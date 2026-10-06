@@ -73,16 +73,20 @@ func staleParallelGraph(t *testing.T) (*lpg.ReadView[string, float64], *csr.CSR[
 				t.Fatalf("AddEdge(%s, b): %v", s, err)
 			}
 			g.IncEdgeCreateCount(s, "b")
-			g.SetEdgeLabelAt(s, "b", int64(i+1), typ)
+			if err := g.SetEdgeLabelAt(s, "b", int64(i+1), typ); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if err := g.AddEdge(s, "c", 1); err != nil {
 			t.Fatalf("AddEdge(%s, c): %v", s, err)
 		}
-		g.SetEdgeLabel(s, "c", "K")
+		if err := g.SetEdgeLabel(s, "c", "K"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	fwd, _ := csrPairFromGraph(g.ReadAt(nil))
 	for _, s := range sources {
-		g.RemoveEdge(s, "b")
+		must(t).E(g.RemoveEdge(s, "b"))
 	}
 	return g.ReadAt(nil), fwd
 }

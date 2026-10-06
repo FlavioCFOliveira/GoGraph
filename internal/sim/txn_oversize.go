@@ -342,7 +342,7 @@ func RunTxnOversizeProducer(ctx context.Context, cfg TxnOversizeConfig) (TxnOver
 			Name:        step.name,
 			Ops:         step.ops,
 			WALBefore:   len(before),
-			OrderBefore: st.graph.LiveOrder(),
+			OrderBefore: st.graph.LiveOrderStored(),
 		}
 
 		tx, berr := st.store.BeginCtx(ctx)
@@ -375,7 +375,7 @@ func RunTxnOversizeProducer(ctx context.Context, cfg TxnOversizeConfig) (TxnOver
 		}
 		attempt.WALAfter = len(after)
 		attempt.WALIdentical = bytes.Equal(before, after)
-		attempt.OrderAfter = st.graph.LiveOrder()
+		attempt.OrderAfter = st.graph.LiveOrderStored()
 		ev.Attempts = append(ev.Attempts, attempt)
 		ev.MaxAttemptOps = max(ev.MaxAttemptOps, step.ops)
 	}
@@ -392,7 +392,7 @@ func RunTxnOversizeProducer(ctx context.Context, cfg TxnOversizeConfig) (TxnOver
 	defer func() { _ = re.Close() }()
 
 	ev.ReopenClean = re.clean
-	ev.RecoveredOrder = re.graph.LiveOrder()
+	ev.RecoveredOrder = re.graph.LiveOrderStored()
 	slices.Sort(model)
 	slices.Sort(refused)
 	ev.ModelKeys = model
@@ -784,7 +784,7 @@ func RunTxnOversizeReplay(ctx context.Context, seed uint64) (TxnOversizeReplayEv
 		}
 		arm.Clean = res.IsClean()
 		arm.WALOps = res.WALOps
-		arm.Order = g.LiveOrder()
+		arm.Order = g.LiveOrderStored()
 
 		// (2) The harness store-open path over the same image: an embedder must
 		// refuse to append onto a fail-stop, never swallow it.

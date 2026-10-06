@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	pathpkg "path"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2363,6 +2364,59 @@ func (d *SimDisk) Stat(path string) (fs.FileInfo, error) {
 		return simFileInfo{name: baseName(path), dir: true}, nil
 	}
 	return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
+}
+
+// ReadDir lists the immediate children of the directory at dir, sorted by
+// name, as [os.ReadDir] does. A child is a file directly under dir, or a
+// directory — tracked explicitly through MkdirAll or implied by a file beneath
+// it. A missing dir is reported with an error wrapping fs.ErrNotExist, and a
+// path naming a file with one wrapping syscall.ENOTDIR.
+//
+// It exists for the store/bulkimport filesystem seam, whose empty-directory
+// check lists the target directory (rmp #2518). It reads the CURRENT image,
+// including names a crash would still revoke, exactly as a directory listing on
+// a live filesystem does.
+func (d *SimDisk) ReadDir(dir string) ([]fs.DirEntry, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dir = pathpkg.Clean(dir)
+	if _, isFile := d.files[dir]; isFile {
+		return nil, &fs.PathError{Op: "readdirent", Path: dir, Err: syscall.ENOTDIR}
+	}
+	if !d.dirExistsLocked(dir) {
+		return nil, &fs.PathError{Op: "open", Path: dir, Err: fs.ErrNotExist}
+	}
+	prefix := dir + "/"
+	children := make(map[string]simFileInfo)
+	for p, f := range d.files {
+		rest, ok := strings.CutPrefix(p, prefix)
+		if !ok {
+			continue
+		}
+		if name, _, nested := strings.Cut(rest, "/"); nested {
+			children[name] = simFileInfo{name: name, dir: true}
+		} else {
+			children[name] = simFileInfo{name: name, size: int64(len(f.data))}
+		}
+	}
+	for dp := range d.dirs {
+		rest, ok := strings.CutPrefix(dp, prefix)
+		if !ok {
+			continue
+		}
+		name, _, _ := strings.Cut(rest, "/")
+		children[name] = simFileInfo{name: name, dir: true}
+	}
+	names := make([]string, 0, len(children))
+	for name := range children {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	out := make([]fs.DirEntry, 0, len(names))
+	for _, name := range names {
+		out = append(out, fs.FileInfoToDirEntry(children[name]))
+	}
+	return out, nil
 }
 
 // ReadFile returns a copy of the whole contents of the file at path, or an

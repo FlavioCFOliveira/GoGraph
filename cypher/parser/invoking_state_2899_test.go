@@ -9,10 +9,10 @@ package parser
 // (DefaultErrorStrategy.getErrorRecoverySet) — and asserts, unchecked, that the
 // state's first transition is a *RuleTransition. Generated rule bodies satisfy
 // it by calling p.SetState(N) before every sub-rule call. The hand-written
-// bodies in gen-patches.patch (MultiPartQ, ReduceExpression and the reduce
-// alternative of Atom) did not, so the callee inherited the rule's start
-// state, whose transition is epsilon, and the first LL fallback beneath a WITH
-// or inside reduce() panicked: `MATCH (a),(b) WITH a, b,
+// bodies in gen-patches.patch (MultiPartQ, and until rmp #2923 made reduce() a
+// grammar rule, ReduceExpression and the reduce alternative of Atom) did not,
+// so the callee inherited the rule's start state, whose transition is epsilon,
+// and the first LL fallback beneath a WITH or inside reduce() panicked: `MATCH (a),(b) WITH a, b,
 // size([(a)-[]-(b)-[]-(a) | 1]) AS n RETURN n` failed with "interface
 // conversion: antlr.Transition is *antlr.EpsilonTransition".
 //
@@ -33,7 +33,7 @@ import (
 
 // invokingState2899Queries reach every hand-written rule call site: both
 // readingStatement loops, updatingStatement, withSt and singlePartQ of
-// MultiPartQ, and every sub-rule of ReduceExpression. Each carries the cyclic
+// MultiPartQ, and every sub-rule of reduceExpression. Each carries the cyclic
 // two-hop pattern comprehension that forces an LL fallback beneath it.
 var invokingState2899Queries = []string{
 	"MATCH (a),(b) WITH a, b, size([(a)-[]-(b)-[]-(a) | 1]) AS n RETURN n",
@@ -76,9 +76,8 @@ func invokedRule(t *testing.T, atn *antlr.ATN, state int) (rule int, ok bool) {
 // invokingStateChecker asserts, on entry to every rule, that the context's
 // invoking state is a rule-invocation state for that same rule, and that the
 // runtime can build the context's full prediction context — the call that
-// panicked. reduceExpression has no ATN rule of its own and is invoked from
-// the functionInvocation alternative of atom, whose follow state is the end of
-// atom: the one sanctioned mismatch.
+// panicked. There is no sanctioned mismatch: since rmp #2923 reduceExpression
+// is an ATN rule invoked from its own alternative of atom.
 type invokingStateChecker struct {
 	antlr.BaseParseTreeListener
 	t      *testing.T
@@ -102,9 +101,6 @@ func (c *invokingStateChecker) EnterEveryRule(ctx antlr.ParserRuleContext) {
 		return
 	}
 	want := ctx.GetRuleIndex()
-	if want == gen.CypherParserRULE_reduceExpression {
-		want = gen.CypherParserRULE_functionInvocation
-	}
 	if got != want {
 		c.t.Errorf("%q: %s context's invoking state %d invokes %s, want %s", c.query, rule, n, names[got], names[want])
 	}

@@ -107,6 +107,11 @@ func (g *Graph[N, W]) IncEdgeCreateCount(src, dst N) int64 {
 // retracted for exactly this reason.
 //
 // EdgeCreateCount is safe for concurrent use.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (g *Graph[N, W]) EdgeCreateCount(src, dst N) int64 {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {

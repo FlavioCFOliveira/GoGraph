@@ -129,6 +129,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
@@ -142,6 +143,30 @@ import (
 // is rejected rather than acting on a released transaction. Matchable with
 // [errors.Is].
 var ErrTxFinished = errors.New("cypher: explicit transaction already finished")
+
+// ErrEngineFailStopped is returned by every operation of an [Engine] whose
+// secondary-index state has become undefined: a commit-time index delivery was
+// cut short by a panic (see [index.ErrIndexStateUndefined], which the returned
+// error also wraps). The engine refuses every later query, transaction and
+// commit rather than answer from, or write into, indexes that may be wrong —
+// the module's fail-stop contract. [ExplicitTx.Rollback] is still accepted, so
+// an open transaction can release what it holds. The graph and the durable log
+// are consistent with each other; reopening the database rebuilds the indexes
+// from the recovered graph. Matchable with [errors.Is].
+//
+// The commit during which the delivery panicked returns an error of its own (the
+// panic, converted). On the WAL path that commit was already durable and is
+// visible, and a reopen replays it; on the in-memory path it is aborted.
+var ErrEngineFailStopped = errors.New("cypher: engine fail-stopped")
+
+// failStopped returns nil while the engine is usable and an error wrapping
+// [ErrEngineFailStopped] once its index state is undefined. One atomic load.
+func (e *Engine) failStopped() error {
+	if err := e.g.IndexManager().Undefined(); err != nil {
+		return fmt.Errorf("%w: %w", ErrEngineFailStopped, err)
+	}
+	return nil
+}
 
 // ErrSerializationConflict is the typed, RETRIABLE write-write conflict error:
 // the transaction attempted to displace a version another transaction wrote
@@ -255,6 +280,16 @@ type ExplicitTx struct {
 	touched *touchedNodes
 	// stampCon: see [mutationUndo.stampCon] (rmp #2353/#2355).
 	stampCon bool
+	// decision is this transaction's entry in the index manager's commit-decision
+	// bracket, held from the top of Commit until release() has published (rmp
+	// #2936); see [index.Manager.EnterCommit]. The zero value holds nothing.
+	// conGen is the constraint catalogue's generation when the transaction
+	// began. A different generation at COMMIT means a constraint was registered
+	// while it was open, and its final state is validated against it (rmp
+	// #2936; see [exec.ConstraintRegistry.ValidateStraddler]).
+	conGen      uint64
+	decision    index.CommitTicket
+	decisionMgr *index.Manager
 
 	// walTx is the single WAL transaction backing the whole explicit transaction,
 	// non-nil only on a WAL-backed engine. It holds the store's writer
@@ -370,8 +405,8 @@ type ExplicitTx struct {
 //
 // The error is returned within the deadline plus a small, bounded margin: the
 // margin is one scheduling hop, not the holder's remaining tenure. See
-// [mvcc.Gate.StrongLockCtx] and the acquireCtx helper beside it for why a queued
-// lock acquisition cannot simply be abandoned and what is done instead.
+// [mvcc.Gate.StrongLockCtx] for how the wait is bounded and how an abandoned
+// request is withdrawn.
 //
 // See exectx.go for the full transaction and concurrency contract, including the
 // isolation scope: concurrent readers do NOT block while this transaction is
@@ -386,6 +421,10 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 func (e *Engine) beginTxSession(ctx context.Context, sess *lpg.Session[string, float64]) (*ExplicitTx, error) {
 	defer cmetrics.Time("cypher.BeginTx").Stop()
 	if err := checkContext(ctx); err != nil {
+		cmetrics.IncCounter("cypher.BeginTx.errors", 1)
+		return nil, err
+	}
+	if err := e.failStopped(); err != nil {
 		cmetrics.IncCounter("cypher.BeginTx.errors", 1)
 		return nil, err
 	}
@@ -415,6 +454,15 @@ func (e *Engine) beginTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// matching comment on the autocommit path (rmp #2353, widened by rmp #2355).
 	tx.stampCon = e.constraintReg != nil &&
 		(e.constraintReg.HasAnyNotNull() || e.constraintReg.HasAnyUnique())
+	// Read BEFORE any statement can run, so a constraint registered after this
+	// load is one the transaction's writes may predate (rmp #2936).
+	tx.conGen = e.constraintReg.Generation()
+	tx.conTxn.TrackReservationsSince(tx.conGen)
+	// A write refused under a constraint registered after this point, of a value
+	// this transaction released before that constraint existed, is deferred to
+	// the commit-time validation; the registry reads this transaction's touched
+	// nodes through this reader to recognise such a release (rmp #2948).
+	tx.conTxn.SetStraddleStateReader(func() exec.StraddleReader { return newStraddleReader(tx) })
 	// Open the WAL transaction on a WAL-backed engine. Store.BeginCtx registers this
 	// transaction as an admitted writer until Commit/Rollback. It no longer excludes
 	// anybody (rmp #2306 retired the capacity-one semaphore), so the only thing that
@@ -623,7 +671,13 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	// prefixed statement therefore does not observe writes this transaction has
 	// not committed. That is a diagnostic reading the committed graph, not a
 	// statement of the transaction.
-	if entry.planMode != parser.PlanModeNone {
+	// A PROFILE of a WRITING statement executes inside THIS transaction, exactly
+	// as the unprefixed statement would, with the measuring wrapper installed by
+	// the write builder (rmp #2790); every other prefixed statement is diverted.
+	var prof *exec.Profiler
+	if entry.planMode == parser.PlanModeProfile && entry.containsWrite {
+		prof = exec.NewProfiler()
+	} else if entry.planMode != parser.PlanModeNone {
 		return tx.eng.runPlanPrefixed(tx.ctx, entry, params, nil)
 	}
 	plan := entry.plan
@@ -663,13 +717,18 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	applyFn := func(fn func(lpg.WriteTx) error) error {
 		return tx.eng.g.ApplyInVersionedTx(tx.ctx, tx.wtx, fn)
 	}
-	r, buildErr := tx.eng.execUnderBarrier(tx.ctx, plan, queryReg, params, mutator, tx.buf, tx.undo, tx.walTx, false, applyFn, tx.touched)
+	r, buildErr := tx.eng.execUnderBarrier(tx.ctx, plan, queryReg, params, mutator, tx.buf, tx.undo, tx.walTx, false, applyFn, tx.touched, prof)
 	if buildErr != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
 	if stmtErr := r.Err(); stmtErr != nil {
 		tx.failed = true
 		return nil, &ErrStatementPipeline{Err: stmtErr}
+	}
+	if prof != nil {
+		// The plan-time advisories every prefixed statement carries; see
+		// [Engine.runPlanPrefixed].
+		r.notifications = entry.notifications
 	}
 	return r, nil
 }
@@ -718,10 +777,34 @@ func (tx *ExplicitTx) Commit() (err error) {
 	if tx.failed {
 		return ErrTxPoisoned
 	}
+	// A FAIL-STOPPED ENGINE COMMITS NOTHING: its indexes may be wrong, and a
+	// commit would write into them. The transaction is rolled back instead, so
+	// everything it holds is released, and the caller is told why.
+	if ferr := tx.eng.failStopped(); ferr != nil {
+		_ = tx.Rollback()
+		return ferr
+	}
 	// A panic during the in-barrier finalisation must still release the writer
 	// serialisation and roll back the WAL transaction; convert it to an error.
 	defer tx.recoverFinishPanic(&err)
 	defer tx.release()
+
+	// ENTER THE COMMIT-DECISION BRACKET (rmp #2936) before anything below decides
+	// what the index buffer owes the indexes, and hold it until release() has
+	// published. An index build waits out every commit inside the bracket before
+	// it takes its snapshot, so a commit whose decision predates the build is
+	// visible to the build's scan, and one whose decision follows it finds the
+	// build and is recorded. See graph/index/commit_gate.go for the two shapes
+	// that lost a node from a new index without it.
+	//
+	// Entered HERE, before the finalisation takes the graph's visibility gate and
+	// before the WAL path allocates the commit instant: an entry parked behind a
+	// build's wait then holds neither, so it cannot close a cycle with a strong
+	// holder of that gate, nor hold the frontier back while it waits.
+	if tx.buf != nil {
+		tx.decisionMgr = tx.eng.g.IndexManager()
+		tx.decision = tx.decisionMgr.EnterCommit()
+	}
 
 	var walErr error
 	var notNullErr error
@@ -767,6 +850,47 @@ func (tx *ExplicitTx) Commit() (err error) {
 			}
 			return nil
 		}
+		// A CONSTRAINT REGISTERED WHILE THIS TRANSACTION WAS OPEN (rmp #2936). Its
+		// writes may predate the constraint, so they were never checked against it
+		// or reserved in its value-set; its final state is validated now, inside
+		// the commit-decision bracket entered at the top of Commit and BEFORE the
+		// WAL record is written, so a refusal leaves no trace anywhere. The
+		// argument that no interleaving escapes is on
+		// [exec.ConstraintRegistry.ValidateStraddler]. One atomic load when no
+		// constraint was registered.
+		if tx.conGen != tx.eng.constraintReg.Generation() && tx.buf != nil {
+			rd := newStraddleReader(tx)
+			// STAMP EVERY TOUCHED NODE FIRST. The transaction began with no
+			// constraint to stamp for, so none of its writes stamped the per-node
+			// constraint slot, and a peer that began after the registration could
+			// write the other half of the invariant — the property, when this one
+			// gained the label — in a different substore without colliding with it.
+			// Stamping now dooms this transaction if such a peer committed or is
+			// pending on any node it touched, and dooms such a peer that arrives
+			// later; only then is this transaction's own view the merged state the
+			// validation below may trust (rmp #2936, audit H1).
+			wv := tx.eng.g.Writer(tx.wtx)
+			for _, id := range rd.Touched() {
+				_ = wv.NoteConstraintTouchByID(id)
+			}
+			if cerr := tx.wtx.Err(); cerr != nil {
+				cmetrics.IncCounter("cypher.ExplicitTx.serializationConflicts", 1)
+				conflictErr = cerr
+				if undoOK := tx.rollbackInBarrierLocked(); !undoOK {
+					conflictErr = wrapUndoFailure(conflictErr)
+				}
+				return nil
+			}
+			if serr := tx.eng.constraintReg.ValidateStraddler(tx.conTxn, tx.conGen,
+				rd, tx.undo.record); serr != nil {
+				cmetrics.IncCounter("cypher.ExplicitTx.constraint.straddleViolations", 1)
+				notNullErr = serr
+				if undoOK := tx.rollbackInBarrierLocked(); !undoOK {
+					notNullErr = wrapUndoFailure(notNullErr)
+				}
+				return nil
+			}
+		}
 		// Commit-time NOT NULL existence check (#1754, ACID Consistency). Runs
 		// FIRST, inside the barrier, BEFORE the WAL fsync, so a node left in its
 		// final committed state carrying a constrained label but lacking the
@@ -805,7 +929,9 @@ func (tx *ExplicitTx) Commit() (err error) {
 			}
 		}
 		if tx.buf != nil {
-			tx.buf.Commit(tx.eng.g.IndexManager())
+			// Delivered when release() publishes the transaction, resolved against
+			// the state its commit produces (rmp #2931, index_commit_apply.go).
+			armIndexCommit((*explicitTxApplier)(tx), tx.buf, tx.eng.g.IndexManager(), tx.eng.g, tx.wtx)
 		}
 		// Relationship count-store (#2082): apply the whole transaction's count
 		// deltas after the WAL fsync, alongside the index buffer, so counts flip
@@ -824,6 +950,9 @@ func (tx *ExplicitTx) Commit() (err error) {
 		tx.undo = nil
 		return nil
 	})
+	if h := tx.eng.commitDecidedHookForTest; h != nil {
+		h()
+	}
 	// Reported BEFORE the NOT NULL verdict: a doomed transaction's own view is a
 	// state that will never commit, so a constraint conclusion drawn from it is
 	// drawn from an invalid premise. The conflict is also the RETRIABLE answer, and
@@ -902,6 +1031,12 @@ func (tx *ExplicitTx) Rollback() (err error) {
 // statements do not produce phantom reservations (#1342).
 func (tx *ExplicitTx) rollbackInBarrierLocked() (undoOK bool) {
 	undoOK = true
+	// The transaction ABORTS (rmp #2973). Every caller is a path on which nothing
+	// is durable — Rollback, and Commit's refusals before or at a failed WAL fsync
+	// — so release() must end the versioned transaction as an abort, not publish
+	// it: a published rollback is a commit after the snapshot of every older
+	// transaction, which first-updater-wins then refuses for no visible reason.
+	tx.wtx.Abandon()
 	if tx.undo != nil && !tx.undo.replay() {
 		undoOK = false
 	}
@@ -949,6 +1084,15 @@ func (tx *ExplicitTx) release() {
 		return
 	}
 	tx.finished = true
+	// Leave the commit-decision bracket only after the publication below, on
+	// every path: an index build waiting on this transaction must find its commit
+	// visible when the wait ends (rmp #2936). Registered FIRST, so that a panic
+	// anywhere below — the horizon release included — still leaves it and no
+	// build waits for ever.
+	defer func() {
+		tx.decisionMgr.ExitCommit(tx.decision)
+		tx.decision, tx.decisionMgr = index.CommitTicket{}, nil
+	}()
 	// Return the transaction's horizon slot before anything else (rmp #2307).
 	// The finished guard above makes this exactly-once across every exit path,
 	// and clearing view makes a double release unrepresentable rather than
@@ -992,6 +1136,9 @@ func (tx *ExplicitTx) recoverExecPanic(errp *error) {
 		if tx.walTx != nil {
 			_ = tx.walTx.Rollback() // rollback error is not actionable while converting a panic
 		}
+		// The undo already ran and nothing is durable: abort, never publish
+		// (rmp #2973; see rollbackInBarrierLocked).
+		tx.wtx.Abandon()
 		tx.release()
 		convertQueryPanic(r, errp, "cypher.ExplicitTx.Exec", "cypher.ExplicitTx.Exec.panics")
 	}

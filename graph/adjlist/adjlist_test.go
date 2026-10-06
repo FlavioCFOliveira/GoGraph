@@ -106,7 +106,7 @@ func TestAdjList_RemoveEdge(t *testing.T) {
 	mustAddEdge(t, a, "a", "b", 1)
 	mustAddEdge(t, a, "a", "c", 2)
 
-	a.RemoveEdge("a", "b")
+	must(t).E(a.RemoveEdge("a", "b"))
 	if a.HasEdge("a", "b") {
 		t.Fatalf("a->b should be gone after RemoveEdge")
 	}
@@ -131,7 +131,7 @@ func TestAdjList_RemoveEdge_UndirectedMirrored(t *testing.T) {
 	t.Parallel()
 	a := New[string, int](Config{Directed: false})
 	mustAddEdge(t, a, "a", "b", 1)
-	a.RemoveEdge("a", "b")
+	must(t).E(a.RemoveEdge("a", "b"))
 	if a.HasEdge("a", "b") || a.HasEdge("b", "a") {
 		t.Fatalf("undirected RemoveEdge must remove both directions")
 	}
@@ -144,9 +144,9 @@ func TestAdjList_RemoveEdge_Unknown(t *testing.T) {
 	t.Parallel()
 	a := New[string, int](Config{Directed: true})
 	mustAddEdge(t, a, "a", "b", 1)
-	a.RemoveEdge("a", "z") // unknown dst
-	a.RemoveEdge("z", "a") // unknown src
-	a.RemoveEdge("a", "a") // never inserted self-loop
+	must(t).E(a.RemoveEdge("a", "z")) // unknown dst
+	must(t).E(a.RemoveEdge("z", "a")) // unknown src
+	must(t).E(a.RemoveEdge("a", "a")) // never inserted self-loop
 	if !a.HasEdge("a", "b") {
 		t.Fatalf("unrelated RemoveEdge calls must not affect existing edges")
 	}
@@ -160,7 +160,7 @@ func TestAdjList_Compact(t *testing.T) {
 	}
 	// Simple graph collapses duplicates → only one edge a->b.
 	mustAddEdge(t, a, "a", "c", 100)
-	a.RemoveEdge("a", "b")
+	must(t).E(a.RemoveEdge("a", "b"))
 	a.Compact(context.Background())
 	if a.HasEdge("a", "b") {
 		t.Fatalf("removed edge must remain removed after Compact")

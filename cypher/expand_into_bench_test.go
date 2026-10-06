@@ -58,7 +58,9 @@ func seedExpandIntoGraph(b *testing.B) *lpg.Graph[string, float64] {
 			if err := g.AddEdge(keys[i], keys[j], 1.0); err != nil {
 				b.Fatalf("AddEdge: %v", err)
 			}
-			g.SetEdgeLabel(keys[i], keys[j], "K")
+			if err := g.SetEdgeLabel(keys[i], keys[j], "K"); err != nil {
+				b.Fatal(err)
+			}
 		}
 	}
 	return g

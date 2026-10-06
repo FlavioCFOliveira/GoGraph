@@ -88,9 +88,14 @@ type NodeByIndexRangeScan struct {
 	// set is bounded only by the selectivity gate and roaring's AND is the primitive
 	// the module already uses for the multi-label conjunction.
 	labelBM func() *roaring64.Bitmap
-	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
-	iter    roaring64.IntPeekable64
-	buf     [1]expr.Value // fixed backing buffer — zero-alloc per Next
+	// snap, when set by [NodeByIndexRangeScan.AtSnapshot], is asked after the range
+	// lookups whether they described the reader's snapshot; when they did not, the
+	// scan emits the label bitmap alone and leaves the residual Filter to decide
+	// (rmp #2937, see index_snapshot.go).
+	snap snapshotGuard
+	ctx  context.Context //nolint:containedctx // stored for per-Next ctx check
+	iter roaring64.IntPeekable64
+	buf  [1]expr.Value // fixed backing buffer — zero-alloc per Next
 	// extra holds the ADDITIONAL indexed conjuncts of a composed intersection
 	// (#2134). Empty for the ordinary single-index range scan.
 	extra []IndexRangePart
@@ -122,6 +127,19 @@ func NewNodeByIndexRangeScan(idx rangeLookup, lo, hi RangeBound) *NodeByIndexRan
 // which keeps the unlabelled shape expressible without a second constructor.
 func (op *NodeByIndexRangeScan) RestrictToLabel(resolve func() *roaring64.Bitmap) *NodeByIndexRangeScan {
 	op.labelBM = resolve
+	return op
+}
+
+// AtSnapshot makes op read for a reader at the snapshot started at startTS, and
+// returns op so a builder can chain it: after the range lookups proof is asked
+// whether they described that snapshot, and when they did not, op emits the label
+// bitmap installed by [NodeByIndexRangeScan.RestrictToLabel] — the replaced
+// label scan — instead, which the caller's residual Filter then refines exactly
+// as it refines the scan it replaced (rmp #2937). A scan with no label
+// restriction has no scan to fall back to, so AtSnapshot requires one; proof must
+// be non-nil.
+func (op *NodeByIndexRangeScan) AtSnapshot(proof SnapshotProof, startTS uint64) *NodeByIndexRangeScan {
+	op.snap = snapshotGuard{proof: proof, startTS: startTS}
 	return op
 }
 
@@ -164,6 +182,12 @@ func (op *NodeByIndexRangeScan) Init(ctx context.Context) error {
 		}
 		other := op.extra[i].Index.RangeBitmap(op.extra[i].Lo.Value, op.extra[i].Hi.Value)
 		bm.And(other)
+	}
+	// Asked AFTER every range lookup; see [SnapshotProof]. The label bitmap is the
+	// replaced scan's own output, read at the reader's snapshot.
+	if op.labelBM != nil && op.snap.declines() {
+		op.iter = op.labelBM().Iterator()
+		return nil
 	}
 	// THE LABEL, last: the range bitmaps are already narrowed, so the label AND runs
 	// against the smallest intermediate. Skipped when the bitmap is already empty,

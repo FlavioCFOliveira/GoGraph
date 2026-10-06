@@ -41,9 +41,14 @@ import (
 //
 //nolint:revive // "Sim" prefix is the DST harness naming scheme (see SimDisk).
 type SimServer struct {
-	clk       clock.Clock
-	closeErr  error
-	srv       *server.Server
+	clk      clock.Clock
+	closeErr error
+	srv      *server.Server
+	// eng is the engine the server executes against. It is read only by the
+	// wire DDL counters adjudication ([SchemaChanger.RunChecked], rmp #2829),
+	// which snapshots the engine's own schema registries either side of a DDL
+	// statement sent over the wire.
+	eng       *cypher.Engine
 	ln        *SimListener
 	cancel    context.CancelFunc
 	serveErr  chan error
@@ -489,6 +494,7 @@ func newSimServer(eng *cypher.Engine, clk clock.Clock, opts *simServerOptions) (
 		cancel:   cancel,
 		serveErr: make(chan error, 1),
 		clk:      clk,
+		eng:      eng,
 	}
 	go func() { s.serveErr <- srv.Serve(ctx, serveLn) }()
 	return s, nil

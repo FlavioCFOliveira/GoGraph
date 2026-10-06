@@ -1,0 +1,107 @@
+spec ww13-void-edge-property: 2 sessions, 6 permutations
+# WW13, edge arm. Both sessions SET r.w on one edge. An edge side-store write is a void primitive: a conflict it hits cannot be returned by the
+# statement, so it is RECORDED on the transaction and must surface at COMMIT as a
+# serialization conflict, applying nothing (F3, rmp #2354). A COMMIT that succeeds
+# after a recorded conflict is a silently dropped write.
+
+starting permutation: s1x s1c s2x s2c
+step s1x: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) SET r.w = 1 RETURN r.w AS w
+w
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2x: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) SET r.w = 2 RETURN r.w AS w
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) RETURN r.w AS w
+w
+-
+1
+(1 row)
+
+starting permutation: s1x s2x s1c s2c
+step s1x: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) SET r.w = 1 RETURN r.w AS w
+w
+-
+1
+(1 row)
+step s2x: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) SET r.w = 2 RETURN r.w AS w
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) RETURN r.w AS w
+w
+-
+1
+(1 row)
+
+starting permutation: s1x s2x s2c s1c
+step s1x: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) SET r.w = 1 RETURN r.w AS w
+w
+-
+1
+(1 row)
+step s2x: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) SET r.w = 2 RETURN r.w AS w
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) RETURN r.w AS w
+w
+-
+1
+(1 row)
+
+starting permutation: s2x s1x s1c s2c
+step s2x: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) SET r.w = 2 RETURN r.w AS w
+w
+-
+2
+(1 row)
+step s1x: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) SET r.w = 1 RETURN r.w AS w
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) RETURN r.w AS w
+w
+-
+2
+(1 row)
+
+starting permutation: s2x s1x s2c s1c
+step s2x: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) SET r.w = 2 RETURN r.w AS w
+w
+-
+2
+(1 row)
+step s1x: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) SET r.w = 1 RETURN r.w AS w
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) RETURN r.w AS w
+w
+-
+2
+(1 row)
+
+starting permutation: s2x s2c s1x s1c
+step s2x: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) SET r.w = 2 RETURN r.w AS w
+w
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1x: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) SET r.w = 1 RETURN r.w AS w
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (:Item {name:'a'})-[r:LINK]->(:Item {name:'b'}) RETURN r.w AS w
+w
+-
+2
+(1 row)

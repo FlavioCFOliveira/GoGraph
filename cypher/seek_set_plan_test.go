@@ -88,9 +88,13 @@ func TestSeekSet_AccessPath(t *testing.T) {
 			wantOp: "NodeByIndexSeekSet",
 		},
 		{
-			name:   "a type-incompatible key does not prevent the seek",
-			query:  `UNWIND ['name-7', 7] AS k MATCH (a:P {name: k}) RETURN a`,
-			wantOp: "NodeByIndexSeekSet",
+			// The string index does not hold a node whose name is the integer 7,
+			// yet `a.name = 7` is true for it, so the seek alone would lose it
+			// (rmp #2954): the set is declined and scanned.
+			name:    "a non-string key declines the seek",
+			query:   `UNWIND ['name-7', 7] AS k MATCH (a:P {name: k}) RETURN a`,
+			wantOp:  "NodeByLabelScan",
+			absentO: "NodeByIndexSeekSet",
 		},
 		{
 			name:   "a NULL key does not prevent the seek",

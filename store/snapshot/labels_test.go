@@ -46,9 +46,15 @@ func TestLabels_Roundtrip(t *testing.T) {
 	if err := g.SetNodeLabel("carol", "Persoa"); err != nil { // intentional unicode-ish glyph
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	g.SetEdgeLabel("alice", "bob", "KNOWS")
-	g.SetEdgeLabel("bob", "carol", "KNOWS")
-	g.SetEdgeLabel("carol", "alice", "FOLLOWS")
+	if err := g.SetEdgeLabel("alice", "bob", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("bob", "carol", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("carol", "alice", "FOLLOWS"); err != nil {
+		t.Fatal(err)
+	}
 
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
@@ -125,7 +131,9 @@ func TestLabels_ManifestCurrent_LoadsClean(t *testing.T) {
 	if err := g.SetNodeLabel("x", "A"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	g.SetEdgeLabel("x", "y", "L")
+	if err := g.SetEdgeLabel("x", "y", "L"); err != nil {
+		t.Fatal(err)
+	}
 	c := csr.BuildFromAdjList(g.AdjList())
 
 	dir := filepath.Join(t.TempDir(), "snap")
@@ -296,7 +304,9 @@ func TestLabels_PropertyRoundtrip(t *testing.T) {
 			k := rapid.IntRange(0, 3).Draw(t, "edge-label-count")
 			for j := 0; j < k; j++ {
 				l := labelGen.Draw(t, "edge-label")
-				g.SetEdgeLabel(s, d, l)
+				if err := g.SetEdgeLabel(s, d, l); err != nil {
+					t.Fatal(err)
+				}
 				key := [2]string{s, d}
 				if edgeLabels[key] == nil {
 					edgeLabels[key] = make(map[string]bool)
@@ -391,11 +401,19 @@ func TestLabels_Roundtrip_MultiLabel(t *testing.T) {
 		t.Fatalf("AddEdge c->d: %v", err)
 	}
 	// a->b carries three types: REL1 inline, REL2 + REL3 in overflow.
-	g.SetEdgeLabel("a", "b", "REL1")
-	g.SetEdgeLabel("a", "b", "REL2")
-	g.SetEdgeLabel("a", "b", "REL3")
+	if err := g.SetEdgeLabel("a", "b", "REL1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("a", "b", "REL2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("a", "b", "REL3"); err != nil {
+		t.Fatal(err)
+	}
 	// c->d carries a single inline type.
-	g.SetEdgeLabel("c", "d", "REL1")
+	if err := g.SetEdgeLabel("c", "d", "REL1"); err != nil {
+		t.Fatal(err)
+	}
 
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")

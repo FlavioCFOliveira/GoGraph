@@ -282,3 +282,38 @@ func runSimWrite(ctx context.Context, sm *Simulator, query string) error {
 	_ = res.Close()
 	return err
 }
+
+// TestSchemaChurnSteps_AbsorbedStepsAbsorb pins the property the schema-chaos
+// tick loop relies on to exercise the absorbed IF [NOT] EXISTS no-op (rmp
+// #2829): replaying [schemaChurnSteps] from the scenario's initial schema (the
+// sim_person_name index present, no constraint), every step alternates between
+// APPLYING (the registries change) and being ABSORBED (they do not), so a
+// reorder that turns the absorbed steps into applied ones fails here rather
+// than silently leaving the counters oracle without an absorbed statement.
+// Each step also passes the DDL counters oracle, through engineRunDDL.
+func TestSchemaChurnSteps_AbsorbedStepsAbsorb(t *testing.T) {
+	sm := newIntrospectionSim(t, "CREATE INDEX sim_person_name FOR (n:Person) ON (n.name)")
+	ctx := context.Background()
+	absorbed := 0
+	for i := 0; i < 2*len(schemaChurnSteps); i++ {
+		step := schemaChurnSteps[i%len(schemaChurnSteps)]
+		before := readDDLSchemaNames(sm.engine)
+		if err := sm.engineRunDDL(ctx, step.ddl); err != nil {
+			t.Fatalf("step %d %q: %v", i, step.ddl, err)
+		}
+		after := readDDLSchemaNames(sm.engine)
+		idxGained, idxLost := gainedLost(before.indexes, after.indexes)
+		conGained, conLost := gainedLost(before.constraints, after.constraints)
+		changed := len(idxGained)+len(idxLost)+len(conGained)+len(conLost) > 0
+		wantAbsorbed := i%2 == 1
+		if changed == wantAbsorbed {
+			t.Errorf("step %d %q: changed=%t, want absorbed=%t", i, step.ddl, changed, wantAbsorbed)
+		}
+		if !changed {
+			absorbed++
+		}
+	}
+	if want := len(schemaChurnSteps); absorbed != want {
+		t.Errorf("absorbed %d steps over two cycles, want %d", absorbed, want)
+	}
+}

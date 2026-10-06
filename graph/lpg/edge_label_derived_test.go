@@ -28,7 +28,9 @@ func TestEdgeLabel_Derived_SingleLabel(t *testing.T) {
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "KNOWS")
+	if err := g.SetEdgeLabel("a", "b", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
 
 	if !g.HasEdgeLabel("a", "b", "KNOWS") {
 		t.Fatal("HasEdgeLabel(KNOWS) = false, want true")
@@ -40,7 +42,9 @@ func TestEdgeLabel_Derived_SingleLabel(t *testing.T) {
 		t.Fatalf("EdgeLabels = %v, want [KNOWS]", got)
 	}
 	// Idempotent re-set: still exactly one label, no overflow growth.
-	g.SetEdgeLabel("a", "b", "KNOWS")
+	if err := g.SetEdgeLabel("a", "b", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
 	if got := sortedEdgeLabels(g, "a", "b"); !eqStrings(got, []string{"KNOWS"}) {
 		t.Fatalf("after re-set EdgeLabels = %v, want [KNOWS]", got)
 	}
@@ -54,9 +58,15 @@ func TestEdgeLabel_Derived_MultiLabel(t *testing.T) {
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "A")
-	g.SetEdgeLabel("a", "b", "B")
-	g.SetEdgeLabel("a", "b", "C")
+	if err := g.SetEdgeLabel("a", "b", "A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("a", "b", "B"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("a", "b", "C"); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, name := range []string{"A", "B", "C"} {
 		if !g.HasEdgeLabel("a", "b", name) {
@@ -67,7 +77,9 @@ func TestEdgeLabel_Derived_MultiLabel(t *testing.T) {
 		t.Fatalf("EdgeLabels = %v, want [A B C]", got)
 	}
 	// Remove the inline (first) label: the remaining overflow labels survive.
-	g.RemoveEdgeLabel("a", "b", "A")
+	if err := g.RemoveEdgeLabel("a", "b", "A"); err != nil {
+		t.Fatal(err)
+	}
 	if g.HasEdgeLabel("a", "b", "A") {
 		t.Fatal("HasEdgeLabel(A) = true after remove, want false")
 	}
@@ -75,7 +87,9 @@ func TestEdgeLabel_Derived_MultiLabel(t *testing.T) {
 		t.Fatalf("after remove A: EdgeLabels = %v, want [B C]", got)
 	}
 	// Remove an overflow label.
-	g.RemoveEdgeLabel("a", "b", "C")
+	if err := g.RemoveEdgeLabel("a", "b", "C"); err != nil {
+		t.Fatal(err)
+	}
 	if got := sortedEdgeLabels(g, "a", "b"); !eqStrings(got, []string{"B"}) {
 		t.Fatalf("after remove C: EdgeLabels = %v, want [B]", got)
 	}
@@ -95,8 +109,12 @@ func TestEdgeLabel_Derived_MultigraphSharedType(t *testing.T) {
 	}
 	// Both parallel edges carry the same type; SetEdgeLabel is called once per
 	// CREATE (mirroring the executor), so it is invoked twice with "T".
-	g.SetEdgeLabel("a", "b", "T")
-	g.SetEdgeLabel("a", "b", "T")
+	if err := g.SetEdgeLabel("a", "b", "T"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("a", "b", "T"); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := sortedEdgeLabels(g, "a", "b"); !eqStrings(got, []string{"T"}) {
 		t.Fatalf("EdgeLabels = %v, want exactly one [T] (deduped across slots)", got)
@@ -116,14 +134,20 @@ func TestEdgeLabel_Derived_MultigraphDistinctTypes(t *testing.T) {
 	}
 	// Two distinct types: first inline on slot 0, second spills to overflow
 	// (because the first slot already holds a different label).
-	g.SetEdgeLabel("a", "b", "X")
-	g.SetEdgeLabel("a", "b", "Y")
+	if err := g.SetEdgeLabel("a", "b", "X"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("a", "b", "Y"); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := sortedEdgeLabels(g, "a", "b"); !eqStrings(got, []string{"X", "Y"}) {
 		t.Fatalf("EdgeLabels = %v, want [X Y]", got)
 	}
 	// Removing one distinct type leaves the other.
-	g.RemoveEdgeLabel("a", "b", "X")
+	if err := g.RemoveEdgeLabel("a", "b", "X"); err != nil {
+		t.Fatal(err)
+	}
 	if got := sortedEdgeLabels(g, "a", "b"); !eqStrings(got, []string{"Y"}) {
 		t.Fatalf("after remove X: EdgeLabels = %v, want [Y]", got)
 	}
@@ -141,18 +165,26 @@ func TestEdgeLabel_Orphan_SetThenRemoveAfterEdgeGone(t *testing.T) {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	// Two labels so the second is in overflow (an orphan-able representation).
-	g.SetEdgeLabel("a", "b", "L1")
-	g.SetEdgeLabel("a", "b", "L2")
+	if err := g.SetEdgeLabel("a", "b", "L1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("a", "b", "L2"); err != nil {
+		t.Fatal(err)
+	}
 
-	// Remove the edge entirely: clearEdgePairState wipes both slot and overflow.
-	g.RemoveEdge("a", "b")
+	// Remove the edge entirely: clearPairSides wipes both slot and overflow.
+	must(t).E(g.RemoveEdge("a", "b"))
 	if got := g.EdgeLabels("a", "b"); len(got) != 0 {
 		t.Fatalf("after RemoveEdge EdgeLabels = %v, want empty", got)
 	}
 	// RemoveEdgeLabel on the now-gone edge must be a safe no-op (does not
 	// require HasEdge, does not panic, does not resurrect anything).
-	g.RemoveEdgeLabel("a", "b", "L1")
-	g.RemoveEdgeLabel("a", "b", "L2")
+	if err := g.RemoveEdgeLabel("a", "b", "L1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RemoveEdgeLabel("a", "b", "L2"); err != nil {
+		t.Fatal(err)
+	}
 	if got := g.EdgeLabels("a", "b"); len(got) != 0 {
 		t.Fatalf("after RemoveEdgeLabel on gone edge: EdgeLabels = %v, want empty", got)
 	}
@@ -189,7 +221,9 @@ func TestAddEdgeLabeled_EquivalentToAddThenSet(t *testing.T) {
 		if err := twoStep.AddEdge(e.src, e.dst, 0); err != nil {
 			t.Fatalf("two-step AddEdge: %v", err)
 		}
-		twoStep.SetEdgeLabel(e.src, e.dst, e.typ)
+		if err := twoStep.SetEdgeLabel(e.src, e.dst, e.typ); err != nil {
+			t.Fatal(err)
+		}
 		if err := fused.AddEdgeLabeled(e.src, e.dst, 0, e.typ); err != nil {
 			t.Fatalf("fused AddEdgeLabeled: %v", err)
 		}
@@ -225,12 +259,16 @@ func TestAddEdgeLabeled_ThenAddSecondLabel(t *testing.T) {
 	if err := g.AddEdgeLabeled("a", "b", 0, "X"); err != nil {
 		t.Fatalf("AddEdgeLabeled: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "Y") // distinct type -> overflow
+	if err := g.SetEdgeLabel("a", "b", "Y"); err != nil {
+		t.Fatal(err)
+	} // distinct type -> overflow
 	if got := sortedEdgeLabels(g, "a", "b"); !eqStrings(got, []string{"X", "Y"}) {
 		t.Fatalf("EdgeLabels = %v, want [X Y]", got)
 	}
 	// Removing the inline (fused) label leaves the overflow label.
-	g.RemoveEdgeLabel("a", "b", "X")
+	if err := g.RemoveEdgeLabel("a", "b", "X"); err != nil {
+		t.Fatal(err)
+	}
 	if got := sortedEdgeLabels(g, "a", "b"); !eqStrings(got, []string{"Y"}) {
 		t.Fatalf("after remove X: EdgeLabels = %v, want [Y]", got)
 	}
@@ -267,9 +305,15 @@ func TestEdgeLabel_RelationshipTypesInUse(t *testing.T) {
 	if err := g.AddEdge("c", "d", 0); err != nil {
 		t.Fatalf("AddEdge c->d: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "T")  // inline on first slot
-	g.SetEdgeLabel("a", "b", "T2") // overflow (different type, slot taken)
-	g.SetEdgeLabel("c", "d", "T")  // shared type on a different pair
+	if err := g.SetEdgeLabel("a", "b", "T"); err != nil {
+		t.Fatal(err)
+	} // inline on first slot
+	if err := g.SetEdgeLabel("a", "b", "T2"); err != nil {
+		t.Fatal(err)
+	} // overflow (different type, slot taken)
+	if err := g.SetEdgeLabel("c", "d", "T"); err != nil {
+		t.Fatal(err)
+	} // shared type on a different pair
 
 	got := g.RelationshipTypesInUse()
 	sort.Strings(got)
@@ -279,7 +323,7 @@ func TestEdgeLabel_RelationshipTypesInUse(t *testing.T) {
 
 	// Removing the c->d edge drops "T" only if no other live edge bears it; but
 	// a->b still bears "T", so it must remain.
-	g.RemoveEdge("c", "d")
+	must(t).E(g.RemoveEdge("c", "d"))
 	got = g.RelationshipTypesInUse()
 	sort.Strings(got)
 	if !eqStrings(got, []string{"T", "T2"}) {

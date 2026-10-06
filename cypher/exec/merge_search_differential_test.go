@@ -180,7 +180,7 @@ func newDifferentialGraph(t *testing.T) *mergeDiffMutator {
 // the SET of bound nodes is.
 func matchIDs(t *testing.T, m *mergeDiffMutator, src MergeLabelSource, labels []string, props []propLiteral) []uint64 {
 	t.Helper()
-	rows, err := searchMergeNodes(context.Background(), m, src, labels, props)
+	rows, err := searchMergeNodes(context.Background(), m, src, nil, labels, props)
 	if err != nil {
 		t.Fatalf("searchMergeNodes: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestWalkMergeCandidatesFallsBackWithoutSource(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			seen := 0
-			walkMergeCandidates(m, tc.src, tc.labels, func(graph.NodeID) bool { seen++; return true })
+			walkMergeCandidates(m, tc.src, tc.labels, nil, nil, func(graph.NodeID) bool { seen++; return true })
 			if seen != total {
 				t.Errorf("candidates = %d, want %d (the full walk); falling back must examine every node", seen, total)
 			}
@@ -352,7 +352,7 @@ func TestWalkMergeCandidatesHonoursEarlyStop(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			seen := 0
-			walkMergeCandidates(m, tc.src, []string{"C"}, func(graph.NodeID) bool {
+			walkMergeCandidates(m, tc.src, []string{"C"}, nil, nil, func(graph.NodeID) bool {
 				seen++
 				return false // stop immediately
 			})

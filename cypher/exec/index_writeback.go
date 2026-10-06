@@ -40,9 +40,26 @@ func (b *IndexBuffer) Enqueue(c index.Change) {
 
 // Commit applies all buffered changes to mgr via ApplyBatch, then resets
 // the buffer. A nil mgr is safe: changes are discarded without panicking.
+//
+// Commit carries no commit timestamp and no committed state: the subscribers
+// resolve each change against the graph's present, and the delivery leaves
+// [index.Manager.DescribesSnapshot] false for good. The engine's commit
+// paths use [IndexBuffer.CommitInState].
 func (b *IndexBuffer) Commit(mgr *index.Manager) {
 	if mgr != nil && len(b.changes) > 0 {
 		mgr.ApplyBatch(b.changes)
+	}
+	b.reset()
+}
+
+// CommitInState delivers the buffered changes through
+// [index.Manager.ApplyBatchInState], every change resolved against st — the state
+// the commit produces — and then resets the buffer. The delivery stays open: the
+// caller must close it with [index.Manager.FinishApplied] once the commit is
+// published, and does so whether or not anything was buffered. A nil mgr discards.
+func (b *IndexBuffer) CommitInState(mgr *index.Manager, st index.NodeState) {
+	if mgr != nil {
+		mgr.ApplyBatchInState(b.changes, st)
 	}
 	b.reset()
 }

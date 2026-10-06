@@ -1,0 +1,107 @@
+spec hz04-vacuum-during-drop-index: 4 sessions, 3 permutations
+# HZ04. Hash index on (:L).s over 1 100 nodes. s0 is a read-only transaction pinned
+# at BEGIN; s1 removes :L from the ten nodes with k < 20, which leaves label-index
+# removals waiting for the watermark; s2 drops the index; s3 drains the vacuum and
+# reads the backlog. Nothing fails, and once s0 has ended the backlog drains to 0.
+
+starting permutation: s1rm s1st s2drop s0r s0c s3st
+step s1rm: MATCH (n:L) WHERE n.k < 20 REMOVE n:L RETURN count(n) AS removed
+removed
+-------
+10     
+(1 row)
+step s1st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+20      |1               |10                   |0                
+(1 row)
+step s2drop: DROP INDEX l_s
+step s0r: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+step s0c: COMMIT
+step s3st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1090|1090
+(1 row)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s2drop s1rm s1st s0r s0c s3st
+step s2drop: DROP INDEX l_s
+step s1rm: MATCH (n:L) WHERE n.k < 20 REMOVE n:L RETURN count(n) AS removed
+removed
+-------
+10     
+(1 row)
+step s1st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+20      |1               |10                   |0                
+(1 row)
+step s0r: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+step s0c: COMMIT
+step s3st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1090|1090
+(1 row)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s1rm s1st s0r s0c s2drop s3st
+step s1rm: MATCH (n:L) WHERE n.k < 20 REMOVE n:L RETURN count(n) AS removed
+removed
+-------
+10     
+(1 row)
+step s1st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+20      |1               |10                   |0                
+(1 row)
+step s0r: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+step s0c: COMMIT
+step s2drop: DROP INDEX l_s
+step s3st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1090|1090
+(1 row)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)

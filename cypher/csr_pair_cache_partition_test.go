@@ -187,11 +187,13 @@ func TestCSRPairCache_BypassBucketsAreDistinguishable(t *testing.T) {
 	}
 
 	// A cache present, consulted through a WRITE transaction's own view — the
-	// rmp #2446 case. [lpg.Graph.WriterView] is bound to the open transaction's
+	// rmp #2446 case. [lpg.Graph.WriterViewOf] is bound to the open transaction's
 	// snapshot, which carries its id, so viewCarriesOwnWrites must refuse it.
 	cache := newCSRPairCache()
-	if err := g.ApplyVersioned(func(lpg.WriteTx) error {
-		view := g.WriterView()
+	if err := g.ApplyVersioned(func(tx lpg.WriteTx) error {
+		// The transaction's own view, carried rather than looked up: a shared
+		// bracket does not claim the ambient slot (rmp #2947).
+		view := g.WriterViewOf(tx)
 		if view.Snapshot() == nil || view.Snapshot().TxID() == 0 {
 			t.Fatal("WriterView carries no transaction id: this test is not exercising " +
 				"the own-writes case it claims to")

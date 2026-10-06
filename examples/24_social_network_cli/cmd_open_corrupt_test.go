@@ -33,7 +33,8 @@ func firstFramePayloadOffset(t *testing.T, raw []byte) int {
 // committed op past the corruption.
 //
 // The assertion exercises the real recovery path used by every subcommand
-// (openStore -> recovery.OpenCtx -> res.IsClean() guard -> wal.Open). A
+// (openStore -> store.OpenCtx, which runs recovery, then the IsClean gate,
+// then wal.Open). A
 // clean (uncorrupted) directory is opened as a positive control so the
 // harness is proven to accept a healthy WAL.
 func TestOpenStore_RefusesCorruptWAL(t *testing.T) {
@@ -78,12 +79,10 @@ func TestOpenStore_RefusesCorruptWAL(t *testing.T) {
 	if err == nil {
 		t.Fatal("openStore opened a corrupt WAL; it must refuse to append")
 	}
-	// recovery.OpenCtx now returns the corruption as a hard error, so
-	// openStore's first error check refuses before ever reaching wal.Open
-	// for append. (The explicit res.IsClean() guard that follows is
-	// defence-in-depth for a caller that ignores the error.) Either way the
-	// returned error must wrap the underlying CRC sentinel so callers can
-	// branch on it with errors.Is.
+	// store.OpenCtx refuses the unclean recovery before it reaches wal.Open
+	// for append, with an error that wraps both store.ErrUncleanRecovery and
+	// the underlying CRC sentinel, so callers can branch on it with
+	// errors.Is.
 	if !errors.Is(err, wal.ErrCRCMismatch) {
 		t.Fatalf("openStore error = %v, want it to wrap wal.ErrCRCMismatch", err)
 	}

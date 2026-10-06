@@ -56,6 +56,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -66,6 +67,32 @@ import (
 // signal, not a failure: the caller answers the query by scanning instead.
 var ErrSeekSetOverBudget = errors.New("exec: index seek set exceeds its posting budget")
 
+// SeekSetKeyTypeError is returned by [NodeByIndexSeekSet.Init] for a key whose
+// type the index does not hold. It wraps [ErrIndexTypeMismatch], so
+// errors.Is(err, ErrIndexTypeMismatch) matches it, and errors.As recovers the
+// key's position and kind.
+//
+// A hash index holds the nodes whose property has its one key type, and no
+// other: a node whose property is the integer 5 is absent from a string index,
+// while `n.s = 5` is true for it. A key of another type therefore cannot be
+// answered by the index alone, and skipping it would silently drop the nodes it
+// matches (rmp #2961). The planner declines such a key set and scans
+// (rmp #2954); a direct caller receives this error and must do the same.
+type SeekSetKeyTypeError struct {
+	// Index is the key's position in the key set the operator was built with.
+	Index int
+	// Kind is the key's kind.
+	Kind expr.Kind
+}
+
+// Error implements the error interface.
+func (e *SeekSetKeyTypeError) Error() string {
+	return fmt.Sprintf("exec: index seek set key %d of kind %s does not match the index key type", e.Index, e.Kind)
+}
+
+// Unwrap returns [ErrIndexTypeMismatch].
+func (e *SeekSetKeyTypeError) Unwrap() error { return ErrIndexTypeMismatch }
+
 // NodeByIndexSeekSet is a Volcano leaf operator that performs an equality lookup
 // on a property hash index for each of several keys, emitting each matching
 // NodeID exactly once. Each Row has a single column: expr.IntegerValue(nodeID).
@@ -74,14 +101,18 @@ type NodeByIndexSeekSet struct {
 	// admit, when non-nil, qualifies every candidate the index returns — the label
 	// check this rewrite owes because it SUBSUMES a labelled scan leaf exactly as the
 	// single-key seek does. See [NodeByIndexSeek] for the defect and rmp #2423.
-	admit  func(nodeID uint64) bool
-	ctx    context.Context //nolint:containedctx // stored for per-Next ctx check
-	keys   []expr.Value
-	buf    [1]expr.Value // fixed backing buffer — zero-alloc per Next
-	ids    []uint64      // merged NodeIDs, drained once at Init
-	idbuf  [16]uint64    // inline backing for ids — small key sets stay zero-alloc
-	pos    int           // cursor into ids
-	budget uint64        // maximum merged posting count; 0 means unbounded
+	admit func(nodeID uint64) bool
+	// residual and snap, when set by [NodeByIndexSeekSet.AtSnapshot], replace
+	// admit exactly as they do on [NodeByIndexSeek] (rmp #2937).
+	residual SeekResidual
+	snap     snapshotGuard
+	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
+	keys     []expr.Value
+	buf      [1]expr.Value // fixed backing buffer — zero-alloc per Next
+	ids      []uint64      // merged NodeIDs, drained once at Init
+	idbuf    [16]uint64    // inline backing for ids — small key sets stay zero-alloc
+	pos      int           // cursor into ids
+	budget   uint64        // maximum merged posting count; 0 means unbounded
 }
 
 // NewNodeByIndexSeekSet creates an operator that looks up every key in idx.
@@ -101,15 +132,28 @@ func (op *NodeByIndexSeekSet) Admitting(admit func(nodeID uint64) bool) *NodeByI
 	return op
 }
 
+// AtSnapshot makes op read for a reader at the snapshot started at startTS, and
+// returns op so a builder can chain it onto the constructor: residual.Admit
+// replaces the admit predicate, and when proof cannot vouch for the merged lookup
+// the operator emits residual.AppendMatching over its keys instead — the
+// snapshot's own answer, which the budget does not apply to because it has
+// already been paid for (rmp #2937, see index_snapshot.go). residual and proof
+// must be non-nil.
+func (op *NodeByIndexSeekSet) AtSnapshot(residual SeekResidual, proof SnapshotProof, startTS uint64) *NodeByIndexSeekSet {
+	op.residual = residual
+	op.snap = snapshotGuard{proof: proof, startTS: startTS}
+	return op
+}
+
 // Init probes the index once per distinct key and merges the results into one
 // ascending, duplicate-free run.
 //
-// A key whose type the index cannot serve is SKIPPED rather than failing the
-// query. That is a correctness requirement, not leniency: openCypher equality
-// across type groups is FALSE, so a key that cannot be in this index matches
-// nothing, and contributing nothing is the right answer. Failing instead would
-// turn `WHERE n.name IN ['a', 7]` into an error where the specification asks for
-// the rows matching 'a'.
+// A NULL key matches nothing and is skipped. A key of any other type the index
+// does not hold fails Init with a [*SeekSetKeyTypeError] before any id is
+// emitted: the index holds only the nodes whose property has its key type, so
+// such a key can match nodes the index does not contain, and skipping it would
+// silently under-return (rmp #2961). The planner never builds this operator for
+// such a key set (rmp #2954).
 func (op *NodeByIndexSeekSet) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.pos = 0
@@ -128,7 +172,7 @@ func (op *NodeByIndexSeekSet) Init(ctx context.Context) error {
 		next, err := op.idx.LookupAppend(op.keys[i], ids)
 		if err != nil {
 			if errors.Is(err, ErrIndexTypeMismatch) {
-				continue
+				return &SeekSetKeyTypeError{Index: i, Kind: op.keys[i].Kind()}
 			}
 			return err
 		}
@@ -146,11 +190,25 @@ func (op *NodeByIndexSeekSet) Init(ctx context.Context) error {
 	}
 
 	op.ids = dedupeSorted(ids)
+	if op.residual != nil && op.snap.declines() {
+		// Asked AFTER every probe; see [SnapshotProof].
+		op.ids = op.residual.AppendMatching(op.keys, op.idbuf[:0])
+		return nil
+	}
 	// The residual predicate runs AFTER the dedupe, so a node is qualified once
 	// however many keys reached it, and BEFORE the budget test, so the budget is
 	// measured against the rows this operator will actually emit. In place, so a
 	// guarded set seek allocates exactly what an unguarded one does (rmp #2423).
-	if op.admit != nil {
+	switch {
+	case op.residual != nil:
+		kept := op.ids[:0]
+		for _, id := range op.ids {
+			if op.residual.Admit(id) {
+				kept = append(kept, id)
+			}
+		}
+		op.ids = kept
+	case op.admit != nil:
 		kept := op.ids[:0]
 		for _, id := range op.ids {
 			if op.admit(id) {

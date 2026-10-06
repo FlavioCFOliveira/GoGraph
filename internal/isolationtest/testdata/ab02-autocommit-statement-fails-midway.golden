@@ -1,0 +1,253 @@
+spec ab02-autocommit-statement-fails-midway: 2 sessions, 6 permutations
+# AB02. Hash index on (:L).s over 1 100 nodes. s1 runs two autocommit statements
+# that write every node and then fail: SET n.s = toString(10 / (n.i - 50)), which
+# divides by zero at i = 50, and SET n.s = 'gone' followed by a CALL that is
+# cancelled while it executes. Neither applies anything: every node keeps s = 'v<i>',
+# and the index holds no value either statement wrote. s2 reads in autocommit
+# statements between them.
+
+starting permutation: s1div s1cancel s2r s2r2
+step s1div: MATCH (n:L) SET n.s = toString(10 / (n.i - 50)) RETURN count(n) AS c
+ERROR: eval: ArithmeticError: / by zero
+step s1cancel: <cancel mid-statement> MATCH (n:L) SET n.s = 'gone' WITH count(n) AS c CALL cat.hold() YIELD x RETURN c, x
+ERROR: canceled
+step s2r: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2r2: MATCH (n:L) WHERE left(n.s, 1) = 'v' RETURN count(n) AS untouched
+untouched
+---------
+1100     
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fzero: MATCH (n:L {s:'0'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = '0' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fgone: MATCH (n:L {s:'gone'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'gone' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final funtouched: MATCH (n:L) WHERE left(n.s, 1) = 'v' RETURN count(n) AS untouched
+untouched
+---------
+1100     
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s1div s2r s1cancel s2r2
+step s1div: MATCH (n:L) SET n.s = toString(10 / (n.i - 50)) RETURN count(n) AS c
+ERROR: eval: ArithmeticError: / by zero
+step s2r: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1cancel: <cancel mid-statement> MATCH (n:L) SET n.s = 'gone' WITH count(n) AS c CALL cat.hold() YIELD x RETURN c, x
+ERROR: canceled
+step s2r2: MATCH (n:L) WHERE left(n.s, 1) = 'v' RETURN count(n) AS untouched
+untouched
+---------
+1100     
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fzero: MATCH (n:L {s:'0'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = '0' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fgone: MATCH (n:L {s:'gone'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'gone' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final funtouched: MATCH (n:L) WHERE left(n.s, 1) = 'v' RETURN count(n) AS untouched
+untouched
+---------
+1100     
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s1div s2r s2r2 s1cancel
+step s1div: MATCH (n:L) SET n.s = toString(10 / (n.i - 50)) RETURN count(n) AS c
+ERROR: eval: ArithmeticError: / by zero
+step s2r: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2r2: MATCH (n:L) WHERE left(n.s, 1) = 'v' RETURN count(n) AS untouched
+untouched
+---------
+1100     
+(1 row)
+step s1cancel: <cancel mid-statement> MATCH (n:L) SET n.s = 'gone' WITH count(n) AS c CALL cat.hold() YIELD x RETURN c, x
+ERROR: canceled
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fzero: MATCH (n:L {s:'0'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = '0' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fgone: MATCH (n:L {s:'gone'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'gone' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final funtouched: MATCH (n:L) WHERE left(n.s, 1) = 'v' RETURN count(n) AS untouched
+untouched
+---------
+1100     
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s2r s1div s1cancel s2r2
+step s2r: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1div: MATCH (n:L) SET n.s = toString(10 / (n.i - 50)) RETURN count(n) AS c
+ERROR: eval: ArithmeticError: / by zero
+step s1cancel: <cancel mid-statement> MATCH (n:L) SET n.s = 'gone' WITH count(n) AS c CALL cat.hold() YIELD x RETURN c, x
+ERROR: canceled
+step s2r2: MATCH (n:L) WHERE left(n.s, 1) = 'v' RETURN count(n) AS untouched
+untouched
+---------
+1100     
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fzero: MATCH (n:L {s:'0'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = '0' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fgone: MATCH (n:L {s:'gone'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'gone' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final funtouched: MATCH (n:L) WHERE left(n.s, 1) = 'v' RETURN count(n) AS untouched
+untouched
+---------
+1100     
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s2r s1div s2r2 s1cancel
+step s2r: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1div: MATCH (n:L) SET n.s = toString(10 / (n.i - 50)) RETURN count(n) AS c
+ERROR: eval: ArithmeticError: / by zero
+step s2r2: MATCH (n:L) WHERE left(n.s, 1) = 'v' RETURN count(n) AS untouched
+untouched
+---------
+1100     
+(1 row)
+step s1cancel: <cancel mid-statement> MATCH (n:L) SET n.s = 'gone' WITH count(n) AS c CALL cat.hold() YIELD x RETURN c, x
+ERROR: canceled
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fzero: MATCH (n:L {s:'0'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = '0' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fgone: MATCH (n:L {s:'gone'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'gone' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final funtouched: MATCH (n:L) WHERE left(n.s, 1) = 'v' RETURN count(n) AS untouched
+untouched
+---------
+1100     
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s2r s2r2 s1div s1cancel
+step s2r: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2r2: MATCH (n:L) WHERE left(n.s, 1) = 'v' RETURN count(n) AS untouched
+untouched
+---------
+1100     
+(1 row)
+step s1div: MATCH (n:L) SET n.s = toString(10 / (n.i - 50)) RETURN count(n) AS c
+ERROR: eval: ArithmeticError: / by zero
+step s1cancel: <cancel mid-statement> MATCH (n:L) SET n.s = 'gone' WITH count(n) AS c CALL cat.hold() YIELD x RETURN c, x
+ERROR: canceled
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fzero: MATCH (n:L {s:'0'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = '0' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fgone: MATCH (n:L {s:'gone'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'gone' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final funtouched: MATCH (n:L) WHERE left(n.s, 1) = 'v' RETURN count(n) AS untouched
+untouched
+---------
+1100     
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)

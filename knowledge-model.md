@@ -14,7 +14,7 @@ edge type, or property is added or removed, update both in the same change.
   element was last confirmed) and `gitDate` (ISO `YYYY-MM-DD`).
 
 Counts as of commit `567253c` + in-flight worktree (2026-06-11): **11,867 nodes**, **15,360 edges**.
-Re-measured live 2026-09-08: **15,447 nodes**, **19,507 edges**, **0 indexes**, **0 constraints**.
+Current counts come from the graph (`MATCH (n) RETURN count(n)`, `SHOW CONSTRAINTS`, `SHOW INDEXES`), not from this file.
 
 > ## ⚠️ Read this before copying any command out of this file
 >
@@ -35,9 +35,10 @@ Re-measured live 2026-09-08: **15,447 nodes**, **19,507 edges**, **0 indexes**, 
 > passages as what was true on their date, never as instructions for today.
 >
 > What did **not** change: **pattern-`MERGE` still creates every node in the pattern
-> afresh unless the whole pattern matches**, which is the cause of the 249 stub
-> `Package` nodes recorded under Constraints. The new `counters` block in every
-> write's response is now the detector for it.
+> afresh unless the whole pattern matches**. It created the stub `Package` nodes that
+> rmp #2802 repaired. The UNIQUE constraints under [Constraints](#constraints) now
+> reject such a duplicate, and the `counters` block in every write's response
+> reports `nodesCreated`.
 Incrementally synced at commit `257ce96` (2026-06-14, task #1502): +4 nodes
 (`NodePropertiesByIDFunc` Method, `nodePropsToExprMap` Function,
 `TestNodePropertiesByIDFunc_MatchesByID` Test, `BenchmarkNodeReturnToPackstream`
@@ -1282,6 +1283,7 @@ rather than introduced:
 | `Benchmark` | A `func BenchmarkXxx` (name prefix `Benchmark`). | `name`, `pkg`, `file` |
 | `FuzzTarget` | A `func FuzzXxx` (name prefix `Fuzz`). | `name`, `pkg`, `file` |
 | `Example` | A runnable godoc `func ExampleXxx` (name prefix `Example`). | `name`, `pkg`, `file` |
+| `File` | A repository file of any kind (Go source, test, generated code, grammar, Makefile, document) that a commit's diff touched. **Present in the live graph before this table documented it; documented 2026-09-28.** The label is populated per commit, not by a tree survey: a file with no touching `Commit` in the synced ranges has no node, and a Go symbol is still located through its own `file` property, never through this node. | `path` (STRING — repo-relative, slash-separated, no leading `./`; the identity), `gitCommit`/`gitDate` (the last synced commit that touched the file). Heterogeneous on the older nodes, which variously carry `note`, `package`, `kind`, `purpose`, `role` |
 | `Spec` | A documentation/specification file under `docs/` (plus root `README.md`/`CHANGELOG.md`). | `name` (basename), `path` (repo-relative), `title` (first `# ` heading) |
 | `Feature` | A curated major capability of the module. | `name`, `description` |
 | `Task` | An `rmp` roadmap task. **Present in the live graph long before this table documented it** (207 `IMPLEMENTED_IN` edges start at one); documented 2026-08-18 (`0f288333`, rmp #2481). **Schema unified 2026-08-25 (rmp #2612)** — see the canonical shape below. | **`id` (INTEGER — the rmp ticket number, the identity; the type is part of the contract, see below), `title`, `status`, `type`, `sprint` (int), `closedAt` (`YYYY-MM-DD`), `commit`.** Optional, evidence-bearing, and deliberately heterogeneous: `severity` (int), `priority` (int), `foundDuring` (what surfaced the task, for one filed from a review rather than planned), `measured` (the figures a filing rests on), `note`, `outcome`, `verdict`, `evidence`, `gap`, `blockers` — the same shape `Defect` carries, because a bug filed and then left in the backlog keeps only what its filing recorded. A `Task` whose `type` is `BUG` is itself a defect record, which is why `TAUGHT` accepts it as a source. `status` ∈ `BACKLOG`\|`SPRINT`\|`DOING`\|`TESTING`\|`COMPLETED` — **`rmp` is the authority and these five are the only admissible values**; a graph-only value (`SUPERSEDED` was found on task 2140) duplicates something the rmp title already says |
@@ -1440,6 +1442,7 @@ All edges carry `gitCommit` and `gitDate`.
 | `FIXES` | `(Commit)-[:FIXES]->(Feature)` | A commit fixes a bug in (or hardens) a feature area. |
 | `IMPROVES` | `(Commit)-[:IMPROVES]->(Feature)` | A commit improves (perf/observability/tests) a feature area without fixing a defect. |
 | `TOUCHES` | `(Commit)-[:TOUCHES]->(Package\|Type\|Function\|Spec)` | A commit's diff touched this element; drives provenance re-stamping. |
+| `TOUCHES` | `(Commit)-[:TOUCHES]->(File)` | The commit's diff added, modified or deleted this file. Documented 2026-09-28. Optional property `change` (STRING — the `git log --name-status` letter: `A`, `M`, `D`, `R`). |
 | `IMPLEMENTED_IN` | `(Task)-[:IMPLEMENTED_IN]->(Commit)` | The commit that delivered a task's work. **The direction is load-bearing, not incidental:** every documented read starts at the `Task`, so an edge written the other way round makes the work *invisible* to `MATCH (t:Task)-[:IMPLEMENTED_IN]->(c:Commit)` rather than merely awkward to reach — a query returning nothing reads as "no such work exists". Four sprint-347 edges (tasks #2480, #2514, #2535, #2537 — the whole DST crash-model family) were found reversed as `(Commit)-[:IMPLEMENTED_IN]->(Task)` and **repaired at `0ed5d4d1` (2026-08-18)**: the correct-direction edges carry `reconciledAt` and `reconciledNote` so the repair is auditable. Verify after any sync with `MATCH (a)-[e:IMPLEMENTED_IN]->(b) RETURN labels(a)[0], labels(b)[0], count(*)` — a `Commit`→`Task` row is a defect. |
 | `DEPENDS_ON` | `(Task)-[:DEPENDS_ON]->(Task)` | A task cannot start/complete until another task (a genuine prerequisite) does. Contrast `FOLLOWED_BY`, which is explicitly non-blocking. Optional property added 2026-08-19 (`201370e0`): `note` — why the dependency exists, for a prerequisite discovered mid-task rather than planned, since rmp's own `depends_on` list is empty for such a pair and the edge would otherwise carry no evidence (#2485 depended on #2567: `make ci` could not go green until the security gate stopped scoring a slow machine as a failed subject). |
 | `FOLLOWED_BY` | `(Task)-[:FOLLOWED_BY]->(Task)` | A completed task's work surfaced a distinct, non-blocking follow-up tracked as a new task — NOT a prerequisite (contrast `DEPENDS_ON`). Introduced 2026-07-02 (task #1866 → #1875). |
@@ -1636,10 +1639,9 @@ single node property:** `IS UNIQUE` (reported type `UNIQUE`) and `IS NOT NULL`
 enforced** — a violating write is rejected with exit 1 — which makes it the only
 real defence against the pattern-`MERGE` duplication above.
 
-**Live schema state, 2026-09-08 (15447 nodes, 19507 edges): zero constraints and
-zero indexes exist.** Everything below is therefore *declared*, and each row says
-whether the data permits enforcing it today. A constraint marked VIOLATED is still
-the model's rule — it is a repair waiting to be scheduled, not an abandoned idea.
+**Live schema state:** read it with `SHOW CONSTRAINTS`. The rows under "Uniqueness —
+DECLARED and enforced" exist in the graph. Every other row is the model's rule and
+states whether the data permits enforcing it.
 
 ### Uniqueness — enforceable today
 
@@ -1655,21 +1657,26 @@ Measured clean (no duplicate values, no nulls):
 | `Document` | `path` | 5 | `CREATE CONSTRAINT document_path_uniq IF NOT EXISTS FOR (n:Document) REQUIRE n.path IS UNIQUE` |
 | `Agent` | `name` | 5 | `CREATE CONSTRAINT agent_name_uniq IF NOT EXISTS FOR (n:Agent) REQUIRE n.name IS UNIQUE` |
 | `Skill` | `name` | 2 | `CREATE CONSTRAINT skill_name_uniq IF NOT EXISTS FOR (n:Skill) REQUIRE n.name IS UNIQUE` |
+| `File` | `path` | — (count with `MATCH (n:File) RETURN count(n)`; check with the duplicate query below) | `CREATE CONSTRAINT file_path_uniq IF NOT EXISTS FOR (n:File) REQUIRE n.path IS UNIQUE` |
 
-### Uniqueness — VIOLATED, cannot be created until repaired
+### Uniqueness — DECLARED and enforced
 
-| Label | Property | Violation (measured 2026-09-08) | Cause |
-|---|---|---|---|
-| `Package` | `path` | **9 values across 256 nodes.** 249 of 369 `Package` nodes are null-`name` stubs; the worst path, `graph/index/hash`, has **115** nodes | pattern-`MERGE` |
-| `Task` | `id` | **5 values across 10 nodes** | pattern-`MERGE`, plus the historical `task_id`/`number` key drift |
-| `Commit` | `hash` | **3 values across 10 nodes** | pattern-`MERGE` |
+The engine enforces these constraints. A write that would duplicate one of these
+identities is rejected, so a pattern-`MERGE` that would rebuild an existing node
+now fails loudly instead of silently creating a stub.
 
-The `Package` split is not cosmetic: 234 edges hang off the stubs (219 `CONTAINS`
-out, 15 `TOUCHES` in). The named `cypher/exec` node holds **1086** `CONTAINS`
-edges while its 64 stubs hold **63**, so *"what does `cypher/exec` contain?"*
-answers 1086 or 1149 depending on which node binds. Filed as rmp **#2802**.
+| Label | Property | Constraint name |
+|---|---|---|
+| `Package` | `path` | `package_path_unique` |
+| `Task` | `id` | `task_id_unique` |
+| `Commit` | `hash` | `commit_hash_unique` |
 
-Detect with:
+They were declared after the rmp **#2802** repair. Before it, null-`name` `Package`
+stubs and duplicate `Task` and `Commit` nodes left by pattern-`MERGE` split
+containment queries. The repair re-homed the stubs' edges onto the named nodes,
+folded the duplicates, and deleted the stubs.
+
+Detect a regression with:
 
 ```
 MATCH (n:Package) WHERE n.name IS NULL RETURN count(n)
@@ -1693,7 +1700,7 @@ propose `IS NOT NULL` for them without deciding the model question first:
 | Label | Property | Nulls | Why it is null |
 |---|---|---:|---|
 | `Defect` | `id` | 32 of 53 | those nodes key on `ref` instead — a second, accepted keying |
-| `Package` | `importPath` | 258 of 369 | mostly the 249 stubs; the real packages carry it |
+| `Package` | `importPath` | count with `MATCH (n:Package) WHERE n.importPath IS NULL RETURN count(n)` | non-Go directories modelled as packages; every Go package carries it |
 | `Test` | `pkg` | 207 | the `internal/sim` divergence: keyed on `package`, not `pkg` |
 | `Function` / `Type` / `Method` | `pkg` | 59 / 47 / 20 | the same `internal/sim` divergence |
 | `Sprint` | `id` | 14 of 87 | legacy nodes predating the canonical shape |

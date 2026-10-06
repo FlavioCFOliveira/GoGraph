@@ -28,6 +28,8 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -53,6 +55,11 @@ type config struct {
 	// needed, which is why this is a fraction and not a flag.
 	hotPct int
 	seed   uint64
+	// ladder is phase 6, the concurrency ladder (ladder.go). Zero levels skip it.
+	ladder ladderConfig
+	// durability is phase 7, durability across a crash (durability.go). Zero
+	// levels and zero kill runs skip it.
+	durability durabilityConfig
 }
 
 func defaultConfig() config {
@@ -64,6 +71,8 @@ func defaultConfig() config {
 		readers:    4,
 		hotPct:     25,
 		seed:       1,
+		ladder:     defaultLadderConfig(),
+		durability: defaultDurabilityConfig(),
 	}
 }
 
@@ -96,9 +105,55 @@ func main() {
 	flag.IntVar(&cfg.readers, "readers", cfg.readers, "concurrent reader goroutines")
 	flag.IntVar(&cfg.hotPct, "hot-pct", cfg.hotPct, "percent of orders that touch the shared inventory (the contention dial)")
 	flag.Uint64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	levels := flag.String("ladder-levels", "1,8,64",
+		"phase 6: comma-separated goroutine counts of the concurrency ladder; empty skips the phase")
+	flag.IntVar(&cfg.ladder.totalOps, "ladder-ops", cfg.ladder.totalOps,
+		"phase 6: operations per arm and level, shared among its goroutines")
+	rows := flag.String("ladder-rows", "",
+		"phase 6: comma-separated arm ids to run (L01,L04,L05,L06,L08,L09,L10,L11,L13,L15,L17,L18,L19); empty runs all")
+	flag.BoolVar(&cfg.ladder.soak, "ladder-soak", false,
+		"phase 6: also run the soak arms (horizon capacity cliff, full-size parallel count) and the self-conflict streak gate")
+	durLevels := flag.String("durability-levels", "8,64",
+		"phase 7: comma-separated writer counts of the in-process crash arms; empty skips them")
+	flag.IntVar(&cfg.durability.totalTxns, "durability-txns", cfg.durability.totalTxns,
+		"phase 7: transactions per arm and level, shared among its writers; the crash lands at half")
+	flag.IntVar(&cfg.durability.killRuns, "durability-kill-runs", 0,
+		"phase 7: kill -9 runs of a child process (D02); 0 skips them")
+	flag.IntVar(&cfg.durability.killLevel, "durability-kill-level", cfg.durability.killLevel,
+		"phase 7: writer count of the kill -9 child")
+	childDir := flag.String("durability-child-dir", "",
+		"INTERNAL: run as the phase-7 kill child against this store directory, until killed")
+	childLevel := flag.Int("durability-child-level", 8, "INTERNAL: writer count of the phase-7 kill child")
 	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
+	if *childDir != "" {
+		if err := runDurabilityChild(context.Background(), *childDir, *childLevel, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "durability child: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	dl, err := parseLevels(*durLevels)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.durability.levels = dl
+	cfg.durability.seed = cfg.seed
+
+	lv, err := parseLevels(*levels)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.ladder.levels = lv
+	for _, r := range strings.Split(*rows, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			cfg.ladder.rows = append(cfg.ladder.rows, r)
+		}
+	}
+	cfg.ladder.seed = cfg.seed
 	if err := cfg.validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
@@ -135,6 +190,30 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 	if err := phaseRestart(ctx, w, cfg); err != nil {
 		return err
 	}
+	// PHASE 5 — the deterministic scenario catalogue (catalogue.go).
+	if err := phaseCatalogue(ctx, w); err != nil {
+		return err
+	}
+	// PHASE 6 — the concurrency ladder (ladder.go).
+	if len(cfg.ladder.levels) > 0 {
+		out, err := phaseLadder(ctx, w, &cfg.ladder)
+		if err != nil {
+			return err
+		}
+		if f := out.failed(); len(f) > 0 {
+			return fmt.Errorf("ladder: %d checks failed:\n%s", len(f), strings.Join(f, "\n"))
+		}
+	}
+	// PHASE 7 — durability under concurrent writers across a crash (durability.go).
+	if len(cfg.durability.levels) > 0 || cfg.durability.killRuns > 0 {
+		out, err := phaseDurability(ctx, w, &cfg.durability)
+		if err != nil {
+			return err
+		}
+		if f := out.failed(); len(f) > 0 {
+			return fmt.Errorf("durability: %d checks failed:\n%s", len(f), strings.Join(f, "\n"))
+		}
+	}
 
 	var m1 runtime.MemStats
 	runtime.ReadMemStats(&m1)
@@ -144,6 +223,22 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 	fmt.Fprintf(w, "# mem.total_alloc_bytes=%d\n", m1.TotalAlloc-m0.TotalAlloc)
 	fmt.Fprintf(w, "# mem.num_gc=%d\n", m1.NumGC-m0.NumGC)
 	return nil
+}
+
+// parseLevels parses the -ladder-levels list.
+func parseLevels(s string) ([]int, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var out []int
+	for _, f := range strings.Split(s, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(f))
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("ladder level %q: want a positive integer", f)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 // newGraph builds an in-memory graph for one phase.
@@ -191,16 +286,28 @@ func seedGraph(g *lpg.Graph[string, float64], cfg *config) error {
 // made this the project's rule after a fixed count died under coverage.
 const retryBudget = 2 * time.Second
 
+// hangBudget bounds one writer phase (one scaling level, or the contention
+// phase) by WALL CLOCK, so a writer that stops making progress — a livelock in
+// the retry loop, or a write that never returns from the barrier — ends the phase
+// with its unfinished orders counted as unrecovered instead of hanging the run.
+//
+// It is sized to catch a hang, not to measure speed: a healthy phase of the
+// documented default shape finishes in milliseconds, and the short-layer shape in
+// less, so 30 s is three to four orders of magnitude of margin. A slow machine
+// cannot reach it; a stuck writer always does.
+const hangBudget = 30 * time.Second
+
 // commitOrder applies one order through sess, retrying a serialization conflict
 // until the budget expires. It reports whether it committed, and how many retries
-// it took.
+// it took. ctx bounds the barrier acquisition, so a phase whose hang budget has
+// expired stops waiting.
 func commitOrder(
-	g *lpg.Graph[string, float64], sess *lpg.Session[string, float64],
+	ctx context.Context, g *lpg.Graph[string, float64], sess *lpg.Session[string, float64],
 	custKey, invKey string, n int,
 ) (retries int, err error) {
 	deadline := time.Now().Add(retryBudget)
 	for attempt := 0; ; attempt++ {
-		err = sess.ApplyVersioned(func(tx lpg.WriteTx) error {
+		err = sess.ApplyVersionedCtx(ctx, func(tx lpg.WriteTx) error {
 			wv := g.Writer(tx)
 			// The producer's OWN customer: uncontended by construction.
 			if perr := wv.SetNodeProperty(custKey, "orders", lpg.Int64Value(int64(n+1))); perr != nil {

@@ -831,7 +831,14 @@ func ApplyLabelsToGraph[N comparable, W any](g *lpg.Graph[N, W], rb LabelsReadba
 	// from actual attachments, never from the registry.
 	reg := g.Registry()
 	for _, name := range rb.Strings {
-		reg.Intern(name)
+		// A name over lpg.MaxTokenLen fails the apply rather than being
+		// dropped (rmp #2748): the engine refuses such a token on every write
+		// path, so a snapshot carrying one can only be from a writer older than
+		// that bound, and loading it silently would hide the data it names.
+		if _, err := reg.Intern(name); err != nil {
+			metrics.IncCounter("store.snapshot.ApplyLabels.tokenTooLong", 1)
+			return fmt.Errorf("snapshot.ApplyLabelsToGraph: %w", err)
+		}
 	}
 	for _, nl := range rb.NodeLabels {
 		if uint64(nl.StringIdx) >= uint64(len(rb.Strings)) {
@@ -869,18 +876,26 @@ func ApplyLabelsToGraph[N comparable, W any](g *lpg.Graph[N, W], rb LabelsReadba
 			continue
 		}
 		if !perSlot {
-			g.SetEdgeLabel(srcN, dstN, rb.Strings[el.StringIdx])
+			if err := g.SetEdgeLabel(srcN, dstN, rb.Strings[el.StringIdx]); err != nil {
+				return fmt.Errorf("snapshot.ApplyLabelsToGraph: SetEdgeLabel: %w", err)
+			}
 			continue
 		}
 		if el.Slot == EdgeLabelSlotOverflow {
-			g.AddEdgeRelTypeOverflowByID(
-				graph.NodeID(el.Src), graph.NodeID(el.Dst), rb.Strings[el.StringIdx])
+			if _, err := g.AddEdgeRelTypeOverflowByID(
+				graph.NodeID(el.Src), graph.NodeID(el.Dst), rb.Strings[el.StringIdx]); err != nil {
+				return fmt.Errorf("snapshot.ApplyLabelsToGraph: AddEdgeRelTypeOverflowByID: %w", err)
+			}
 			continue
 		}
-		if !g.SetEdgeRelTypeAtSlotByID(
+		placed, err := g.SetEdgeRelTypeAtSlotByID(
 			graph.NodeID(el.Src), graph.NodeID(el.Dst),
 			int(el.Slot), rb.Strings[el.StringIdx],
-		) {
+		)
+		if err != nil {
+			return fmt.Errorf("snapshot.ApplyLabelsToGraph: SetEdgeRelTypeAtSlotByID: %w", err)
+		}
+		if !placed {
 			metrics.IncCounter("store.snapshot.ApplyLabels.slotMissing", 1)
 		}
 	}

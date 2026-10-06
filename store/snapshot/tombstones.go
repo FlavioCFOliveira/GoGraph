@@ -201,10 +201,15 @@ func ReadTombstones(r io.Reader) (TombstonesReadback, error) {
 // A later WAL re-create (OpAddNode) for any of these ids still revives it,
 // preserving the chronology of a delete→recreate cycle that straddles the
 // snapshot boundary.
-func ApplyTombstonesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb TombstonesReadback) {
+//
+// It returns the error [lpg.Graph.RestoreTombstones] reports —
+// [lpg.ErrIndexedRawWrite] when g already has a secondary index registered,
+// which recovery never does because it applies the snapshot to a graph it has
+// just constructed.
+func ApplyTombstonesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb TombstonesReadback) error {
 	defer metrics.Time("store.snapshot.ApplyTombstonesToGraph").Stop()
 	if len(rb.IDs) == 0 {
-		return
+		return nil
 	}
-	g.RestoreTombstones(rb.IDs)
+	return g.RestoreTombstones(rb.IDs)
 }

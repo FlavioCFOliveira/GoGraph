@@ -70,9 +70,9 @@ When asking for clarification:
 
 **Every piece of work in this project is delegated to a specialist sub-agent**, chosen as the best available match for the objectives that work must achieve. The coordinating agent never performs the work itself.
 
-**Exactly one sub-agent runs at a time.** Use as many sub-agents as the objective needs — in series, never in parallel: each one finishes before the next starts.
+**Exactly one sub-agent runs at a time, alongside the main conversation — never more than one.** Use as many sub-agents as the objective needs — in series, never in parallel: each one finishes before the next starts.
 
-**The only exception is the user's explicit prior authorisation**, granted for a named piece of work and revoked automatically when that work ends; it never carries over to the next piece of work. The full contract is in [Sub-Agents (Specialists)](#sub-agents-specialists).
+**The only exception is the user's explicit authorisation to run more than one sub-agent in parallel**, granted for a named piece of work and revoked automatically when that work ends; it never carries over to the next piece of work. The full contract is in [Sub-Agents (Specialists)](#sub-agents-specialists).
 
 ### Language
 
@@ -114,7 +114,7 @@ repeats until the objectives are met:
 
 Then iterate: when step 3 shows the objectives are not yet met, return to step 1
 carrying the evidence the tests produced. The cycle closes only once the objectives
-are met.
+are met, and it is run to reach them in the fewest possible iterations.
 
 **Batch tasks of similar scope into the same iteration.** Whenever several open
 tasks share a scope — the same component, the same kind of change, the same body of
@@ -170,7 +170,8 @@ is skipped or reordered.
   not warrant a run.
 - **The full `make ci` gate is reserved for very special moments**, and there are
   exactly three: the close of a sprint, any push, and a specific request from the
-  user. Nothing else qualifies — it is never a per-task step and never a reflex at
+  user. For a push, only its correctness stages decide; measurement stages are
+  reported, never gating (see [Tests and validation](#concrete-applications)). Nothing else qualifies — it is never a per-task step and never a reflex at
   the end of an iteration.
 - The enforceable detail — what the targeted validation must cover, which
   compliance gates a change drags in, what `make ci` still guarantees, and how to
@@ -178,8 +179,8 @@ is skipped or reordered.
 
 ### Volunteering and proactivity
 
-- **Action is directed strictly at the objective of the work in hand.** Nothing
-  outside that objective is started, changed, or explored.
+- **Action is directed strictly and highly at the objective of the work in hand.**
+  Nothing outside that objective is started, changed, or explored.
 - **Starting any work that was not explicitly requested is forbidden** — no
   speculative feature, no adjacent refactor, no unrequested improvement, no
   groundwork for work nobody has asked for.
@@ -285,10 +286,13 @@ Correctness outranks security, and security outranks speed: never trade a higher
 carried as one effort; splitting it pays for the same analysis, context loading,
 and validation twice.
 
-**Across work items.** Whenever open work items — tasks in `rmp`, and any work in
-hand that is not tracked as a task — are substantially close functionally or
-technically, join them into a **single development effort**, and maximise what
-that one effort delivers across all of them. The batching rule in
+**Objectives are reached with the fewest possible tasks and iterations.** This is
+the measure of every plan and every execution.
+
+**Across work items.** Whenever open work items — tasks in `rmp`, and any work the
+user requests ad hoc that is not tracked as a task — are verifiably close
+functionally or technically, join them into a **single development effort**, and
+maximise what that one effort delivers across all of them. The batching rule in
 [Development workflow](#development-workflow) and the unit of work in
 [Execution](#execution) are this principle applied to tasks.
 
@@ -309,6 +313,32 @@ never a reason to start work that was not requested (see
 [Volunteering and proactivity](#volunteering-and-proactivity)), to widen a task
 beyond its stated objectives, or to deliver any part of it less than completely
 (see [Self-contained development](#self-contained-development)).
+
+### Work convergence policy
+
+**Always look for convergence between the individual objectives of the tasks, and
+turn that convergence into synergy.** Tasks with complementary objectives, or with
+functional or technical proximity, are **always** worked as one optimised effort
+that maximises the synergy between them.
+
+- **One pass per kind of work.** Write all the code in one pass, all the
+  documentation in one pass, and run the tests over all the changed code in one
+  pass.
+- **Aggregate work of the same kind** wherever aggregation makes delivery faster.
+- **Quality never drops.** Synergy and convergence must deliver **better** work
+  than task-by-task development, never lower-quality work. An aggregation that
+  would lower the quality of any deliverable is not made.
+- **Maximise the internal resources available** — specialists, skills, local
+  tooling — so that deliveries are faster and cost the user less, always within
+  the one-sub-agent-at-a-time rule (see
+  [Delegation to sub-agents](#delegation-to-sub-agents)).
+
+**This is the default way of working, never an on-request mode.** The user never
+needs to ask for synergy or convergence to be sought. The motto is: **"Make the
+effort pay: deliver the most with the least work."**
+
+**Neither policy is ever recorded as a task in `rmp`.** They govern how work is
+done; they are not work items.
 
 ---
 
@@ -389,12 +419,48 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
   single test, not its whole package. This narrows a run's **extent**; it never
   licenses a trickle of small edits each followed by its own run (see
   [Work synergy policy](#work-synergy-policy)).
+- **Use a RAM drive (tmpfs) whenever it naturally speeds a run up — this is very
+  important.** It applies to suites whose cost is I/O: the whole persistence
+  component (`store/` — `wal`, `checkpoint`, `snapshot`, `recovery`, `txn`,
+  `bulkimport` — and `internal/crashinject/`), the MVCC machinery (`graph/mvcc`,
+  the MVCC paths of `graph/lpg`, and the MVCC examples such as
+  `examples/37_mvcc_write_contention`, 17 and 25), and any other suite that writes
+  temporary files intensively or runs for a very long time on disk.
+  - It is not used for CPU-bound suites (parser, planner, algorithms): they gain
+    nothing, and the drive takes RAM the tests need.
+  - Mechanics on macOS. **Reuse first:** if a RAM volume is already mounted
+    (`mount | grep -i ram`, or `diskutil info` showing `Virtual: Yes`), work in a
+    fresh subdirectory on it; create a drive only when none exists. To create one:
+    `dev=$(hdiutil attach -nomount ram://<sectors>)`, then
+    `diskutil erasevolume APFS <Name> $dev`, which formats it and mounts it at
+    `/Volumes/<Name>`. `newfs_apfs` followed by `mount -t apfs` fails (exit 66) and
+    leaves images that cannot be detached until a reboot. Point `TMPDIR` and
+    `GOTMPDIR` at the subdirectory so `t.TempDir()` and build temporaries land
+    there; `GOCACHE` stays on disk. At the end, delete the subdirectory, and eject
+    the drive (`diskutil eject $dev`) only if this run created it.
+  - Tests whose workload is sized by elapsed time grow with the medium's speed and
+    can exhaust the drive or time out. They are tracked and fixed as defects, not
+    run on disk forever.
+  - Prove equivalence once before relying on it: a short slice of the suite on disk
+    and on the RAM drive gives the same pass set.
+  - Crash tests (`kill -9`, fault injection) remain valid on a RAM drive, because a
+    process kill loses no page cache on either medium. Only tests that measure
+    real-device fsync latency or throughput stay on disk.
+  - This relaxes no gate and changes no test: it changes only the medium the run
+    uses.
 - **This relaxes no gate, it relocates one.** `make ci` — `go test -race ./...`,
   the TCK regression gate, `goleak`, and the lint pass — still runs in full, and
   every [Compliance Mandate](#compliance-mandates) and
   [Reliability and Concurrency Mandate](#reliability-and-concurrency-mandates)
   still has to be green before the sprint closes and before anything is pushed. What
   changes is the frequency, not the standard.
+- **A push is validated by correctness alone — never by a benchmark or a
+  measurement.** The gate before a push is the correctness evidence: build, vet, lint,
+  the race-enabled tests, `goleak`, the TCK regression gate, the crash/recovery
+  battery, and the knowledge-graph fidelity check. A benchmark, a wall-clock or
+  throughput gate, or a per-package test-time budget **never blocks a push**: its
+  result is reported, and a regression it shows is recorded as a task, not used to
+  hold the push.
 - **Read the exit status from inside the log, never from the wrapper.** A
   `make ci | tail` pipeline reports the exit code of `tail`: a real
   `make: *** [test-short] Error 1` has been masked as success this way. Redirect the
@@ -442,7 +508,7 @@ Use the **Knowledge Graph** to identify the **foundational and highest-leverage 
 
 **Prioritisation.** By default, always work from the highest-gain, highest-impact tasks down to the least essential. Foundational tasks, and tasks that unblock other tasks or features, are always tackled first.
 
-**Task sizing.** When a task is too large to be completed in a single pass by an AI agent, subdivide it into parts, each of which still honours the self-contained-development principle.
+**Task sizing.** Plan the fewest tasks that reach the objective (see [Work synergy policy](#work-synergy-policy)). Subdivide a task only when it is too large to be completed in a single pass, and then into the fewest parts possible, each of which still honours the self-contained-development principle.
 
 ### Execution
 
@@ -672,7 +738,7 @@ This module must operate **without failure under sustained high load and high co
 ### Acceptance gates
 
 - **Soak test (periodic reliability exercise; not a release gate).** A multi-hour mixed-workload run under `GODEBUG=gctrace=1` should show zero growth in heap, file descriptors, and goroutine count after warm-up. Run it periodically — and ideally before a major release — but it does **not** block a release.
-- **Concurrency stress test in the local gate.** A short variant of the soak workload runs as part of the race-enabled short test layer (`make ci`) before every push.
+- **Concurrency stress test in the local gate.** A short variant of the soak workload runs as part of the race-enabled short test layer (`make ci`) before every push. It gates on correctness (no race, no deadlock, no lost or phantom write), never on its timing.
 - **Load-test report alongside benchmarks.** Each release ships latency and throughput numbers at multiple concurrency levels (1, 8, 64, 256, 1024 goroutines), recorded in `docs/benchmarks/`.
 
 ---

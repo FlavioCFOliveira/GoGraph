@@ -349,7 +349,9 @@ func TestRecovery_NoTombstoneResurrectionUnderOrdering(t *testing.T) {
 
 	// Remove a middle destination, which tombstones it without stripping its
 	// incident edges; the live filter is what must exclude its arcs.
-	g.RemoveNode("d40")
+	if err := g.RemoveNode("d40"); err != nil {
+		t.Fatalf("g.RemoveNode(\"d40\"): %v", err)
+	}
 
 	live := g.LiveNodeFilter()
 	cs := csr.BuildFromAdjListLive(g.AdjList(), live)

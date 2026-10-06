@@ -52,7 +52,16 @@ func TestColumnarExercise(t *testing.T) {
 	// (1) Columnar aggregation. Every user carries one of the fixed countries, so
 	// the grouping covers all users across exactly len(countries) groups. The
 	// columnar de-box (unboxed grouping-key hash) must allocate strictly fewer
-	// times and fewer bytes than the coalesce() row-mode twin.
+	// times than the coalesce() row-mode twin.
+	//
+	// Bytes are NOT asserted here (rmp #2927). This test once also required fewer
+	// bytes, which held only while the row-mode twin was wasteful: commit f6b96b15
+	// cut the row path's per-row allocation, taking row_bytes from 655376 to
+	// 151696 while col_bytes stayed at 197864 -> 197928 (parent a1c7bb9f passes,
+	// f6b96b15 fails). The columnar path did not regress; the claim that it
+	// allocates fewer bytes than the row path is simply no longer true of the
+	// module, so asserting it would pin a false statement. Both figures are still
+	// emitted as telemetry.
 	wantUsers := int64(min(cfg.users, colScaleUsers))
 	if got := telemetryInt(t, out, "columnar.agg.groups"); got != int64(len(countries)) {
 		t.Errorf("columnar.agg.groups = %d, want %d", got, len(countries))
@@ -64,9 +73,6 @@ func TestColumnarExercise(t *testing.T) {
 	aggRow := telemetryInt(t, out, "columnar.agg.row_mallocs")
 	if aggCol <= 0 || aggCol >= aggRow {
 		t.Errorf("columnar aggregation did not win: col_mallocs=%d, row_mallocs=%d (want 0 < col < row)", aggCol, aggRow)
-	}
-	if col, row := telemetryInt(t, out, "columnar.agg.col_bytes"), telemetryInt(t, out, "columnar.agg.row_bytes"); col >= row {
-		t.Errorf("columnar aggregation bytes did not win: col_bytes=%d, row_bytes=%d", col, row)
 	}
 
 	// (2) Columnar Expand + Filter. The batch counter is the direct engagement

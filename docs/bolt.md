@@ -399,9 +399,11 @@ already streaming), which bounds the following intentional limitations:
   populated (rmp #2721). Alongside the operator tree, `args` carries `Details`,
   `EstimatedRows` and its provenance, and — for a `PROFILE` — `RowsRemovedByFilter`.
   The page-cache figures Neo4j reports are absent because GoGraph measures none of
-  them, and a fabricated zero would read as a measurement. Two limitations sit
-  inside the pair: `PROFILE` refuses a writing statement, and neither prefix may
-  precede a schema statement.
+  them, and a fabricated zero would read as a measurement. A writing `PROFILE`
+  executes and commits exactly as the unprefixed statement does — in its own
+  transaction on an autocommit RUN, inside the open transaction otherwise — with
+  the same write counters (rmp #2790). Neither prefix may precede a schema
+  statement.
 - **`type`** — not sent, so `ResultSummary.StatementType` reads
   `StatementTypeUnknown`.
 - **`t_first`** / **`t_last`** — not sent; the server does not measure them, so
@@ -758,7 +760,8 @@ The rules are tested in the order below; the first match wins.
 | `cypher.ErrUnsupportedParamType` | `Neo.ClientError.Statement.TypeError` |
 | `cypher.ErrWriteInReadOnlyTx` | `Neo.ClientError.Request.Invalid` |
 | `txn.ErrTransactionTooLarge` | `Neo.ClientError.General.TransactionOutOfMemoryError` |
-| `txn.ErrFieldTooLong` | `Neo.ClientError.Statement.ArgumentError` |
+| `txn.ErrTokenTooLong` (a label, relationship type, property key or schema identifier over 65535 bytes) | `Neo.ClientError.Schema.TokenLengthError` |
+| `txn.ErrFieldTooLong` of any other kind: `txn.ErrValueTooLong` (a property value over a durable format's cap), or a per-edge-handle label or property count over the snapshot's per-record cap | `Neo.ClientError.Data.DataUnsupportedByStoreFormat` |
 | `wal.ErrDurabilityFailed` | `Neo.DatabaseError.General.UnknownError` |
 | `mvcc.ErrSerializationConflict` | `Neo.TransientError.Transaction.Outdated` |
 | `cypher.ErrResultRowsExceeded`, `cypher.ErrResultBytesExceeded`, `funcs.ErrCollectItemsExceeded` | `Neo.ClientError.General.LimitExceeded` |
@@ -786,6 +789,16 @@ poisoned and the next attempt fails the same way.
 
 Error matching uses `errors.Is` and `errors.As`, so wrapped errors are matched
 correctly.
+
+The 65535-byte token limit (`lpg.MaxTokenLen`) is enforced by every engine, so a
+store-less (in-memory) engine and a WAL-backed one both raise
+`Neo.ClientError.Schema.TokenLengthError` for the same label, relationship type or
+property key, before anything is written. A client can check a token before it
+sends a statement: the limit is a byte length, not a character count.
+`store/snapshot.ErrFieldTooLong` has no Bolt code of its own. Only the
+checkpointer, bulk import and the offline tools write snapshots, so no Bolt
+statement can return it; if one ever did, it would be a server fault and would
+reach the client as `Neo.DatabaseError.General.UnknownError`.
 
 A few codes are produced directly by the session handlers rather than by the
 `FailureCode` map above:

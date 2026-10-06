@@ -16,9 +16,11 @@ package mvcc
 //   - no ctx re-check on the SUCCESS path, so a deadline that elapsed while queued
 //     was reported as success and the caller was handed a lock it may no longer use.
 //
-// Both are fixed in [acquireCtx]. These tests are what stops them coming back a
-// third time, which is precisely what deleting a package with its tests would not
-// have done.
+// Both were fixed in an acquisition helper that rmp #2983 later removed: every wait
+// now selects on ctx directly and withdraws the request on expiry, so an abandoned
+// acquire costs no goroutine at all and the success-path re-check lives in the Ctx
+// methods themselves. These tests are what stops either property coming back,
+// which is precisely what deleting a package with its tests would not have done.
 
 import (
 	"context"
@@ -47,7 +49,9 @@ func waitForGoroutines(want int, timeout time.Duration) int {
 // not 2N.
 //
 // The threshold is the midpoint between herd and 2*herd, so the old two-goroutine
-// shape fails and ordinary test noise does not.
+// shape fails and ordinary test noise does not. Since rmp #2983 an abandoned acquire
+// leaves NO goroutine; TestGateCancel_AbandonedAcquiresLeaveNoGoroutine asserts that
+// stronger bound, and this test is kept as the weaker one it implies.
 func TestGateCtx_AbandonedAcquireCostsOneHelper(t *testing.T) {
 	const herd = 64
 	var g Gate
@@ -90,8 +94,8 @@ func TestGateCtx_AbandonedAcquireCostsOneHelper(t *testing.T) {
 }
 
 // TestGateCtx_NeverLeavesTheGateHeldWithNoOwner drives the handoff race directly.
-// The deadline is tuned to fire at roughly the moment the helper acquires, so across
-// many iterations BOTH CAS arms are taken. After each iteration the gate must be
+// The deadline is tuned to fire at roughly the moment the holder releases, so across
+// many iterations both outcomes — admitted, and withdrawn — are taken. After each iteration the gate must be
 // free — verified by an uncontended strong acquire, which is the only observation
 // that distinguishes "released" from "held by nobody".
 func TestGateCtx_NeverLeavesTheGateHeldWithNoOwner(t *testing.T) {
@@ -140,21 +144,21 @@ func TestGateCtx_NeverLeavesTheGateHeldWithNoOwner(t *testing.T) {
 //
 // This is the property rmp #2174 was about. The round-3 audit measured BeginTx with a
 // 50 ms deadline returning after 601 ms, and after 11.60 s under load, in both cases
-// with err=nil and a live transaction. What makes that impossible is that the WAIT is
-// abandoned on ctx while the queued ACQUISITION is left to a helper.
+// with err=nil and a live transaction. What makes that impossible is that the wait
+// selects on ctx and the request is withdrawn when ctx finishes.
 //
 // # What this test does NOT claim, stated because the first version of it claimed it
 //
-// [acquireCtx] also re-checks ctx on the success path, so a deadline that elapsed
+// The Ctx methods also re-check ctx on the success path, so a deadline that elapsed
 // while the caller was queued is reported rather than swallowed. That re-check is
 // correct and free, but its window is ONE SCHEDULING QUANTUM: the caller can only
-// take the success arm with an expired context when the helper's acquisition and the
-// deadline become ready at the same instant, and in that case the elapsed time is
+// take the success arm with an expired context when the admission and the deadline
+// become ready at the same instant, and in that case the elapsed time is
 // still within budget. It is therefore not observable from outside this package, and
 // no test here claims to cover it.
 //
 // The first version of this test did claim it, with the oracle "err == nil implies
-// ctx.Err() == nil after the call". That oracle is WRONG: acquireCtx checks ctx and
+// ctx.Err() == nil after the call". That oracle is WRONG: the method checks ctx and
 // then returns, so the deadline can elapse in the gap before the caller looks, and a
 // correct implementation fails it. It did — under `make ci`, at iteration 96.
 func TestGateCtx_ReturnsWithinItsBudget(t *testing.T) {
@@ -271,7 +275,7 @@ func TestGateCtx_ReturnsWithinItsBudget(t *testing.T) {
 			<-released
 			t.Fatalf("caller %d: WeakLockCtx did not return until AFTER the strong holder "+
 				"released, %v into its %v budget. The wait must be abandoned on ctx and the "+
-				"queued acquisition left to a helper; blocking for the holder's remaining "+
+				"request withdrawn; blocking for the holder's remaining "+
 				"tenure (%v) is the rmp #2174 defect, measured there as a 232x overrun "+
 				"reported as err=nil. This is an ordering fact, not a timing one, so machine "+
 				"load cannot have caused it (rmp #2574)",

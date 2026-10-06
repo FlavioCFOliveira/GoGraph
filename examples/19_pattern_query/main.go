@@ -258,8 +258,10 @@ type buildStats struct {
 // matching the original example's use of the schema package.
 func declareSchema(g *lpg.Graph[string, int64]) {
 	s := schema.New(g.Registry(), g.PropertyKeys())
-	s.RegisterLabel(labelPackage)
-	s.RegisterLabel(labelDeprecated)
+	// RegisterLabel only fails on a label longer than lpg.MaxTokenLen bytes,
+	// which these two constants are not; the values are discarded deliberately.
+	_, _ = s.RegisterLabel(labelPackage)
+	_, _ = s.RegisterLabel(labelDeprecated)
 	// RegisterProperty only fails on a kind redeclaration, which cannot
 	// happen here because each key is registered exactly once with a fixed
 	// kind; the values are discarded deliberately.

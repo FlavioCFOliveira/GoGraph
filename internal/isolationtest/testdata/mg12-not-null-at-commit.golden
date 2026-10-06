@@ -1,0 +1,624 @@
+spec mg12-not-null-at-commit: 2 sessions, 20 permutations
+# MG12. NOT NULL on (:R).p, checked at COMMIT. s1 creates r1 without p and sets p
+# later in the same transaction: it commits. s2 creates r2 with p and removes p
+# later in the same transaction: its COMMIT is refused and nothing of it is applied.
+
+starting permutation: s1c s1s s1x s2c s2r s2x
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s1x: COMMIT
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s1c s1s s2c s1x s2r s2x
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s1x: COMMIT
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s1c s1s s2c s2r s1x s2x
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s1x: COMMIT
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s1c s1s s2c s2r s2x s1x
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1x: COMMIT
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s1c s2c s1s s1x s2r s2x
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s1x: COMMIT
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s1c s2c s1s s2r s1x s2x
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s1x: COMMIT
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s1c s2c s1s s2r s2x s1x
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1x: COMMIT
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s1c s2c s2r s1s s1x s2x
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s1x: COMMIT
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s1c s2c s2r s1s s2x s1x
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1x: COMMIT
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s1c s2c s2r s2x s1s s1x
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s1x: COMMIT
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s2c s1c s1s s1x s2r s2x
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s1x: COMMIT
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s2c s1c s1s s2r s1x s2x
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s1x: COMMIT
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s2c s1c s1s s2r s2x s1x
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1x: COMMIT
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s2c s1c s2r s1s s1x s2x
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s1x: COMMIT
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s2c s1c s2r s1s s2x s1x
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1x: COMMIT
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s2c s1c s2r s2x s1s s1x
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s1x: COMMIT
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s2c s2r s1c s1s s1x s2x
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s1x: COMMIT
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s2c s2r s1c s1s s2x s1x
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1x: COMMIT
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s2c s2r s1c s2x s1s s1x
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s1x: COMMIT
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)
+
+starting permutation: s2c s2r s2x s1c s1s s1x
+step s2c: CREATE (n:R {name:'r2', p:2}) RETURN n.p AS p
+p
+-
+2
+(1 row)
+step s2r: MATCH (n:R {name:'r2'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1c: CREATE (n:R {name:'r1'}) RETURN n.name AS name
+name
+----
+"r1"
+(1 row)
+step s1s: MATCH (n:R {name:'r1'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s1x: COMMIT
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+"r1"|1
+(2 rows)

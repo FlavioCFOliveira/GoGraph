@@ -47,6 +47,7 @@ package bulkimport
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -62,9 +63,18 @@ var ErrFinished = errors.New("bulkimport: builder already finished")
 // idempotent: the second record adds its labels and properties to the node the
 // first created rather than failing, which is what a CSV split across files
 // needs.
+//
+// Every label and property key is bounded at [lpg.MaxTokenLen] (65535) bytes,
+// the same limit every other write path enforces: [Builder.AddNode] refuses a
+// record carrying a longer one with an error wrapping [lpg.ErrTokenTooLong] and
+// adds none of it (rmp #2748). [Edge] is bounded the same way.
 type Node struct {
-	// Properties are set in map-iteration order, which is unspecified. That is
-	// safe because each key is written once, so no ordering can change the result.
+	// Properties are applied in ascending key order, never in map-iteration
+	// order. Each key is written once, so the order cannot change the LOGICAL
+	// result; it fixes the PHYSICAL one. The graph interns property keys and
+	// lays out each item's property bag in the order they are first set, and the
+	// snapshot writer serialises both, so applying a map in iteration order made
+	// two publishes of identical records differ byte for byte (rmp #2519).
 	Properties map[string]lpg.PropertyValue
 	Key        string
 	Labels     []string
@@ -78,6 +88,7 @@ type Node struct {
 // would otherwise silently produce a labelless, propertyless node, which is the
 // class of silent-wrong-result the audit's correctness findings were about.
 type Edge[W any] struct {
+	// Properties are applied in ascending key order, as on [Node].
 	Properties map[string]lpg.PropertyValue
 	Src        string
 	Dst        string
@@ -155,6 +166,12 @@ func (b *Builder[W]) AddNode(n Node) error {
 	if n.Key == "" {
 		return fmt.Errorf("bulkimport: node record has an empty key")
 	}
+	// Every token is checked BEFORE the record touches the graph (rmp #2748):
+	// a refused record adds no node, no label and no property, so nothing the
+	// WAL could not carry ever reaches a published snapshot.
+	if err := checkNodeTokens(n); err != nil {
+		return fmt.Errorf("bulkimport: node %q: %w", n.Key, err)
+	}
 	b.stats.NodeRecords++
 	if _, ok := b.seen[n.Key]; !ok {
 		if err := b.g.AddNode(n.Key); err != nil {
@@ -171,9 +188,57 @@ func (b *Builder[W]) AddNode(n Node) error {
 			return fmt.Errorf("bulkimport: label node %q as %q: %w", n.Key, l, err)
 		}
 	}
-	for k, v := range n.Properties {
-		if err := b.g.SetNodeProperty(n.Key, k, v); err != nil {
+	for _, k := range sortedKeys(n.Properties) {
+		if err := b.g.SetNodeProperty(n.Key, k, n.Properties[k]); err != nil {
 			return fmt.Errorf("bulkimport: set property %q on node %q: %w", k, n.Key, err)
+		}
+	}
+	return nil
+}
+
+// sortedKeys returns the keys of props in ascending byte order, the order in
+// which [Builder.AddNode] and [Builder.AddEdge] apply properties so that a
+// publish is a deterministic function of its records (rmp #2519). It follows
+// the precedent of the GraphML writer, which emits property keys sorted for the
+// same reason. A nil or empty map yields nil.
+func sortedKeys(props map[string]lpg.PropertyValue) []string {
+	if len(props) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(props))
+	for k := range props {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// checkNodeTokens refuses a node record carrying a label or a property key
+// longer than [lpg.MaxTokenLen] bytes, with an error wrapping
+// [lpg.ErrTokenTooLong].
+func checkNodeTokens(n Node) error {
+	for _, l := range n.Labels {
+		if err := lpg.CheckToken("node label", l); err != nil {
+			return err
+		}
+	}
+	for k := range n.Properties {
+		if err := lpg.CheckToken("node property key", k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkEdgeTokens is [checkNodeTokens] for an edge record's relationship type
+// and property keys.
+func checkEdgeTokens(relType string, props map[string]lpg.PropertyValue) error {
+	if err := lpg.CheckToken("relationship type", relType); err != nil {
+		return err
+	}
+	for k := range props {
+		if err := lpg.CheckToken("edge property key", k); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -208,16 +273,22 @@ func (b *Builder[W]) AddEdge(e Edge[W]) error {
 	if _, ok := b.seen[e.Dst]; !ok {
 		return fmt.Errorf("bulkimport: edge target %q was never added as a node", e.Dst)
 	}
+	// As in AddNode: every token is checked before the edge is added (rmp #2748).
+	if err := checkEdgeTokens(e.Type, e.Properties); err != nil {
+		return fmt.Errorf("bulkimport: edge %q->%q: %w", e.Src, e.Dst, err)
+	}
 	handle, err := b.g.AddEdgeH(e.Src, e.Dst, e.Weight)
 	if err != nil {
 		return fmt.Errorf("bulkimport: add edge %q->%q: %w", e.Src, e.Dst, err)
 	}
 	b.stats.Edges++
 	if e.Type != "" {
-		b.g.SetEdgeLabelByHandle(e.Src, e.Dst, handle, e.Type)
+		if lerr := b.g.SetEdgeLabelByHandle(e.Src, e.Dst, handle, e.Type); lerr != nil {
+			return fmt.Errorf("bulkimport: type edge %q->%q as %q: %w", e.Src, e.Dst, e.Type, lerr)
+		}
 	}
-	for k, v := range e.Properties {
-		if perr := b.g.SetEdgePropertyByHandle(e.Src, e.Dst, handle, k, v); perr != nil {
+	for _, k := range sortedKeys(e.Properties) {
+		if perr := b.g.SetEdgePropertyByHandle(e.Src, e.Dst, handle, k, e.Properties[k]); perr != nil {
 			return fmt.Errorf("bulkimport: set property %q on edge %q->%q: %w", k, e.Src, e.Dst, perr)
 		}
 	}

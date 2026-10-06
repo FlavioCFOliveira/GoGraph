@@ -1,0 +1,282 @@
+spec ww09-disjoint-nodes-lpg: 2 sessions, 20 permutations
+# WW09 through the lpg API: two sessions, each incrementing only its own node twice.
+
+starting permutation: s1w1 s1w2 s1c s2w1 s2w2 s2c
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s1w2 s2w1 s1c s2w2 s2c
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s1w2 s2w1 s2w2 s1c s2c
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s1w2 s2w1 s2w2 s2c s1c
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s2w1 s1w2 s1c s2w2 s2c
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s2w1 s1w2 s2w2 s1c s2c
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s2w1 s1w2 s2w2 s2c s1c
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s2w1 s2w2 s1w2 s1c s2c
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s2w1 s2w2 s1w2 s2c s1c
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s2w1 s2w2 s2c s1w2 s1c
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s1w1 s1w2 s1c s2w2 s2c
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s1w1 s1w2 s2w2 s1c s2c
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s1w1 s1w2 s2w2 s2c s1c
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s1w1 s2w2 s1w2 s1c s2c
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s1w1 s2w2 s1w2 s2c s1c
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s1w1 s2w2 s2c s1w2 s1c
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s2w2 s1w1 s1w2 s1c s2c
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s2w2 s1w1 s1w2 s2c s1c
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s2w2 s1w1 s2c s1w2 s1c
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s2w2 s2c s1w1 s1w2 s1c
+step s2w1: lpg: SetNodeProperty(b, v, v + 1)
+step s2w2: lpg: SetNodeProperty(b, v, v + 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1w1: lpg: SetNodeProperty(a, v, v + 1)
+step s1w2: lpg: SetNodeProperty(a, v, v + 1)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)

@@ -1,0 +1,243 @@
+spec se01-session-reads-own-commit: 2 sessions, 7 permutations
+# SE01. s1 commits x.v = 1 in an autocommit statement and then x.v = 2 in an explicit
+# transaction, reading x through its own cypher.Session after each; s2 reads x
+# sessionless (Engine.RunInTx). s1 sees each of its commits immediately (F11,
+# docs/isolation-design.md:189).
+
+starting permutation: s1w s1r s1b s1w2 s1c s1r2 s2r
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b: BEGIN
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1w s1r s1b s1w2 s1c s2r s1r2
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b: BEGIN
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1w s1r s1b s1w2 s2r s1c s1r2
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b: BEGIN
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1w s1r s1b s2r s1w2 s1c s1r2
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b: BEGIN
+step s2r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1w s1r s2r s1b s1w2 s1c s1r2
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b: BEGIN
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1w s2r s1r s1b s1w2 s1c s1r2
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b: BEGIN
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s2r s1w s1r s1b s1w2 s1c s1r2
+step s2r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b: BEGIN
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)

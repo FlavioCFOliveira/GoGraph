@@ -765,3 +765,71 @@ func TestExplicitTx_DoomedCreateLeavesNoOrphanSlot(t *testing.T) {
 		t.Fatalf("after doomed-create rollback: MATCH (n) count=%d, want 1 (orphan slot leaked)", int64(v))
 	}
 }
+
+// TestExplicitTx_StackedRelationshipWriteCannotCommitARolledBackRelationship is
+// the audit's Cypher reproduction of rmp #2966 crossed with rmp #2965. T1
+// creates a->c; T2 sets a property on a->b, which rebuilt a's adjacency entry
+// with T1's uncommitted arc in it; T1 is doomed by a conflict on a node and
+// rolls back. The undo removed T1's arc, the abort's withdrawal then restored
+// T2's entry, which still held it, and T2's commit made the rolled-back
+// relationship permanent: count 2 where 1 is right. The relationship-property
+// write now claims a, so T2 is refused and the arc never leaves T1.
+func TestExplicitTx_StackedRelationshipWriteCannotCommitARolledBackRelationship(t *testing.T) {
+	for _, doomed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("doomed=%v", doomed), func(t *testing.T) {
+			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			t.Cleanup(func() { _ = g.Close() })
+			eng := cypher.NewEngine(g)
+			ctx := context.Background()
+			run := func(r *cypher.Result, err error) error {
+				if err != nil {
+					return err
+				}
+				for r.Next() {
+				}
+				return r.Close()
+			}
+			if err := run(eng.RunAny(ctx, "CREATE (a:N {id:'a'})-[:R]->(b:N {id:'b'}), (c:N {id:'c'}), (x:N {id:'x'})", nil)); err != nil {
+				t.Fatal(err)
+			}
+			t1, err := eng.BeginTx(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := run(t1.ExecAny("MATCH (a:N {id:'a'}), (c:N {id:'c'}) CREATE (a)-[:R]->(c)", nil)); err != nil {
+				t.Fatal(err)
+			}
+			t2, err := eng.BeginTx(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = run(t2.ExecAny("MATCH (:N {id:'a'})-[r:R]->(:N {id:'b'}) SET r.p = 1", nil))
+			if doomed {
+				t3, err := eng.BeginTx(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = run(t3.ExecAny("MATCH (x:N {id:'x'}) SET x.v = 3", nil))
+				if err := run(t1.ExecAny("MATCH (x:N {id:'x'}) SET x.v = 1", nil)); err == nil {
+					t.Fatal("setup: T1 was not doomed by T3's pending write")
+				}
+				_ = t3.Rollback()
+			}
+			_ = t1.Rollback()
+			_ = t2.Commit()
+			g.ReclaimNow()
+			r, err := eng.RunAny(ctx, "MATCH (:N {id:'a'})-[r:R]->(m) RETURN count(r) AS n, collect(m.id) AS ids", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got any
+			for r.Next() {
+				got = r.Record()
+			}
+			_ = r.Close()
+			if fmt.Sprint(got) != `map[ids:["b"] n:1]` {
+				t.Errorf("the rolled-back relationship a->c is committed: %v", got)
+			}
+		})
+	}
+}

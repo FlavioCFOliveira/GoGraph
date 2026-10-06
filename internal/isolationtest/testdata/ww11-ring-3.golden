@@ -1,0 +1,148 @@
+spec ww11-ring-3: 3 sessions, 3 permutations
+# WW11. A ring of 3 transactions, each writing its own node and then its
+# successor's — the N-way deadlock cycle. No step may ever wait (F7); each write
+# succeeds or is refused. Every transaction then rolls back and the vacuum is drained
+# (H1), after which one autocommit statement rewrites the whole ring and must
+# succeed: the cycle leaves nothing behind that blocks progress. Named interleavings:
+# round-robin, sequential, staggered.
+
+starting permutation: s0b s1b s2b s0own s1own s2own s0next s1next s2next s0rb s0dr s1rb s1dr s2rb s2dr retry
+step s0b: BEGIN
+step s1b: BEGIN
+step s2b: BEGIN
+step s0own: MATCH (n:Ring {name:'r0'}) SET n.v = 's0' RETURN n.v AS v
+v   
+----
+"s0"
+(1 row)
+step s1own: MATCH (n:Ring {name:'r1'}) SET n.v = 's1' RETURN n.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2own: MATCH (n:Ring {name:'r2'}) SET n.v = 's2' RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+step s0next: MATCH (n:Ring {name:'r1'}) SET n.v = 's0' RETURN n.v AS v
+ERROR: serialization conflict
+step s1next: MATCH (n:Ring {name:'r2'}) SET n.v = 's1' RETURN n.v AS v
+ERROR: serialization conflict
+step s2next: MATCH (n:Ring {name:'r0'}) SET n.v = 's2' RETURN n.v AS v
+ERROR: serialization conflict
+step s0rb: ROLLBACK
+step s0dr: <vacuum drain>
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+step retry: MATCH (n:Ring) SET n.v = 'retry' RETURN count(n) AS written
+written
+-------
+3      
+(1 row)
+final final: MATCH (n:Ring) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v      
+----+-------
+"r0"|"retry"
+"r1"|"retry"
+"r2"|"retry"
+(3 rows)
+
+starting permutation: s0b s0own s0next s0rb s0dr s1b s1own s1next s1rb s1dr s2b s2own s2next s2rb s2dr retry
+step s0b: BEGIN
+step s0own: MATCH (n:Ring {name:'r0'}) SET n.v = 's0' RETURN n.v AS v
+v   
+----
+"s0"
+(1 row)
+step s0next: MATCH (n:Ring {name:'r1'}) SET n.v = 's0' RETURN n.v AS v
+v   
+----
+"s0"
+(1 row)
+step s0rb: ROLLBACK
+step s0dr: <vacuum drain>
+step s1b: BEGIN
+step s1own: MATCH (n:Ring {name:'r1'}) SET n.v = 's1' RETURN n.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1next: MATCH (n:Ring {name:'r2'}) SET n.v = 's1' RETURN n.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2b: BEGIN
+step s2own: MATCH (n:Ring {name:'r2'}) SET n.v = 's2' RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2next: MATCH (n:Ring {name:'r0'}) SET n.v = 's2' RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+step retry: MATCH (n:Ring) SET n.v = 'retry' RETURN count(n) AS written
+written
+-------
+3      
+(1 row)
+final final: MATCH (n:Ring) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v      
+----+-------
+"r0"|"retry"
+"r1"|"retry"
+"r2"|"retry"
+(3 rows)
+
+starting permutation: s0b s0own s1b s1own s2b s2own s0next s2next s1next s2rb s2dr s1rb s1dr s0rb s0dr retry
+step s0b: BEGIN
+step s0own: MATCH (n:Ring {name:'r0'}) SET n.v = 's0' RETURN n.v AS v
+v   
+----
+"s0"
+(1 row)
+step s1b: BEGIN
+step s1own: MATCH (n:Ring {name:'r1'}) SET n.v = 's1' RETURN n.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2b: BEGIN
+step s2own: MATCH (n:Ring {name:'r2'}) SET n.v = 's2' RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+step s0next: MATCH (n:Ring {name:'r1'}) SET n.v = 's0' RETURN n.v AS v
+ERROR: serialization conflict
+step s2next: MATCH (n:Ring {name:'r0'}) SET n.v = 's2' RETURN n.v AS v
+ERROR: serialization conflict
+step s1next: MATCH (n:Ring {name:'r2'}) SET n.v = 's1' RETURN n.v AS v
+ERROR: serialization conflict
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s0rb: ROLLBACK
+step s0dr: <vacuum drain>
+step retry: MATCH (n:Ring) SET n.v = 'retry' RETURN count(n) AS written
+written
+-------
+3      
+(1 row)
+final final: MATCH (n:Ring) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v      
+----+-------
+"r0"|"retry"
+"r1"|"retry"
+"r2"|"retry"
+(3 rows)

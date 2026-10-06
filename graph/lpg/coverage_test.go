@@ -33,8 +33,12 @@ func TestGraph_EdgeLabels_Coverage(t *testing.T) {
 	// Either way the function should not panic.
 	_ = g.EdgeLabels("alice", "bob")
 
-	g.SetEdgeLabel("alice", "bob", "KNOWS")
-	g.SetEdgeLabel("alice", "bob", "FOLLOWS")
+	if err := g.SetEdgeLabel("alice", "bob", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("alice", "bob", "FOLLOWS"); err != nil {
+		t.Fatal(err)
+	}
 	got := g.EdgeLabels("alice", "bob")
 	if len(got) != 2 {
 		t.Errorf("expected 2 labels, got %v", got)

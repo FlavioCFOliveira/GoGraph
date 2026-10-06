@@ -1,6 +1,13 @@
 package lpg
 
-import "context"
+import (
+	"context"
+	"math/bits"
+	"sync"
+
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
+)
 
 // mvcc_write.go — MVCC P4a (rmp #2288): one shared commit record per write, and
 // the arming of the versioning substrate.
@@ -51,6 +58,14 @@ import "context"
 // signal ([mvcc.AbortedTS]) mean two different things. Pinned by
 // TestLabelTx_ComposesWithPhysicalUndo.
 //
+// The substrate still publishes a rolled-back transaction its owner did not
+// abandon, but the Cypher engine no longer leaves one un-abandoned: its explicit
+// rollback (rmp #2973) and its failed autocommit statement (rmp #2976) call
+// [WriteTx.Abandon] before the transaction closes. A published rollback is a
+// commit after the snapshot of every older transaction, so first-updater-wins
+// refuses such a transaction's later write to an object the rollback touched,
+// although nothing it can see changed. That refusal outweighs the cost above.
+//
 // # Rollback is not ABORT (rmp #2300)
 //
 // The paragraph above is about a statement that ROLLED BACK: its inverses have run,
@@ -90,15 +105,36 @@ import "context"
 // [Graph.releaseWriterSnapshot] what it loses on the snapshot side — where it is
 // worse, because it recycles a live writer's state underneath it.
 //
-// The graph slot is still published, because a write that carries no transaction
-// has to resolve one somehow (the whole Cypher write path is such a write); what
-// changed is that a transaction's own lifecycle no longer depends on it.
+// # Who may own the ambient slot (rmp #2947)
+//
+// publish says whether the transaction also claims the graph's AMBIENT slot —
+// [Graph.stamp]'s open transaction and [Graph.writeTx] — through which a write
+// that carries no transaction ([Graph.deltaStamp] with a nil record,
+// [Graph.AmbientWriteTx]) resolves one.
+//
+// Only an EXCLUSIVE bracket publishes: [Graph.ApplyAtomically],
+// [Graph.ApplyAtomicallyTx] and [Graph.LockBarrierCtx]. Each holds the schema
+// barrier exclusively, so it is the only write bracket open, and the slot can
+// name no one else. It serves [Graph.ApplyInsideLockedTx]. A direct Go-API call
+// never resolves through it: it runs as an implicit transaction of its own,
+// inside a bracket or not (rmp #2947, audit F7). Nor does a raw adjacency write
+// made through [Graph.AdjList]: it too is its own transaction (rmp #2967; see
+// [adjlist.AdjList.SetWriteStamp]).
+//
+// A SHARED bracket ([Graph.ApplyVersioned]) or an explicit transaction
+// ([Graph.BeginVersionedTx]) does not. Several can be open at once, so the slot
+// would name whichever published last; and an explicit transaction stays open
+// across client round-trips. Publishing either one made every direct write
+// anywhere in the process — on an object the transaction never touched — join
+// it: invisible to new readers until the transaction ended, and rolled back by
+// its undo. Both thread their [writeCtx] through every write instead (rmp
+// #2320), so neither needs the slot.
 //
 // Nested calls remain forbidden: a nested bracket would be a nested transaction,
 // which this design has no meaning for. [Graph.ApplyInsideLocked] deliberately
 // does not call this, and the re-entrancy guard catches the rest under -race or
 // -tags gograph_debug.
-func (g *Graph[N, W]) beginWrite() *writeCtx {
+func (g *Graph[N, W]) beginWrite(publish bool) *writeCtx {
 	if !g.mvccArmed {
 		return nil
 	}
@@ -130,8 +166,10 @@ func (g *Graph[N, W]) beginWrite() *writeCtx {
 	// object; the graph keeps only a slot naming it.
 	w := g.acquireWriteCtx(startTS, txID)
 	w.snap.slot = slot
-	g.stamp.Publish(&w.tx)
-	g.writeTx.Store(w)
+	if publish {
+		g.stamp.Publish(&w.tx)
+		g.writeTx.Store(w)
+	}
 	// The writer gauge (rmp #2312). Paired with the EndWriter in
 	// [Graph.releaseWriterSnapshot], which every bracket reaches — including the ones
 	// that version nothing, which [Graph.endWrite] returns early from. Both carry the
@@ -188,6 +226,162 @@ type WriteTx struct{ w *writeCtx }
 // transaction to name and every write is committed as it is made.
 func (tx WriteTx) Valid() bool { return tx.w != nil }
 
+// StartTS returns the instant this transaction reads at: every commit at or below
+// it is visible to the transaction, and no commit above it is. It is 0 for the
+// zero value, which names no transaction.
+//
+// It exists so a caller holding a structure maintained OUTSIDE the versioned
+// stores — a secondary index, which is written at commit time and read at the
+// present — can prove that the structure describes this transaction's snapshot
+// before trusting it as an access path (rmp #2812).
+func (tx WriteTx) StartTS() uint64 {
+	if tx.w == nil {
+		return 0
+	}
+	return tx.w.startTS
+}
+
+// CommitApplier is work that must observe a transaction's commit exactly as
+// committed, before any reader can: the engine's secondary-index fan-out
+// (rmp #2931).
+//
+// # Why it runs inside the publication, and under the node-shard locks
+//
+// A secondary index is maintained from the changes a transaction recorded, but
+// several of those changes also need a fact about the node that the change does
+// not carry — whether the node is live and labelled, and its current value of the
+// indexed property. Read from the graph's present, that fact includes OTHER
+// transactions' eager, uncommitted writes, and an index entry derived from one
+// outlives that transaction when it rolls back. Read from the committing
+// transaction's own snapshot instead, it misses the commits that landed after the
+// snapshot was taken. Neither is the state the commit produces.
+//
+// [Graph.endWrite] therefore runs the applier BEFORE it stamps the commit record,
+// and hands it a snapshot that sees every STAMPED commit, its own writes, and
+// nothing else in flight. After the apply the record is marked ready, stamped and
+// published. On the in-memory path the instant is allocated only then, after the
+// apply, so an applier holds back no one's frontier; on the WAL path it was
+// allocated before the fsync ([Graph.AllocateCommitTS]) and is held, not ready,
+// across the apply. An
+// index entry describes one node, so what must be ordered is the appliers that
+// touch a COMMON node: the applier, the stamp and the publication run holding the
+// lock of every node shard the applier names ([CommitApplier.CommitApplyShards]),
+// taken in ascending order. Two appliers on a common node therefore run one after
+// the other, the second seeing the first's commit; appliers on disjoint nodes run
+// in parallel and cannot affect each other's entries. The result is the committed
+// state whatever the interleaving. No reader can observe the gap: the instant is
+// not yet published, so no snapshot can start at or after it. A transaction that
+// registers no applier pays nothing.
+//
+// # Nodes no other transaction can name need no lock
+//
+// A node BORN in the committing transaction, and not alive before it
+// ([CommitNodes.Private]), is invisible to every other transaction until this
+// one publishes, so no concurrent transaction can have written it and no
+// concurrent applier can name it; a transaction that names it later started
+// after this publication, which follows this apply. Its shard is therefore left
+// out of the set. A bulk CREATE names only such nodes and takes no lock at all.
+// Measured before this rule (rmp #2931 audit, F3): 256 writers of 128-row
+// UNWIND…CREATE batches on an indexed label over the WAL spent 88% of their
+// blocked time in these locks, queued behind one another holding allocated,
+// not-ready instants, and lost 14.6% of HEAD's throughput.
+type CommitApplier interface {
+	// CommitApplyShards returns the set of node shards the applier's work
+	// concerns, one bit per [CommitApplyShard] value, for every node whose state
+	// the applier will read or whose index entries it will write and that nodes
+	// does not report private. Zero means no shard lock is needed.
+	CommitApplyShards(nodes CommitNodes) uint64
+	// ApplyCommitted runs once, holding the named shard locks, before the
+	// transaction's commit record is stamped. On the in-memory path the commit
+	// instant is not yet allocated; on the WAL path it was allocated before the
+	// fsync and is not yet ready. snap sees every commit stamped so far plus this
+	// transaction's own writes, and nothing else uncommitted; it is valid only
+	// for the duration of the call.
+	//
+	// A panic out of this method or out of CommitApplyShards is not
+	// recovered: it propagates to the caller of the transaction's end, and the
+	// state of whatever the applier maintains is undefined afterwards — the
+	// applier must record that itself (the engine fail-stops; see
+	// [index.Manager.MarkUndefined]). On the way out the TRANSACTION is settled
+	// so that memory and the durable log agree, and so the frontier is not
+	// stalled (rmp #2931 re-audit, N2):
+	//
+	//   - On the WAL path its commit record is already durable — the applier is
+	//     registered only after [Graph.AllocateCommitTS]'s instant has been
+	//     fsynced — and recovery will replay it as committed. It is therefore
+	//     PUBLISHED, without the applier's work, never aborted: aborting it in
+	//     memory would make the running process and a reopened one disagree.
+	//   - On the in-memory path nothing is durable and no instant is allocated,
+	//     so it is ABORTED exactly as a doomed transaction is: its versions become
+	//     permanently invisible and are handed to the reclaimer, so the nodes it
+	//     wrote are writable again.
+	ApplyCommitted(snap *Snapshot)
+	// Committed runs right after the instant ts is allocated, stamped and
+	// published, still holding the locks.
+	Committed(ts uint64)
+	// DiscardCommitted runs instead of both when the transaction publishes
+	// nothing: it aborted, or it versioned nothing and so changed no state.
+	DiscardCommitted()
+}
+
+// commitApplyShards is the number of node shards [CommitApplier] work is ordered
+// by. 64, so a shard set is one uint64.
+const commitApplyShards = 64
+
+// CommitApplyShard returns the shard, in [0, 64), that orders commit-time work
+// concerning node id; see [CommitApplier]. Fibonacci hashing, so node ids that
+// share low bits — an adjacency that encodes its shard there — still spread.
+func CommitApplyShard(id graph.NodeID) uint {
+	return uint((uint64(id) * 0x9E3779B97F4A7C15) >> 58)
+}
+
+// CommitNodes answers, for the transaction being published, which of the nodes
+// its changes name no other transaction can name; see [CommitApplier]. The zero
+// value reports no node private. It is valid only during
+// [CommitApplier.CommitApplyShards].
+type CommitNodes struct {
+	life *[propMapShards]nodeLifeShard
+	info *commitInfo
+}
+
+// Private reports whether node id was born in the committing transaction and was
+// not alive immediately before it: created by it, or revived by it from a
+// committed death. Such a node is invisible to every other transaction until
+// this one publishes. A node the transaction deleted and then restored — the
+// undo of a rolled-back DELETE — was alive before it and is not private.
+//
+// Safe for concurrent use.
+func (c CommitNodes) Private(id graph.NodeID) bool {
+	if c.life == nil || c.info == nil {
+		return false
+	}
+	sh := &c.life[uint64(id)&(propMapShards-1)]
+	sh.mu.RLock()
+	born, ok := sh.born[id]
+	sh.mu.RUnlock()
+	return ok && born.info == c.info && !born.wasAlive
+}
+
+// commitApplyShard is one shard lock of [Graph.commitApply] and the snapshot an
+// applier whose lowest shard it is reads through, alone on its cache lines.
+type commitApplyShard struct {
+	mu   sync.Mutex
+	snap Snapshot
+	memo snapMemo // snap's verdict memo; see [Snapshot.memo]
+	_    [64]byte
+}
+
+// SetCommitApplier registers a to run when this transaction's bracket publishes
+// it (see [CommitApplier]). At most one applier is held; a second call replaces
+// the first. A no-op on the zero value, whose writes are committed as they are
+// made.
+func (tx WriteTx) SetCommitApplier(a CommitApplier) {
+	if tx.w == nil {
+		return
+	}
+	tx.w.applier = a
+}
+
 // Err returns the serialization conflict this transaction has been doomed by, or
 // nil when it is still viable. The error wraps [mvcc.ErrSerializationConflict] and
 // carries the store attribution through [mvcc.Conflict].
@@ -215,6 +409,65 @@ func (tx WriteTx) Valid() bool { return tx.w != nil }
 //
 // Nil on the zero value, so a caller can ask unconditionally.
 func (tx WriteTx) Err() error { return tx.w.err() }
+
+// Versions returns how many versions this transaction has written so far, and
+// whether the count is meaningful. ok is false for the zero value and for a
+// bracket on a graph whose versioning substrate is disarmed, where writes leave
+// no version to count.
+//
+// # What the count is for — effect logging (rmp #2965, round 5)
+//
+// On an armed graph every change a write makes is a version: the version is the
+// pre-image an abort restores and the claim that refuses every other writer
+// until this transaction ends. A write that changes nothing — re-asserting a
+// present label, setting a property to the value it already holds, deleting
+// what is absent, creating a live node — writes no version and therefore holds
+// no claim. Sampling the count before and after one operation tells a durable
+// caller whether that operation took effect, so it can log only the operations
+// that did. A logged operation then always holds a claim, which is what makes
+// WAL order agree with the in-memory order of every change.
+//
+// The count only grows during the transaction. It is not safe to compare across
+// transactions.
+func (tx WriteTx) Versions() (n int64, ok bool) {
+	if tx.w == nil {
+		return 0, false
+	}
+	return tx.w.tx.Versions(), true
+}
+
+// Abandon marks this transaction so that closing it with [Graph.EndVersionedTx]
+// (or [Session.EndVersionedTx]) ABORTS it instead of publishing it: none of its
+// versions ever becomes visible, it is counted in [mvcc.WriteCounts] Aborts and
+// not in Commits, and a commit timestamp allocated for it is abandoned.
+//
+// # Why a rollback must abort rather than publish (rmp #2973)
+//
+// An embedder that rolls a multi-statement transaction back PHYSICALLY — the
+// Cypher engine replays its undo log through the ordinary mutators — leaves the
+// stored values right either way. Publishing the record, however, makes it a
+// COMMIT whose instant postdates the snapshot of every transaction that began
+// earlier, so first-updater-wins refuses such a transaction when it later writes
+// an object the rolled-back one touched, although nothing it can see changed.
+// Aborting the record is what PostgreSQL and InnoDB do on ROLLBACK, and it is
+// what [Graph.endWrite] already does for a doomed transaction.
+//
+// # Preconditions
+//
+// Call it only BEFORE the transaction is closed; on a closed transaction it is
+// meaningless and must not be called. Never call it on a path whose commit record
+// is already DURABLE — after the WAL fsync of [Graph.AllocateCommitTS]'s instant
+// — because recovery replays such a transaction as committed, and aborting it in
+// memory would make the running process and a reopened one disagree.
+//
+// A no-op on the zero value. Not safe for concurrent use: like every other
+// operation on one write transaction, it must be called from the goroutine that
+// drives it.
+func (tx WriteTx) Abandon() {
+	if tx.w != nil {
+		tx.w.abandon = true
+	}
+}
 
 // EnterUndo marks the start of this transaction's PHYSICAL undo replay, during
 // which its writes are withdrawals of work it already applied rather than new
@@ -277,6 +530,29 @@ func (g *Graph[N, W]) WriterViewOf(tx WriteTx) *ReadView[N, W] {
 		return g.ReadAt(nil)
 	}
 	return g.ReadAt(&tx.w.snap)
+}
+
+// LatestViewOf returns a view of the LATEST committed state — every commit
+// stamped so far, whether or not its instant is published yet — with tx's own
+// writes when withOwn is set and without them otherwise. It is the state a
+// commit by tx will leave behind, read before (without) or after (with) tx's
+// writes land, as opposed to tx's snapshot, which cannot see a commit made after
+// tx began.
+//
+// It exists for commit-time constraint validation of a transaction open across
+// a new constraint (rmp #2936). The versions it reads are the newest of each
+// chain, which reclamation never removes. A zero tx reads the present.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) LatestViewOf(tx WriteTx, withOwn bool) *ReadView[N, W] {
+	if tx.w == nil {
+		return g.ReadAt(nil)
+	}
+	var own uint64
+	if withOwn {
+		own = tx.w.txID
+	}
+	return g.ReadAt(newSharedSnapshot(mvcc.TxIDBase-1, own, 0))
 }
 
 // AmbientWriteTx returns the write transaction the graph's slot currently names,
@@ -372,9 +648,38 @@ func (g *Graph[N, W]) AllocateCommitTS(tx WriteTx) uint64 {
 		return 0
 	}
 	if tx.w.commitTS == 0 {
-		tx.w.commitTS = g.mvccClock.NextCommitTS()
+		// Registered with the transaction's record but NOT ready: the WAL record
+		// is not durable yet, so no helper may publish it (rmp #2932). The bracket
+		// marks it ready in [Graph.endWrite], after the fsync.
+		// A transaction that has versioned nothing yet has no record: register an
+		// anonymous one and keep it, so its discharge passes it to the clock
+		// instead of looking it up after a later lap may have displaced it.
+		rec := tx.w.tx.OpenRecord()
+		if rec == nil {
+			rec = new(mvcc.CommitInfo)
+		}
+		tx.w.allocRec = rec
+		tx.w.commitTS = g.mvccClock.AllocateFor(rec, false)
 	}
 	return tx.w.commitTS
+}
+
+// AwaitAllocatedCommits blocks until every commit timestamp allocated before the
+// call has been published or abandoned — until a snapshot started afterwards sees
+// every commit that had allocated by then — or until ctx finishes, returning ctx's
+// error. Unlike [Graph.AwaitCommitQuiescence] it does not wait for commits that
+// allocate after the call, so a steady stream of commits cannot starve it.
+//
+// It is what an index build uses, once no further commit can escape its
+// recording, to make its snapshot include every commit that could (rmp #2936).
+// It returns immediately on a graph whose versioning substrate is disarmed.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) AwaitAllocatedCommits(ctx context.Context) error {
+	if !g.mvccArmed {
+		return nil
+	}
+	return g.mvccClock.AwaitVisible(ctx, g.mvccClock.Allocated())
 }
 
 // AwaitCommitQuiescence blocks until every commit timestamp this graph has allocated
@@ -417,8 +722,8 @@ func (g *Graph[N, W]) abandonAllocatedCommitTS(w *writeCtx) {
 	if w.commitTS == 0 {
 		return
 	}
-	g.mvccClock.AbandonCommitTS(w.commitTS)
-	w.commitTS = 0
+	g.mvccClock.AbandonCommit(w.allocRec, w.commitTS)
+	w.commitTS, w.allocRec = 0, nil
 }
 
 // endWrite publishes every version the write transaction w created, atomically,
@@ -480,7 +785,12 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) uint64 {
 		return 0
 	}
 	info, created := g.stamp.EndFor(&w.tx)
+	applier := w.applier
+	w.applier = nil
 	if info == nil {
+		if applier != nil {
+			applier.DiscardCommitted()
+		}
 		// The transaction versioned nothing, so there is no record to publish,
 		// nothing to reclaim, and no reason to allocate a commit timestamp.
 		//
@@ -495,16 +805,21 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) uint64 {
 		// still a refusal and it is counted as one (rmp #2312) — an abort the substrate
 		// does not count is a failure an operator cannot see, and it would leave
 		// Commits+Aborts short of the transactions that actually reached an outcome.
-		if w.err() != nil {
+		if w.err() != nil || w.abandon {
 			g.writeCounts.Abort(w.txID)
 		}
 		return 0
 	}
 	// A transaction that hit a serialization conflict ABORTS. See below for the
 	// measured atomicity violation that this closes, and why it is not the same
-	// thing as the rolled-back-statement case the file comment describes.
-	if w.err() != nil {
-		info.Abort()
+	// thing as the rolled-back-statement case the file comment describes. So does
+	// one its owner abandoned ([writeCtx.abandon]): a durable apply whose WAL
+	// record was refused or never became durable.
+	if w.err() != nil || w.abandon {
+		if applier != nil {
+			applier.DiscardCommitted()
+		}
+		adjFreed := g.abortRecord(&w.tx, info)
 		// Counted here, where publication is REFUSED, because Commits and Aborts are
 		// the two outcomes and must partition the transactions that reached one. The
 		// conflict that caused it is counted separately, at the detection site, and is
@@ -517,7 +832,7 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) uint64 {
 		// Charged AND woken unconditionally: the version records exist and occupy
 		// memory whatever their commit record says, and until the sweep withdraws
 		// them the stored value still carries this transaction's writes (rmp #2318).
-		g.abortWake(created)
+		g.abortWake(created-adjFreed, &w.tx)
 		return 0
 	}
 	// Allocate, store into the shared record, THEN publish. A reader must never
@@ -529,13 +844,15 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) uint64 {
 	// the fsync (rmp #2309). Reusing it is what makes the durable record and the
 	// visible instant the same number; minting a second one here would make the
 	// derived clock floor disagree with what actually became visible.
-	ts := w.commitTS
-	if ts == 0 {
-		ts = g.mvccClock.NextCommitTS()
+	var ts uint64
+	if applier != nil {
+		ts = g.commitAndApply(info, w, applier, created)
+	} else {
+		ts = g.allocateReady(info, w)
+		info.Commit(ts)
+		g.mvccClock.PublishCommit(w.registeredRecord(info), ts)
 	}
-	w.commitTS = 0
-	info.Commit(ts)
-	g.mvccClock.PublishCommitTS(ts)
+	w.commitTS, w.allocRec = 0, nil
 	// A transaction that got this far PUBLISHED an instant, which is the only
 	// definition of "committed" the substrate has (rmp #2312). The versioned-nothing
 	// branch above is deliberately NOT counted: it published no instant, so counting
@@ -672,3 +989,151 @@ func (g *Graph[N, W]) disarmMVCCForTest() {
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) AmbientVersionResolutions() int64 { return g.stamp.AmbientResolutions() }
+
+// commitAndApply runs applier and then stamps info with the commit instant,
+// allocating it first when the transaction has none yet, all while holding every
+// shard lock the applier names (see [CommitApplier]); it then publishes the
+// instant and returns it.
+//
+// # Why the instant is allocated AFTER the apply
+//
+// The frontier is contiguous: an instant that is allocated and not yet published
+// holds back every later one, so every snapshot started meanwhile is older than
+// it needs to be, and a writer whose previous commit sits above the stalled
+// frontier then sees its own newest version as invisible and is refused with a
+// serialization conflict. Measured with the instant allocated before the apply:
+// the mixed contention arm at 32 writers exhausted 64 retries on every run,
+// because a writer preempted inside the apply held the frontier for a scheduler
+// quantum. The apply reads the transaction's own writes through its id instead,
+// so it needs no instant, and the window shrinks to the stamp and the
+// publication. [CommitApplier.Committed] runs after the publication for the
+// same reason: measured with it between the stamp and the publication, its two
+// atomics on process-wide cache lines widened the window enough that later
+// commits published out of order and queued on the clock's publish lock, and a
+// frontier held for 4.7 ms exhausted the same 64 retries. A transaction that already holds an instant — the WAL path
+// allocates it before the fsync — keeps it; that window is the fsync's and
+// predates this.
+//
+// The deferred unlocks keep a panicking applier from wedging later commits.
+func (g *Graph[N, W]) commitAndApply(info *mvcc.CommitInfo, w *writeCtx, applier CommitApplier, created int64) uint64 {
+	// A PANICKING APPLIER SETTLES THE TRANSACTION, AND NEVER AGAINST THE LOG. This
+	// defer does not recover — a panic is a programmer error and must surface — it
+	// only settles what the panic would otherwise strand, in the one way that
+	// keeps memory consistent with the durable log (see
+	// [CommitApplier.ApplyCommitted]):
+	//
+	//   - An instant allocated before the fsync means the WAL record is durable,
+	//     because the applier is registered only after the fsync succeeded. The
+	//     commit is PUBLISHED without the applier's work. Aborting it here, as the
+	//     first version of this handler did, left the running process without a
+	//     commit that recovery then replays as committed.
+	//   - No instant means the in-memory path: nothing is durable, so the record
+	//     is ABORTED and handed to the reclaimer exactly as a doomed transaction's
+	//     is. Leaving it in flight, as the first version did, made every node it
+	//     wrote unwritable for ever.
+	//
+	// The index delivery the applier may have opened is left open, which keeps
+	// [index.Manager.DescribesSnapshot] false, and the applier has recorded the
+	// indexes as undefined, which fail-stops the engine.
+	published := false
+	defer func() {
+		if published {
+			return
+		}
+		if w.commitTS != 0 {
+			ts := g.allocateReady(info, w)
+			info.Commit(ts)
+			g.mvccClock.PublishCommit(w.registeredRecord(info), ts)
+			w.commitTS, w.allocRec = 0, nil
+			g.writeCounts.Commit(w.txID)
+			g.chargeReclaimDebt(created)
+			return
+		}
+		adjFreed := g.abortRecord(&w.tx, info)
+		g.writeCounts.Abort(w.txID)
+		g.abortWake(created-adjFreed, &w.tx)
+	}()
+	mask := applier.CommitApplyShards(CommitNodes{life: &g.nodeLifeShards, info: info})
+	for m := mask; m != 0; m &= m - 1 {
+		g.commitApply[bits.TrailingZeros64(m)].mu.Lock()
+	}
+	defer func() {
+		for m := mask; m != 0; m &= m - 1 {
+			g.commitApply[bits.TrailingZeros64(m)].mu.Unlock()
+		}
+	}()
+	// Every stamped commit is below TxIDBase and therefore at or below this
+	// instant, and txID makes this transaction's own versions visible; every
+	// other in-flight record carries a different transaction id, so nothing else
+	// uncommitted is visible. An applier that held a common shard before this one
+	// stamped its record before releasing it, so it is seen. The snapshot belongs
+	// to the lowest shard held, so no concurrent applier shares it, and it is
+	// reused so a commit allocates nothing for it. An applier that holds no shard
+	// takes one from the graph's pool instead and returns it after the apply.
+	var snap *Snapshot
+	if mask != 0 {
+		sh := &g.commitApply[bits.TrailingZeros64(mask)]
+		snap = &sh.snap
+		snap.memo = &sh.memo
+	} else {
+		if s, ok := g.commitApplySnaps.Get().(*Snapshot); ok {
+			snap = s
+		} else {
+			snap = newSharedSnapshot(0, 0, 0)
+		}
+		defer g.commitApplySnaps.Put(snap)
+	}
+	snap.startTS, snap.txID = mvcc.TxIDBase-1, w.txID
+	// Cleared rather than dropped, so the pinned-verdict map the apply's reads
+	// fill is allocated once per shard and not once per commit.
+	snap.memo.mu.Lock()
+	clear(snap.memo.verdict)
+	snap.memo.mu.Unlock()
+	applier.ApplyCommitted(snap)
+	// Ready only now: the index changes are applied, so a helper that publishes
+	// this commit on its behalf publishes it with them in place (rmp #2932).
+	ts := g.allocateReady(info, w)
+	info.Commit(ts)
+	g.mvccClock.PublishCommit(w.registeredRecord(info), ts)
+	published = true
+	// AFTER the publication, still under the locks: nothing may sit between the
+	// allocation and the publication. See the comment above.
+	applier.Committed(ts)
+	return ts
+}
+
+// registeredRecord is the record w's commit instant is registered for: the one
+// [Graph.AllocateCommitTS] registered when the instant was allocated early, and
+// otherwise info, which [Graph.allocateReady] registers.
+func (w *writeCtx) registeredRecord(info *mvcc.CommitInfo) *mvcc.CommitInfo {
+	if w.allocRec != nil {
+		return w.allocRec
+	}
+	return info
+}
+
+// allocateReady returns the commit instant of w, whose record is info, with the
+// record marked ready: every precondition of publishing it holds, so a later
+// publication that finds the frontier stuck on it may stamp and publish it on
+// this transaction's behalf (see [mvcc.Clock.AllocateFor]). The caller calls it
+// only once its versions are complete, its WAL record is durable, and its index
+// changes are applied.
+//
+// One path reaches here with its WAL record NOT durable: the fsync failed. The
+// engine then replays the transaction's undo log inside the same record before
+// closing it (cypher's ExplicitTx.Commit, rollbackInBarrierLocked), so every
+// value it wrote is written back and its versions net to zero. Publishing that
+// record — by its owner or by a helper — makes visible a state identical to the
+// one before the transaction, which is why marking it ready is sound there too.
+//
+// A transaction whose instant was allocated before its fsync
+// ([Graph.AllocateCommitTS]) keeps that instant and is marked ready here; any
+// other allocates and becomes ready in one step. Either way the caller then
+// stamps and publishes, and does not care whether a helper did so first.
+func (g *Graph[N, W]) allocateReady(info *mvcc.CommitInfo, w *writeCtx) uint64 {
+	if ts := w.commitTS; ts != 0 {
+		info.MarkReady()
+		return ts
+	}
+	return g.mvccClock.AllocateFor(info, true)
+}

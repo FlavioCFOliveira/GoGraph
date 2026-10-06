@@ -1,0 +1,182 @@
+spec ri03-hub-same-source: 2 sessions, 6 permutations
+# RI03 (G8). Two transactions each create one edge sharing an endpoint with the
+# other's: x->t1 and x->t2 (same source). The adjacency conflict rule (graph/lpg/mvcc_adjversion.go, rmp #2445)
+# claims BOTH endpoints of an append, so the second appender is refused while the first
+# is open and after it commits. If appends commuted, as an older comment stated, both
+# would commit in every order.
+# The final dangling probe must count 0 in every permutation: an edge to a dead node
+# is never committed (catalogue §9 point 3).
+
+starting permutation: s1e s1c s2e s2c
+step s1e: MATCH (x:N {name:'x'}), (t:N {name:'t1'}) CREATE (x)-[:R {id:1}]->(t) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2e: MATCH (x:N {name:'x'}), (t:N {name:'t2'}) CREATE (x)-[:R {id:2}]->(t) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"t1"
+"t2"
+"x" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst 
+---+--+----
+"x"|1 |"t1"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s1e s2e s1c s2c
+step s1e: MATCH (x:N {name:'x'}), (t:N {name:'t1'}) CREATE (x)-[:R {id:1}]->(t) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2e: MATCH (x:N {name:'x'}), (t:N {name:'t2'}) CREATE (x)-[:R {id:2}]->(t) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"t1"
+"t2"
+"x" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst 
+---+--+----
+"x"|1 |"t1"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s1e s2e s2c s1c
+step s1e: MATCH (x:N {name:'x'}), (t:N {name:'t1'}) CREATE (x)-[:R {id:1}]->(t) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2e: MATCH (x:N {name:'x'}), (t:N {name:'t2'}) CREATE (x)-[:R {id:2}]->(t) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"t1"
+"t2"
+"x" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst 
+---+--+----
+"x"|1 |"t1"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s1e s1c s2c
+step s2e: MATCH (x:N {name:'x'}), (t:N {name:'t2'}) CREATE (x)-[:R {id:2}]->(t) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1e: MATCH (x:N {name:'x'}), (t:N {name:'t1'}) CREATE (x)-[:R {id:1}]->(t) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"t1"
+"t2"
+"x" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst 
+---+--+----
+"x"|2 |"t2"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s1e s2c s1c
+step s2e: MATCH (x:N {name:'x'}), (t:N {name:'t2'}) CREATE (x)-[:R {id:2}]->(t) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1e: MATCH (x:N {name:'x'}), (t:N {name:'t1'}) CREATE (x)-[:R {id:1}]->(t) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"t1"
+"t2"
+"x" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst 
+---+--+----
+"x"|2 |"t2"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s2c s1e s1c
+step s2e: MATCH (x:N {name:'x'}), (t:N {name:'t2'}) CREATE (x)-[:R {id:2}]->(t) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1e: MATCH (x:N {name:'x'}), (t:N {name:'t1'}) CREATE (x)-[:R {id:1}]->(t) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"t1"
+"t2"
+"x" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst 
+---+--+----
+"x"|2 |"t2"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)

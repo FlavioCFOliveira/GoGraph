@@ -1,5 +1,7 @@
 package txn
 
+import "github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+
 // This file exposes internals to the external txn_test package. It is a _test.go
 // file, so nothing here widens the public API of the package.
 
@@ -14,4 +16,16 @@ func (s *Store[N, W]) ApplyWaiterCountForTest() int {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 	return len(s.applyWaiters)
+}
+
+// ApplyOpForTest applies op through wv exactly as [Tx.Commit]'s in-memory apply
+// does, so a test can hold a transaction that writes what a store commit writes
+// inside a bracket it controls.
+func ApplyOpForTest[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
+	return applyOp(wv, op)
+}
+
+// BufferOpForTest buffers op on t as the op's public buffering method would.
+func (t *Tx[N, W]) BufferOpForTest(op Op[N, W]) {
+	t.ops = append(t.ops, op)
 }

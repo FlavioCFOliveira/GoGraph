@@ -86,7 +86,9 @@ func parallelSelectionFixture(t *testing.T) (*lpg.Graph[string, float64], *Engin
 			if err != nil {
 				t.Fatalf("AddEdgeH(%s->%s): %v", src, dst, err)
 			}
-			g.SetEdgeLabelByHandle(src, dst, h, "K")
+			if err := g.SetEdgeLabelByHandle(src, dst, h, "K"); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	// ParallelScanThreshold is lowered so the fused shape engages on 4096 rows.

@@ -460,9 +460,9 @@ func TestWriteCtx_RecycledStateIsNeverSharedAcrossTransactions(t *testing.T) {
 	commits := make([]uint64, brackets)
 	for i := 0; i < brackets; i++ {
 		var txID uint64
-		if err := g.ApplyAtomically(func() error {
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
 			txID = g.writerSnapshot().TxID()
-			return g.SetNodeLabel(i, "L")
+			return g.Writer(tx).SetNodeLabel(i, "L")
 		}); err != nil {
 			t.Fatalf("bracket %d: %v", i, err)
 		}

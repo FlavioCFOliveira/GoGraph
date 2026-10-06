@@ -564,8 +564,8 @@ paths are covered by `cross_process_test.go`.
 The **schema survives too**. The `CREATE CONSTRAINT` / `CREATE INDEX` statements
 are WAL-logged writes, and the shutdown snapshot embeds the constraint set and
 index definitions. On open the engine is built with
-`cypher.NewEngineWithStoreAndSchema`, which re-registers both from the recovered
-state and re-backfills each backing index — so the `UNIQUE` constraint still
+`cypher.NewEngineWithOpened` over the directory opened by `store.OpenCtx`, which
+re-registers both from the recovered state and restores each backing index — so the `UNIQUE` constraint still
 rejects duplicates and the index seek still fires after a restart. Both
 `cross_process_test.go` restart paths assert this (constraint present in
 `/schema`, and a duplicate `Component.key` rejected with `409`). Using the plain

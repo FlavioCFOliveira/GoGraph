@@ -110,6 +110,21 @@ type lifeStamp struct {
 	// is consulted in strictly one branch of [aliveBefore] that used to answer
 	// with a constant, so it can only change the answer for a birth carrying it.
 	wasAlive bool
+	// unbornBefore answers, for a BIRTH record only, whether the node had NEVER
+	// EXISTED in committed history immediately before the transaction that wrote
+	// this record first touched it: the birth is a first creation, or the revival
+	// of a key whose only creation aborted ([Graph.unborn]). It is false for the
+	// revival of a node a committed removal tombstoned.
+	//
+	// It is what lets an abort restore the node's previous life exactly (ACID
+	// audit round 6, finding C2). Withdrawing an aborted birth tombstones the
+	// node either way, but only a key that never existed may be marked unborn:
+	// [Graph.internEndpoint] creates an unborn endpoint as it would a key never
+	// seen, and doing that to a committed-dead node revived in memory a node
+	// recovery keeps dead. Like wasAlive it is decided once, under the life
+	// shard's lock, and carried forward only across one transaction's own
+	// records (see [Graph.noteNodeLife]).
+	unbornBefore bool
 }
 
 // aliveBefore answers what a reader that can see NEITHER recorded event
@@ -230,7 +245,15 @@ type nodeLifeShard struct {
 	// impossible; that is worth 8 bytes on records the watermark keeps sparse.
 	churnBorn map[graph.NodeID][]LabelID
 	churnDied map[graph.NodeID][]LabelID
-	mu        sync.RWMutex
+	// claim holds a transaction's EXISTENCE CLAIM on a node it is removing
+	// although the node is already dead (ACID audit round 6): a stamp every
+	// existence head test sees, so a concurrent label or property write on the
+	// node is refused exactly as by a death record, but not an EVENT — no reader
+	// consults it, and it displaces neither the birth nor the death record a
+	// reader older than it still needs. See [Graph.noteNodeClaim]. Nil until a
+	// claim is recorded; counted in nodeLifeActive like the records.
+	claim map[graph.NodeID]commitStamp
+	mu    sync.RWMutex
 }
 
 // nodeLifeShardFor selects the shard responsible for id.
@@ -250,7 +273,7 @@ func (g *Graph[N, W]) noteNodeBorn(id graph.NodeID, tx *writeCtx) bool {
 	// no bitmap membership for the birth to disturb. Any label it goes on to
 	// acquire arrives through [Graph.setNodeLabelInfo], which pushes a delta
 	// carrying that lid and raises the gate itself.
-	return g.noteNodeLife(id, tx, true, nil)
+	return g.noteNodeLife(id, tx, true, true, nil)
 }
 
 // noteNodeBornAutocommit is [Graph.noteNodeBorn] outside any transaction, in the
@@ -260,7 +283,7 @@ func (g *Graph[N, W]) noteNodeBorn(id graph.NodeID, tx *writeCtx) bool {
 // before the transaction was threaded through, rather than a closure over a nil
 // pointer.
 func (g *Graph[N, W]) noteNodeBornAutocommit(id graph.NodeID) {
-	g.noteNodeLife(id, nil, true, nil)
+	g.noteNodeLife(id, nil, true, true, nil)
 }
 
 // noteNodeDied records that id was removed now.
@@ -269,26 +292,32 @@ func (g *Graph[N, W]) noteNodeDied(id graph.NodeID, tx *writeCtx, bagLids []Labe
 	// takes it out of every one of those labels' bitmaps as far as a reader newer
 	// than the death is concerned, so the churn gate has to be held up for all of
 	// them until the death record is reclaimed. [Graph.removeNodeInfo] needs the
-	// same bag for its own scoped hold and for the bitmap strip, and passes it in
-	// rather than making this read it a second and third time.
-	return g.noteNodeLife(id, tx, false, bagLids)
+	// same bag for the bitmap strip, and passes it in rather than making this
+	// read it a second time.
+	return g.noteNodeLife(id, tx, false, false, bagLids)
 }
 
-// noteNodeRevived records that a tombstoned id is live again.
+// noteNodeRevived records that a tombstoned id is live again. wasUnborn reports
+// whether id was in [Graph.unborn] — its only creation aborted — when the
+// revival began, which the record carries as [lifeStamp.unbornBefore].
 //
 // A revival is a BIRTH as far as a reader is concerned: from this instant the
 // node exists, and before it the death record still applies.
-func (g *Graph[N, W]) noteNodeRevived(id graph.NodeID, tx *writeCtx) bool {
+func (g *Graph[N, W]) noteNodeRevived(id graph.NodeID, tx *writeCtx, wasUnborn bool) bool {
 	// The bag is read HERE, unlike for an ordinary birth: it SURVIVES
 	// tombstoning, and [Graph.restoreLabelBitmaps] puts the node straight back
 	// into every bitmap the bag names — with no delta and no deferred removal to
 	// hold the gate up. A reader older than the revival must still be told the
 	// node is gone, so this is the only birth that has to raise the gate itself.
-	return g.noteNodeLife(id, tx, true, g.nodeLabelBagLids(id))
+	return g.noteNodeLife(id, tx, true, wasUnborn, g.nodeLabelBagLids(id))
 }
 
 // noteNodeLife records a birth (alive) or a death, and reports whether the
-// change may proceed.
+// change may proceed. unbornBefore is the caller's answer to
+// [lifeStamp.unbornBefore] for a birth, ignored for a death; a birth that
+// displaces this same transaction's own earlier birth inherits that record's
+// answer instead, because the question is about the instant before the
+// transaction began.
 //
 // The three entry points became one function when write-write conflict
 // detection arrived (rmp #2300), because the check has to run under the SAME
@@ -302,7 +331,7 @@ func (g *Graph[N, W]) noteNodeRevived(id graph.NodeID, tx *writeCtx) bool {
 // newer than the death must still see the node as gone, and only the record can
 // tell it that. [Graph.NodeExistsAsOf] decides between the two by taking the
 // later of the events that reader can see.
-func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool, bagLids []LabelID) bool {
+func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive, unbornBefore bool, bagLids []LabelID) bool {
 	if !g.mvccArmed {
 		return true
 	}
@@ -325,7 +354,7 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool, ba
 	// tombstones it when the abort is processed (rmp #2444, found by the DST
 	// multi-session mode: a CREATE on an already-doomed transaction leaked its
 	// slot). A genuine collision (head != 0) is still refused.
-	if head := sh.headStamp(id); tx.conflicts(head) && (!alive || head != 0) {
+	if head := sh.headStampWithClaim(id); tx.conflicts(head) && (!alive || head != 0) {
 		sh.mu.Unlock()
 		// No record was written, so nothing owns the holds taken above.
 		g.labelChurn.releaseAll(held)
@@ -345,28 +374,56 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool, ba
 		// concurrent life write can slip between the decision and the record it
 		// is stored on. See [lifeStamp.wasAlive] (rmp #2724).
 		st.wasAlive = sh.aliveBeforeTx(id, info)
+		st.unbornBefore = unbornBefore
+		if prev, ok := sh.born[id]; ok && info != nil && prev.info == info {
+			st.unbornBefore = prev.unbornBefore
+		}
 	}
 	// The store is one record deep per direction, so writing this one DISPLACES
 	// whatever was there. The displaced record's holds are now owned by nothing,
 	// and are released below — after the unlock, so the union of old and new is
 	// never briefly under-raised.
 	var displaced []LabelID
+	// overwrote reports whether this write REPLACED a record rather than adding
+	// one. The gate counts records held, not writes made, because the reclaimers
+	// subtract one per record they free: counting an overwrite left the gate
+	// above zero for good and over-reported MVCCStats.NodeLifeRecords
+	// (rmp #2962).
+	var overwrote bool
 	if alive {
 		if sh.born == nil {
 			sh.born = make(map[graph.NodeID]lifeStamp, 8)
 		}
+		_, overwrote = sh.born[id]
 		sh.born[id] = st
 		displaced = sh.setChurnHeld(true, id, held)
 	} else {
 		if sh.died == nil {
 			sh.died = make(map[graph.NodeID]lifeStamp, 8)
 		}
+		_, overwrote = sh.died[id]
 		sh.died[id] = st
 		displaced = sh.setChurnHeld(false, id, held)
 	}
+	// THE GATE IS RAISED UNDER THE LOCK THAT PUBLISHES THE RECORD (rmp #2842).
+	// nodeLifeActive is read lock-free as "no life record exists"; raised after
+	// the unlock, a reader could take the shard lock, find this record, and
+	// still load 0 from the gate. Every reader that can see the record takes
+	// this lock first, so the increment happens-before its observation. The
+	// decrements in the reclaimers stay after their unlocks: there the counter
+	// briefly over-counts, which is the safe direction.
+	if !overwrote {
+		g.nodeLifeActive.Add(1)
+	}
 	sh.mu.Unlock()
+	if tx != nil {
+		tx.tx.Touch(touchedLife)
+		tx.noteSide(sideNodeLife, uint64(id), 0, 0)
+	}
+	if h := g.nodeLifePublishedHookForTest; h != nil {
+		h(id)
+	}
 	g.labelChurn.releaseAll(displaced)
-	g.nodeLifeActive.Add(1)
 	return true
 }
 
@@ -502,6 +559,108 @@ func (sh *nodeLifeShard) headStamp(id graph.NodeID) uint64 {
 	return 0
 }
 
+// headStampWithClaim is [nodeLifeShard.headStamp] raised to id's existence
+// claim when it has one, which is what a conflict test must see: an in-flight
+// or aborted claim refuses like an in-flight or aborted record. The caller must
+// hold the shard lock.
+func (sh *nodeLifeShard) headStampWithClaim(id graph.NodeID) uint64 {
+	head := sh.headStamp(id)
+	if c, ok := sh.claim[id]; ok {
+		if at := c.at(); at > head {
+			return at
+		}
+	}
+	return head
+}
+
+// noteNodeClaim records tx's existence claim on id, a node tx is removing while
+// it is already dead, and reports whether tx may proceed (ACID audit round 6).
+//
+// # Why a dead node's removal claims at all
+//
+// A durable store's removal strips the node's labels and properties as its
+// transaction sees them, and replay strips them as the log has them at the
+// removal's position. A label another transaction adds to the dead node and
+// commits ahead of the removal is in the second set and not the first, unless
+// the removal holds a claim that refuses it. A death record would be that
+// claim, but on a dead node it displaces the death a reader older than it still
+// needs, and its abort reads it as the removal of a living node. The claim
+// refuses like a record and is invisible to every reader.
+//
+// The head test and the stamp are one observation under the shard lock, as in
+// [Graph.noteNodeLife]. A nil tx — a disarmed graph — claims nothing.
+func (g *Graph[N, W]) noteNodeClaim(id graph.NodeID, tx *writeCtx) bool {
+	if tx == nil || !g.mvccArmed {
+		return true
+	}
+	sh := g.nodeLifeShardFor(id)
+	sh.mu.Lock()
+	if head := sh.headStampWithClaim(id); tx.conflicts(head) {
+		sh.mu.Unlock()
+		_ = tx.conflictErr(mvcc.StoreNodeExistence, head)
+		return false
+	}
+	info, ts := g.deltaStamp(tx.record())
+	if sh.claim == nil {
+		sh.claim = make(map[graph.NodeID]commitStamp, 4)
+	}
+	if _, overwrote := sh.claim[id]; !overwrote {
+		// Raised under the lock that publishes the claim, as for a record.
+		g.nodeLifeActive.Add(1)
+	}
+	sh.claim[id] = commitStamp{info: info, ts: ts}
+	sh.mu.Unlock()
+	tx.tx.Touch(touchedLife)
+	tx.noteSide(sideNodeLife, uint64(id), 0, 0)
+	return true
+}
+
+// NodesLifeWrittenBy returns, each once, every node whose existence tx changed
+// — created, deleted or revived — by the birth and death records tx stamped.
+//
+// It exists for commit-time constraint validation (rmp #2936), which must know
+// every node a transaction touched, including one it deleted before any index
+// existed, when no index change recorded the deletion. It walks every life
+// shard, so it costs in proportion to the life records not yet reclaimed; it is
+// called only on the rare commit of a transaction that straddles a new
+// constraint, and on no write path. It returns nil for a zero tx and on a graph
+// whose versioning substrate is disarmed.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) NodesLifeWrittenBy(tx WriteTx) []graph.NodeID {
+	if !g.mvccArmed || tx.w == nil {
+		return nil
+	}
+	info := tx.w.tx.OpenRecord()
+	if info == nil {
+		return nil
+	}
+	var out []graph.NodeID
+	seen := make(map[graph.NodeID]struct{})
+	for i := range g.nodeLifeShards {
+		sh := &g.nodeLifeShards[i]
+		sh.mu.RLock()
+		for id, st := range sh.born {
+			if st.info == info {
+				if _, dup := seen[id]; !dup {
+					seen[id] = struct{}{}
+					out = append(out, id)
+				}
+			}
+		}
+		for id, st := range sh.died {
+			if st.info == info {
+				if _, dup := seen[id]; !dup {
+					seen[id] = struct{}{}
+					out = append(out, id)
+				}
+			}
+		}
+		sh.mu.RUnlock()
+	}
+	return out
+}
+
 // NodeExistsAsOf reports whether id was a live node at s.
 //
 // A nil snapshot asks about the present, which is the tombstone check the read
@@ -517,7 +676,7 @@ func (sh *nodeLifeShard) headStamp(id graph.NodeID) uint64 {
 // Safe for concurrent use.
 func (g *Graph[N, W]) NodeExistsAsOf(id graph.NodeID, s *Snapshot) bool {
 	if s == nil {
-		return !g.IsTombstoned(id)
+		return !g.IsTombstonedStored(id)
 	}
 	// The gate is this shard's OWN maps, read under its lock — not a
 	// graph-level counter read before it. A counter sampled first can report
@@ -529,7 +688,7 @@ func (g *Graph[N, W]) NodeExistsAsOf(id graph.NodeID, s *Snapshot) bool {
 	sh.mu.RLock()
 	if sh.born == nil && sh.died == nil {
 		sh.mu.RUnlock()
-		return !g.IsTombstoned(id)
+		return !g.IsTombstonedStored(id)
 	}
 	born, hasBorn := sh.born[id]
 	died, hasDied := sh.died[id]
@@ -582,7 +741,7 @@ func (g *Graph[N, W]) NodeExistsAsOf(id graph.NodeID, s *Snapshot) bool {
 		// which is the direction the tombstone bitmap alone cannot express.
 		return true
 	}
-	return !g.IsTombstoned(id)
+	return !g.IsTombstonedStored(id)
 }
 
 // reclaimNodeLife drops the birth and death records the watermark has made
@@ -623,6 +782,15 @@ func (g *Graph[N, W]) reclaimNodeLife(watermark uint64) int {
 				released = append(released, sh.takeChurnHeld(false, id)...)
 				freed++
 			}
+		}
+		for id, c := range sh.claim {
+			if c.at() <= watermark {
+				delete(sh.claim, id)
+				freed++
+			}
+		}
+		if len(sh.claim) == 0 {
+			sh.claim = nil
 		}
 		if len(sh.born) == 0 {
 			sh.born = nil
@@ -713,7 +881,7 @@ func (g *Graph[N, W]) NodeLifeVersionCount() int64 { return g.nodeLifeActive.Loa
 // Safe for concurrent use.
 func (g *Graph[N, W]) TombstonedIDsAsOf(s *Snapshot) []graph.NodeID {
 	if s == nil {
-		return g.TombstonedIDs()
+		return g.TombstonedIDsStored()
 	}
 	// SORTED EXPLICITLY. This said "ascending by construction: the mapper walks ids in
 	// increasing order", and that is false for any graph with more than one node in
@@ -727,7 +895,7 @@ func (g *Graph[N, W]) TombstonedIDsAsOf(s *Snapshot) []graph.NodeID {
 	//
 	// The cost is O(D log D) in the number of TOMBSTONES, against the O(V) existence
 	// walk it follows.
-	out := make([]graph.NodeID, 0, g.TombstoneCount())
+	out := make([]graph.NodeID, 0, g.TombstoneCountStored())
 	g.adj.Mapper().Walk(func(id graph.NodeID, _ N) bool {
 		// INTERNED as of s AND not alive as of s. Both halves are load-bearing.
 		//

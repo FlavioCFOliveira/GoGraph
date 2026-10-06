@@ -53,6 +53,14 @@ func (s simSnapshotFS) DirSync(path string) error { return s.disk.DirSync(path) 
 
 func (s simSnapshotFS) ParentDirSync(childPath string) error { return s.disk.ParentDirSync(childPath) }
 
+// simBulkImportFS adapts a [SimDisk] to the store/bulkimport filesystem seam
+// ([bulkimport.PublishFS], [bulkimport.ImportIntoFS]): the store/snapshot seam
+// plus the directory listing the importer's empty-directory check needs
+// (rmp #2518).
+type simBulkImportFS struct{ simSnapshotFS }
+
+func (s simBulkImportFS) ReadDir(dir string) ([]fs.DirEntry, error) { return s.disk.ReadDir(dir) }
+
 // simCSRFS adapts a [SimDisk] to the store/csrfile filesystem seam. It is a
 // distinct type from [simSnapshotFS] because csrfile's Create returns
 // csrfile.File whereas snapshot's returns snapshot.File — one Go type cannot

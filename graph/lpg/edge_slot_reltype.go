@@ -127,7 +127,22 @@ func canonicalPairSlots(
 //
 // ForEachPairSlotRelTypeByID is safe for concurrent use; it observes a lock-free
 // adjacency snapshot, so a slot added concurrently may or may not be included.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) ForEachPairSlotRelTypeByID(
+	srcID, dstID graph.NodeID,
+	visit func(ordinal int, name string),
+) {
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	g.ForEachPairSlotRelTypeByIDAsOf(srcID, dstID, g.latestCommitted(&cs), visit)
+}
+
+// forEachPairSlotRelTypeByIDRaw is the present-state body of [Graph.ForEachPairSlotRelTypeByID], reading the newest
+// stored entry including uncommitted writes; [Graph.ForEachPairSlotRelTypeByIDAsOf] uses it
+// for a nil snapshot.
+func (g *Graph[N, W]) forEachPairSlotRelTypeByIDRaw(
 	srcID, dstID graph.NodeID,
 	visit func(ordinal int, name string),
 ) {
@@ -175,7 +190,7 @@ func (g *Graph[N, W]) ForEachPairSlotRelTypeByIDAsOf(
 	visit func(ordinal int, name string),
 ) {
 	if s == nil {
-		g.ForEachPairSlotRelTypeByID(srcID, dstID, visit)
+		g.forEachPairSlotRelTypeByIDRaw(srcID, dstID, visit)
 		return
 	}
 	v := g.adj.EntryViewAsOf(srcID, s.startTS, s.txID)
@@ -212,24 +227,13 @@ func (g *Graph[N, W]) ForEachPairSlotRelTypeByIDAsOf(
 //
 // ForEachPairOverflowRelTypeByID is safe for concurrent use. Names are resolved
 // after the shard lock is released, so visit may safely read the graph.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) ForEachPairOverflowRelTypeByID(srcID, dstID graph.NodeID, visit func(name string)) {
-	if g.edgeLabelOverflowActive.Load() == 0 {
-		return
-	}
-	k := edgeKey{src: srcID, dst: dstID}
-	sh := g.edgeLabelShardFor(k)
-	sh.mu.RLock()
-	var ids []LabelID
-	if ls := sh.overflow[k]; len(ls) > 0 {
-		ids = make([]LabelID, len(ls))
-		copy(ids, ls)
-	}
-	sh.mu.RUnlock()
-	for _, lid := range ids {
-		if name, ok := g.reg.Resolve(lid); ok {
-			visit(name)
-		}
-	}
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	g.ForEachPairOverflowRelTypeByIDAsOf(srcID, dstID, g.latestCommitted(&cs), visit)
 }
 
 // SetEdgeRelTypeAtSlotByID attaches name as a relationship type to the ONE slot
@@ -256,25 +260,53 @@ func (g *Graph[N, W]) ForEachPairOverflowRelTypeByID(srcID, dstID graph.NodeID, 
 // whether a handle record also exists.
 //
 // SetEdgeRelTypeAtSlotByID is safe for concurrent use.
-func (g *Graph[N, W]) SetEdgeRelTypeAtSlotByID(srcID, dstID graph.NodeID, ordinal int, name string) bool {
-	return g.setEdgeRelTypeAtSlotByIDInfo(srcID, dstID, ordinal, name, nil)
+//
+// It refuses a relationship type longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
+// The error result is a breaking change: SetEdgeRelTypeAtSlotByID used to
+// return the bool alone.
+//
+// It runs as a single-operation transaction (rmp #2947): it refuses with an error
+// wrapping [ErrDirectWriteConflict], reporting false and changing nothing, while
+// another transaction holds an uncommitted write on src's adjacency or the
+// pair's overflow relationship types. The refusal is retryable.
+func (g *Graph[N, W]) SetEdgeRelTypeAtSlotByID(srcID, dstID graph.NodeID, ordinal int, name string) (bool, error) {
+	if err := CheckToken("relationship type", name); err != nil {
+		return false, err
+	}
+	var resolved bool
+	err := g.direct(func(tx *writeCtx) error {
+		resolved = g.setEdgeRelTypeAtSlotByIDInfo(srcID, dstID, ordinal, name, tx)
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return resolved, nil
 }
 
-// setEdgeRelTypeAtSlotByIDInfo is [Graph.SetEdgeRelTypeAtSlotByID] with an explicit
-// write transaction; tx is nil for a direct Go-API mutation, which is committed the
-// instant it is made and takes no conflict check. See [writeCtx].
+// setEdgeRelTypeAtSlotByIDInfo is [Graph.SetEdgeRelTypeAtSlotByID] inside write
+// transaction tx; tx is nil only on a graph whose versioning substrate is
+// disarmed. See [writeCtx].
 func (g *Graph[N, W]) setEdgeRelTypeAtSlotByIDInfo(srcID, dstID graph.NodeID, ordinal int, name string, tx *writeCtx) bool {
 	if ordinal < 0 {
 		return false
 	}
-	lid := g.reg.Intern(name)
+	// Every write claims src's adjacency before it resolves the ordinal from
+	// the present entry, which may be showing another transaction's uncommitted
+	// change (rmp #2947), and before it rebuilds the entry, which would otherwise
+	// embed that change (rmp #2966); see [Graph.setEdgeLabelInfo].
+	if err := g.adjVer.noteExclusive(srcID, tx); err != nil {
+		return false
+	}
+	lid := g.reg.intern(name)
 	enc := encodeSlotLabel(lid)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
 	resolved, changed := g.setSlotRelTypeLocked(k, ordinal, lid, enc, tx)
 	sh.mu.Unlock()
-	if !resolved {
+	if !resolved || tx.doomed() {
 		return false
 	}
 	g.edgeIdx.Add(uint32(lid), srcID)
@@ -307,7 +339,11 @@ func (g *Graph[N, W]) setSlotRelTypeLocked(k edgeKey, ordinal int, lid LabelID, 
 	switch cur {
 	case 0:
 		one := [1]int{idx}
-		return true, g.adj.Writer(tx.adjTx()).SetEdgeLabelSlotsAt(k.src, k.dst, one[:], enc) > 0
+		n, err := g.adj.Writer(tx.adjTx()).SetEdgeLabelSlotsAt(k.src, k.dst, one[:], enc)
+		if adjErr(tx, err) != nil {
+			return true, false
+		}
+		return true, n > 0
 	case enc:
 		return true, false
 	}
@@ -330,15 +366,36 @@ func (g *Graph[N, W]) setSlotRelTypeLocked(k edgeKey, ordinal int, lid LabelID, 
 // [adjlist.AdjList.HasEdge] before calling.
 //
 // AddEdgeRelTypeOverflowByID is safe for concurrent use.
-func (g *Graph[N, W]) AddEdgeRelTypeOverflowByID(srcID, dstID graph.NodeID, name string) bool {
-	return g.addEdgeRelTypeOverflowByIDInfo(srcID, dstID, name, nil)
+//
+// It refuses a relationship type longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
+// The error result is a breaking change: AddEdgeRelTypeOverflowByID used to
+// return the bool alone.
+//
+// It runs as a single-operation transaction (rmp #2947): it refuses with an error
+// wrapping [ErrDirectWriteConflict], reporting false and changing nothing, while
+// another transaction holds an uncommitted write on the pair's overflow
+// relationship types. The refusal is retryable.
+func (g *Graph[N, W]) AddEdgeRelTypeOverflowByID(srcID, dstID graph.NodeID, name string) (bool, error) {
+	if err := CheckToken("relationship type", name); err != nil {
+		return false, err
+	}
+	var changed bool
+	err := g.direct(func(tx *writeCtx) error {
+		changed = g.addEdgeRelTypeOverflowByIDInfo(srcID, dstID, name, tx)
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return changed, nil
 }
 
-// addEdgeRelTypeOverflowByIDInfo is [Graph.AddEdgeRelTypeOverflowByID] with an explicit write transaction; tx is
-// nil for a direct Go-API mutation, which is committed the instant it is made
-// and takes no conflict check. See [writeCtx].
+// addEdgeRelTypeOverflowByIDInfo is [Graph.AddEdgeRelTypeOverflowByID] inside
+// write transaction tx; tx is nil only on a graph whose versioning substrate is
+// disarmed. See [writeCtx].
 func (g *Graph[N, W]) addEdgeRelTypeOverflowByIDInfo(srcID, dstID graph.NodeID, name string, tx *writeCtx) bool {
-	lid := g.reg.Intern(name)
+	lid := g.reg.intern(name)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()

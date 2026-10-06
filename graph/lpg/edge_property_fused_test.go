@@ -199,7 +199,9 @@ func TestFused_MixedWithSetEdgeProperty(t *testing.T) {
 		g.mustSet(t, "h", "d5", "b", StringValue("x"))    // second key on one pair
 		g.mustSet(t, "h", "d5", "a", Int64Value(999))     // overwrite the fused key
 		g.mustSet(t, "h", "d10", "c", Float64Value(2.71)) // second key, another pair
-		g.DelEdgeProperty("h", "d20", "a")                // delete a fused key
+		if err := g.DelEdgeProperty("h", "d20", "a"); err != nil {
+			t.Fatal(err)
+		} // delete a fused key
 	}
 	for i := 0; i < degree; i++ {
 		dst := fmt.Sprintf("d%d", i)
@@ -229,8 +231,8 @@ func TestFused_EquivalenceAfterRemoval(t *testing.T) {
 	}
 	// Remove a handful of edges from both (middle, first, last).
 	for _, d := range []string{"d0", "d15", fmt.Sprintf("d%d", degree-1), "d7"} {
-		ref.RemoveEdge("h", d)
-		fused.RemoveEdge("h", d)
+		must(t).E(ref.RemoveEdge("h", d))
+		must(t).E(fused.RemoveEdge("h", d))
 	}
 	for i := 0; i < degree; i++ {
 		dst := fmt.Sprintf("d%d", i)

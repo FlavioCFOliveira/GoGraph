@@ -129,7 +129,7 @@ func TestOverlap_DeferredIndexRemovalChargedToItsOwnTransaction(t *testing.T) {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
 	id := nodeIDOf(t, g, "a")
-	lid := uint32(g.reg.Intern("L"))
+	lid := uint32(g.reg.intern("L"))
 	if !g.nodeIdx.Has(lid, id) {
 		t.Fatal("the label bitmap does not carry the node it was just given a label for")
 	}

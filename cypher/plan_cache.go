@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"hash/maphash"
 	"sync"
+	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
@@ -138,12 +139,26 @@ type planCacheShard struct {
 // is still incremented exactly once per lookup, but the work no longer
 // lengthens a critical section every caller queues behind.
 //
+// # Invalidation is a generation, not only an emptying
+//
+// An entry memoises state read from the index catalog while it is compiled
+// (paramTypes), so emptying the cache is not by itself an invalidation: a
+// compilation that read the catalog before a DDL and publishes after the DDL's
+// [planCache.clear] would re-install the pre-change inference for every later
+// caller (rmp #2854, reproduced by plan_cache_ddl_window_test.go). clear
+// therefore also advances gen, and [planCache.loadOrStoreAt] installs an entry
+// only while gen still equals the value the compilation read before it touched
+// the catalog. The check runs under the shard mutex and clear advances gen
+// while holding every shard mutex, so a publication either lands before the
+// clear, and is removed by it, or sees the new generation and is refused.
+//
 // planCache is safe for concurrent use by any number of goroutines.
 type planCache struct {
 	shards []planCacheShard
 	seed   maphash.Seed
 	mask   uint64
 	cap    int
+	gen    atomic.Uint64 // advanced by every clear; see the section above
 }
 
 // newPlanCache constructs a planCache with the given capacity and the
@@ -233,6 +248,21 @@ func (c *planCache) get(key string) (*planCacheEntry, bool) {
 // SHARD is dropped and metrics.cypher.plan_cache.evictions is incremented.
 // See the eviction contract on [planCache].
 func (c *planCache) loadOrStore(key string, entry *planCacheEntry) (*planCacheEntry, bool) {
+	return c.loadOrStoreAt(key, entry, c.generation())
+}
+
+// generation returns the current invalidation generation. A compilation reads
+// it BEFORE it reads the index catalog and passes it to
+// [planCache.loadOrStoreAt].
+func (c *planCache) generation() uint64 { return c.gen.Load() }
+
+// loadOrStoreAt is [planCache.loadOrStore] for an entry compiled under
+// generation gen. When a [planCache.clear] has run since gen was read, the
+// entry may carry pre-change catalog state, so it is NOT installed: the call
+// returns (entry, false) and the cache is left unchanged. The caller may still
+// use entry for its own execution, which overlapped the schema change; no later
+// caller receives it from the cache.
+func (c *planCache) loadOrStoreAt(key string, entry *planCacheEntry, gen uint64) (*planCacheEntry, bool) {
 	s := c.shardFor(key)
 	s.mu.Lock()
 	if e, ok := s.by[key]; ok {
@@ -241,6 +271,10 @@ func (c *planCache) loadOrStore(key string, entry *planCacheEntry) (*planCacheEn
 		v := e.Value.(*planCacheNode).value
 		s.mu.Unlock()
 		return v, true
+	}
+	if c.gen.Load() != gen {
+		s.mu.Unlock()
+		return entry, false
 	}
 	evicted := false
 	if s.ll.Len() >= s.cap {
@@ -286,6 +320,9 @@ func (c *planCache) loadOrStore(key string, entry *planCacheEntry) (*planCacheEn
 // another lock, blocks, or calls out to caller-supplied code — the metrics
 // events are emitted outside. No other path holds two shard mutexes.
 //
+// The generation (see [planCache]) is advanced inside the same all-shards hold,
+// which is what turns the emptying into an invalidation.
+//
 // The list reset and the map clear must stay inside ONE lock hold per shard.
 // [list.List.Init] leaves every old element still pointing at this list, so an
 // element that outlived the reset would pass MoveToFront's ownership guard and
@@ -300,6 +337,9 @@ func (c *planCache) clear() {
 		s.ll.Init()
 		clear(s.by)
 	}
+	// Advanced while every shard mutex is still held, so no loadOrStoreAt can
+	// install an entry compiled under the old generation after this clear.
+	c.gen.Add(1)
 	for i := range c.shards {
 		c.shards[i].mu.Unlock()
 	}
@@ -365,6 +405,7 @@ type planBuild struct {
 	done  chan struct{}
 	entry *planCacheEntry
 	err   error
+	gen   uint64 // plan-cache generation the leader started under
 }
 
 // planBuildGroup collapses the concurrent compilations of one cache key into a
@@ -447,22 +488,32 @@ func newPlanBuildGroup() *planBuildGroup {
 // g.mu guards only the in-flight map and is never held across build, so a
 // compilation of one query never delays a lookup — or a build — of another.
 //
+// gen is the plan-cache generation the caller read before calling. A caller
+// joins an in-flight build only when that build's leader started under the
+// same generation: a leader that started before a [planCache.clear] may have
+// read the pre-change catalog, and a caller that arrived after the clear must
+// not receive its result (rmp #2854). Such a caller builds for itself, without
+// replacing the in-flight record.
+//
 // If build panics, the deferred close still releases the waiters, which then
 // see the zero (nil, nil) result and build for themselves rather than
 // deadlocking. build never returns (nil, nil) on any non-panicking path, so
 // that pair is unambiguous as a signal. The panic itself is not recovered:
 // panics indicate programmer error and must surface.
-func (g *planBuildGroup) do(key string, build func(string) (*planCacheEntry, error)) (*planCacheEntry, error) {
+func (g *planBuildGroup) do(key string, gen uint64, build func(string) (*planCacheEntry, error)) (*planCacheEntry, error) {
 	g.mu.Lock()
 	if b, ok := g.inflight[key]; ok {
 		g.mu.Unlock()
+		if b.gen != gen {
+			return build(key)
+		}
 		<-b.done
 		if b.entry == nil && b.err == nil {
 			return build(key) // leader panicked; do not inherit its silence
 		}
 		return b.entry, b.err
 	}
-	b := &planBuild{done: make(chan struct{})}
+	b := &planBuild{done: make(chan struct{}), gen: gen}
 	g.inflight[key] = b
 	g.mu.Unlock()
 

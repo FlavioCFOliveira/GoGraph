@@ -1,0 +1,80 @@
+spec ro01-read-only-snapshot-stable-lpg: 2 sessions, 4 permutations
+# RO01 through the lpg API, the stable-snapshot half (an lpg read snapshot has no
+# write surface to reject): s1 pins Graph.BeginRead and reads x.v twice; s2 sets
+# x.v = 2 in its own transaction. Both reads return 0.
+
+starting permutation: s1r s1r2 s1c s2w
+step s1r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1r2: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s2w: lpg: SetNodeProperty(x, v, 2)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1r s1r2 s2w s1c
+step s1r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1r2: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s2w: lpg: SetNodeProperty(x, v, 2)
+step s1c: lpg: Graph.EndRead
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1r s2w s1r2 s1c
+step s1r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s2w: lpg: SetNodeProperty(x, v, 2)
+step s1r2: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1c: lpg: Graph.EndRead
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s2w s1r s1r2 s1c
+step s2w: lpg: SetNodeProperty(x, v, 2)
+step s1r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1r2: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1c: lpg: Graph.EndRead
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)

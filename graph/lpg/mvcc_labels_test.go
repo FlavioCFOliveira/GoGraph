@@ -73,20 +73,20 @@ func TestLabelDelta_ReconstructsOlderVersion(t *testing.T) {
 
 	// A reader that started BEFORE the change must not see "Hot".
 	old := g.labelBagAsOf(id, baseline, 0)
-	if !old.has(g.reg.Intern("Base")) {
+	if !old.has(g.reg.intern("Base")) {
 		t.Fatal("the older version lost the label it had")
 	}
-	if old.has(g.reg.Intern("Hot")) {
+	if old.has(g.reg.intern("Hot")) {
 		t.Fatal("a reader that started before the change can see it: the delta was not applied")
 	}
 	// A reader that started AFTER must see it.
 	now := g.labelBagAsOf(id, g.readTS(), 0)
-	if !now.has(g.reg.Intern("Hot")) {
+	if !now.has(g.reg.intern("Hot")) {
 		t.Fatal("a reader that started after the change cannot see it")
 	}
 	// The stored version must be untouched by the reconstruction.
 	stored := g.labelBagPlain(id)
-	if !stored.has(g.reg.Intern("Hot")) {
+	if !stored.has(g.reg.intern("Hot")) {
 		t.Fatal("reconstructing an older version mutated the stored one")
 	}
 }
@@ -109,8 +109,12 @@ func TestLabelDelta_NoDeltaForARedundantWrite(t *testing.T) {
 		t.Fatalf("ten identical SetNodeLabel calls produced %d deltas, want 1: a re-assertion "+
 			"that changes nothing must not record a version that never existed", n)
 	}
-	g.RemoveNodeLabel("a", "L")
-	g.RemoveNodeLabel("a", "L")
+	if err := g.RemoveNodeLabel("a", "L"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"a\", \"L\"): %v", err)
+	}
+	if err := g.RemoveNodeLabel("a", "L"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"a\", \"L\"): %v", err)
+	}
 	if n := g.LabelDeltaCount(); n != 2 {
 		t.Fatalf("a real removal plus a redundant one produced %d deltas, want 2", n)
 	}
@@ -132,7 +136,9 @@ func TestLabelDelta_ArmedByDefaultAndDisarmable(t *testing.T) {
 	if err := armed.SetNodeLabel("a", "L"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	armed.RemoveNodeLabel("a", "L")
+	if err := armed.RemoveNodeLabel("a", "L"); err != nil {
+		t.Fatalf("armed.RemoveNodeLabel(\"a\", \"L\"): %v", err)
+	}
 	if n := armed.LabelDeltaCount(); n != 2 {
 		t.Fatalf("a default graph recorded %d label deltas for one add and one remove, want 2: "+
 			"MVCC is armed by default, so a read must be able to reconstruct both older versions", n)
@@ -146,7 +152,9 @@ func TestLabelDelta_ArmedByDefaultAndDisarmable(t *testing.T) {
 	if err := inert.SetNodeLabel("a", "L"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	inert.RemoveNodeLabel("a", "L")
+	if err := inert.RemoveNodeLabel("a", "L"); err != nil {
+		t.Fatalf("inert.RemoveNodeLabel(\"a\", \"L\"): %v", err)
+	}
 	if n := inert.LabelDeltaCount(); n != 0 {
 		t.Fatalf("a disarmed graph recorded %d label deltas; DisableMVCC must record nothing", n)
 	}

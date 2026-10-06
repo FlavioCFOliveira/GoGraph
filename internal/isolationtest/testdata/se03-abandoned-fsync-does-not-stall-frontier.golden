@@ -1,0 +1,1128 @@
+spec se03-abandoned-fsync-does-not-stall-frontier: 2 sessions, 35 permutations
+# SE03, fsync arm. s0 writes s, reserves its commit instant (the WAL commit path's
+# allocation, before its fsync) and then abandons it — the fsync-failure path:
+# WriteTx.Abandon, then EndVersionedTx. s1 commits x.v = 1 in an explicit Cypher
+# transaction. In every interleaving a sessionless read sees s1's commit unless s0's
+# reserved instant is below it and not yet abandoned, and no commit is left in
+# flight (in_flight_commits = 0) once s0 has abandoned: the abandoned commit does
+# not hold the frontier. s's write is never visible.
+
+starting permutation: s0w s0a s0x s0fr s1w s1c s1r
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s0a s0x s1w s0fr s1c s1r
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s0a s0x s1w s1c s0fr s1r
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s0a s0x s1w s1c s1r s0fr
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s0a s1w s0x s0fr s1c s1r
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s0a s1w s0x s1c s0fr s1r
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1c: COMMIT
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s0a s1w s0x s1c s1r s0fr
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s0a s1w s1c s0x s0fr s1r
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s0a s1w s1c s0x s1r s0fr
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s0a s1w s1c s1r s0x s0fr
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s1w s0a s0x s0fr s1c s1r
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s1w s0a s0x s1c s0fr s1r
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1c: COMMIT
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s1w s0a s0x s1c s1r s0fr
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s1w s0a s1c s0x s0fr s1r
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1c: COMMIT
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s1w s0a s1c s0x s1r s0fr
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1c: COMMIT
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s1w s0a s1c s1r s0x s0fr
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s1w s1c s0a s0x s0fr s1r
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s1w s1c s0a s0x s1r s0fr
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s1w s1c s0a s1r s0x s0fr
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s0w s1w s1c s1r s0a s0x s0fr
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s0w s0a s0x s0fr s1c s1r
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s0w s0a s0x s1c s0fr s1r
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1c: COMMIT
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s0w s0a s0x s1c s1r s0fr
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s0w s0a s1c s0x s0fr s1r
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1c: COMMIT
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s0w s0a s1c s0x s1r s0fr
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1c: COMMIT
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s0w s0a s1c s1r s0x s0fr
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s0w s1c s0a s0x s0fr s1r
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1c: COMMIT
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s0w s1c s0a s0x s1r s0fr
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1c: COMMIT
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s0w s1c s0a s1r s0x s0fr
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1c: COMMIT
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s0w s1c s1r s0a s0x s0fr
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s1c s0w s0a s0x s0fr s1r
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s1c s0w s0a s0x s1r s0fr
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s1c s0w s0a s1r s0x s0fr
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s1c s0w s1r s0a s0x s0fr
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)
+
+starting permutation: s1w s1c s1r s0w s0a s0x s0fr
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0x: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s0fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+"x" |1
+(2 rows)

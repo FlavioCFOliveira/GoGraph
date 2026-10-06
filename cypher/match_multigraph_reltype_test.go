@@ -718,7 +718,9 @@ func TestMatch_GoAPIEdge_PropertiesReadThroughPerPair(t *testing.T) {
 	if _, err := g.AddEdgeH("d", "tk", 1.0); err != nil {
 		t.Fatal(err)
 	}
-	g.SetEdgeLabel("d", "tk", "ASSIGNED_TO")
+	if err := g.SetEdgeLabel("d", "tk", "ASSIGNED_TO"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.SetEdgeProperty("d", "tk", "state", lpg.StringValue("planned")); err != nil {
 		t.Fatal(err)
 	}

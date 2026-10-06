@@ -1,0 +1,108 @@
+spec mg06-merge-on-match-vs-update: 2 sessions, 6 permutations
+# MG06. s1 updates n.v; s2 runs MERGE (n:K {k:'a'}) ON MATCH SET n.v = 2 with an
+# older snapshot. The MERGE matches at its snapshot, and its ON MATCH SET is a write
+# to a node whose head is not visible to it: refused (F2). PostgreSQL's
+# insert-conflict-do-update-3 updates a tuple its snapshot cannot see; GoGraph must
+# never do that.
+
+starting permutation: s1w s1c s2m s2c
+step s1w: MATCH (n:K {k:'a'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2m: MERGE (n:K {k:'a'}) ON MATCH SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v
+---+-
+"a"|1
+(1 row)
+
+starting permutation: s1w s2m s1c s2c
+step s1w: MATCH (n:K {k:'a'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2m: MERGE (n:K {k:'a'}) ON MATCH SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v
+---+-
+"a"|1
+(1 row)
+
+starting permutation: s1w s2m s2c s1c
+step s1w: MATCH (n:K {k:'a'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2m: MERGE (n:K {k:'a'}) ON MATCH SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v
+---+-
+"a"|1
+(1 row)
+
+starting permutation: s2m s1w s1c s2c
+step s2m: MERGE (n:K {k:'a'}) ON MATCH SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w: MATCH (n:K {k:'a'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v
+---+-
+"a"|2
+(1 row)
+
+starting permutation: s2m s1w s2c s1c
+step s2m: MERGE (n:K {k:'a'}) ON MATCH SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w: MATCH (n:K {k:'a'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v
+---+-
+"a"|2
+(1 row)
+
+starting permutation: s2m s2c s1w s1c
+step s2m: MERGE (n:K {k:'a'}) ON MATCH SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (n:K {k:'a'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v
+---+-
+"a"|2
+(1 row)

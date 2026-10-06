@@ -129,58 +129,66 @@ func reserveConstraintValue(
 	//
 	// remark is allocated ONLY in that case, so the ordinary reserve — no pending
 	// release of the same value — journals exactly the single delete it always did.
-	var remark []string
-	if sv := valueSetKeyOf(value); ct != nil && sv != "" {
-		for _, label := range labels {
-			if ct.releasedHere(constraintKey(label, prop), sv) {
-				remark = append(remark, label)
+	var (
+		remark  []string
+		gen0    uint64
+		genRest []uint64
+		err     error
+	)
+	// One attempt per label at most past the first: a refusal under a UNIQUE
+	// constraint registered while the transaction was open, of a value the
+	// transaction itself released before that constraint existed, is deferred
+	// to the commit-time validation by marking that release and retrying
+	// (rmp #2948, [ConstraintRegistry.adoptStraddledRelease]). Every other
+	// refusal is returned as it is.
+	for attempt := 0; ; attempt++ {
+		remark = remark[:0]
+		if sv := valueSetKeyOf(value); ct != nil && sv != "" {
+			for _, label := range labels {
+				if ct.releasedHere(constraintKey(label, prop), sv) {
+					remark = append(remark, label)
+				}
 			}
 		}
+		gen0, genRest, err = reg.reserveSetPropertyGen(ct, labels, prop, value, mgr)
+		if err == nil {
+			break
+		}
+		if attempt >= len(labels) || !reg.adoptStraddledRelease(ct, err, value) {
+			return err
+		}
 	}
-	if err := reg.ReserveSetProperty(ct, labels, prop, value, mgr); err != nil {
-		return err
-	}
-	del := copyLabels(labels)
-	if len(remark) > 0 {
-		del = withoutLabels(labels, remark)
-	}
+	all := copyLabels(labels)
 	journalConstraintInverse(mutator, func() {
 		// A rolled-back RESERVATION that genuinely PUT the value in the shared set is
 		// given back directly, and that stays correct: the value was reserved for the
 		// whole life of the statement, so no peer can have committed it in the meantime
-		// and deleting it cannot disturb anyone. Passing nil applies the delete
-		// immediately, which is what an inverse must do.
-		if len(del) > 0 {
-			reg.ReleasePropertyValue(nil, del, prop, value)
+		// and deleting it cannot disturb anyone — PROVIDED it is still the same
+		// value-set. After a DROP and re-CREATE of the constraint, or a DROP rewound
+		// after its durable commit failed, the set is a new one, which never held this
+		// reservation and in which a peer may now hold the value, so the delete is
+		// skipped (rmp #2936 audit, R4-3).
+		// Deleted where, and only where, this reservation inserted the value —
+		// which the reservation decided under the registry's lock. A value that was
+		// already in the set belongs to its committed holder and stays.
+		sv := valueSetKeyOf(value)
+		for i, label := range all {
+			g := gen0
+			if i > 0 {
+				g = genRest[i-1]
+			}
+			if g&reservationInserted != 0 {
+				reg.releaseInGeneration(constraintKey(label, prop), sv, g&^reservationInserted)
+			}
+		}
+		for _, label := range all {
+			ct.unmarkReserved(constraintKey(label, prop), sv)
 		}
 		for _, label := range remark {
 			ct.markReleased(constraintKey(label, prop), valueSetKeyOf(value))
 		}
 	})
 	return nil
-}
-
-// withoutLabels returns a copy of labels with every entry of drop removed.
-//
-// Both slices are the labels of ONE node, so they are a handful of entries and the
-// quadratic scan is cheaper than building a set. It is called only on the rare path
-// where a reserve spent this transaction's own pending release; see
-// [reserveConstraintValue].
-func withoutLabels(labels, drop []string) []string {
-	out := make([]string, 0, len(labels))
-	for _, l := range labels {
-		keep := true
-		for _, d := range drop {
-			if l == d {
-				keep = false
-				break
-			}
-		}
-		if keep {
-			out = append(out, l)
-		}
-	}
-	return out
 }
 
 // releaseConstraintValue records that value is released under every label, and

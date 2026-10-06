@@ -1,0 +1,135 @@
+spec ab03-refused-statement-then-continue: 2 sessions, 5 permutations
+# AB03 (G10). s1 reads x, writes x.v = 3, reads x again and commits; s2 writes x.v = 2
+# in an autocommit statement. When s2 commits first, s1's write is refused; s1's next
+# read must still be at its snapshot (v = 0), and its COMMIT applies nothing. This
+# transcript pins which error the COMMIT returns.
+
+starting permutation: s1r s1w s1r2 s1c s2w
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 3 RETURN n.v AS v
+v
+-
+3
+(1 row)
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+3
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1r s1w s1r2 s2w s1c
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 3 RETURN n.v AS v
+v
+-
+3
+(1 row)
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+3
+(1 row)
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+3
+(1 row)
+
+starting permutation: s1r s1w s2w s1r2 s1c
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 3 RETURN n.v AS v
+v
+-
+3
+(1 row)
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+3
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+3
+(1 row)
+
+starting permutation: s1r s2w s1w s1r2 s1c
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 3 RETURN n.v AS v
+ERROR: serialization conflict
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s2w s1r s1w s1r2 s1c
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 3 RETURN n.v AS v
+ERROR: serialization conflict
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)

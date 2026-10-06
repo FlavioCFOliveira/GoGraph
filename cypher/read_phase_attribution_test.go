@@ -41,6 +41,11 @@ func TestReadPhasePrefixMatchesRunRead(t *testing.T) {
 		name   string
 		query  string
 		params map[string]expr.Value
+		// hoists marks a query carrying a literal parseAndAnalyse lifts into an
+		// auto-parameter, which runRead merges into the caller's parameters
+		// (rmp #2847). The case asserts the hoist happened, so it cannot pass
+		// vacuously if the hoisting rules stop lifting its literal.
+		hoists bool
 	}{
 		{
 			name:   "point lookup (the benchmark's reader)",
@@ -51,10 +56,22 @@ func TestReadPhasePrefixMatchesRunRead(t *testing.T) {
 			name:  "label scan count",
 			query: "MATCH (n:Acct) RETURN count(n) AS c",
 		},
+		{
+			name:   "point lookup with a hoisted string literal",
+			query:  "MATCH (n:Acct {id: $id}) WHERE toString(n.bal) <> 'x' RETURN n.bal AS b",
+			params: map[string]expr.Value{"id": expr.IntegerValue(3)},
+			hoists: true,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.hoists {
+				if _, auto, err := eng.parseAndAnalyse(tc.query); err != nil || len(auto) == 0 {
+					t.Fatalf("parseAndAnalyse hoisted %v (err %v); the case needs at least one "+
+						"auto-parameter to guard the merge", auto, err)
+				}
+			}
 			// Every prefix short of the full one must succeed without executing, so a
 			// phase boundary that started returning an error would be caught rather
 			// than silently reported as a fast phase.
@@ -102,7 +119,8 @@ func TestReadPhasePrefixMatchesRunRead(t *testing.T) {
 func collectPrefixRows(t *testing.T, eng *Engine, query string, params map[string]expr.Value) []string {
 	t.Helper()
 	ctx := context.Background()
-	entry, _, err := eng.parseAndAnalyse(query)
+	entry, autoParams, err := eng.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if err != nil {
 		t.Fatalf("parseAndAnalyse: %v", err)
 	}

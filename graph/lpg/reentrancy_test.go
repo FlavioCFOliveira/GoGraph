@@ -225,8 +225,8 @@ func TestReentrancyGuard_NoFalsePositive_ConcurrentReadersAndWriter(t *testing.T
 			defer writersWG.Done()
 			for i := 0; i < iterations; i++ {
 				guarded(func() {
-					_ = g.ApplyAtomically(func() error {
-						_ = g.SetNodeLabel("u", "Hot")
+					_ = g.ApplyAtomicallyTx(func(tx WriteTx) error {
+						_ = g.Writer(tx).SetNodeLabel("u", "Hot")
 						return nil
 					})
 				})

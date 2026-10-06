@@ -1,0 +1,178 @@
+spec ri04-application-check-vs-edge-insert: 2 sessions, 6 permutations
+# RI04. An application-level RI check: s1 deletes b only if no edge points into it
+# (MATCH (b) WHERE NOT ()-->(b) DELETE b); s2 creates a->b. At s1's snapshot b has no
+# incoming edge, so the check passes; the native edge RI must still refuse one of the
+# two. PostgreSQL without a foreign key permits the orphan.
+# The final dangling probe must count 0 in every permutation: an edge to a dead node
+# is never committed (catalogue §9 point 3).
+
+starting permutation: s1d s1c s2e s2c
+step s1d: MATCH (b:N {name:'b'}) WHERE NOT ()-->(b) DELETE b RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2e: MATCH (a:N {name:'a'}), (b:N {name:'b'}) CREATE (a)-[:R {id:1}]->(b) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+(1 row)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s1d s2e s1c s2c
+step s1d: MATCH (b:N {name:'b'}) WHERE NOT ()-->(b) DELETE b RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2e: MATCH (a:N {name:'a'}), (b:N {name:'b'}) CREATE (a)-[:R {id:1}]->(b) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+(1 row)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s1d s2e s2c s1c
+step s1d: MATCH (b:N {name:'b'}) WHERE NOT ()-->(b) DELETE b RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2e: MATCH (a:N {name:'a'}), (b:N {name:'b'}) CREATE (a)-[:R {id:1}]->(b) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+(1 row)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s2e s1d s1c s2c
+step s2e: MATCH (a:N {name:'a'}), (b:N {name:'b'}) CREATE (a)-[:R {id:1}]->(b) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (b:N {name:'b'}) WHERE NOT ()-->(b) DELETE b RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+ERROR: serialization conflict
+step s2c: COMMIT
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s1d s2c s1c
+step s2e: MATCH (a:N {name:'a'}), (b:N {name:'b'}) CREATE (a)-[:R {id:1}]->(b) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (b:N {name:'b'}) WHERE NOT ()-->(b) DELETE b RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: serialization conflict
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s2c s1d s1c
+step s2e: MATCH (a:N {name:'a'}), (b:N {name:'b'}) CREATE (a)-[:R {id:1}]->(b) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1d: MATCH (b:N {name:'b'}) WHERE NOT ()-->(b) DELETE b RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+ERROR: serialization conflict
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)

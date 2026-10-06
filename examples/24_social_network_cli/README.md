@@ -8,7 +8,10 @@ end on a small social-network domain:
 - WAL-backed transactional writes (`store/wal` + `store/txn`) and
   recovery from a snapshot plus the WAL tail (`store/recovery`);
 - manual checkpoints via `store/snapshot.WriteSnapshotFull`;
-- Cypher reads via `cypher.NewEngineWithStore` + `Engine.RunInTx`,
+- the composed reopen `store.OpenCtx` (recovery, WAL open, and the
+  transactional store built from the recovery result) and
+  `cypher.NewEngineWithOpened`;
+- Cypher reads via `Engine.RunInTx`,
   streamed back as JSON Lines.
 
 ```
@@ -363,10 +366,9 @@ change that alters the answer is a defect, not an optimisation.
                │       fsyncs the WAL     │
                v                          v
         ┌──────────────────────────────────────────────┐
-        │  recovery.Open[string, float64](dir, opts)   │  read snapshot + WAL
-        │  wal.Open(<dir>/wal)                         │  append-only WAL writer
-        │  txn.NewStoreWithOptions(graph, wal, opts)   │  WAL-backed store
-        │  cypher.NewEngineWithStore(store)            │  Cypher engine
+        │  store.OpenCtx(ctx, dir, opts)               │  recover snapshot + WAL,
+        │                                              │  open WAL, build store
+        │  cypher.NewEngineWithOpened(opened)          │  Cypher engine + schema
         └──────────────────────────────────────────────┘
                                 │
                                 │  RunInTx / WriteSnapshotFull

@@ -662,7 +662,7 @@ func (h *mvccHarness) nameDiff(tick int64) []Violation {
 			id := graph.NodeID(nodeID)
 			snap := g.BeginRead()
 			state := fmt.Sprintf("tombstoned=%v existsPresent=%v existsSnap=%v",
-				g.IsTombstoned(id), g.NodeExistsAsOf(id, nil), g.NodeExistsAsOf(id, snap))
+				g.IsTombstonedStored(id), g.NodeExistsAsOf(id, nil), g.NodeExistsAsOf(id, snap))
 			g.EndRead(snap)
 			out = append(out, Violation{Tick: tick, Op: "name diff", Kind: ViolationACIDConsistency,
 				Message: fmt.Sprintf("engine holds a non-Person node (id=%d name=%q, %s) the workload never creates", nodeID, name, state)})
@@ -706,7 +706,7 @@ func (h *mvccHarness) lpgState(name string) string {
 	existsSnap := g.NodeExistsAsOf(id, snap)
 	g.EndRead(snap)
 	return fmt.Sprintf("id=%d tombstoned=%v existsPresent=%v existsSnap=%v",
-		id, g.IsTombstoned(id), g.NodeExistsAsOf(id, nil), existsSnap)
+		id, g.IsTombstonedStored(id), g.NodeExistsAsOf(id, nil), existsSnap)
 }
 
 // observeOverlap updates the overlap counters for the current tick.

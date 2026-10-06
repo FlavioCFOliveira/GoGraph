@@ -61,7 +61,9 @@ func tableGraph(t *testing.T) *lpg.Graph[string, float64] {
 		if err := g.AddEdge(src, dst, 1); err != nil {
 			t.Fatalf("AddEdge(%s,%s): %v", src, dst, err)
 		}
-		g.SetEdgeLabel(src, dst, "KNOWS")
+		if err := g.SetEdgeLabel(src, dst, "KNOWS"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return g
 }
@@ -309,18 +311,25 @@ func TestProfileTable_AgreesWithProfile(t *testing.T) {
 	}
 }
 
-// TestProfileTable_RefusesAWritingStatement holds the same guarantee Profile
-// makes: a diagnostic must not perform writes as a side effect.
+// TestProfileTable_RefusesAWritingStatement held, until rmp #2790, that
+// ProfileTable refused a writing statement. ProfileTable now shares Profile's
+// contract for one: the statement executes on the transactional write path, its
+// writes applied exactly once, and the table measures its write operator.
 func TestProfileTable_RefusesAWritingStatement(t *testing.T) {
 	g := tableGraph(t)
 	eng := cypher.NewEngine(g)
 	before := g.LiveOrder()
 
-	if _, err := eng.ProfileTable(t.Context(), "CREATE (n:Person {name: 'zz'}) RETURN n", nil); err == nil {
-		t.Fatal("ProfileTable executed a writing statement")
+	table, err := eng.ProfileTable(t.Context(), "CREATE (n:Person {name: 'zz'}) RETURN n", nil)
+	if err != nil {
+		t.Fatalf("ProfileTable of a writing statement: %v", err)
 	}
-	if after := g.LiveOrder(); after != before {
-		t.Errorf("ProfileTable wrote to the graph: %d nodes before, %d after", before, after)
+	if !strings.Contains(table, "CreateNode") {
+		t.Errorf("the table does not measure the write operator:\n%s", table)
+	}
+	if after := g.LiveOrder(); after != before+1 {
+		t.Errorf("ProfileTable applied the CREATE %d times, want exactly once (%d nodes before, %d after)",
+			after-before, before, after)
 	}
 }
 

@@ -23,7 +23,9 @@ func TestEdgeByID_EquivalentToKeyed(t *testing.T) {
 	if err := g.AddEdgeLabeled("a", "b", 1, "KNOWS"); err != nil {
 		t.Fatalf("AddEdgeLabeled(a,b,KNOWS): %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "WORKS_WITH")
+	if err := g.SetEdgeLabel("a", "b", "WORKS_WITH"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.SetEdgeProperty("a", "b", "since", Int64Value(2020)); err != nil {
 		t.Fatalf("SetEdgeProperty(since): %v", err)
 	}

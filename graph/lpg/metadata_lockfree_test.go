@@ -91,7 +91,7 @@ func TestRegistryConcurrentInternResolve(t *testing.T) {
 				defer wg.Done()
 				for i := 0; i < perWriter; i++ {
 					name := fmt.Sprintf("L%d", w*perWriter+i)
-					id := reg.Intern(name)
+					id := reg.intern(name)
 					got, ok := reg.Resolve(id)
 					if !ok || got != name {
 						t.Errorf("Resolve(%d)=%q,%v want %q", id, got, ok, name)
@@ -134,7 +134,7 @@ func TestRegistryConcurrentInternResolve(t *testing.T) {
 				defer wg.Done()
 				for i := 0; i < perWriter; i++ {
 					name := fmt.Sprintf("p%d", w*perWriter+i)
-					id := reg.Intern(name)
+					id := reg.intern(name)
 					got, ok := reg.Resolve(id)
 					if !ok || got != name {
 						t.Errorf("Resolve(%d)=%q,%v want %q", id, got, ok, name)
@@ -159,9 +159,9 @@ func TestRegistryConcurrentInternResolve(t *testing.T) {
 // not extend the snapshot.
 func TestRegistryInternIsBounded(t *testing.T) {
 	reg := NewPropertyKeyRegistry()
-	first := reg.Intern("dup")
+	first := reg.intern("dup")
 	for i := 0; i < 1000; i++ {
-		if got := reg.Intern("dup"); got != first {
+		if got := reg.intern("dup"); got != first {
 			t.Fatalf("Intern(dup) #%d = %d, want %d", i, got, first)
 		}
 	}

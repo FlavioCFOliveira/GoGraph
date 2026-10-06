@@ -103,7 +103,9 @@ func testDelNodeProperty(t *testing.T, shape shapegen.Shape[int, int64]) {
 	// Delete the subset.
 	for _, nodeKey := range keys {
 		for idx := range deletedIdx {
-			g.DelNodeProperty(nodeKey, fmt.Sprintf("k%d", idx))
+			if err := g.DelNodeProperty(nodeKey, fmt.Sprintf("k%d", idx)); err != nil {
+				t.Fatalf("g.DelNodeProperty(nodeKey, fmt.Sprintf(\"k%%d\", idx)): %v", err)
+			}
 		}
 	}
 
@@ -132,8 +134,12 @@ func testDelNodeProperty(t *testing.T, shape shapegen.Shape[int, int64]) {
 
 	// Delete already-absent keys — must not panic, surviving keys unaffected.
 	for _, nodeKey := range keys {
-		g.DelNodeProperty(nodeKey, "k1")          // already deleted
-		g.DelNodeProperty(nodeKey, "no_such_key") // never existed
+		if err := g.DelNodeProperty(nodeKey, "k1"); err != nil {
+			t.Fatalf("g.DelNodeProperty(nodeKey, \"k1\"): %v", err)
+		} // already deleted
+		if err := g.DelNodeProperty(nodeKey, "no_such_key"); err != nil {
+			t.Fatalf("g.DelNodeProperty(nodeKey, \"no_such_key\"): %v", err)
+		} // never existed
 		if _, ok := g.GetNodeProperty(nodeKey, "k0"); !ok {
 			t.Errorf("node %d: k0 missing after double-delete no-op", nodeKey)
 		}
@@ -181,7 +187,9 @@ func testDelEdgeProperty(t *testing.T, shape shapegen.Shape[int, int64]) {
 	deleted := make(map[int]bool, len(edges)/2+1)
 	for i, e := range edges {
 		if i%2 == 0 {
-			g.DelEdgeProperty(e.src, e.dst, propKey)
+			if err := g.DelEdgeProperty(e.src, e.dst, propKey); err != nil {
+				t.Fatal(err)
+			}
 			deleted[i] = true
 		}
 	}
@@ -207,8 +215,12 @@ func testDelEdgeProperty(t *testing.T, shape shapegen.Shape[int, int64]) {
 
 	// Delete already-absent property — must not panic.
 	for _, e := range edges {
-		g.DelEdgeProperty(e.src, e.dst, propKey) // may already be gone
-		g.DelEdgeProperty(e.src, e.dst, "no_such_key")
+		if err := g.DelEdgeProperty(e.src, e.dst, propKey); err != nil {
+			t.Fatal(err)
+		} // may already be gone
+		if err := g.DelEdgeProperty(e.src, e.dst, "no_such_key"); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -259,7 +271,9 @@ func testNodeLabels(t *testing.T, shape shapegen.Shape[int, int64]) {
 	// Remove Beta; expect {Alpha, Gamma}.
 	wantAfterBeta := []string{"Alpha", "Gamma"}
 	for _, nodeKey := range keys {
-		g.RemoveNodeLabel(nodeKey, "Beta")
+		if err := g.RemoveNodeLabel(nodeKey, "Beta"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(nodeKey, \"Beta\"): %v", err)
+		}
 		got := g.NodeLabels(nodeKey)
 		sort.Strings(got)
 		if len(got) != len(wantAfterBeta) {
@@ -277,8 +291,12 @@ func testNodeLabels(t *testing.T, shape shapegen.Shape[int, int64]) {
 
 	// Remove all remaining labels; expect length==0.
 	for _, nodeKey := range keys {
-		g.RemoveNodeLabel(nodeKey, "Alpha")
-		g.RemoveNodeLabel(nodeKey, "Gamma")
+		if err := g.RemoveNodeLabel(nodeKey, "Alpha"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(nodeKey, \"Alpha\"): %v", err)
+		}
+		if err := g.RemoveNodeLabel(nodeKey, "Gamma"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(nodeKey, \"Gamma\"): %v", err)
+		}
 		got := g.NodeLabels(nodeKey)
 		if len(got) != 0 {
 			t.Errorf("node %d: after removing all labels NodeLabels len=%d, want 0: %v",

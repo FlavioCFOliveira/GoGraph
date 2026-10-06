@@ -165,7 +165,9 @@ func TestWriteLabels_EdgeRecordWriteFailure(t *testing.T) {
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "KNOWS")
+	if err := g.SetEdgeLabel("a", "b", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
 
 	w := &partialWriter{n: 0, err: errors.New("edge-record flush boom")}
 	_, _, err := WriteLabels(w, g, nil)
@@ -187,7 +189,9 @@ func TestWriteLabels_RoundtripEdgeLabels(t *testing.T) {
 	if err := g.SetNodeLabel("a", "Person"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "KNOWS")
+	if err := g.SetEdgeLabel("a", "b", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
 
 	var buf bytes.Buffer
 	_, _, err := WriteLabels(&buf, g, nil)

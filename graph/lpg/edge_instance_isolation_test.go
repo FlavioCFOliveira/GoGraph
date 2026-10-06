@@ -68,18 +68,22 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 	// indices. The instance index is the 1-based value IncEdgeCreateCount
 	// returns, exactly as CreateRelationship wires it.
 	applyTwoParallelEdges := func(beforeSecond func()) error {
-		return g.ApplyAtomically(func() error {
-			h1, err := g.AddEdgeH("a", "b", 0)
+		return g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			h1, err := g.Writer(tx).AddEdgeH("a", "b", 0)
 			if err != nil {
 				return err
 			}
 			i1 := g.IncEdgeCreateCount("a", "b")
-			g.SetEdgeLabelAt("a", "b", i1, "R")
-			if err := g.SetEdgePropertyAt("a", "b", i1, "seq", Int64Value(i1)); err != nil {
+			if err := g.Writer(tx).SetEdgeLabelAt("a", "b", i1, "R"); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.Writer(tx).SetEdgePropertyAt("a", "b", i1, "seq", Int64Value(i1)); err != nil {
 				return err
 			}
-			g.SetEdgeLabelByHandle("a", "b", h1, "R")
-			if err := g.SetEdgePropertyByHandle("a", "b", h1, "seq", Int64Value(i1)); err != nil {
+			if err := g.Writer(tx).SetEdgeLabelByHandle("a", "b", h1, "R"); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.Writer(tx).SetEdgePropertyByHandle("a", "b", h1, "seq", Int64Value(i1)); err != nil {
 				return err
 			}
 
@@ -87,17 +91,21 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 				beforeSecond()
 			}
 
-			h2, err := g.AddEdgeH("a", "b", 0)
+			h2, err := g.Writer(tx).AddEdgeH("a", "b", 0)
 			if err != nil {
 				return err
 			}
 			i2 := g.IncEdgeCreateCount("a", "b")
-			g.SetEdgeLabelAt("a", "b", i2, "R")
-			if err := g.SetEdgePropertyAt("a", "b", i2, "seq", Int64Value(i2)); err != nil {
+			if err := g.Writer(tx).SetEdgeLabelAt("a", "b", i2, "R"); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.Writer(tx).SetEdgePropertyAt("a", "b", i2, "seq", Int64Value(i2)); err != nil {
 				return err
 			}
-			g.SetEdgeLabelByHandle("a", "b", h2, "R")
-			if err := g.SetEdgePropertyByHandle("a", "b", h2, "seq", Int64Value(i2)); err != nil {
+			if err := g.Writer(tx).SetEdgeLabelByHandle("a", "b", h2, "R"); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.Writer(tx).SetEdgePropertyByHandle("a", "b", h2, "seq", Int64Value(i2)); err != nil {
 				return err
 			}
 			return nil

@@ -1,0 +1,1351 @@
+spec gg03-degree-and-count-at-snapshot: 2 sessions, 21 permutations
+# GG03. s0 pins a read snapshot and reads the hub's degree and the :R relationship
+# count — the count-store answer (seek) beside a typed scan (scan) — twice; s1 adds an
+# edge into the hub and deletes one in two autocommit statements. s0's repeated reads
+# are equal, and seek = scan in every read.
+# The final dangling probe must count 0 in every permutation: an edge to a dead node
+# is never committed (catalogue §9 point 3).
+
+starting permutation: s0d1 s0r1 s0d2 s0r2 s0c s1a s1d
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s0r1 s0d2 s0r2 s1a s0c s1d
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0c: COMMIT
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s0r1 s0d2 s0r2 s1a s1d s0c
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s0r1 s0d2 s1a s0r2 s0c s1d
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s0r1 s0d2 s1a s0r2 s1d s0c
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s0r1 s0d2 s1a s1d s0r2 s0c
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s0r1 s1a s0d2 s0r2 s0c s1d
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s0r1 s1a s0d2 s0r2 s1d s0c
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s0r1 s1a s0d2 s1d s0r2 s0c
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s0r1 s1a s1d s0d2 s0r2 s0c
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s1a s0r1 s0d2 s0r2 s0c s1d
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s1a s0r1 s0d2 s0r2 s1d s0c
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s1a s0r1 s0d2 s1d s0r2 s0c
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s1a s0r1 s1d s0d2 s0r2 s0c
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s0d1 s1a s1d s0r1 s0d2 s0r2 s0c
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s1a s0d1 s0r1 s0d2 s0r2 s0c s1d
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s1a s0d1 s0r1 s0d2 s0r2 s1d s0c
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s1a s0d1 s0r1 s0d2 s1d s0r2 s0c
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s1a s0d1 s0r1 s1d s0d2 s0r2 s0c
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s1a s0d1 s1d s0r1 s0d2 s0r2 s0c
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)
+
+starting permutation: s1a s1d s0d1 s0r1 s0d2 s0r2 s0c
+step s1a: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (:N {name:'x1'})-[r:R]->(:N {name:'hub'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0d1: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r1: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0d2: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+step s0r2: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s0c: COMMIT
+final degree: MATCH (h:N {name:'hub'}) OPTIONAL MATCH (h)--(m) RETURN count(m) AS degree
+degree
+------
+3     
+(1 row)
+final rels: MATCH ()-[r:R]->() WITH count(r) AS seek OPTIONAL MATCH ()-[s]->() WHERE type(s) = 'R' RETURN seek, count(s) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"y"  
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src  |id|dst  
+-----+--+-----
+"hub"|3 |"y"  
+"x"  |4 |"hub"
+"x2" |2 |"hub"
+(3 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+3        |0       
+(1 row)

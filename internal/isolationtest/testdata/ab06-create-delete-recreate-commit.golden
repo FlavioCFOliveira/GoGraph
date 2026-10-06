@@ -1,0 +1,202 @@
+spec ab06-create-delete-recreate-commit: 2 sessions, 6 permutations
+# AB06, COMMIT arm. In one transaction s1 creates z (v = 1), deletes it, creates it
+# again (v = 2) and reads it, then ends; s2 counts z in an autocommit statement. On
+# COMMIT z is visible once with v = 2; on ROLLBACK it was never visible.
+
+starting permutation: s1c1 s1d s1c2 s1r s1c s2r
+step s1c1: CREATE (n:L {name:'z', v:1}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1d: MATCH (n:L {name:'z'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c2: CREATE (n:L {name:'z', v:2}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1r: MATCH (n:L {name:'z'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (n:L {name:'z'}) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+final final: MATCH (n:L {name:'z'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1c1 s1d s1c2 s1r s2r s1c
+step s1c1: CREATE (n:L {name:'z', v:1}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1d: MATCH (n:L {name:'z'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c2: CREATE (n:L {name:'z', v:2}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1r: MATCH (n:L {name:'z'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2r: MATCH (n:L {name:'z'}) RETURN count(n) AS c
+c
+-
+0
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L {name:'z'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1c1 s1d s1c2 s2r s1r s1c
+step s1c1: CREATE (n:L {name:'z', v:1}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1d: MATCH (n:L {name:'z'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c2: CREATE (n:L {name:'z', v:2}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2r: MATCH (n:L {name:'z'}) RETURN count(n) AS c
+c
+-
+0
+(1 row)
+step s1r: MATCH (n:L {name:'z'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L {name:'z'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1c1 s1d s2r s1c2 s1r s1c
+step s1c1: CREATE (n:L {name:'z', v:1}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1d: MATCH (n:L {name:'z'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2r: MATCH (n:L {name:'z'}) RETURN count(n) AS c
+c
+-
+0
+(1 row)
+step s1c2: CREATE (n:L {name:'z', v:2}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1r: MATCH (n:L {name:'z'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L {name:'z'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1c1 s2r s1d s1c2 s1r s1c
+step s1c1: CREATE (n:L {name:'z', v:1}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2r: MATCH (n:L {name:'z'}) RETURN count(n) AS c
+c
+-
+0
+(1 row)
+step s1d: MATCH (n:L {name:'z'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c2: CREATE (n:L {name:'z', v:2}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1r: MATCH (n:L {name:'z'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L {name:'z'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s2r s1c1 s1d s1c2 s1r s1c
+step s2r: MATCH (n:L {name:'z'}) RETURN count(n) AS c
+c
+-
+0
+(1 row)
+step s1c1: CREATE (n:L {name:'z', v:1}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1d: MATCH (n:L {name:'z'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c2: CREATE (n:L {name:'z', v:2}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1r: MATCH (n:L {name:'z'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L {name:'z'}) RETURN n.v AS v
+v
+-
+2
+(1 row)

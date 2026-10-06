@@ -1,0 +1,54 @@
+spec mg10-intra-statement-duplicate: 2 sessions, 3 permutations
+# MG10. UNIQUE on (:K).k. One statement writes the same value to two nodes:
+# SET a.k = 'x', b.k = 'x'. The statement is rejected and nothing it wrote is visible
+# to anyone (cypher/exec/constraints.go); the transaction is poisoned, so the client
+# rolls it back (F8). s2 creates k='x' in an autocommit statement. Between the failed
+# statement and the ROLLBACK the value is still reserved by the open transaction,
+# and s2 is refused (G6); after the ROLLBACK s2 succeeds, so no reservation leaks.
+
+starting permutation: s1w s1rb s2c
+step s1w: MATCH (a:K {v:'a'}), (b:K {v:'b'}) SET a.k = 'x', b.k = 'x' RETURN a.k AS a, b.k AS b
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "x" already exists
+step s1rb: ROLLBACK
+step s2c: CREATE (n:K {k:'x', v:'s2'}) RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"p"|"a" 
+"q"|"b" 
+"x"|"s2"
+(3 rows)
+
+starting permutation: s1w s2c s1rb
+step s1w: MATCH (a:K {v:'a'}), (b:K {v:'b'}) SET a.k = 'x', b.k = 'x' RETURN a.k AS a, b.k AS b
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "x" already exists
+step s2c: CREATE (n:K {k:'x', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "x" already exists
+step s1rb: ROLLBACK
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v  
+---+---
+"p"|"a"
+"q"|"b"
+(2 rows)
+
+starting permutation: s2c s1w s1rb
+step s2c: CREATE (n:K {k:'x', v:'s2'}) RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1w: MATCH (a:K {v:'a'}), (b:K {v:'b'}) SET a.k = 'x', b.k = 'x' RETURN a.k AS a, b.k AS b
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "x" already exists
+step s1rb: ROLLBACK
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"p"|"a" 
+"q"|"b" 
+"x"|"s2"
+(3 rows)

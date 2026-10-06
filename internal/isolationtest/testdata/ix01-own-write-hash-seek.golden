@@ -1,0 +1,343 @@
+spec ix01-own-write-hash-seek: 2 sessions, 7 permutations
+# IX01 (#2814). Hash index on (:L).s over 1 100 nodes. Inside one transaction s1
+# moves n7 from s='v7' to s='zzz' and creates a node with s='qqq', reading each value
+# after the write through the equality seek and through a scan. Its own writes are
+# visible to the seek: 1 for 'zzz', 0 for 'v7', 1 for 'qqq', and seek = scan (F12).
+# s2 reads the same values in an autocommit statement and sees s1's writes only
+# after s1 commits. InnoDB's full-text index hides own uncommitted rows by design.
+
+starting permutation: s1w s1new s1old s1cr s1crr s1c s2r
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1new: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1old: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'qqq'}) RETURN n.s AS s
+s    
+-----
+"qqq"
+(1 row)
+step s1crr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fnew: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fold: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s1w s1new s1old s1cr s1crr s2r s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1new: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1old: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'qqq'}) RETURN n.s AS s
+s    
+-----
+"qqq"
+(1 row)
+step s1crr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2r: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1c: COMMIT
+final fnew: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fold: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s1w s1new s1old s1cr s2r s1crr s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1new: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1old: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'qqq'}) RETURN n.s AS s
+s    
+-----
+"qqq"
+(1 row)
+step s2r: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1crr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fnew: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fold: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s1w s1new s1old s2r s1cr s1crr s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1new: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1old: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2r: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'qqq'}) RETURN n.s AS s
+s    
+-----
+"qqq"
+(1 row)
+step s1crr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fnew: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fold: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s1w s1new s2r s1old s1cr s1crr s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1new: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2r: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1old: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'qqq'}) RETURN n.s AS s
+s    
+-----
+"qqq"
+(1 row)
+step s1crr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fnew: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fold: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s1w s2r s1new s1old s1cr s1crr s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2r: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1new: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1old: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'qqq'}) RETURN n.s AS s
+s    
+-----
+"qqq"
+(1 row)
+step s1crr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fnew: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fold: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s2r s1w s1new s1old s1cr s1crr s1c
+step s2r: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1new: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1old: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'qqq'}) RETURN n.s AS s
+s    
+-----
+"qqq"
+(1 row)
+step s1crr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fnew: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fold: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'qqq'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'qqq' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)

@@ -217,7 +217,9 @@ func TestPatternComp_Projection_MatchesSubqueryOracle(t *testing.T) {
 	if err := g.AddEdge("a", "d", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.RemoveNode("z")
+	if err := g.RemoveNode("z"); err != nil {
+		t.Fatalf("g.RemoveNode(\"z\"): %v", err)
+	}
 
 	cases := []struct{ name, projection, oracle string }{
 		{"typed, rewrite eligible", `size([ (a)-[:K]->(x) | 1 ])`, `COUNT { (a)-[:K]->() }`},

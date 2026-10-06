@@ -158,7 +158,9 @@ func goAPIGraph(t *testing.T) *lpg.Graph[string, float64] {
 		if err := g.AddEdge(a[0], a[1], 1); err != nil {
 			t.Fatalf("AddEdge(%v): %v", a, err)
 		}
-		g.SetEdgeLabel(a[0], a[1], a[2])
+		if err := g.SetEdgeLabel(a[0], a[1], a[2]); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return g
 }
@@ -177,7 +179,9 @@ func mixedOriginGraph(t *testing.T) *lpg.Graph[string, float64] {
 	if err := g.AddEdge(a, b, 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel(a, b, "M")
+	if err := g.SetEdgeLabel(a, b, "M"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.AddEdge(a, b, 1); err != nil {
 		t.Fatalf("AddEdge (untyped): %v", err)
 	}
@@ -201,12 +205,18 @@ func multiTypeArcGraph(t *testing.T) *lpg.Graph[string, float64] {
 	if err := g.AddEdge("u", "v", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("u", "v", "K")
-	g.SetEdgeLabel("u", "v", "M") // second type on the same pair → overflow
+	if err := g.SetEdgeLabel("u", "v", "K"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("u", "v", "M"); err != nil {
+		t.Fatal(err)
+	} // second type on the same pair → overflow
 	if err := g.AddEdge("v", "w", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("v", "w", "M")
+	if err := g.SetEdgeLabel("v", "w", "M"); err != nil {
+		t.Fatal(err)
+	}
 	return g
 }
 

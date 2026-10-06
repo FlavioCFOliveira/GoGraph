@@ -198,24 +198,14 @@ func TestBulkImportParity_LifecycleContract(t *testing.T) {
 }
 
 // TestBulkImportParity_Deterministic asserts the run is a pure function of the
-// seed: two runs produce the same publish counts, the same parity counters, and
-// a BYTE-IDENTICAL set of snapshot data components, even though each ran in a
-// different temporary directory.
+// seed: two runs produce the same publish counts, the same parity counters, the
+// same fault evidence, and a BYTE-IDENTICAL set of snapshot data components,
+// even though each ran in a different temporary directory.
 //
-// Two things are deliberately NOT asserted here, both because they are measured
-// to be untrue rather than because they are hard:
-//
-//   - The snapshot's TOTAL byte count, because manifest.json carries a
-//     `created_at` wall clock whose rendering drops a trailing zero about one run
-//     in ten (a measured 654-vs-655-byte swing).
-//   - Byte-identity of the data components, because the importer writes each
-//     item's properties in Go map iteration order and
-//     [bulkimport.Node.Properties] is a map. The combined SIZE is invariant —
-//     the same keys are written either way — but the bytes are not.
-//     TestBulkImportParity_ByteBoundary pins exactly where that begins.
-//
-// Asserting either would be asserting that a clock, or a map walk, is constant:
-// a flake, not a property.
+// The snapshot's TOTAL byte count is deliberately not asserted: manifest.json
+// carries a `created_at` wall clock whose rendering drops a trailing zero about
+// one run in ten (a measured 654-vs-655-byte swing). Asserting it would be
+// asserting that a clock is constant.
 func TestBulkImportParity_Deterministic(t *testing.T) {
 	t.Parallel()
 	sc := bulkImportParityScenario()
@@ -242,9 +232,12 @@ func TestBulkImportParity_Deterministic(t *testing.T) {
 			a.dataComponents, b.dataComponents)
 	}
 	if a.dataBytes != b.dataBytes {
-		t.Errorf("snapshot data components differ in SIZE across runs of the same seed: %d vs %d bytes — "+
-			"property map order changes the byte layout but must not change how much is written",
+		t.Errorf("snapshot data components differ in SIZE across runs of the same seed: %d vs %d bytes",
 			a.dataBytes, b.dataBytes)
+	}
+	if a.dataDigest != b.dataDigest {
+		t.Errorf("snapshot data components differ BYTE FOR BYTE across runs of the same seed: digests %s vs %s",
+			a.dataDigest, b.dataDigest)
 	}
 	t.Logf("data components %v: %d bytes both runs; digests %s / %s (manifest.json excluded — wall-clock created_at)",
 		a.dataComponents, a.dataBytes, a.dataDigest[:16], b.dataDigest[:16])
@@ -254,31 +247,18 @@ func TestBulkImportParity_Deterministic(t *testing.T) {
 			a.handlesChecked, a.pairsChecked, a.propsChecked, a.parallelPairsSeen,
 			b.handlesChecked, b.pairsChecked, b.propsChecked, b.parallelPairsSeen)
 	}
+	if !slices.Equal(a.faults.regimes, b.faults.regimes) || a.faults.cleanOps != b.faults.cleanOps ||
+		a.faults.crashEmpty != b.faults.crashEmpty || a.faults.crashComplete != b.faults.crashComplete {
+		t.Errorf("fault evidence differs across runs of the same seed: %+v vs %+v", a.faults, b.faults)
+	}
 }
 
-// TestBulkImportParity_ByteBoundary records where byte-reproducibility of a
-// bulk-import publish begins and ends, AS MEASURED under rmp #2466.
-//
-// The finding: publishing the identical record slices twice produces data
-// components with the same names and the same sizes but DIFFERENT bytes, and the
-// whole of that divergence is Go map iteration over the `Properties` maps.
-// Stripping properties entirely, or reducing each item to exactly one property,
-// makes the publish byte-identical. Publishing the same slices twice in one
-// process is already enough to diverge, which rules out the fixture's own
-// construction, a timestamp, or an address.
-//
-// This is NOT a correctness defect: `bulkimport.Node` documents that properties
-// are set in unspecified map order and that "each key is written once, so no
-// ordering can change the result", and the parity pass re-proves that logical
-// claim on every run. What is not promised, and is not true, is byte-identity of
-// the physical image — so two imports of identical data cannot be compared by
-// checksum, and bulk-import snapshots will not deduplicate in content-addressed
-// storage.
-//
-// The test exists so that if any of the three regimes flips, it is noticed. A
-// flip to "multi-property is stable" would be an improvement (property keys
-// presumably ordered) and requires this documentation to be updated, not
-// preserved.
+// TestBulkImportParity_ByteBoundary asserts byte-reproducibility of a
+// bulk-import publish (rmp #2519): publishing identical records twice yields
+// byte-identical data components over the full property matrix, and over the
+// no-property and single-property controls that isolated the original defect
+// under rmp #2466. Before #2519 the full matrix diverged on the first pair,
+// because the importer applied each Properties map in iteration order.
 func TestBulkImportParity_ByteBoundary(t *testing.T) {
 	t.Parallel()
 	sc := bulkImportParityScenario()
@@ -291,24 +271,33 @@ func TestBulkImportParity_ByteBoundary(t *testing.T) {
 	}
 
 	b := ev.byteBoundary
-	t.Logf("byte-reproducibility of an identical republish: multi-property=%t (after %d attempt(s)), "+
+	t.Logf("byte-reproducibility of an identical republish: multi-property=%t (%d pair(s)), "+
 		"no-properties=%t, single-property=%t",
 		b.multiStable, b.attempts, b.noneStable, b.singleStable)
 
-	if b.attempts == 0 {
-		t.Fatal("the byte-boundary arm never ran")
+	if b.attempts != bulkImportByteAttempts {
+		t.Fatalf("the multi-property regime ran %d publish pair(s), want %d", b.attempts, bulkImportByteAttempts)
 	}
-	if b.multiStable {
-		t.Error("multi-property republish is byte-identical: the documented boundary has moved " +
-			"(likely an improvement) and this scenario's documentation is now stale")
+	if !b.multiStable {
+		t.Error("a multi-property republish is not byte-identical: the publish is not byte-reproducible")
 	}
 	if !b.noneStable {
-		t.Error("a property-free republish is not byte-identical: a second source of " +
-			"non-determinism has appeared in the publish path")
+		t.Error("a property-free republish is not byte-identical")
 	}
 	if !b.singleStable {
-		t.Error("a single-property republish is not byte-identical: the divergence is no longer " +
-			"explained by property map order alone")
+		t.Error("a single-property republish is not byte-identical")
+	}
+
+	// The verdict can fail: each regime's instability is a violation.
+	for _, broken := range []bulkImportByteBoundary{
+		{attempts: 0, multiStable: true, noneStable: true, singleStable: true},
+		{attempts: 1, multiStable: false, noneStable: true, singleStable: true},
+		{attempts: 3, multiStable: true, noneStable: false, singleStable: true},
+		{attempts: 3, multiStable: true, noneStable: true, singleStable: false},
+	} {
+		if len(bulkImportCheckByteStability(broken)) == 0 {
+			t.Errorf("an unstable boundary %+v produced no violation", broken)
+		}
 	}
 }
 

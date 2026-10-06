@@ -1,0 +1,131 @@
+spec sk07-receipt-report: 3 sessions, 4 permutations
+# SK07. Three sessions over a batch date. s1 reads the current date and records a
+# receipt for it; s2 closes the batch (date + 1); s3, read-only, reports the receipts
+# of the closed date. In the anomalous interleaving s3 reports the closed batch
+# WITHOUT s1's receipt, which then commits into it: a state no serial order shows.
+# Snapshot isolation permits it (F1). Named interleavings: the full enumeration is
+# 210.
+
+starting permutation: s1r s1w s1c s2w s2c s3b s3r s3c
+step s1r: MATCH (c:Control) RETURN c.date AS date
+date
+----
+1   
+(1 row)
+step s1w: MATCH (c:Control) CREATE (r:Receipt {date: c.date, amount: 4}) RETURN r.date AS date
+date
+----
+1   
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (c:Control) SET c.date = c.date + 1 RETURN c.date AS date
+date
+----
+2   
+(1 row)
+step s2c: COMMIT
+step s3b: BEGIN READ
+step s3r: MATCH (c:Control) OPTIONAL MATCH (r:Receipt) WHERE r.date = c.date - 1 RETURN c.date AS date, count(r) AS closed_receipts
+date|closed_receipts
+----+---------------
+2   |1              
+(1 row)
+step s3c: COMMIT
+final final: MATCH (r:Receipt) RETURN r.date AS date, count(r) AS receipts ORDER BY date
+date|receipts
+----+--------
+1   |1       
+(1 row)
+
+starting permutation: s1r s2w s2c s3b s3r s3c s1w s1c
+step s1r: MATCH (c:Control) RETURN c.date AS date
+date
+----
+1   
+(1 row)
+step s2w: MATCH (c:Control) SET c.date = c.date + 1 RETURN c.date AS date
+date
+----
+2   
+(1 row)
+step s2c: COMMIT
+step s3b: BEGIN READ
+step s3r: MATCH (c:Control) OPTIONAL MATCH (r:Receipt) WHERE r.date = c.date - 1 RETURN c.date AS date, count(r) AS closed_receipts
+date|closed_receipts
+----+---------------
+2   |0              
+(1 row)
+step s3c: COMMIT
+step s1w: MATCH (c:Control) CREATE (r:Receipt {date: c.date, amount: 4}) RETURN r.date AS date
+date
+----
+1   
+(1 row)
+step s1c: COMMIT
+final final: MATCH (r:Receipt) RETURN r.date AS date, count(r) AS receipts ORDER BY date
+date|receipts
+----+--------
+1   |1       
+(1 row)
+
+starting permutation: s1r s2w s2c s1w s3b s3r s1c s3c
+step s1r: MATCH (c:Control) RETURN c.date AS date
+date
+----
+1   
+(1 row)
+step s2w: MATCH (c:Control) SET c.date = c.date + 1 RETURN c.date AS date
+date
+----
+2   
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (c:Control) CREATE (r:Receipt {date: c.date, amount: 4}) RETURN r.date AS date
+date
+----
+1   
+(1 row)
+step s3b: BEGIN READ
+step s3r: MATCH (c:Control) OPTIONAL MATCH (r:Receipt) WHERE r.date = c.date - 1 RETURN c.date AS date, count(r) AS closed_receipts
+date|closed_receipts
+----+---------------
+2   |0              
+(1 row)
+step s1c: COMMIT
+step s3c: COMMIT
+final final: MATCH (r:Receipt) RETURN r.date AS date, count(r) AS receipts ORDER BY date
+date|receipts
+----+--------
+1   |1       
+(1 row)
+
+starting permutation: s2w s2c s1r s1w s1c s3b s3r s3c
+step s2w: MATCH (c:Control) SET c.date = c.date + 1 RETURN c.date AS date
+date
+----
+2   
+(1 row)
+step s2c: COMMIT
+step s1r: MATCH (c:Control) RETURN c.date AS date
+date
+----
+1   
+(1 row)
+step s1w: MATCH (c:Control) CREATE (r:Receipt {date: c.date, amount: 4}) RETURN r.date AS date
+date
+----
+1   
+(1 row)
+step s1c: COMMIT
+step s3b: BEGIN READ
+step s3r: MATCH (c:Control) OPTIONAL MATCH (r:Receipt) WHERE r.date = c.date - 1 RETURN c.date AS date, count(r) AS closed_receipts
+date|closed_receipts
+----+---------------
+2   |1              
+(1 row)
+step s3c: COMMIT
+final final: MATCH (r:Receipt) RETURN r.date AS date, count(r) AS receipts ORDER BY date
+date|receipts
+----+--------
+1   |1       
+(1 row)

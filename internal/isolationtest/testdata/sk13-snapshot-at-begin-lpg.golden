@@ -1,0 +1,64 @@
+spec sk13-snapshot-at-begin-lpg: 2 sessions, 4 permutations
+# SK13 through the lpg API: s1 opens Session.BeginVersionedTx, s2 commits x.v = 2 in
+# its own transaction, s1 then reads x.v. s1 sees 2 only if s2 committed before s1
+# began.
+
+starting permutation: s1b s1r s1c s2w
+step s1b: lpg: Session.BeginVersionedTx
+step s1r: lpg: read x.v
+x.v
+---
+1  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2w: lpg: SetNodeProperty(x, v, 2)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1b s1r s2w s1c
+step s1b: lpg: Session.BeginVersionedTx
+step s1r: lpg: read x.v
+x.v
+---
+1  
+(1 row)
+step s2w: lpg: SetNodeProperty(x, v, 2)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1b s2w s1r s1c
+step s1b: lpg: Session.BeginVersionedTx
+step s2w: lpg: SetNodeProperty(x, v, 2)
+step s1r: lpg: read x.v
+x.v
+---
+1  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s2w s1b s1r s1c
+step s2w: lpg: SetNodeProperty(x, v, 2)
+step s1b: lpg: Session.BeginVersionedTx
+step s1r: lpg: read x.v
+x.v
+---
+2  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)

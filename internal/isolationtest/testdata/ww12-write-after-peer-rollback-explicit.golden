@@ -1,0 +1,117 @@
+spec ww12-write-after-peer-rollback-explicit: 2 sessions, 6 permutations
+# WW12, explicit second writer. s1 writes n and ROLLS BACK; the vacuum is drained
+# right after (H1); s2, open since before s1's write, writes n and commits. A write
+# after the rollback and drain succeeds in every interleaving; one while s1 is open
+# is refused.
+# The second writer is an EXPLICIT transaction that BEGINs before
+# either session's first step, so its snapshot predates the ROLLBACK. A ROLLBACK
+# aborts its transaction (rmp #2973): once it is drained, the older snapshot's write
+# must succeed, exactly as the autocommit arm's does. Before #2973 the ROLLBACK
+# published a commit record and this write was refused.
+
+starting permutation: s1w s1rb s1dr s2w s2c
+step s1w: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2w: MATCH (n:Item {name:'n'}) SET n.x = 2 RETURN n.x AS x
+x
+-
+2
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:Item {name:'n'}) RETURN n.x AS x
+x
+-
+2
+(1 row)
+
+starting permutation: s1w s2w s1rb s1dr s2c
+step s1w: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {name:'n'}) SET n.x = 2 RETURN n.x AS x
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item {name:'n'}) RETURN n.x AS x
+x
+-
+0
+(1 row)
+
+starting permutation: s1w s2w s2c s1rb s1dr
+step s1w: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {name:'n'}) SET n.x = 2 RETURN n.x AS x
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item {name:'n'}) RETURN n.x AS x
+x
+-
+0
+(1 row)
+
+starting permutation: s2w s1w s1rb s1dr s2c
+step s2w: MATCH (n:Item {name:'n'}) SET n.x = 2 RETURN n.x AS x
+x
+-
+2
+(1 row)
+step s1w: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2c: COMMIT
+final final: MATCH (n:Item {name:'n'}) RETURN n.x AS x
+x
+-
+2
+(1 row)
+
+starting permutation: s2w s1w s2c s1rb s1dr
+step s2w: MATCH (n:Item {name:'n'}) SET n.x = 2 RETURN n.x AS x
+x
+-
+2
+(1 row)
+step s1w: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item {name:'n'}) RETURN n.x AS x
+x
+-
+2
+(1 row)
+
+starting permutation: s2w s2c s1w s1rb s1dr
+step s2w: MATCH (n:Item {name:'n'}) SET n.x = 2 RETURN n.x AS x
+x
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item {name:'n'}) RETURN n.x AS x
+x
+-
+2
+(1 row)

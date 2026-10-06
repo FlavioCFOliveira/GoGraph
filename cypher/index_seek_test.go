@@ -64,10 +64,14 @@ func newPersonGraph(n int, withIndex bool) (*lpg.Graph[string, float64], *cypher
 // "person_name_hash" by walking every node in g that carries the label "Person"
 // and reading its "name" property directly from the LPG layer.
 //
-// hash.Index[V].Apply is a no-op for the generic index, so we call Insert
-// directly rather than relying on the change-fan-out mechanism.
+// The index is BOUND to (Person, name) through the Go API ([hash.NewBound]): the
+// planner serves reads only from a bound index, because an unbound one is
+// maintained by no path (rmp #2938). It is populated here with Insert rather than
+// through the change fan-out, since the nodes already exist.
 func installPersonNameIndex(g *lpg.Graph[string, float64]) {
-	idx := hash.New[string]()
+	idx := boundTestHashIndex(g, "Person", "name", func(pv lpg.PropertyValue) (string, bool) {
+		return pv.String()
+	})
 	if err := g.IndexManager().CreateIndex("person_name_hash", idx); err != nil {
 		if !strings.Contains(err.Error(), "already exists") {
 			panic(fmt.Sprintf("installPersonNameIndex CreateIndex: %v", err))
@@ -89,6 +93,44 @@ func installPersonNameIndex(g *lpg.Graph[string, float64]) {
 		}
 		return true
 	})
+}
+
+// boundTestHashIndex returns an empty hash index bound to (label, prop) on g
+// through the Go API, projecting a stored value with project. Its binding reads
+// g's present state, which is what the change fan-out resolves against.
+func boundTestHashIndex[V comparable](g *lpg.Graph[string, float64], label, prop string, project func(lpg.PropertyValue) (V, bool)) *hash.Index[V] {
+	proj := func(v any) (V, bool) {
+		switch x := v.(type) {
+		case lpg.PropertyValue:
+			return project(x)
+		case *lpg.PropertyValue:
+			if x != nil {
+				return project(*x)
+			}
+		}
+		var zero V
+		return zero, false
+	}
+	idx, err := hash.NewBound(hash.Binding[V]{
+		Label:      label,
+		Property:   prop,
+		LabelID:    labelIDOf(g.Registry(), label),
+		PropertyID: keyIDOf(g.PropertyKeys(), prop),
+		Project:    proj,
+		Eligible:   func(id graph.NodeID) bool { return g.HasNodeLabelByID(id, label) },
+		CurrentValue: func(id graph.NodeID) (V, bool) {
+			pv, ok := g.NodePropertyByID(id, prop)
+			if !ok {
+				var zero V
+				return zero, false
+			}
+			return project(pv)
+		},
+	})
+	if err != nil {
+		panic(fmt.Sprintf("boundTestHashIndex: %v", err))
+	}
+	return idx
 }
 
 func drainResultIdx(r *cypher.Result) {
@@ -227,4 +269,24 @@ func TestIndexSeek_NoIndexKeepsLabelScan(t *testing.T) {
 	if !strings.Contains(plan, "LabelScan") && !strings.Contains(plan, "Selection") {
 		t.Errorf("expected LabelScan or Selection without index; plan:\n%s", plan)
 	}
+}
+
+// labelIDOf interns name in r and returns its id as an index.Change carries it.
+// Test names are short constants that the token bound (lpg.MaxTokenLen) cannot
+// refuse, so a refusal is a defect in the test itself and panics.
+func labelIDOf(r *lpg.LabelRegistry, name string) uint32 {
+	id, err := r.Intern(name)
+	if err != nil {
+		panic(err)
+	}
+	return uint32(id)
+}
+
+// keyIDOf is [labelIDOf] for a property key.
+func keyIDOf(r *lpg.PropertyKeyRegistry, name string) uint32 {
+	id, err := r.Intern(name)
+	if err != nil {
+		panic(err)
+	}
+	return uint32(id)
 }

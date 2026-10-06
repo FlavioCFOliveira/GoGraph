@@ -2099,42 +2099,52 @@ func (v *visitor) VisitInvocationName(ctx *gen.InvocationNameContext) interface{
 // Subquery forms
 // -------------------------------------------------------------------------
 
-// subqueryUnionUnsupported is the refusal a UNION inside an EXISTS or COUNT
-// subquery body earns, shared by both so the two cannot drift (rmp #2615).
+// subqueryBody returns the AST a block-form EXISTS or COUNT body is held as:
+// the *ast.SingleQuery itself for a one-branch body, and the *ast.MultiQuery
+// for a UNION body (rmp #2627). A one-part MultiQuery is unwrapped so a body
+// without UNION keeps the shape every single-branch consumer expects.
 //
-// # Why this is a refusal and not an answer
+// # A UNION body is answered, from every branch
 //
-// The grammar admits `regularQuery` in both positions, so a UNION parses; but
-// [ast.ExistsSubquery.Query] and [ast.CountSubquery.Query] are typed
-// *ast.SingleQuery, which cannot hold one. Both visitors used to keep
-// q.Parts[0] and discard the rest — "multi-union inside EXISTS is unusual" —
-// which made the query answer from ONE BRANCH with no error and no
-// notification. MEASURED on a node with a :W edge and no :Z edge,
-// `EXISTS { MATCH (x)-[:Z]->() RETURN 1 UNION MATCH (x)-[:W]->() RETURN 1 }`
-// returned false where the second branch matches: a silent wrong answer.
+// Until rmp #2627 a UNION body was refused (rmp #2615), and before that it was
+// answered from Parts[0] alone — a silent wrong answer. Both reference engines
+// answer it, read from their grammar source: Neo4j's existsExpression and
+// countExpression admit `regularQuery`, which is
+// `singleQuery (UNION (ALL | DISTINCT)? singleQuery)*` (github.com/neo4j/neo4j
+// 2026.07.1, community/cypher/front-end/parser/v5/parser/src/main/antlr4/org/neo4j/cypher/internal/parser/v5/Cypher5Parser.g4:33-35,
+// 671-677), and Memgraph's `EXISTS '{' subqueryBody '}'` and
+// `COUNT '{' subqueryBody '}'` admit `cypherQuery`, which carries `cypherUnion`
+// (github.com/memgraph/memgraph commit 01cc6b67c6d0d1161c15b99cd76ed13959d8f3da,
+// src/query/frontend/opencypher/grammar/Cypher.g4:73, 79-81, 272-273, 318-319).
 //
-// BOTH REFERENCE ENGINES ANSWER THIS QUERY, read from their grammar source:
-// Neo4j's existsExpression and countExpression admit `regularQuery`, which is
-// `singleQuery (UNION (ALL | DISTINCT)? singleQuery)*` (Cypher5Parser.g4:33-35,
-// 671-677), and Memgraph's existsSubquery and countSubquery admit `cypherQuery`,
-// which carries `cypherUnion` (Cypher.g4:73-81, 317-323). So refusing DIVERGES
-// from both, and says so rather than pretending the shape is illegal.
+// # Column compatibility applies inside the body
 //
-// It is refused rather than supported because a silent wrong answer is a DEFECT
-// and reference parity is a FEATURE: supporting it means widening the two AST
-// node types and teaching the subquery driver to translate a multi-branch body,
-// including UNION-versus-UNION-ALL de-duplication inside a subquery. That is
-// filed separately. The openCypher 9 TCK does not cover subquery expressions at
-// all — zero occurrences of `EXISTS {` or `COUNT {` in any feature file — so
-// neither refusing nor supporting moves the conformance count.
-func subqueryUnionUnsupported(rule string, pos ast.Position) *SemaError {
-	return &SemaError{
-		Rule: rule,
-		Pos:  pos,
-		Message: "UNION is not supported inside an " + rule +
-			" subquery body: the query would be answered from its first branch alone. " +
-			"Rewrite the subquery without UNION, or combine the branches outside it",
+// The body is visited by [visitor.VisitRegularQuery], the same visitor a
+// top-level UNION goes through, so its two rules hold here unchanged: UNION and
+// UNION ALL may not be mixed (InvalidClauseComposition), and every branch must
+// project the same columns (DifferentColumnsInUnion, [checkUnionColumns]) —
+// both compile-time errors. That is Neo4j's behaviour too. Its column check is
+// not confined to the top level: VariableChecker.incompatibleReturnColumns
+// fires on EVERY Union statement scope, a subquery body's included, and raises
+// "All sub queries in an UNION must have the same return column names"
+// (github.com/neo4j/neo4j 2026.07.1,
+// community/cypher/front-end/frontend/src/main/scala/org/neo4j/cypher/internal/frontend/phases/parserTransformers/scoping/VariableChecker.scala:143-148,
+// VariableCheckerUtil.scala:450-463, and the message at
+// community/cypher/front-end/ast/src/main/scala/org/neo4j/cypher/internal/ast/semantics/SemanticError.scala:735-738);
+// its EXISTS and COUNT checks run the body through
+// Union.semanticCheckInSubqueryExpressionContext, which applies the same
+// per-branch checks as a top-level UNION (ast/Query.scala:1200-1208 and
+// ast/semantics/SemanticExpressionCheck.scala:899-943). The openCypher TCK pins
+// the rule for a top-level UNION (clauses/union/Union1.feature [5] and
+// Union2.feature [5], "Failing when UNION has different columns" /
+// "Failing when UNION ALL has different columns"); it has no scenario for a
+// UNION inside a subquery expression, so the rule is applied here by the same
+// code rather than by a second policy.
+func subqueryBody(q *ast.MultiQuery) ast.Query {
+	if len(q.Parts) == 1 {
+		return q.Parts[0]
 	}
+	return q
 }
 
 // VisitSubqueryExist handles EXISTS { … }.
@@ -2152,17 +2162,16 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 			}
 			return &ast.ExistsSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q}
 		case *ast.MultiQuery:
-			// A UNION body. Refused rather than answered from Parts[0], which is
-			// what this did until rmp #2615 — silently, and wrongly. See
-			// [subqueryUnionUnsupported].
-			if len(q.Parts) > 1 {
-				return subqueryUnionUnsupported("EXISTS", positionOf(ctx))
-			}
+			// A UNION body: every branch is held and every branch is checked, so
+			// an update clause in any branch is refused (rmp #2627). See
+			// [subqueryBody].
 			if len(q.Parts) > 0 {
-				if err := existsSubqueryHasUpdateClause(q.Parts[0]); err != nil {
-					return &SemaError{Rule: "subqueryExist", Pos: positionOf(ctx), Message: err.Error()}
+				for _, part := range q.Parts {
+					if err := existsSubqueryHasUpdateClause(part); err != nil {
+						return &SemaError{Rule: "subqueryExist", Pos: positionOf(ctx), Message: err.Error()}
+					}
 				}
-				return &ast.ExistsSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q.Parts[0]}
+				return &ast.ExistsSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: subqueryBody(q)}
 			}
 		}
 	}
@@ -2205,8 +2214,8 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 // reading clauses is well formed.
 //
 // The clauses are assembled exactly as [visitor.VisitSinglePartQ] does. The
-// resulting RETURN-less SingleQuery is the same shape that existsToSingleQuery
-// and countToSingleQuery already synthesise for the bare-pattern form, so the
+// resulting RETURN-less SingleQuery is the same shape that existsToQuery
+// and countToQuery already synthesise for the bare-pattern form, so the
 // downstream evaluator needs no change.
 func (v *visitor) visitSubqueryReadingBlock(ctx antlr.ParserRuleContext, rss []gen.IReadingStatementContext) (*ast.SingleQuery, *SemaError) {
 	q := &ast.SingleQuery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
@@ -2254,13 +2263,10 @@ func (v *visitor) VisitSubqueryCount(ctx *gen.SubqueryCountContext) interface{} 
 		case *ast.SingleQuery:
 			return &ast.CountSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q}
 		case *ast.MultiQuery:
-			// Same refusal as the EXISTS sibling, through the same helper so the
-			// two cannot drift (rmp #2615).
-			if len(q.Parts) > 1 {
-				return subqueryUnionUnsupported("COUNT", positionOf(ctx))
-			}
+			// A UNION body, held whole through the same helper as the EXISTS
+			// sibling so the two cannot drift (rmp #2627). See [subqueryBody].
 			if len(q.Parts) > 0 {
-				return &ast.CountSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q.Parts[0]}
+				return &ast.CountSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: subqueryBody(q)}
 			}
 		}
 	}

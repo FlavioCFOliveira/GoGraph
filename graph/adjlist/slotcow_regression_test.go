@@ -42,7 +42,7 @@ func unbracketedBytesPerOp(t *testing.T, n int) float64 {
 		if err := a.AddEdge(src, sentinel, 2); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
-		a.RemoveEdge(src, sentinel)
+		must(t).E(a.RemoveEdge(src, sentinel))
 	}
 	runtime.ReadMemStats(&after)
 	// Assert the writes happened, so a pass cannot come from a loop that
@@ -112,7 +112,7 @@ func TestSlotCOW_PinnedVersionNeverChangesUnderConcurrentUnbracketedWrites(t *te
 					t.Error(err)
 					return
 				}
-				a.RemoveEdge(hub, dst)
+				must(t).E(a.RemoveEdge(hub, dst))
 			}
 		}(w)
 	}

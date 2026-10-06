@@ -1,0 +1,137 @@
+spec sk02-swap-write-skew: 2 sessions, 6 permutations
+# SK02. s1 turns every apple into a pear; s2 turns every pear into an apple. Each
+# reads the set the other writes and they write disjoint nodes, so snapshot
+# isolation PERMITS both to commit and the sets end up swapped — a result no serial
+# order produces. PostgreSQL SERIALIZABLE aborts one; GoGraph is SI (F1).
+
+starting permutation: s1w s1c s2w s2c
+step s1w: MATCH (f:Fruit {kind:'apple'}) SET f.kind = 'pear' RETURN count(f) AS changed
+changed
+-------
+2      
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (f:Fruit {kind:'pear'}) SET f.kind = 'apple' RETURN count(f) AS changed
+changed
+-------
+2      
+(1 row)
+step s2c: COMMIT
+final final: MATCH (f:Fruit) RETURN f.name AS name, f.kind AS kind ORDER BY name
+name|kind   
+----+-------
+"f1"|"pear" 
+"f2"|"pear" 
+"f3"|"apple"
+"f4"|"apple"
+(4 rows)
+
+starting permutation: s1w s2w s1c s2c
+step s1w: MATCH (f:Fruit {kind:'apple'}) SET f.kind = 'pear' RETURN count(f) AS changed
+changed
+-------
+2      
+(1 row)
+step s2w: MATCH (f:Fruit {kind:'pear'}) SET f.kind = 'apple' RETURN count(f) AS changed
+changed
+-------
+2      
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (f:Fruit) RETURN f.name AS name, f.kind AS kind ORDER BY name
+name|kind   
+----+-------
+"f1"|"pear" 
+"f2"|"pear" 
+"f3"|"apple"
+"f4"|"apple"
+(4 rows)
+
+starting permutation: s1w s2w s2c s1c
+step s1w: MATCH (f:Fruit {kind:'apple'}) SET f.kind = 'pear' RETURN count(f) AS changed
+changed
+-------
+2      
+(1 row)
+step s2w: MATCH (f:Fruit {kind:'pear'}) SET f.kind = 'apple' RETURN count(f) AS changed
+changed
+-------
+2      
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (f:Fruit) RETURN f.name AS name, f.kind AS kind ORDER BY name
+name|kind   
+----+-------
+"f1"|"pear" 
+"f2"|"pear" 
+"f3"|"apple"
+"f4"|"apple"
+(4 rows)
+
+starting permutation: s2w s1w s1c s2c
+step s2w: MATCH (f:Fruit {kind:'pear'}) SET f.kind = 'apple' RETURN count(f) AS changed
+changed
+-------
+2      
+(1 row)
+step s1w: MATCH (f:Fruit {kind:'apple'}) SET f.kind = 'pear' RETURN count(f) AS changed
+changed
+-------
+2      
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (f:Fruit) RETURN f.name AS name, f.kind AS kind ORDER BY name
+name|kind   
+----+-------
+"f1"|"pear" 
+"f2"|"pear" 
+"f3"|"apple"
+"f4"|"apple"
+(4 rows)
+
+starting permutation: s2w s1w s2c s1c
+step s2w: MATCH (f:Fruit {kind:'pear'}) SET f.kind = 'apple' RETURN count(f) AS changed
+changed
+-------
+2      
+(1 row)
+step s1w: MATCH (f:Fruit {kind:'apple'}) SET f.kind = 'pear' RETURN count(f) AS changed
+changed
+-------
+2      
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (f:Fruit) RETURN f.name AS name, f.kind AS kind ORDER BY name
+name|kind   
+----+-------
+"f1"|"pear" 
+"f2"|"pear" 
+"f3"|"apple"
+"f4"|"apple"
+(4 rows)
+
+starting permutation: s2w s2c s1w s1c
+step s2w: MATCH (f:Fruit {kind:'pear'}) SET f.kind = 'apple' RETURN count(f) AS changed
+changed
+-------
+2      
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (f:Fruit {kind:'apple'}) SET f.kind = 'pear' RETURN count(f) AS changed
+changed
+-------
+2      
+(1 row)
+step s1c: COMMIT
+final final: MATCH (f:Fruit) RETURN f.name AS name, f.kind AS kind ORDER BY name
+name|kind   
+----+-------
+"f1"|"pear" 
+"f2"|"pear" 
+"f3"|"apple"
+"f4"|"apple"
+(4 rows)

@@ -36,7 +36,7 @@ import (
 // outer is the plan produced so far (before the WHERE clause).
 func (t *translator) translateExistsPredicate(predExpr ast.Expression, outer LogicalPlan) (LogicalPlan, error) {
 	// Case 1: EXISTS { … }
-	if exists, ok := predExpr.(*ast.ExistsSubquery); ok {
+	if exists, ok := predExpr.(*ast.ExistsSubquery); ok && !isUnionBody(exists) {
 		tag := nextArgTag()
 		inner, err := t.existsSubPlan(exists, outer, tag)
 		if err != nil {
@@ -47,7 +47,7 @@ func (t *translator) translateExistsPredicate(predExpr ast.Expression, outer Log
 
 	// Case 2: NOT EXISTS { … } — represented as UnaryOp{"NOT", ExistsSubquery}
 	if notOp, ok := predExpr.(*ast.UnaryOp); ok && notOp.Operator == "NOT" {
-		if exists, ok := notOp.Operand.(*ast.ExistsSubquery); ok {
+		if exists, ok := notOp.Operand.(*ast.ExistsSubquery); ok && !isUnionBody(exists) {
 			tag := nextArgTag()
 			inner, err := t.existsSubPlan(exists, outer, tag)
 			if err != nil {
@@ -58,7 +58,18 @@ func (t *translator) translateExistsPredicate(predExpr ast.Expression, outer Log
 	}
 
 	// Case 3: plain predicate → Selection (with AST preserved for execution).
+	// An EXISTS whose body is a UNION also lands here: the Selection evaluates
+	// it as an expression through the subquery evaluator, which drives every
+	// branch with its own correlated seed and stops at the first branch that
+	// yields a row (rmp #2627). A SemiApply inner side has ONE Argument leaf
+	// and cannot host several independently seeded branches.
 	return NewSelectionExpr(predExpr.String(), predExpr, outer), nil
+}
+
+// isUnionBody reports whether the body of e is a multi-branch UNION.
+func isUnionBody(e *ast.ExistsSubquery) bool {
+	_, ok := e.Query.(*ast.MultiQuery)
+	return ok
 }
 
 // existsSubPlan builds the inner plan for a SemiApply / AntiSemiApply.
@@ -142,12 +153,13 @@ func (t *translator) existsSubPlan(exists *ast.ExistsSubquery, outer LogicalPlan
 		return plan, nil
 	}
 
-	// EXISTS { MATCH … } — translate the full subquery.
-	if exists.Query != nil {
+	// EXISTS { MATCH … } — translate the full subquery. A UNION body never
+	// reaches here: translateExistsPredicate routes it to the expression path.
+	if body, ok := exists.Query.(*ast.SingleQuery); ok && body != nil {
 		// Replace the first reading clause scan root with arg by processing the
 		// subquery but pre-seeding the plan with arg.
 		plan := LogicalPlan(arg)
-		for _, rc := range exists.Query.ReadingClauses {
+		for _, rc := range body.ReadingClauses {
 			var err error
 			plan, err = t.readingClause(rc, plan)
 			if err != nil {
@@ -184,8 +196,8 @@ func (t *translator) existsSubPlan(exists *ast.ExistsSubquery, outer LogicalPlan
 		// builder now applies to the SemiApply / AntiSemiApply inner side; see
 		// `case *ir.SemiApply` in cypher/api.go. Neither half is correct without the
 		// other.
-		if exists.Query.Return != nil {
-			projected, err := t.returnClause(exists.Query.Return, plan)
+		if body.Return != nil {
+			projected, err := t.returnClause(body.Return, plan)
 			if err != nil {
 				return nil, err
 			}

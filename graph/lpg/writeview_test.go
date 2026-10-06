@@ -113,8 +113,9 @@ func TestWriteView_SecondWriteDoesNotAdoptAnOverlappingTransactionsRecord(t *tes
 
 // TestWriteView_CarriesTheTransactionRatherThanResolvingIt is the direct,
 // non-concurrent form of the same property: with a foreign transaction published
-// on the slot, a view-driven write must count ZERO ambient resolutions, and a view
-// built from the zero transaction must count some.
+// on the slot, a view-driven write, a zero-view write and a raw adjacency write
+// must each count ZERO ambient resolutions, and the graph's untransacted stamp
+// must count some.
 //
 // It pins the two halves against each other, so neither the threading nor the
 // instrument can rot without a failure.
@@ -142,12 +143,38 @@ func TestWriteView_CarriesTheTransactionRatherThanResolvingIt(t *testing.T) {
 			"%d version(s) through the ambient slot", n)
 	}
 
+	// A view over the zero WriteTx no longer writes without a transaction: it runs
+	// as a direct write's implicit transaction (rmp #2947), so it resolves nothing
+	// through the ambient slot either, and over the foreign transaction's pending
+	// version it is refused rather than stacked on it.
+	direct := g.AmbientVersionResolutions()
+	if err := g.Writer(WriteTx{}).SetNodeProperty("n", "v", Int64Value(2)); !errors.Is(err, ErrDirectWriteConflict) {
+		t.Fatalf("a zero-view write over a pending foreign version returned %v, want ErrDirectWriteConflict", err)
+	}
+	if n := g.AmbientVersionResolutions() - direct; n != 0 {
+		t.Fatalf("a zero-view write resolved %d version(s) through the ambient slot", n)
+	}
+
+	// A raw adjacency write carries no transaction either, and it is its own
+	// transaction (rmp #2967): it resolves nothing through the slot.
+	raw := g.AmbientVersionResolutions()
+	if err := g.AdjList().AddEdge("x", "y", 1); err != nil {
+		t.Fatalf("raw adjacency write: %v", err)
+	}
+	if n := g.AmbientVersionResolutions() - raw; n != 0 {
+		t.Fatalf("a raw adjacency write resolved %d version(s) through the ambient slot", n)
+	}
+
+	// The instrument is still alive: the graph's untransacted stamp resolves
+	// through the slot while a transaction is published on it, and it is counted.
+	// No exported write path reaches it any more, so the liveness control the
+	// zero assertions above rely on lives here.
 	bypassed := g.AmbientVersionResolutions()
-	if err := g.Writer(WriteTx{}).SetNodeProperty("n", "v", Int64Value(2)); err != nil {
-		t.Fatalf("bypassed write: %v", err)
+	if info, _ := g.deltaStamp(nil); info == nil {
+		t.Fatal("the untransacted stamp did not resolve the published transaction")
 	}
 	if n := g.AmbientVersionResolutions() - bypassed; n == 0 {
-		t.Fatal("a write through a WriteView that carries NO transaction resolved nothing " +
+		t.Fatal("a stamp that carries NO transaction resolved nothing " +
 			"through the ambient slot; the instrument the gate above relies on is dead")
 	}
 }
@@ -188,28 +215,60 @@ func TestWriteView_CoversEveryTransactionalMutator(t *testing.T) {
 	// breaks the build here, which is the point; a store that gains a threaded form
 	// with no WriteView method must be added.
 	calls := map[string]func(){
-		"addNodeInfo":                    func() { _ = wv.AddNode("n") },
-		"removeNodeInfo":                 func() { wv.RemoveNode("n") },
-		"reviveInfo":                     func() { wv.Revive("n") },
-		"setNodeLabelInfo":               func() { _ = wv.SetNodeLabel("n", "L") },
-		"removeNodeLabelInfo":            func() { wv.RemoveNodeLabel("n", "L") },
-		"setNodePropertyInfo":            func() { _ = wv.SetNodeProperty("n", "k", Int64Value(1)) },
-		"delNodePropertyInfo":            func() { wv.DelNodeProperty("n", "k") },
-		"addEdgeInfo":                    func() { _ = wv.AddEdge("n", "m", 0) },
-		"addEdgeHInfo":                   func() { _, _ = wv.AddEdgeH("n", "m", 0) },
-		"addEdgeHIfAbsentInfo":           func() { _, _ = wv.AddEdgeHIfAbsent("n", "m", 0, 99) },
-		"removeEdgeByHandleInfo":         func() { wv.RemoveEdgeByHandle("n", "m", 99) },
-		"setEdgeLabelInfo":               func() { wv.SetEdgeLabel("n", "m", "R") },
-		"removeEdgeLabelInfo":            func() { wv.RemoveEdgeLabel("n", "m", "R") },
-		"setEdgePropertyInfo":            func() { _ = wv.SetEdgeProperty("n", "m", "k", Int64Value(1)) },
-		"delEdgePropertyInfo":            func() { wv.DelEdgeProperty("n", "m", "k") },
-		"setEdgeLabelAtInfo":             func() { wv.SetEdgeLabelAt("n", "m", 0, "R") },
-		"setEdgePropertyAtInfo":          func() { _ = wv.SetEdgePropertyAt("n", "m", 0, "k", Int64Value(1)) },
-		"removeEdgeInstanceInfo":         func() { wv.RemoveEdgeInstance("n", "m", 0) },
-		"setEdgeLabelByHandleInfo":       func() { wv.SetEdgeLabelByHandle("n", "m", 99, "R") },
-		"setEdgePropertyByHandleInfo":    func() { _ = wv.SetEdgePropertyByHandle("n", "m", 99, "k", Int64Value(1)) },
-		"delEdgePropertyByHandleInfo":    func() { wv.DelEdgePropertyByHandle("n", "m", 99, "k") },
-		"removeEdgeInstanceByHandleInfo": func() { wv.RemoveEdgeInstanceByHandle("n", "m", 99) },
+		"addNodeInfo":      func() { _ = wv.AddNode("n") },
+		"removeNodeInfo":   func() { _, _ = wv.RemoveNode("n") },
+		"reviveInfo":       func() { must(t).E(wv.Revive("n")) },
+		"setNodeLabelInfo": func() { _ = wv.SetNodeLabel("n", "L") },
+		"removeNodeLabelInfo": func() {
+			if err := wv.RemoveNodeLabel("n", "L"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"setNodePropertyInfo": func() { _ = wv.SetNodeProperty("n", "k", Int64Value(1)) },
+		"delNodePropertyInfo": func() {
+			if err := wv.DelNodeProperty("n", "k"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"addEdgeInfo":            func() { _ = wv.AddEdge("n", "m", 0) },
+		"addEdgeHInfo":           func() { _, _ = wv.AddEdgeH("n", "m", 0) },
+		"addEdgeHIfAbsentInfo":   func() { _, _ = wv.AddEdgeHIfAbsent("n", "m", 0, 99) },
+		"removeEdgeByHandleInfo": func() { wv.RemoveEdgeByHandle("n", "m", 99) },
+		"setEdgeLabelInfo": func() {
+			if err := wv.SetEdgeLabel("n", "m", "R"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"removeEdgeLabelInfo": func() {
+			if err := wv.RemoveEdgeLabel("n", "m", "R"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"setEdgePropertyInfo": func() { _ = wv.SetEdgeProperty("n", "m", "k", Int64Value(1)) },
+		"delEdgePropertyInfo": func() {
+			if err := wv.DelEdgeProperty("n", "m", "k"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"setEdgeLabelAtInfo": func() {
+			if err := wv.SetEdgeLabelAt("n", "m", 0, "R"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"setEdgePropertyAtInfo":  func() { _ = wv.SetEdgePropertyAt("n", "m", 0, "k", Int64Value(1)) },
+		"removeEdgeInstanceInfo": func() { must(t).E(wv.RemoveEdgeInstance("n", "m", 0)) },
+		"setEdgeLabelByHandleInfo": func() {
+			if err := wv.SetEdgeLabelByHandle("n", "m", 99, "R"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"setEdgePropertyByHandleInfo": func() { _ = wv.SetEdgePropertyByHandle("n", "m", 99, "k", Int64Value(1)) },
+		"delEdgePropertyByHandleInfo": func() {
+			if err := wv.DelEdgePropertyByHandle("n", "m", 99, "k"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"removeEdgeInstanceByHandleInfo": func() { must(t).E(wv.RemoveEdgeInstanceByHandle("n", "m", 99)) },
 		"removeAllEdgesFromInfo":         func() { wv.RemoveAllEdgesFrom("n") },
 		"removeEdgeInfo(via RemoveEdge)": func() { wv.RemoveEdge("n", "m") },
 	}
@@ -266,7 +325,7 @@ func TestWriteCtx_UndoOfADoomedTransactionIsNotRefused(t *testing.T) {
 		defer tx.ExitUndo()
 		if tx.w.doomed() {
 			t.Fatal("the transaction still reports doomed inside the undo region; " +
-				"clearEdgePairState and friends read that to mean 'my write was refused'")
+				"clearPairSides and friends read that to mean 'my write was refused'")
 		}
 		if err := wv.SetNodeProperty("n", "v", Int64Value(0)); err != nil {
 			t.Fatalf("the undo's inverse was REFUSED: %v.\n"+

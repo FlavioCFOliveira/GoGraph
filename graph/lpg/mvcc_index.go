@@ -58,7 +58,69 @@ type idxEntry struct {
 // Lazily allocated, so a graph that has never removed a label holds nothing.
 type deferredIdx struct {
 	pending map[idxEntry]commitStamp
-	mu      sync.Mutex
+	// retiring names the pending keys a node RETIREMENT deferred, as opposed to
+	// a label removal (rmp #2964). The distinction decides who may cancel one: a
+	// label removal is withdrawn by the label coming back
+	// ([Graph.setNodeLabelInfo]); a retirement's removals only by the node coming
+	// back ([Graph.restoreLabelBitmaps]). A label re-asserted on a node whose
+	// retirement is in flight or done does not make it a member again, and
+	// cancelling on it left a deleted node in the label bitmap for good.
+	//
+	// A SEPARATE map that only retirements populate, so label churn pays nothing
+	// for it: a flag in pending's value widened every slot of that map, which a
+	// plain add/remove cycle reallocates (measured at +64 B/op). Every key in it
+	// is also in pending, and it is guarded by mu with pending.
+	retiring map[idxEntry]struct{}
+	// shadow keeps, for a pending key whose stamp a deferral by ANOTHER
+	// transaction replaced, the stamp it replaced (rmp #2947, audit F4). One key
+	// is one removal of one bitmap entry, but two transactions can owe it at once:
+	// a node retirement claims the node's existence and not its label store, so a
+	// peer's label removal on the same node can still defer the same key before
+	// that peer is refused by its own cross-check. Replacing the stamp outright
+	// made the removal hang on the LAST deferrer alone — when the peer then
+	// aborted, its withdrawal dropped the key, and with it the retirement's
+	// removal: the deleted node stayed in the label bitmap for good. Withdrawing an
+	// aborted stamp now reinstates the one it replaced instead.
+	//
+	// One level is enough: two removals of the same label by two transactions
+	// conflict on the label store, and two retirements of the same node on the
+	// existence store, so at most one of each can be pending on a key at once.
+	// Allocated only when a replacement first happens, guarded by mu.
+	shadow map[idxEntry]shadowStamp
+	mu     sync.Mutex
+}
+
+// shadowStamp is a replaced pending stamp and whether the key was a
+// retirement's removal under it; see [deferredIdx.shadow].
+type shadowStamp struct {
+	st       commitStamp
+	retiring bool
+}
+
+// dropLocked removes k from every map, releasing each when it empties. The
+// caller holds mu.
+func (d *deferredIdx) dropLocked(k idxEntry) {
+	delete(d.pending, k)
+	if len(d.pending) == 0 {
+		d.pending = nil
+	}
+	if d.retiring != nil {
+		delete(d.retiring, k)
+		if len(d.retiring) == 0 {
+			d.retiring = nil
+		}
+	}
+	d.dropShadowLocked(k)
+}
+
+// dropShadowLocked forgets k's replaced stamp. The caller holds mu.
+func (d *deferredIdx) dropShadowLocked(k idxEntry) {
+	if d.shadow != nil {
+		delete(d.shadow, k)
+		if len(d.shadow) == 0 {
+			d.shadow = nil
+		}
+	}
 }
 
 // deferLabelIndexRemoval records that id should leave lid's bitmap, without
@@ -66,6 +128,10 @@ type deferredIdx struct {
 //
 // Returns false when versioning is disarmed, in which case the caller removes
 // the entry immediately as it always did.
+//
+// retire marks a removal made by a node retirement; see [deferredIdx.retiring].
+// It is sticky: a key once deferred by a retirement stays a retirement's removal
+// when a later label removal re-defers it.
 //
 // # Whose instant the removal is stamped with (rmp #2303, MVCC B1)
 //
@@ -125,7 +191,7 @@ type deferredIdx struct {
 // label can still find it, and no reader's snapshot can legitimately see an add
 // made by a transaction that is aborting. This is the same exemption
 // [writeCtx.undoing] already grants the conflict test, and for the same reason.
-func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID, tx *writeCtx) bool {
+func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID, tx *writeCtx, retire bool) bool {
 	if !g.indexRemovalDeferrable(tx) {
 		return false
 	}
@@ -135,8 +201,28 @@ func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID, tx *wr
 	if g.idxDeferred.pending == nil {
 		g.idxDeferred.pending = make(map[idxEntry]commitStamp, 8)
 	}
-	_, existed := g.idxDeferred.pending[k]
+	prev, existed := g.idxDeferred.pending[k]
+	if existed && (prev.info == nil || prev.info != info) {
+		// Another transaction's removal of the same entry is pending: keep its
+		// stamp, so this one's abort reinstates it ([deferredIdx.shadow]).
+		if g.idxDeferred.shadow == nil {
+			g.idxDeferred.shadow = make(map[idxEntry]shadowStamp, 1)
+		}
+		_, wasRetiring := g.idxDeferred.retiring[k]
+		g.idxDeferred.shadow[k] = shadowStamp{st: prev, retiring: wasRetiring}
+	}
 	g.idxDeferred.pending[k] = commitStamp{info: info, ts: ts}
+	if tx != nil {
+		// An abort sweeps the deferred removals only when it wrote one; see
+		// [Graph.withdrawAbortedNow].
+		tx.tx.Touch(touchedIdxRemoval)
+	}
+	if retire {
+		if g.idxDeferred.retiring == nil {
+			g.idxDeferred.retiring = make(map[idxEntry]struct{}, 4)
+		}
+		g.idxDeferred.retiring[k] = struct{}{}
+	}
 	g.idxDeferred.mu.Unlock()
 	if !existed {
 		g.idxPendingActive.Add(1)
@@ -180,18 +266,24 @@ func (g *Graph[N, W]) indexRemovalDeferrable(tx *writeCtx) bool {
 // failed statement stripped, and without this the strip's deferred removal
 // would still fire at the next sweep and delete an entry that is legitimately
 // present again.
-func (g *Graph[N, W]) cancelDeferredIndexRemoval(lid uint32, id graph.NodeID) {
+//
+// retirements says whether a removal made by a node retirement may be withdrawn
+// too. Only a revival passes true; a label re-assert passes false, because the
+// node it re-labels is still going away (rmp #2964, see [deferredIdx.retiring]).
+func (g *Graph[N, W]) cancelDeferredIndexRemoval(lid uint32, id graph.NodeID, retirements bool) {
 	if g.idxPendingActive.Load() == 0 {
 		return
 	}
 	k := idxEntry{id: id, lid: lid}
 	g.idxDeferred.mu.Lock()
 	_, existed := g.idxDeferred.pending[k]
-	if existed {
-		delete(g.idxDeferred.pending, k)
-		if len(g.idxDeferred.pending) == 0 {
-			g.idxDeferred.pending = nil
+	if existed && !retirements {
+		if _, retiring := g.idxDeferred.retiring[k]; retiring {
+			existed = false
 		}
+	}
+	if existed {
+		g.idxDeferred.dropLocked(k)
 	}
 	g.idxDeferred.mu.Unlock()
 	if existed {
@@ -247,10 +339,7 @@ func (g *Graph[N, W]) applyDeferredIndexRemovals(watermark uint64) int {
 		}
 	}
 	for _, k := range ready {
-		delete(g.idxDeferred.pending, k)
-	}
-	if len(g.idxDeferred.pending) == 0 {
-		g.idxDeferred.pending = nil
+		g.idxDeferred.dropLocked(k)
 	}
 	// Under the lock. See the comment above for the lost row this closes; the
 	// lock order is idxDeferred.mu then the index's own lock, which is the order
@@ -650,6 +739,11 @@ func (g *Graph[N, W]) labelBitmapNeedsFilter(s *Snapshot) bool {
 // filtered scan.
 //
 // Safe for concurrent use.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (g *Graph[N, W]) LabelCountExact(lid LabelID, s *Snapshot) (int64, bool) {
 	// THE GATE IS SAMPLED ON BOTH SIDES OF THE CARDINALITY, and the second
 	// sample is the whole of rmp #2688.
@@ -937,6 +1031,11 @@ func (g *Graph[N, W]) fireLabelCountAsOfWindowProbe() {
 // for that limit stated in full.
 //
 // Safe for concurrent use.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (g *Graph[N, W]) LabelCountBound(lid LabelID, s *Snapshot) (n int64, exact bool) {
 	raw := int64(g.nodeIdx.Count(uint32(lid)))
 	// The seam sits HERE, between the two reads, because that is the only place
@@ -993,6 +1092,11 @@ func (g *Graph[N, W]) LabelCountBound(lid LabelID, s *Snapshot) (n int64, exact 
 // for that limit stated in full.
 //
 // Safe for concurrent use.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (g *Graph[N, W]) LabelsCountExact(lids []LabelID, s *Snapshot) (int64, bool) {
 	if len(lids) == 0 {
 		return 0, false

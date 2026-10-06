@@ -219,7 +219,7 @@ func TestPatternPredicate_BoundEndSnapshotVisibility(t *testing.T) {
 	}
 	defer g.EndRead(old)
 
-	g.RemoveEdge("h", "s7")
+	must(t).E(g.RemoveEdge("h", "s7"))
 	if err := g.AddEdgeLabeled("h", "lone", 1, "LINK"); err != nil {
 		t.Fatalf("AddEdgeLabeled: %v", err)
 	}

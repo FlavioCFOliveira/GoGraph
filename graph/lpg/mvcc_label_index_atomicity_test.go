@@ -45,7 +45,7 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 			t.Fatalf("AddNode: %v", err)
 		}
 	}
-	lid := g.reg.Intern("L")
+	lid := g.reg.intern("L")
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -64,9 +64,14 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 			}
 			k := keys[i%nodes]
 			if i%2 == 0 {
-				_ = g.ApplyAtomically(func() error { return g.SetNodeLabel(k, "L") })
+				_ = g.ApplyAtomicallyTx(func(tx WriteTx) error { return g.Writer(tx).SetNodeLabel(k, "L") })
 			} else {
-				_ = g.ApplyAtomically(func() error { g.RemoveNodeLabel(k, "L"); return nil })
+				_ = g.ApplyAtomicallyTx(func(tx WriteTx) error {
+					if err := g.Writer(tx).RemoveNodeLabel(k, "L"); err != nil {
+						t.Errorf("g.RemoveNodeLabel(k, \"L\"): %v", err)
+					}
+					return nil
+				})
 			}
 			// Bumped AFTER the operation completes, so an epoch the reader finds
 			// unchanged across its window means no operation FINISHED inside it —

@@ -1,0 +1,120 @@
+spec ab04-retry-loop-converges: 2 sessions, 6 permutations
+# AB04. WW03's two increments of x.v, each run by a client that retries the whole
+# transaction on a retriable refusal (a serialization conflict, or the poisoning it
+# leaves), up to three attempts. The final x.v must equal the number of increments
+# acknowledged, in every interleaving: a retry never double-applies and an
+# acknowledged increment is never lost.
+
+starting permutation: s1go s1fin s2go s2fin
+step s1go: <retrier: BEGIN; SET x.v = x.v + 1>
+step s1fin: <retrier: COMMIT, retry on a retriable refusal>
+attempts|acknowledged
+--------+------------
+1       |true        
+(1 row)
+step s2go: <retrier: BEGIN; SET x.v = x.v + 1>
+step s2fin: <retrier: COMMIT, retry on a retriable refusal>
+attempts|acknowledged
+--------+------------
+1       |true        
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1go s2go s1fin s2fin
+step s1go: <retrier: BEGIN; SET x.v = x.v + 1>
+step s2go: <retrier: BEGIN; SET x.v = x.v + 1>
+step s1fin: <retrier: COMMIT, retry on a retriable refusal>
+attempts|acknowledged
+--------+------------
+1       |true        
+(1 row)
+step s2fin: <retrier: COMMIT, retry on a retriable refusal>
+attempts|acknowledged
+--------+------------
+2       |true        
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1go s2go s2fin s1fin
+step s1go: <retrier: BEGIN; SET x.v = x.v + 1>
+step s2go: <retrier: BEGIN; SET x.v = x.v + 1>
+step s2fin: <retrier: COMMIT, retry on a retriable refusal>
+attempts|acknowledged
+--------+------------
+3       |false       
+(1 row)
+step s1fin: <retrier: COMMIT, retry on a retriable refusal>
+attempts|acknowledged
+--------+------------
+1       |true        
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+
+starting permutation: s2go s1go s1fin s2fin
+step s2go: <retrier: BEGIN; SET x.v = x.v + 1>
+step s1go: <retrier: BEGIN; SET x.v = x.v + 1>
+step s1fin: <retrier: COMMIT, retry on a retriable refusal>
+attempts|acknowledged
+--------+------------
+3       |false       
+(1 row)
+step s2fin: <retrier: COMMIT, retry on a retriable refusal>
+attempts|acknowledged
+--------+------------
+1       |true        
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+
+starting permutation: s2go s1go s2fin s1fin
+step s2go: <retrier: BEGIN; SET x.v = x.v + 1>
+step s1go: <retrier: BEGIN; SET x.v = x.v + 1>
+step s2fin: <retrier: COMMIT, retry on a retriable refusal>
+attempts|acknowledged
+--------+------------
+1       |true        
+(1 row)
+step s1fin: <retrier: COMMIT, retry on a retriable refusal>
+attempts|acknowledged
+--------+------------
+2       |true        
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s2go s2fin s1go s1fin
+step s2go: <retrier: BEGIN; SET x.v = x.v + 1>
+step s2fin: <retrier: COMMIT, retry on a retriable refusal>
+attempts|acknowledged
+--------+------------
+1       |true        
+(1 row)
+step s1go: <retrier: BEGIN; SET x.v = x.v + 1>
+step s1fin: <retrier: COMMIT, retry on a retriable refusal>
+attempts|acknowledged
+--------+------------
+1       |true        
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)

@@ -38,12 +38,16 @@ func TestEdgeHandles_RoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	h1, _ := g.AddEdgeH("x", "y", 1)
-	g.SetEdgeLabelByHandle("x", "y", h1, "USES")
+	if err := g.SetEdgeLabelByHandle("x", "y", h1, "USES"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.SetEdgePropertyByHandle("x", "y", h1, "w", lpg.Int64Value(7)); err != nil {
 		t.Fatalf("SetEdgePropertyByHandle: %v", err)
 	}
 	h2, _ := g.AddEdgeH("x", "y", 1)
-	g.SetEdgeLabelByHandle("x", "y", h2, "CALLS")
+	if err := g.SetEdgeLabelByHandle("x", "y", h2, "CALLS"); err != nil {
+		t.Fatal(err)
+	}
 
 	var buf bytes.Buffer
 	_, _, emitted, err := WriteEdgeHandles(&buf, g, nil)
@@ -73,7 +77,9 @@ func TestEdgeHandles_RoundTrip(t *testing.T) {
 	if err := ApplyCSRToGraph(fresh, &rbCSR); err != nil {
 		t.Fatalf("ApplyCSRToGraph: %v", err)
 	}
-	ApplyEdgeHandlesToGraph(fresh, rb)
+	if err := ApplyEdgeHandlesToGraph(fresh, rb); err != nil {
+		t.Fatal(err)
+	}
 
 	// Both handles must resolve their own type on the fresh graph.
 	if got := fresh.EdgeLabelsByHandle("x", "y", h1); !hasOnly(got, "USES") {

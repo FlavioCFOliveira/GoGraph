@@ -129,16 +129,16 @@
 // fsynced to the WAL before the commit is acknowledged, so the store is
 // kill -9 safe: a crash with no clean shutdown still recovers every
 // acknowledged write by replaying the WAL on the next start. On startup
-// the server calls recovery.OpenCtx, which loads the snapshot and replays
-// any WAL tail; on graceful shutdown it writes a final snapshot (an
+// the server calls store.OpenCtx, which loads the snapshot, replays any WAL
+// tail, refuses a directory whose recovery was not clean, and builds the
+// transactional store from the recovery result; on graceful shutdown it writes a final snapshot (an
 // optimisation that shortens the next replay) and closes the WAL.
 //
 // The schema is durable too: CREATE CONSTRAINT / CREATE INDEX are WAL-logged
 // writes, and the shutdown snapshot embeds the constraint set and index
 // definitions (WriteSnapshotFullWithConstraintsAndIndexDefs). On open the
-// engine is built with cypher.NewEngineWithStoreAndSchema, which re-registers
-// both from the recovered store/recovery.Result and re-backfills each backing
-// index — so a constraint declared before a crash is enforced again and an
+// engine is built with cypher.NewEngineWithOpened, which re-registers both
+// from the recovered store/recovery.Result and restores each backing index — so a constraint declared before a crash is enforced again and an
 // index seek serves live rows immediately. Using the plain
 // cypher.NewEngineWithStore would silently lose enforcement and index seeks
 // across a restart.

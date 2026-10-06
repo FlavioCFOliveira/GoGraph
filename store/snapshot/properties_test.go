@@ -152,7 +152,9 @@ func TestProperties_ManifestCurrent_WithBothLabelsAndProperties_Loads(t *testing
 	if err := g.SetNodeLabel("a", "L"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "E")
+	if err := g.SetEdgeLabel("a", "b", "E"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.SetNodeProperty("a", "k", lpg.Int64Value(99)); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}

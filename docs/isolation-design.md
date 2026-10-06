@@ -431,6 +431,57 @@ in the pre-existing bug the audit found.
 which a partial transaction leaks; the single-root rule is what makes
 "no partial reads" provable rather than hoped-for.
 
+### Who maintains a secondary index (rmp #2062, #2848, #2938)
+
+A property index registered on `index.Manager` is written by one path only: the
+change fan-out the Cypher engine drives when a transaction commits
+(`index.Manager.ApplyBatchInState`, from `cypher/index_commit_apply.go`). The
+raw `lpg.Graph` mutators deliver no change, so:
+
+- The raw node mutators — label, property, removal, revival — refuse with
+  `lpg.ErrIndexedRawWrite` while any index is registered or being built, and
+  change nothing. A graph is populated through them before its first index is
+  created; creating an index backfills it.
+- The raw edge mutators are admitted. They change no node's labels, properties
+  or existence, and no index the module builds consumes an edge change: the
+  bound hash and btree indexes decline every edge change through
+  `index.ChangeFilter`, and `index.Manager.Concerns` keeps a batch for an edge
+  change only when a filter claims it. A Go-API subscriber that consumes edge
+  changes is outside this contract.
+- An index registered through the Go API without a binding (`hash.New`,
+  `btree.New`) claims no change, so no path maintains it. The planner never
+  serves a read from one: `indexCoversNode` (`cypher/api.go`) accepts only a
+  bound index, and the range, prefix and join paths already required one.
+
+### Index reads describe the reader's snapshot (rmp #2937)
+
+An index is written at commit and read at the present, while a reader runs at a
+snapshot. Every MATCH access path that reads a property index — the equality
+seek, the key-set seek, the range, prefix and intersection scans, and the index
+nested-loop join — asks `index.Manager.DescribesSnapshot(startTS)` after its
+lookup. When the proof holds, the lookup is the answer. When it does not, the
+access path answers from the snapshot instead: the equality and key-set seeks,
+which subsume their Selection, walk the replaced label scan at the snapshot and
+keep the nodes whose property equals a key under openCypher `=`; the range
+family emits the label scan and leaves its retained residual Filter to decide;
+the join takes its per-row fallback over the inner label scan. The operator
+contract is in `cypher/exec/index_snapshot.go`, the build side in
+`cypher/index_snapshot_read.go`. The proof is process-wide, so under concurrent
+commits to any index a reader that began earlier declines and pays for the
+label scan. The node MERGE probe (`cypher/merge_index_probe.go`) applies the
+same proof.
+
+### Constraint builds validate committed state (rmp #2946)
+
+`CREATE CONSTRAINT … IS UNIQUE` and `… IS NOT NULL` validate the existing data
+against a snapshot taken under the commit-decision hold
+(`index.Manager.HoldCommitDecisions`) after `lpg.Graph.AwaitAllocatedCommits`,
+so the snapshot is the committed state and no commit can land before the
+constraint is registered. An open transaction's uncommitted writes are not
+validated by the DDL; that transaction began before the constraint existed and
+is validated at its own commit against the latest committed state merged with
+its writes (`exec.ConstraintRegistry.ValidateStraddler`, rmp #2936).
+
 ## Checkpoint and recovery
 
 **Delivered by rmp #2310.** `store/checkpoint` used to hold the commit

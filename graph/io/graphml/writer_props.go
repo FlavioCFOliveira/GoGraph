@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -261,6 +262,16 @@ func deserialisePropertyValue(attrType, s string) (lpg.PropertyValue, error) {
 // excluded, together with every incident edge and every <key>
 // declaration only their properties would justify, so an export→import
 // round trip never resurrects deleted data.
+//
+// Concurrency: WriteWithProps and [WriteWithPropsCtx] are safe to call while
+// other goroutines write to g. <node> elements cover the nodes interned when
+// the <node> walk ran; <edge> elements are bounded by the
+// [adjlist.AdjList.MaxNodeID] read just before that walk, so an edge incident
+// to a node created after that read is omitted and every <edge> references an
+// emitted <node>. Properties, labels and
+// adjacency are read per node, so the output is not an atomic snapshot of the
+// graph: a concurrent write may be reflected for some nodes and not for
+// others. For a transactionally consistent export, stop the writers first.
 func WriteWithProps(w io.Writer, g *lpg.Graph[string, int64]) error {
 	err := WriteWithPropsCtx(context.Background(), w, g)
 	if err != nil {
@@ -287,7 +298,7 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 	// re-import. Build the removed set once so every pass below skips
 	// them — and their incident edges — with an O(1) lookup.
 	var dead map[graph.NodeID]struct{}
-	if ids := g.TombstonedIDs(); len(ids) > 0 {
+	if ids := g.TombstonedIDsStored(); len(ids) > 0 {
 		dead = make(map[graph.NodeID]struct{}, len(ids))
 		for _, id := range ids {
 			dead[id] = struct{}{}
@@ -451,6 +462,11 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		// Emit the node's labels under the reserved label key (#1793). Labels
 		// are JSON-encoded so any label text (including commas) round-trips.
 		if labels := g.NodeLabels(name); len(labels) > 0 {
+			// NodeLabels returns a fresh slice in unspecified order — a node
+			// with more than eight labels holds them in a Go map — so sort it,
+			// keeping the export a deterministic function of the graph, as the
+			// property keys already are (rmp #2519).
+			slices.Sort(labels)
 			lj, mErr := json.Marshal(labels)
 			if mErr != nil {
 				encErr = fmt.Errorf("graphml: node %q labels: %w", name, mErr)
@@ -467,6 +483,10 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		encErr = enc.EncodeToken(nodeStart.End())
 		return encErr == nil
 	}
+	// edgeBound is read before the <node> walk, so every edge endpoint below
+	// it was interned before that walk and is emitted as a <node>: no <edge>
+	// references a node a concurrent writer created mid-export (rmp #2902).
+	edgeBound := uint64(a.MaxNodeID())
 	walkNodeRefs(a, refs)
 	for _, r := range *refs {
 		if !emitNode(r.id, r.name) {
@@ -485,7 +505,7 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 
 	// Emit <edge> elements using the same batched-name pattern as the
 	// plain writer, skipping any edge incident to a tombstoned node.
-	if err := encodeEdges(enc, a, uint64(a.MaxNodeID()), dead); err != nil {
+	if err := encodeEdges(enc, a, edgeBound, dead); err != nil {
 		return err
 	}
 

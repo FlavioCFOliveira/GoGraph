@@ -1,0 +1,706 @@
+spec se03-abandoned-commit-does-not-stall-frontier: 2 sessions, 20 permutations
+# SE03, NOT NULL arm. NOT NULL on (:R).p. s0 creates an :R node without p and
+# commits: the COMMIT is refused by the constraint. s1 commits x.v = 1 in an explicit
+# transaction. A sessionless read sees s1's commit, and no commit is left in flight
+# (InFlightCommits = 0) after either: the refused commit does not hold the frontier.
+# The fsync arm is se03-abandoned-fsync-does-not-stall-frontier, on the commit hold.
+
+starting permutation: s0w s0c s0st s1w s1c s1r
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |1               |0                    |0                
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s0w s0c s1w s0st s1c s1r
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+1       |1               |0                    |0                
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s0w s0c s1w s1c s0st s1r
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s0w s0c s1w s1c s1r s0st
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s0w s1w s0c s0st s1c s1r
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+1       |1               |0                    |0                
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s0w s1w s0c s1c s0st s1r
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1c: COMMIT
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s0w s1w s0c s1c s1r s0st
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s0w s1w s1c s0c s0st s1r
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s0w s1w s1c s0c s1r s0st
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s0w s1w s1c s1r s0c s0st
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s1w s0w s0c s0st s1c s1r
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+1       |1               |0                    |0                
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s1w s0w s0c s1c s0st s1r
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1c: COMMIT
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s1w s0w s0c s1c s1r s0st
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s1w s0w s1c s0c s0st s1r
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s1c: COMMIT
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s1w s0w s1c s0c s1r s0st
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s1c: COMMIT
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s1w s0w s1c s1r s0c s0st
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s1w s1c s0w s0c s0st s1r
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s1w s1c s0w s0c s1r s0st
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s1w s1c s0w s1r s0c s0st
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)
+
+starting permutation: s1w s1c s1r s0w s0c s0st
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s1r: <sessionless> MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s0w: CREATE (n:R {name:'bad'}) RETURN n.name AS name
+name 
+-----
+"bad"
+(1 row)
+step s0c: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s0st: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fst: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final fr: MATCH (n:R) RETURN count(n) AS r
+r
+-
+0
+(1 row)

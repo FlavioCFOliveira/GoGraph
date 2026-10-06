@@ -65,7 +65,7 @@ const maxSnapshotPerRecordCount = 1 << 20
 // store/snapshot's own checkSnapshotPerRecordCount is pinned.
 func checkSnapshotFoldableCount(what string, n int) error {
 	if n > maxSnapshotPerRecordCount {
-		return errFieldTooLong(what, n, maxSnapshotPerRecordCount)
+		return errFieldTooLong(ErrFieldTooLong, what, n, maxSnapshotPerRecordCount)
 	}
 	return nil
 }

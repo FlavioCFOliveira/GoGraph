@@ -1,0 +1,1235 @@
+spec dd04-drop-recreate-index-with-writers: 3 sessions, 30 permutations
+# DD04 (REINDEX analogue). Hash index on (:L).s over 1 100 nodes. s1 drops the index
+# and creates it again; s2 moves n7 to 'zzz' in an explicit transaction; s3 moves n8
+# to 'yyy' in an autocommit statement. The rebuilt index must hold both writes: seek
+# = scan for 'zzz', 'v7', 'yyy' and 'v8' after the run.
+
+starting permutation: s1drop s1ix s2w s2c s3w
+step s1drop: DROP INDEX l_s
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2c: COMMIT
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s1drop s1ix s2w s3w s2c
+step s1drop: DROP INDEX l_s
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s2c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s1drop s1ix s3w s2w s2c
+step s1drop: DROP INDEX l_s
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s1drop s2w s1ix s2c s3w
+step s1drop: DROP INDEX l_s
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2c: COMMIT
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s1drop s2w s1ix s3w s2c
+step s1drop: DROP INDEX l_s
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s2c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s1drop s2w s2c s1ix s3w
+step s1drop: DROP INDEX l_s
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2c: COMMIT
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s1drop s2w s2c s3w s1ix
+step s1drop: DROP INDEX l_s
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2c: COMMIT
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s1drop s2w s3w s1ix s2c
+step s1drop: DROP INDEX l_s
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s1drop s2w s3w s2c s1ix
+step s1drop: DROP INDEX l_s
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s2c: COMMIT
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s1drop s3w s1ix s2w s2c
+step s1drop: DROP INDEX l_s
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s1drop s3w s2w s1ix s2c
+step s1drop: DROP INDEX l_s
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s1drop s3w s2w s2c s1ix
+step s1drop: DROP INDEX l_s
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2c: COMMIT
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s2w s1drop s1ix s2c s3w
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2c: COMMIT
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s2w s1drop s1ix s3w s2c
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s2c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s2w s1drop s2c s1ix s3w
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s2c: COMMIT
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s2w s1drop s2c s3w s1ix
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s2c: COMMIT
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s2w s1drop s3w s1ix s2c
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s2w s1drop s3w s2c s1ix
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s2c: COMMIT
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s2w s2c s1drop s1ix s3w
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2c: COMMIT
+step s1drop: DROP INDEX l_s
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s2w s2c s1drop s3w s1ix
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2c: COMMIT
+step s1drop: DROP INDEX l_s
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s2w s2c s3w s1drop s1ix
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2c: COMMIT
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s2w s3w s1drop s1ix s2c
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s2w s3w s1drop s2c s1ix
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s2c: COMMIT
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s2w s3w s2c s1drop s1ix
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s2c: COMMIT
+step s1drop: DROP INDEX l_s
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s3w s1drop s1ix s2w s2c
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s3w s1drop s2w s1ix s2c
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s3w s1drop s2w s2c s1ix
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2c: COMMIT
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s3w s2w s1drop s1ix s2c
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s3w s2w s1drop s2c s1ix
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1drop: DROP INDEX l_s
+step s2c: COMMIT
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)
+
+starting permutation: s3w s2w s2c s1drop s1ix
+step s3w: MATCH (n:L {name:'n8'}) SET n.s = 'yyy' RETURN n.s AS s
+s    
+-----
+"yyy"
+(1 row)
+step s2w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2c: COMMIT
+step s1drop: DROP INDEX l_s
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fyyy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fschema: <schema>
+kind |name         |definition
+-----+-------------+----------
+index|l_s          |          
+index|l_s_btree_num|          
+(2 rows)

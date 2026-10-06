@@ -1,0 +1,825 @@
+spec ro03-read-only-tx-parallel-count: 2 sessions, 21 permutations
+# RO03. 3 000 nodes, and the engine's parallel-count threshold lowered to 2 048 so a
+# bare count(n) takes the morsel-parallel path (#1672). s1 is a read-only transaction
+# that counts through that path and through a filtered serial scan, twice; s2 creates
+# ten nodes and deletes five in one explicit transaction. Each parallel count equals
+# the serial one, at s1's snapshot, in every interleaving.
+
+starting permutation: s1fa s1sa s1fl s1sl s1c s2w s2c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s2c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s1sa s1fl s1sl s2w s1c s2c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s1sa s1fl s1sl s2w s2c s1c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s1sa s1fl s2w s1sl s1c s2c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s1sa s1fl s2w s1sl s2c s1c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s1sa s1fl s2w s2c s1sl s1c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s2c: COMMIT
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s1sa s2w s1fl s1sl s1c s2c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s1sa s2w s1fl s1sl s2c s1c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s1sa s2w s1fl s2c s1sl s1c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2c: COMMIT
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s1sa s2w s2c s1fl s1sl s1c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s2c: COMMIT
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s2w s1sa s1fl s1sl s1c s2c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s2w s1sa s1fl s1sl s2c s1c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s2w s1sa s1fl s2c s1sl s1c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2c: COMMIT
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s2w s1sa s2c s1fl s1sl s1c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2c: COMMIT
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s1fa s2w s2c s1sa s1fl s1sl s1c
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s2c: COMMIT
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s2w s1fa s1sa s1fl s1sl s1c s2c
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s2w s1fa s1sa s1fl s1sl s2c s1c
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s2w s1fa s1sa s1fl s2c s1sl s1c
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2c: COMMIT
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s2w s1fa s1sa s2c s1fl s1sl s1c
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2c: COMMIT
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s2w s1fa s2c s1sa s1fl s1sl s1c
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s2c: COMMIT
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+
+starting permutation: s2w s2c s1fa s1sa s1fl s1sl s1c
+step s2w: UNWIND range(1, 10) AS i CREATE (:N {name:'new' + toString(i)}) WITH count(*) AS c MATCH (d:N) WHERE d.name IN ['n1', 'n2', 'n3', 'n4', 'n5'] DETACH DELETE d RETURN count(*) AS deleted
+deleted
+-------
+5      
+(1 row)
+step s2c: COMMIT
+step s1fa: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sa: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1fl: MATCH (n) RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1sl: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3000
+(1 row)
+step s1c: COMMIT
+final ffast: MATCH (n) RETURN count(n) AS c
+c   
+----
+3005
+(1 row)
+final fscan: MATCH (n) WHERE n.name IS NOT NULL RETURN count(n) AS c
+c   
+----
+3005
+(1 row)

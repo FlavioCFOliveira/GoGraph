@@ -1,0 +1,110 @@
+spec mg02-unique-merge-winner-commits: 2 sessions, 6 permutations
+# MG02. UNIQUE on (:K).k. s1 MERGEs k='a' and creates it, holding the reservation
+# open; s2 MERGEs the same key. While s1's reservation is in flight, s2's MERGE is a
+# ConstraintViolation — not a serialization conflict, so not retriable (F10, gap G6).
+# PostgreSQL's INSERT ... ON CONFLICT waits for s1 and then does nothing or updates;
+# InnoDB takes a shared lock and waits. GoGraph does not wait (F7).
+# Commit arm: s1 commits. s2 is an explicit transaction whose snapshot predates
+# s1's commit, so it cannot match s1's node in any interleaving.
+
+starting permutation: s1m s1c s2m s2c
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1c: COMMIT
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+(1 row)
+
+starting permutation: s1m s2m s1c s2c
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+(1 row)
+
+starting permutation: s1m s2m s2c s1c
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+(1 row)
+
+starting permutation: s2m s1m s1c s2c
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s2"
+(1 row)
+
+starting permutation: s2m s1m s2c s1c
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s2"
+(1 row)
+
+starting permutation: s2m s2c s1m s1c
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s2"
+(1 row)

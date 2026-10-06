@@ -22,7 +22,7 @@ func init() {
 		reg := NewPropertyKeyRegistry()
 		m := make(map[string]PropertyKeyID, len(fixedPropKeys))
 		for _, k := range fixedPropKeys {
-			m[k] = reg.Intern(k)
+			m[k] = reg.intern(k)
 		}
 		if err := json.NewEncoder(os.Stdout).Encode(m); err != nil {
 			fmt.Fprintf(os.Stderr, "prop-key-intern: encode: %v\n", err)
@@ -44,7 +44,7 @@ func TestCrossProc_PropertyKeyRegistry_StableIDs(t *testing.T) {
 	reg := NewPropertyKeyRegistry()
 	wantIDs := make(map[string]PropertyKeyID, len(fixedPropKeys))
 	for _, k := range fixedPropKeys {
-		wantIDs[k] = reg.Intern(k)
+		wantIDs[k] = reg.intern(k)
 	}
 
 	// Child: independent process, same key order.

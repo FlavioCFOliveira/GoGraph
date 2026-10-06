@@ -28,7 +28,7 @@ package lpg
 //
 // Because SetEdgeProperty is gated on the edge existing (HasEdge), a property
 // only ever lives on a live adjacency slot, and the per-pair state is dropped
-// when the last edge between the pair is removed (clearEdgePairState). There is
+// when the last edge between the pair is removed (clearPairSides). There is
 // therefore no orphan tier for properties (unlike relationship labels, whose
 // RemoveEdgeLabel can be called on an absent edge).
 
@@ -49,13 +49,23 @@ import (
 // immutable column block is built with every dst-matching slot updated and is
 // published with a single atomic store, so a concurrent lock-free reader
 // observes either the prior block or the fully-updated one.
+//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
+//
+// It runs as a single-operation transaction (rmp #2947): it refuses with an
+// error wrapping [ErrDirectWriteConflict], and changes nothing, while another
+// transaction holds an uncommitted write on src's adjacency entry. The refusal is retryable. See
+// [ErrDirectWriteConflict].
 func (g *Graph[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValue) error {
-	return g.setEdgePropertyInfo(src, dst, key, value, nil)
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
+	return g.direct(func(tx *writeCtx) error { return g.setEdgePropertyInfo(src, dst, key, value, tx) })
 }
 
-// setEdgePropertyInfo is [Graph.SetEdgeProperty] with an explicit write
-// transaction; tx is nil for a direct Go-API mutation, which is committed the
-// instant it is made. See [writeCtx].
+// setEdgePropertyInfo is [Graph.SetEdgeProperty] inside write transaction tx; tx
+// is nil only on a graph whose versioning substrate is disarmed. See [writeCtx].
 //
 // It exists because the columnar edge-property write goes through the ADJACENCY
 // ENTRY — [adjlist.AdjList.UpdateEntryAux] publishes a whole new entry carrying
@@ -65,26 +75,46 @@ func (g *Graph[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValu
 // whichever transaction the ambient slot named, splitting the statement across
 // two commit records (rmp #2320).
 //
-// It takes no write-write conflict check, which is the status quo for this store
-// and is rmp #2300's to close: the adjacency's conflict index ([adjVersions]) is
-// per-SOURCE-NODE, so refusing here would refuse two writers setting properties
-// on two different relationships out of the same node. Threading the record is
-// independent of that and strictly narrows what can go wrong: today two such
-// writers lose an update silently AND publish at two instants; after this they
-// still lose the update — until #2300 — but each statement is atomic.
+// It CLAIMS the source node's adjacency ([adjVersions.noteExclusive]) before it
+// reads or rebuilds the entry, like every other write that rebuilds one
+// (rmp #2966). An adjacency entry is an immutable snapshot of every edge out of
+// the node, so a write that rebuilds it embeds whatever the entry holds; without
+// the claim an explicit transaction rebuilt an entry another explicit
+// transaction had not committed, carried that transaction's arcs into its own
+// commit, and made the other's abort unrecoverable. The claim makes the node the
+// unit of conflict, exactly as it is for appends since rmp #2445: two
+// transactions setting properties on two relationships out of the same node
+// now conflict, and the second retries.
 func (g *Graph[N, W]) setEdgePropertyInfo(src, dst N, key string, value PropertyValue, tx *writeCtx) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
 		}
 	}
-	if !g.adj.HasEdge(src, dst) {
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
 		return nil
 	}
-	srcID, _ := g.adj.Mapper().Lookup(src)
-	dstID, _ := g.adj.Mapper().Lookup(dst)
-	keyID := g.pkeys.Intern(key)
-	g.adj.Writer(tx.adjTx()).UpdateEntryAux(srcID, func(cur adjlist.AuxColumn, neighbours []graph.NodeID) (adjlist.AuxColumn, bool) {
+	if err := g.adjVer.noteExclusive(srcID, tx); err != nil {
+		return err
+	}
+	// The presence guard reads the PRESENT entry, which may be showing another
+	// transaction's uncommitted removal. A direct write leaves the decision to
+	// the column update instead (rmp #2947): it tests the entry under its shard
+	// lock before it looks for a slot, and finds none to change only once no
+	// uncommitted entry can be hiding one.
+	if !tx.implicit() && !g.HasEdgeAsOf(src, dst, nil) { // stored entry: see own writes
+		return nil
+	}
+	dstID, ok := g.adj.Mapper().Lookup(dst)
+	if !ok {
+		return nil
+	}
+	keyID := g.pkeys.intern(key)
+	_, err := g.adj.Writer(tx.adjTx()).UpdateEntryAux(srcID, func(cur adjlist.AuxColumn, neighbours []graph.NodeID) (adjlist.AuxColumn, bool) {
 		block := asEdgePropCols(cur)
 		length := len(neighbours)
 		changed := false
@@ -100,15 +130,20 @@ func (g *Graph[N, W]) setEdgePropertyInfo(src, dst N, key string, value Property
 		}
 		return block, true
 	})
-	return nil
+	return adjErr(tx, err)
 }
 
 // GetEdgeProperty returns the property value attached to the
 // directed edge (src, dst) under key. When several parallel edges connect the
 // pair the latest-winning value across their slots is returned (the slots carry
 // the identical value by the SetEdgeProperty fan-out, so this is well-defined).
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) GetEdgeProperty(src, dst N, key string) (PropertyValue, bool) {
-	return g.GetEdgePropertyAsOf(src, dst, key, nil)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.GetEdgePropertyAsOf(src, dst, key, g.latestCommitted(&cs))
 }
 
 // GetEdgePropertyAsOf is [Graph.GetEdgeProperty] as the edge stood at snap. A
@@ -177,8 +212,13 @@ func (g *Graph[N, W]) GetEdgePropertyAsOf(src, dst N, key string, snap *Snapshot
 // it reads an immutable published columnar block and bounds its scan by the
 // shorter of the block and the neighbours snapshot, so a concurrent copy-on-write
 // writer is observed atomically (old block or new, never half-built).
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) EdgeHasProperty(src, dst N, key string) bool {
-	return g.EdgeHasPropertyAsOf(src, dst, key, nil)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.EdgeHasPropertyAsOf(src, dst, key, g.latestCommitted(&cs))
 }
 
 // EdgeHasPropertyAsOf is [Graph.EdgeHasProperty] as the edge stood at snap. A
@@ -225,15 +265,31 @@ func (g *Graph[N, W]) EdgeHasPropertyAsOf(src, dst N, key string, snap *Snapshot
 // DelEdgeProperty removes the named property from the directed edge
 // (src, dst). No-op if absent. The key is cleared on every dst-matching slot so
 // the per-pair view no longer reports it.
-func (g *Graph[N, W]) DelEdgeProperty(src, dst N, key string) {
-	g.delEdgePropertyInfo(src, dst, key, nil)
+//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong] and changes nothing (rmp #2748): no such token can exist,
+// and the WAL-backed store refuses the same call. The error return is a
+// breaking change: DelEdgeProperty used to return nothing.
+//
+// It runs as a single-operation transaction (rmp #2947): it refuses with an
+// error wrapping [ErrDirectWriteConflict], and changes nothing, while another
+// transaction holds an uncommitted write on src's adjacency entry. The refusal is retryable. See
+// [ErrDirectWriteConflict].
+func (g *Graph[N, W]) DelEdgeProperty(src, dst N, key string) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
+	return g.direct(func(tx *writeCtx) error {
+		g.delEdgePropertyInfo(src, dst, key, tx)
+		return nil
+	})
 }
 
-// delEdgePropertyInfo is [Graph.DelEdgeProperty] with an explicit write
-// transaction; tx is nil for a direct Go-API mutation. It is the removal half of
-// [Graph.setEdgePropertyInfo] and exists for exactly the same reason — see there
-// for why this store had no transaction-carrying form and why it takes no
-// conflict check.
+// delEdgePropertyInfo is [Graph.DelEdgeProperty] inside write transaction tx; tx
+// is nil only on a graph whose versioning substrate is disarmed. It is the
+// removal half of [Graph.setEdgePropertyInfo] and exists for exactly the same
+// reason — see there for why this store had no transaction-carrying form and
+// what refuses it.
 func (g *Graph[N, W]) delEdgePropertyInfo(src, dst N, key string, tx *writeCtx) {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
@@ -247,7 +303,12 @@ func (g *Graph[N, W]) delEdgePropertyInfo(src, dst N, key string, tx *writeCtx) 
 	if !ok {
 		return
 	}
-	g.adj.Writer(tx.adjTx()).UpdateEntryAux(srcID, func(cur adjlist.AuxColumn, neighbours []graph.NodeID) (adjlist.AuxColumn, bool) {
+	// Claimed like every write that rebuilds the entry; see
+	// [Graph.setEdgePropertyInfo]. A refusal is recorded on tx and dooms it.
+	if g.adjVer.noteExclusive(srcID, tx) != nil {
+		return
+	}
+	_, err := g.adj.Writer(tx.adjTx()).UpdateEntryAux(srcID, func(cur adjlist.AuxColumn, neighbours []graph.NodeID) (adjlist.AuxColumn, bool) {
 		block := asEdgePropCols(cur)
 		if block == nil {
 			return cur, false
@@ -268,13 +329,20 @@ func (g *Graph[N, W]) delEdgePropertyInfo(src, dst N, key string, tx *writeCtx) 
 		}
 		return block, true
 	})
+	// The refusal is recorded on tx; this primitive returns nothing.
+	_ = adjErr(tx, err)
 }
 
 // EdgeProperties returns a snapshot of every property currently
 // attached to the directed edge (src, dst). When several parallel edges connect
 // the pair the result is the latest-wins coalesced union across their slots.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) EdgeProperties(src, dst N) map[string]PropertyValue {
-	return g.EdgePropertiesAsOf(src, dst, nil)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.EdgePropertiesAsOf(src, dst, g.latestCommitted(&cs))
 }
 
 // EdgePropertiesAsOf is [Graph.EdgeProperties] as the edge stood at snap.
@@ -305,8 +373,13 @@ func (g *Graph[N, W]) EdgePropertiesAsOf(src, dst N, snap *Snapshot) map[string]
 // and the Mapper contract forbids re-entry there while a writer may be running
 // (graph/mapper.go:337-345, #1648). The read is served from the lock-free
 // immutable adjacency entry, so EdgePropertiesByID is safe for concurrent use.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) EdgePropertiesByID(srcID, dstID graph.NodeID) map[string]PropertyValue {
-	return g.EdgePropertiesByIDAsOf(srcID, dstID, nil)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.EdgePropertiesByIDAsOf(srcID, dstID, g.latestCommitted(&cs))
 }
 
 // EdgePropertiesByIDAsOf is [Graph.EdgePropertiesByID] as the edge stood at
@@ -338,8 +411,13 @@ func (g *Graph[N, W]) EdgePropertiesByIDAsOf(srcID, dstID graph.NodeID, snap *Sn
 // visit is called zero times when either endpoint is unknown or the pair carries
 // no properties. See [Graph.ForEachEdgePropertyByID] for the coalescing and
 // concurrency contract.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) ForEachEdgeProperty(src, dst N, visit func(name string, pv PropertyValue)) {
-	g.ForEachEdgePropertyAsOf(src, dst, nil, visit)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	g.ForEachEdgePropertyAsOf(src, dst, g.latestCommitted(&cs), visit)
 }
 
 // ForEachEdgePropertyAsOf is [Graph.ForEachEdgeProperty] as the edge stood at
@@ -386,8 +464,13 @@ func (g *Graph[N, W]) ForEachEdgePropertyAsOf(src, dst N, snap *Snapshot, visit 
 // a value copy of the immutable cell, so copying it out (or deriving an
 // independent value from it) is safe; for the boxed Bytes/List kinds the same
 // slice-aliasing caveat as [Graph.GetEdgeProperty] applies.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) ForEachEdgePropertyByID(srcID, dstID graph.NodeID, visit func(name string, pv PropertyValue)) {
-	g.ForEachEdgePropertyByIDAsOf(srcID, dstID, nil, visit)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	g.ForEachEdgePropertyByIDAsOf(srcID, dstID, g.latestCommitted(&cs), visit)
 }
 
 // ForEachEdgePropertyByIDAsOf is [Graph.ForEachEdgePropertyByID] as the edge

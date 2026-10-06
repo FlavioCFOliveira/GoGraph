@@ -1,0 +1,78 @@
+spec ww14-chain-walk-in-flight-head: 4 sessions, 2 permutations
+# WW14. s0 pins a read snapshot; s1 writes n and commits; s2 then writes n and keeps
+# its transaction open; s0 reads; s3 reads in a new autocommit statement. s0 sees
+# the ORIGINAL value through a chain whose head is in flight and whose middle
+# committed after its snapshot; s3 sees s1's committed value and never s2's (F1).
+# Named interleavings: s2 must BEGIN after s1 commits, or its write is refused.
+
+starting permutation: s0r1 s1w s1c s2b s2w s0r2 s3r s2rb s0c
+step s0r1: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v         
+----------
+"original"
+(1 row)
+step s1w: MATCH (n:Item {name:'n'}) SET n.v = 'committed' RETURN n.v AS v
+v          
+-----------
+"committed"
+(1 row)
+step s1c: COMMIT
+step s2b: BEGIN
+step s2w: MATCH (n:Item {name:'n'}) SET n.v = 'in-flight' RETURN n.v AS v
+v          
+-----------
+"in-flight"
+(1 row)
+step s0r2: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v         
+----------
+"original"
+(1 row)
+step s3r: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v          
+-----------
+"committed"
+(1 row)
+step s2rb: ROLLBACK
+step s0c: COMMIT
+final final: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v          
+-----------
+"committed"
+(1 row)
+
+starting permutation: s1w s0r1 s1c s2b s2w s3r s0r2 s0c s2rb
+step s1w: MATCH (n:Item {name:'n'}) SET n.v = 'committed' RETURN n.v AS v
+v          
+-----------
+"committed"
+(1 row)
+step s0r1: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v         
+----------
+"original"
+(1 row)
+step s1c: COMMIT
+step s2b: BEGIN
+step s2w: MATCH (n:Item {name:'n'}) SET n.v = 'in-flight' RETURN n.v AS v
+v          
+-----------
+"in-flight"
+(1 row)
+step s3r: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v          
+-----------
+"committed"
+(1 row)
+step s0r2: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v         
+----------
+"original"
+(1 row)
+step s0c: COMMIT
+step s2rb: ROLLBACK
+final final: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v          
+-----------
+"committed"
+(1 row)

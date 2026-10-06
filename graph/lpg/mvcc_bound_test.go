@@ -78,11 +78,11 @@ func TestMVCCBound_SustainedWritesStayFlat(t *testing.T) {
 	const rounds = reclaimThreshold * 6
 	var peak int64
 	for i := 0; i < rounds; i++ {
-		if err := g.ApplyAtomically(func() error {
-			if err := g.SetNodeProperty("a", "w", Int64Value(int64(i))); err != nil {
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			if err := g.Writer(tx).SetNodeProperty("a", "w", Int64Value(int64(i))); err != nil {
 				return err
 			}
-			return g.SetNodeLabel("a", fmt.Sprintf("L%d", i%4))
+			return g.Writer(tx).SetNodeLabel("a", fmt.Sprintf("L%d", i%4))
 		}); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
@@ -150,8 +150,8 @@ func TestMVCCStats_AttributesGrowthToTheReaderHoldingIt(t *testing.T) {
 
 	snap := g.BeginRead() // the long reader
 	for i := 0; i < reclaimThreshold*3; i++ {
-		if err := g.ApplyAtomically(func() error {
-			return g.SetNodeProperty("a", "w", Int64Value(int64(i)))
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			return g.Writer(tx).SetNodeProperty("a", "w", Int64Value(int64(i)))
 		}); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
@@ -235,8 +235,8 @@ func TestMVCCMetrics_AreExported(t *testing.T) {
 		t.Fatalf("AddNode: %v", err)
 	}
 	for i := 0; i < reclaimThreshold*2; i++ {
-		if err := g.ApplyAtomically(func() error {
-			return g.SetNodeProperty("a", "w", Int64Value(int64(i)))
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			return g.Writer(tx).SetNodeProperty("a", "w", Int64Value(int64(i)))
 		}); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}

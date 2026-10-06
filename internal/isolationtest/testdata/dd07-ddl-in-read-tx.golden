@@ -1,0 +1,73 @@
+spec dd07-ddl-in-read-tx: 2 sessions, 4 permutations
+# DD07, read-only transaction. s1 issues CREATE INDEX inside BEGIN READ, then reads
+# and commits; s2 creates another index in an autocommit statement. The DDL in the
+# read-only transaction is ErrWriteInReadOnlyTx (F9) and creates nothing; the read
+# that follows still answers.
+
+starting permutation: s1ddl s1r s1c s2ix
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1r: MATCH (n:L) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2ix: CREATE INDEX l_name FOR (n:L) ON (n.name)
+final fschema: <schema>
+kind |name            |definition
+-----+----------------+----------
+index|l_name          |          
+index|l_name_btree_num|          
+(2 rows)
+
+starting permutation: s1ddl s1r s2ix s1c
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1r: MATCH (n:L) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s2ix: CREATE INDEX l_name FOR (n:L) ON (n.name)
+step s1c: COMMIT
+final fschema: <schema>
+kind |name            |definition
+-----+----------------+----------
+index|l_name          |          
+index|l_name_btree_num|          
+(2 rows)
+
+starting permutation: s1ddl s2ix s1r s1c
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s2ix: CREATE INDEX l_name FOR (n:L) ON (n.name)
+step s1r: MATCH (n:L) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1c: COMMIT
+final fschema: <schema>
+kind |name            |definition
+-----+----------------+----------
+index|l_name          |          
+index|l_name_btree_num|          
+(2 rows)
+
+starting permutation: s2ix s1ddl s1r s1c
+step s2ix: CREATE INDEX l_name FOR (n:L) ON (n.name)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1r: MATCH (n:L) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1c: COMMIT
+final fschema: <schema>
+kind |name            |definition
+-----+----------------+----------
+index|l_name          |          
+index|l_name_btree_num|          
+(2 rows)

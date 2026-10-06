@@ -76,7 +76,9 @@ func TestLPG_EdgeProperty_ConcurrentReshape(t *testing.T) {
 			}
 			// Shrink to ~10% fill (demotes to sparse).
 			for i := degree * 1 / 10; i < degree; i++ {
-				g.DelEdgeProperty(src, dsts[i], "since")
+				if err := g.DelEdgeProperty(src, dsts[i], "since"); err != nil {
+					t.Error(err)
+				}
 			}
 		}
 	}()

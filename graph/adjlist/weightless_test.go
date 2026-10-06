@@ -136,7 +136,7 @@ func TestAdjList_Weightless_RemoveCompactKeepNil(t *testing.T) {
 		mustAddEdge(t, a, "hub", "n"+itoa(i), int64(i+1))
 	}
 	// Remove an interior edge: exercises compactEntry (excise slot idx).
-	a.RemoveEdge("hub", "n5")
+	must(t).E(a.RemoveEdge("hub", "n5"))
 	idHub, _ := a.Mapper().Lookup("hub")
 	if _, ws := a.LoadEntry(idHub); ws != nil {
 		t.Fatalf("weightless after RemoveEdge: weights = %v, want nil", ws)

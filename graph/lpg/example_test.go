@@ -27,7 +27,7 @@ func ExampleGraph() {
 
 	// Connect them with a labelled edge.
 	_ = g.AddEdge("alice", "bob", 0)
-	g.SetEdgeLabel("alice", "bob", "KNOWS")
+	_ = g.SetEdgeLabel("alice", "bob", "KNOWS")
 
 	name, _ := g.GetNodeProperty("alice", "name")
 	nameStr, _ := name.String()
@@ -73,7 +73,10 @@ func ExampleGraph_RemoveNode() {
 	_ = g.SetNodeLabel("auth", "Spec")
 	id, _ := g.AdjList().Mapper().Lookup("auth")
 
-	g.RemoveNode("auth")
+	if err := g.RemoveNode("auth"); err != nil {
+		fmt.Println("RemoveNode:", err)
+		return
+	}
 	fmt.Println("tombstoned:", g.IsTombstoned(id), "live:", g.LiveOrder())
 
 	// Re-create the same key: revived under the same NodeID.
@@ -92,10 +95,12 @@ func ExampleGraph_RemoveNode() {
 func ExampleGraph_RemoveEdge() {
 	g := lpg.New[string, int](adjlist.Config{Directed: true})
 	_ = g.AddEdge("alice", "bob", 0)
-	g.SetEdgeLabel("alice", "bob", "KNOWS")
+	_ = g.SetEdgeLabel("alice", "bob", "KNOWS")
 	fmt.Println("before delete:", g.HasEdgeLabel("alice", "bob", "KNOWS"))
 
-	g.RemoveEdge("alice", "bob")
+	if err := g.RemoveEdge("alice", "bob"); err != nil {
+		fmt.Println("remove:", err)
+	}
 	_ = g.AddEdge("alice", "bob", 0) // re-create the same pair
 	fmt.Println("after re-create:", g.HasEdgeLabel("alice", "bob", "KNOWS"))
 	// Output:
@@ -121,10 +126,10 @@ func ExampleGraph_BeginRead() {
 
 	// One transaction establishes a cross-substructure invariant: the edge
 	// alice->bob and both endpoint :Hot labels become visible together.
-	_ = g.ApplyAtomically(func() error {
-		_ = g.AddEdge("alice", "bob", 0)
-		_ = g.SetNodeLabel("alice", "Hot")
-		_ = g.SetNodeLabel("bob", "Hot")
+	_ = g.ApplyAtomicallyTx(func(tx lpg.WriteTx) error {
+		_ = g.Writer(tx).AddEdge("alice", "bob", 0)
+		_ = g.Writer(tx).SetNodeLabel("alice", "Hot")
+		_ = g.Writer(tx).SetNodeLabel("bob", "Hot")
 		return nil
 	})
 

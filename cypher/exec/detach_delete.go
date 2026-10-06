@@ -8,8 +8,9 @@ package exec
 //
 // # Enumeration strategy
 //
-// Outgoing edges are enumerated via graphMutator.OutNeighbours. Incoming edges
-// are enumerated via graphMutator.InNeighbours. Each edge is removed with
+// Outgoing edges are removed in bulk via graphMutator.RemoveAllEdgesFrom.
+// Incoming edges are enumerated in the transaction's own view via
+// [inNeighboursInTx] (rmp #2884). Each incoming edge is removed with
 // graphMutator.RemoveEdge before the node itself is cleaned up.
 //
 // Snapshot before mutate: outgoing and incoming neighbour lists are
@@ -117,7 +118,7 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 			srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.StartID))
 			dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.EndID))
 			if srcOK && dstOK {
-				op.mutator.RemoveEdge(srcKey, dstKey)
+				removeBoundRelationship(op.mutator, srcKey, dstKey, tv.ID, false)
 			}
 			*out = childRow
 			return true, nil
@@ -145,7 +146,7 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 				srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.StartID))
 				dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.EndID))
 				if srcOK && dstOK {
-					op.mutator.RemoveEdge(srcKey, dstKey)
+					removeBoundRelationship(op.mutator, srcKey, dstKey, tv.ID, false)
 				}
 				*out = childRow
 				return true, nil
@@ -177,7 +178,12 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	// graphs: RemoveAllEdgesFrom only removes outgoing edges from the
 	// adjacency layer; incoming edges from other nodes pointing at nodeKey
 	// must still be removed one-by-one via RemoveEdge).
-	incoming := op.mutator.InNeighbours(nodeKey)
+	// Read in THIS transaction's view (rmp #2884): an incoming relationship its
+	// snapshot holds is removed even when a concurrent transaction has already
+	// taken it out of the present — the removal then collides with that
+	// transaction's adjacency claim instead of silently leaving the arc for its
+	// rollback to restore into a deleted node.
+	incoming := inNeighboursInTx(op.mutator, nodeKey)
 
 	// The per-Next ctx check above is per node; a supernode's incident-edge
 	// sweep is O(degree) under the visibility barrier, so poll ctx.Err()
@@ -219,11 +225,17 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	// (#2212). Suppress effect counting for the span.
 	resumeCounting := suppressEffectCounting(op.mutator)
 	for _, lbl := range nodeLabels {
-		op.mutator.RemoveNodeLabel(nodeKey, lbl)
+		if err := op.mutator.RemoveNodeLabel(nodeKey, lbl); err != nil {
+			resumeCounting()
+			return false, err
+		}
 	}
 	// Strip all properties.
 	for k := range op.mutator.NodeProperties(nodeKey) {
-		op.mutator.DelNodeProperty(nodeKey, k)
+		if err := op.mutator.DelNodeProperty(nodeKey, k); err != nil {
+			resumeCounting()
+			return false, err
+		}
 	}
 	resumeCounting()
 	// Tombstone the node so subsequent scans treat it as absent.
@@ -255,7 +267,7 @@ func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
 			continue
 		}
 		// Snapshot incoming before the bulk outgoing removal.
-		incoming := op.mutator.InNeighbours(nodeKey)
+		incoming := inNeighboursInTx(op.mutator, nodeKey)
 
 		// Remove all outgoing edges in O(degree) via the bulk path.
 		if swept&0xFFF == 0 {
@@ -283,10 +295,16 @@ func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
 		// (#2212). Suppress effect counting for the span.
 		resumeCounting := suppressEffectCounting(op.mutator)
 		for _, lbl := range pathLabels {
-			op.mutator.RemoveNodeLabel(nodeKey, lbl)
+			if err := op.mutator.RemoveNodeLabel(nodeKey, lbl); err != nil {
+				resumeCounting()
+				return err
+			}
 		}
 		for k := range op.mutator.NodeProperties(nodeKey) {
-			op.mutator.DelNodeProperty(nodeKey, k)
+			if err := op.mutator.DelNodeProperty(nodeKey, k); err != nil {
+				resumeCounting()
+				return err
+			}
 		}
 		resumeCounting()
 		op.mutator.RemoveNode(nodeKey)

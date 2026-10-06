@@ -58,7 +58,7 @@ func BenchmarkSlotCOW_Unbracketed(b *testing.B) {
 				if err := a.AddEdge(src, sentinel, 2); err != nil {
 					b.Fatal(err)
 				}
-				a.RemoveEdge(src, sentinel)
+				must(b).E(a.RemoveEdge(src, sentinel))
 			}
 		})
 	}

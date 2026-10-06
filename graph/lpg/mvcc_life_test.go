@@ -72,7 +72,7 @@ func TestNodeLife_RolledBackDeleteSurvivesAnUnrelatedDelete(t *testing.T) {
 	// separating this from the #2445 case, whose reader survives to the end.
 	tx1 := g.BeginVersionedTx()
 	if err := g.ApplyInVersionedTx(ctx, tx1, func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("tx1 delete: %v", err)
@@ -87,7 +87,7 @@ func TestNodeLife_RolledBackDeleteSurvivesAnUnrelatedDelete(t *testing.T) {
 	// tombstoned. A rolled-back apply PUBLISHES a real instant (mvcc_write.go),
 	// so this is not an abort the reclaimer will withdraw.
 	if err := g.ApplyInVersionedTx(ctx, tx1, func(tx WriteTx) error {
-		g.Writer(tx).Revive("a")
+		_ = g.Writer(tx).Revive("a") // a transaction records its refusal on itself
 		return nil
 	}); err != nil {
 		t.Fatalf("tx1 undo revive: %v", err)
@@ -102,7 +102,7 @@ func TestNodeLife_RolledBackDeleteSurvivesAnUnrelatedDelete(t *testing.T) {
 	tx2 := g.BeginVersionedTx()
 	defer g.EndVersionedTx(tx2)
 	if err := g.ApplyInVersionedTx(ctx, tx2, func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("tx2 delete: %v", err)
@@ -165,7 +165,7 @@ func TestNodeLife_InTxCreateDeleteRecreateStaysInvisible(t *testing.T) {
 		if err := g.Writer(tx).AddNode("a"); err != nil {
 			return err
 		}
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return g.Writer(tx).AddNode("a")
 	}); err != nil {
 		t.Fatalf("tx1 create/delete/create: %v", err)
@@ -187,7 +187,7 @@ func TestNodeLife_InTxCreateDeleteRecreateStaysInvisible(t *testing.T) {
 	tx2 := g.BeginVersionedTx()
 	defer g.EndVersionedTx(tx2)
 	if err := g.ApplyInVersionedTx(ctx, tx2, func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("tx2 delete: %v", err)
@@ -220,7 +220,7 @@ func TestNodeLife_OrdinaryResurrectionIsNotMistakenForAnUndo(t *testing.T) {
 	g, id := lifeGraph(t)
 
 	if err := g.ApplyVersioned(func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("committed delete: %v", err)
@@ -268,7 +268,7 @@ func TestNodeLife_RepeatedDeleteReviveKeepsTheTransactionsPriorState(t *testing.
 
 	tx1 := g.BeginVersionedTx()
 	if err := g.ApplyInVersionedTx(ctx, tx1, func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("tx1 first delete: %v", err)
@@ -279,9 +279,9 @@ func TestNodeLife_RepeatedDeleteReviveKeepsTheTransactionsPriorState(t *testing.
 	defer g.EndRead(snap)
 
 	for i, step := range []func(WriteTx) error{
-		func(tx WriteTx) error { g.Writer(tx).Revive("a"); return nil },
-		func(tx WriteTx) error { g.Writer(tx).RemoveNode("a"); return nil },
-		func(tx WriteTx) error { g.Writer(tx).Revive("a"); return nil },
+		func(tx WriteTx) error { return g.Writer(tx).Revive("a") },
+		func(tx WriteTx) error { _, _ = g.Writer(tx).RemoveNode("a"); return nil },
+		func(tx WriteTx) error { return g.Writer(tx).Revive("a") },
 	} {
 		if err := g.ApplyInVersionedTx(ctx, tx1, step); err != nil {
 			t.Fatalf("tx1 step %d: %v", i, err)
@@ -301,7 +301,7 @@ func TestNodeLife_RepeatedDeleteReviveKeepsTheTransactionsPriorState(t *testing.
 	tx2 := g.BeginVersionedTx()
 	defer g.EndVersionedTx(tx2)
 	if err := g.ApplyInVersionedTx(ctx, tx2, func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("tx2 delete: %v", err)
@@ -311,5 +311,129 @@ func TestNodeLife_RepeatedDeleteReviveKeepsTheTransactionsPriorState(t *testing.
 		t.Errorf("a reader older than the delete/revive cycle lost a committed "+
 			"node; born{ts=%d seq=%d wasAlive=%v} died{ts=%d seq=%d}",
 			born.at(), born.seq, born.wasAlive, died.at(), died.seq)
+	}
+}
+
+// TestNodeLife_GateIsRaisedBeforeTheRecordIsObservable pins that
+// [Graph.nodeLifeActive] is published under the life shard lock that publishes
+// the record (rmp #2842).
+//
+// The gate is read lock-free as "no life record exists", so a reader that can
+// find a record must never load it at zero. The seam runs at the earliest
+// instant any other goroutine can observe the record — right after the lock is
+// released — and reads both there. Against the old ordering, which raised the
+// gate after the unlock, every record written from a zero gate fails this.
+//
+// Both directions are driven from a zero gate: a birth on a fresh graph, and a
+// death after every life record has been reclaimed.
+func TestNodeLife_GateIsRaisedBeforeTheRecordIsObservable(t *testing.T) {
+	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: false})
+	t.Cleanup(func() { _ = g.Close() })
+	if !g.mvccArmed {
+		t.Fatal("setup: the graph is not MVCC-armed, so no life record is ever written")
+	}
+
+	var observed, atZero int
+	g.nodeLifePublishedHookForTest = func(id graph.NodeID) {
+		if _, hasBorn, _, hasDied := lifePair(g, id); !hasBorn && !hasDied {
+			return
+		}
+		observed++
+		if g.nodeLifeActive.Load() == 0 {
+			atZero++
+		}
+	}
+
+	if got := g.nodeLifeActive.Load(); got != 0 {
+		t.Fatalf("setup: a fresh graph's life gate reads %d, want 0", got)
+	}
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if observed != 1 {
+		t.Fatalf("the birth published %d observable life records, want 1", observed)
+	}
+
+	// Drop every life record so the death below is written from a zero gate.
+	// Single-threaded here, which is the exclusion reclaimNodeLife requires.
+	g.reclaimNodeLife(^uint64(0))
+	if got := g.nodeLifeActive.Load(); got != 0 {
+		t.Fatalf("setup: after reclaiming every life record the gate reads %d, want 0", got)
+	}
+	if err := g.RemoveNode("a"); err != nil {
+		t.Fatalf("RemoveNode: %v", err)
+	}
+	g.nodeLifePublishedHookForTest = nil
+
+	if observed != 2 {
+		t.Fatalf("the birth and the death published %d observable life records, want 2", observed)
+	}
+	if atZero != 0 {
+		t.Fatalf("%d of %d life records were observable while nodeLifeActive read 0: the "+
+			"gate was raised after the shard lock was released, so a lock-free reader "+
+			"skips a record it could already see (rmp #2842)", atZero, observed)
+	}
+}
+
+// lifeRecordCount counts the birth and death records actually held, across
+// every life shard.
+func lifeRecordCount[N comparable, W any](g *Graph[N, W]) int64 {
+	var n int64
+	for i := range g.nodeLifeShards {
+		sh := &g.nodeLifeShards[i]
+		sh.mu.RLock()
+		n += int64(len(sh.born) + len(sh.died))
+		sh.mu.RUnlock()
+	}
+	return n
+}
+
+// TestNodeLife_GateCountsRecordsNotWrites pins that [Graph.nodeLifeActive]
+// counts the life records held, not the life writes made (rmp #2962).
+//
+// The store is one record deep per direction, so a second birth or death of the
+// same node OVERWRITES the first. Counting that write as a new record made the
+// gate drift upward for good: the reclaimers subtract one per record they free,
+// so the overwritten one was never subtracted, the gate never returned to zero,
+// and [MVCCStats.NodeLifeRecords] over-reported.
+func TestNodeLife_GateCountsRecordsNotWrites(t *testing.T) {
+	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: false})
+	t.Cleanup(func() { _ = g.Close() })
+	// Pinned so the direct writes' own reclamation frees nothing mid-sequence.
+	hold := g.BeginRead()
+
+	steps := []struct {
+		name string
+		op   func() error
+	}{
+		{"birth", func() error { return g.AddNode("a") }},
+		{"death", func() error { return g.RemoveNode("a") }},
+		{"revival overwrites the birth", func() error { return g.AddNode("a") }},
+		{"second death overwrites the death", func() error { return g.RemoveNode("a") }},
+	}
+	for _, s := range steps {
+		if err := s.op(); err != nil {
+			t.Fatalf("%s: %v", s.name, err)
+		}
+		if got, want := g.nodeLifeActive.Load(), lifeRecordCount(g); got != want {
+			t.Errorf("after %s the gate reads %d but %d life records are held (rmp #2962)",
+				s.name, got, want)
+		}
+	}
+	if got := lifeRecordCount(g); got != 2 {
+		t.Fatalf("setup: %d life records held, want 2 (one per direction)", got)
+	}
+
+	g.EndRead(hold)
+	g.reclaimNodeLife(^uint64(0))
+	if got := lifeRecordCount(g); got != 0 {
+		t.Fatalf("setup: %d life records survive a reclaim at the maximum watermark", got)
+	}
+	if got := g.nodeLifeActive.Load(); got != 0 {
+		t.Fatalf("every life record is reclaimed but the gate reads %d: overwrites were "+
+			"counted as new records (rmp #2962)", got)
+	}
+	if got := g.MVCCStats().NodeLifeRecords; got != 0 {
+		t.Fatalf("MVCCStats.NodeLifeRecords = %d with no life record held, want 0", got)
 	}
 }

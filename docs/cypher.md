@@ -1468,8 +1468,12 @@ with Neo4j's `PROFILE`.
 
 Two caveats, both explicit in the output or the API:
 
-- `Profile` refuses a writing statement rather than performing its writes as the
-  side effect of a diagnostic.
+- A **writing** statement really writes. `Profile` executes it exactly as
+  `RunInTx` does — one transaction, committed on success and rolled back on error,
+  its writes applied once and its write counters those of the unprofiled
+  statement — with the instrumentation installed by the write builder, so the
+  tree measures the write operators (`CreateNode`, `SetProperty`, `Merge`, …) as
+  well as the reads that feed them.
 - A node shown as `(not measured)` was not instrumented, and did **not** cost
   nothing. Every operator is instrumented today; the label remains because a future
   composite lowering could reopen the gap.
@@ -1542,8 +1546,8 @@ build in which profiling does not exist.
 >   (`IndexNestedLoopJoin` and `ExpandIntersect`), and **every
 >   operator that evaluates one of your expressions** — `Filter`, `Project`, `Sort`,
 >   `Top`, `UNWIND`, `RollUpApply`, the hash joins and procedure calls. The write
->   operators are classified `?` too, but none of them can reach a `PROFILE`,
->   which refuses a writing statement. The expression group is the surprising
+>   operators are classified `?` too: a profiled write measures their rows and
+>   time, but not their storage accesses. The expression group is the surprising
 >   one, and it is real: a GoGraph expression can walk the graph, so
 >   `WHERE (a)-[:T]->()` and `RETURN size([(a)-->(x) | 1])` read relationship
 >   records *inside* a `Filter` or a `Project`, with no operator in the plan for
@@ -1758,7 +1762,8 @@ cells are easy to mistake:
   time already includes every child's.
 
 `ProfileTable` carries every caveat `Profile` carries: the query really runs and
-its rows are discarded, a writing statement is refused, times are inclusive of
+its rows are discarded, a writing statement executes and commits as under
+`RunInTx`, times are inclusive of
 children, and an operator the instrumentation did not reach is marked
 `(not measured)` rather than left to read as one that cost nothing.
 
@@ -1840,12 +1845,17 @@ parameter's value only where an access-path gate needs it, and a plan is a usefu
 answer before anything is bound. `PROFILE` executes, so it requires them like any
 other execution and reports `ParameterMissing` when one is absent.
 
-#### Two limitations
+#### Writes and schema statements
 
-- **`PROFILE` refuses a writing statement**, returning an error rather than
-  executing it, because the profiling instrumentation is installed by the read
-  builder. This is the same refusal `Engine.Profile` applies. Use `EXPLAIN` for a
-  writing statement's plan, or run it without a prefix to execute it.
+- **A writing `PROFILE` executes only where a write can.** On `RunInTx` (and
+  `RunAny`, which routes a writing statement there) it runs in its own
+  transaction; inside an explicit transaction (`ExplicitTx.Exec`) it joins that
+  transaction and is committed or rolled back with it. Either way the
+  instrumentation is installed by the write builder, the writes apply exactly
+  once, and `Result.Counters()` equals the unprefixed statement's — the same
+  contract `Engine.Profile` gives a writing statement. `Engine.Run` never writes:
+  it refuses a writing `PROFILE` with the error it gives the unprefixed statement
+  (`ErrWriteInReadOnlyTx`), and so does a read-only transaction.
 - **Neither prefix may precede a schema statement** (`CREATE`/`DROP`
   `INDEX`/`CONSTRAINT`, `SHOW …`). Those are parsed by a separate, hand-written
   DDL parser that the Cypher grammar does not cover, so a prefixed schema

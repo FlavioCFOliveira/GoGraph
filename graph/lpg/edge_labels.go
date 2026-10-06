@@ -18,8 +18,13 @@ import "github.com/FlavioCFOliveira/GoGraph/graph"
 // (the second-and-later types of a multi-label pair and any orphaned types).
 // Distinct labels are deduplicated across both sources, so a multigraph pair
 // whose parallel slots happen to share a type reports it once.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) EdgeLabels(src, dst N) []string {
-	return g.EdgeLabelsAsOf(src, dst, nil)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.EdgeLabelsAsOf(src, dst, g.latestCommitted(&cs))
 }
 
 // EdgeLabelsAsOf is [Graph.EdgeLabels] as the edge stood at s. A nil snapshot
@@ -53,8 +58,13 @@ func (g *Graph[N, W]) EdgeLabelsAsOf(src, dst N, s *Snapshot) []string {
 // (graph/mapper.go:337-345, #1648). The label snapshot is still taken under the
 // per-shard edge-label RWMutex and the registry's own lock, so EdgeLabelsByID is
 // safe for concurrent use.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) EdgeLabelsByID(srcID, dstID graph.NodeID) []string {
-	return g.EdgeLabelsByIDAsOf(srcID, dstID, nil)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.EdgeLabelsByIDAsOf(srcID, dstID, g.latestCommitted(&cs))
 }
 
 // EdgeLabelsByIDAsOf is [Graph.EdgeLabelsByID] as the edge stood at s.
@@ -128,8 +138,13 @@ func (g *Graph[N, W]) EdgeLabelsByIDAsOf(srcID, dstID graph.NodeID, snap *Snapsh
 // every Cypher-built graph.
 //
 // ForEachSlotRelTypeByID is safe for concurrent use.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) ForEachSlotRelTypeByID(srcID, dstID graph.NodeID, encoded uint32, visit func(name string)) {
-	g.ForEachSlotRelTypeByIDAsOf(srcID, dstID, encoded, nil, visit)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	g.ForEachSlotRelTypeByIDAsOf(srcID, dstID, encoded, g.latestCommitted(&cs), visit)
 }
 
 // ForEachSlotRelTypeByIDAsOf is [Graph.ForEachSlotRelTypeByID] as the pair's
@@ -174,8 +189,13 @@ func (g *Graph[N, W]) ForEachSlotRelTypeByIDAsOf(srcID, dstID graph.NodeID, enco
 // lock is released, exactly as EdgeLabelsByID does, so visit may safely read the
 // graph. The dedup scratch is the same small per-call slice EdgeLabelsByID uses;
 // the saving is the []string result slice the caller would otherwise range over.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) ForEachEdgeLabelByID(srcID, dstID graph.NodeID, visit func(name string)) {
-	g.ForEachEdgeLabelByIDAsOf(srcID, dstID, nil, visit)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	g.ForEachEdgeLabelByIDAsOf(srcID, dstID, g.latestCommitted(&cs), visit)
 }
 
 // ForEachEdgeLabelByIDAsOf is [Graph.ForEachEdgeLabelByID] as the edge stood at

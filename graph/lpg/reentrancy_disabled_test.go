@@ -76,8 +76,8 @@ func TestBarrierGuard_ConcurrentReadersAndWriterUnaffected(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for j := 0; j < iterations; j++ {
-			if err := g.ApplyAtomically(func() error {
-				return g.SetNodeProperty("a", "v", Int64Value(int64(j)))
+			if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+				return g.Writer(tx).SetNodeProperty("a", "v", Int64Value(int64(j)))
 			}); err != nil {
 				t.Errorf("ApplyAtomically: %v", err)
 				return

@@ -16,9 +16,12 @@ package cypher
 // and it is a safety property before it is a diagnostic one: a user reaching for
 // EXPLAIN on a DETACH DELETE must not lose their graph. Every route into this
 // file therefore diverts BEFORE the write path opens a transaction — see the
-// call sites in [Engine.runRead], [Engine.runInTxSession] and
+// call sites in [Engine.runRead], [Engine.runInTxSessionProfiled] and
 // [ExplicitTx.Exec], each placed immediately after the semantic check and
-// before any lock, transaction or build.
+// before any lock, transaction or build. The one statement the transactional
+// call sites do NOT divert is a PROFILE of a writing statement (rmp #2790):
+// PROFILE executes, a write executes only in a transaction, so it stays on the
+// write path with the profiler installed in the write builder.
 //
 // # Result shape, and why it is Neo4j's
 //
@@ -183,12 +186,15 @@ func (e *Engine) runExplainPrefixed(
 // the result — Neo4j's PROFILE returns the query's rows, and a client that
 // prefixed a statement with PROFILE still asked for its answer.
 //
-// A WRITING statement is refused rather than executed. This is the same refusal
-// [Engine.Profile] documents and applies, kept identical on purpose so the
-// Cypher surface and the Go surface cannot disagree: the profiling wrapper is
-// installed by the READ builder, and a write's operators bind to a live mutator
-// that builder does not create. Use EXPLAIN for a writing statement's plan, or
-// run it without a prefix to execute it.
+// A WRITING statement never reaches the profiled read below (rmp #2790). On the
+// transactional surfaces — [Engine.RunInTx] and [ExplicitTx.Exec] — it is not
+// diverted here at all: it takes the ordinary write path with the profiler
+// installed in the WRITE builder, so its operators bind to the live mutator and
+// its writes apply exactly once inside the transaction, as [Engine.Profile]
+// does for a writing statement. What still arrives here is a writing PROFILE
+// sent to [Engine.Run], a read-only surface, and it is refused with the very
+// error Run gives the same statement without the prefix: a profiled write must
+// never apply outside a transaction.
 func (e *Engine) runProfilePrefixed(
 	ctx context.Context,
 	entry *planCacheEntry,
@@ -196,8 +202,7 @@ func (e *Engine) runProfilePrefixed(
 	at *pinnedView,
 ) (*Result, error) {
 	if entry.containsWrite {
-		return nil, fmt.Errorf("cypher: PROFILE: refusing to execute a writing statement; " +
-			"use EXPLAIN for its plan, or run the statement without a prefix to execute it")
+		return nil, errRunWrite()
 	}
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {
 		return nil, err

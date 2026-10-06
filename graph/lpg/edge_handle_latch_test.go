@@ -103,7 +103,9 @@ func TestHandlePropLatch_CreationSite_IDKeyed(t *testing.T) {
 		t.Fatal(`Mapper has no id for "b"`)
 	}
 
-	g.SetEdgePropertyByHandleID(srcID, dstID, h, "w", Int64Value(9))
+	if err := g.SetEdgePropertyByHandleID(srcID, dstID, h, "w", Int64Value(9)); err != nil {
+		t.Fatal(err)
+	}
 
 	if !g.AnyEdgeHandlePropertyEverWritten() {
 		t.Fatal("SetEdgePropertyByHandleID did not set the latch: recovery would restore invisible properties")
@@ -134,7 +136,9 @@ func TestHandlePropLatch_MonotonicAcrossDelete(t *testing.T) {
 	if err := g.SetEdgePropertyByHandle("a", "b", h, "w", Int64Value(1)); err != nil {
 		t.Fatalf("SetEdgePropertyByHandle: %v", err)
 	}
-	g.DelEdgePropertyByHandle("a", "b", h, "w")
+	if err := g.DelEdgePropertyByHandle("a", "b", h, "w"); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := g.EdgePropertiesByHandle("a", "b", h); len(got) != 0 {
 		t.Fatalf("property survived the delete: %v", got)
@@ -183,7 +187,9 @@ func TestHandlePropLatch_LatchedBeforeTheWriteCanBeVisible(t *testing.T) {
 		{
 			"id-keyed", // setEdgePropertyByHandleIDInfo, edge_handle_durable.go
 			func(g *Graph[string, float64], srcID, dstID graph.NodeID, h uint64) {
-				g.SetEdgePropertyByHandleID(srcID, dstID, h, "w", Int64Value(1))
+				if err := g.SetEdgePropertyByHandleID(srcID, dstID, h, "w", Int64Value(1)); err != nil {
+					t.Fatal(err)
+				}
 			},
 		},
 	} {

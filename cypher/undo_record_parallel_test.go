@@ -66,8 +66,12 @@ func addTyped(t *testing.T, g *lpg.Graph[string, float64], src, dst string, w fl
 	if err != nil {
 		t.Fatalf("AddEdgeH(%s,%s): %v", src, dst, err)
 	}
-	g.SetEdgeLabel(src, dst, typ)
-	g.SetEdgeLabelByHandle(src, dst, h, typ)
+	if err := g.SetEdgeLabel(src, dst, typ); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabelByHandle(src, dst, h, typ); err != nil {
+		t.Fatal(err)
+	}
 	return h
 }
 
@@ -128,7 +132,9 @@ func TestUndo_AddEdge_RemovesTheCreatedInstance_2885(t *testing.T) {
 		t.Fatalf("AddEdgeH: %v", err)
 	}
 	m.recordAddEdge("a", "b", h, false, false)
-	m.wv.SetEdgeLabelByHandle("a", "b", h, "V")
+	if err := m.wv.SetEdgeLabelByHandle("a", "b", h, "V"); err != nil {
+		t.Fatal(err)
+	}
 	if !u.replay() {
 		t.Fatal("undo replay failed")
 	}

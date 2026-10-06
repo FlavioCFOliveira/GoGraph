@@ -1,0 +1,584 @@
+spec sk12-no-phantom-no-non-repeatable: 2 sessions, 20 permutations
+# SK12. s1 counts :L twice in one transaction; s2 inserts one :L node, deletes
+# another, and commits. Both of s1's counts must be equal in every interleaving:
+# no phantom and no non-repeatable read under snapshot isolation (F1).
+
+starting permutation: s1c1 s1c2 s1c s2i s2d s2c
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s1c1 s1c2 s2i s1c s2d s2c
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s1c: COMMIT
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s1c1 s1c2 s2i s2d s1c s2c
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s1c1 s1c2 s2i s2d s2c s1c
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s1c1 s2i s1c2 s1c s2d s2c
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s1c1 s2i s1c2 s2d s1c s2c
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s1c1 s2i s1c2 s2d s2c s1c
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s1c1 s2i s2d s1c2 s1c s2c
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s1c1 s2i s2d s1c2 s2c s1c
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s1c1 s2i s2d s2c s1c2 s1c
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s2i s1c1 s1c2 s1c s2d s2c
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s2i s1c1 s1c2 s2d s1c s2c
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s2i s1c1 s1c2 s2d s2c s1c
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s2i s1c1 s2d s1c2 s1c s2c
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s2i s1c1 s2d s1c2 s2c s1c
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s2i s1c1 s2d s2c s1c2 s1c
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s2i s2d s1c1 s1c2 s1c s2c
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s2i s2d s1c1 s1c2 s2c s1c
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s2i s2d s1c1 s2c s1c2 s1c
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s2i s2d s2c s1c1 s1c2 s1c
+step s2i: CREATE (n:L {name:'n3'}) RETURN n.name AS created
+created
+-------
+"n3"   
+(1 row)
+step s2d: MATCH (n:L {name:'n1'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1c1: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c2: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)

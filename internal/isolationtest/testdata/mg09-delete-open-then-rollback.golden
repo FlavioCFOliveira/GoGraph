@@ -1,0 +1,55 @@
+spec mg09-delete-open-then-rollback: 2 sessions, 3 permutations
+# MG09. UNIQUE on (:K).k, one node k='u'. Deleting a UNIQUE value and creating it
+# again must leave exactly one holder, never two and never none.
+# (c) s1 deletes k='u' and holds it open; s2 creates k='u' in an autocommit
+# statement; s1 rolls back and the vacuum is drained (H1). While s1 is open s2 is
+# refused (the release is deferred to commit); after the rollback u is back and s2
+# is refused by it. Exactly one u in every interleaving.
+
+starting permutation: s1d s1rb s1dr s2r
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"u"|"seed"
+(1 row)
+
+starting permutation: s1d s2r s1rb s1dr
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"u"|"seed"
+(1 row)
+
+starting permutation: s2r s1d s1rb s1dr
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"u"|"seed"
+(1 row)

@@ -467,8 +467,24 @@ type schemaChurnStep struct {
 // FOR ... REQUIRE grammar (the legacy ON ... ASSERT spelling runs in the
 // constraint scenarios and the wire SchemaChanger), and the index create is
 // OPTIONS-free, so it exercises the default (hash) kind.
+//
+// Every applied step is followed by the same IF [NOT] EXISTS statement a second
+// time, which the engine ABSORBS as a no-op because the object is by then in the
+// state the statement asks for (rmp #2829): CREATE ... IF NOT EXISTS on a name
+// known to be present, and DROP ... IF EXISTS on a name known to be absent. The
+// cycle is positional and the run creates sim_person_name before the first step
+// and no sim_contact_email_uq, so "known" is a property of the step order, not
+// an assumption. Without these steps the tick loop never issued an absorbed
+// statement, and the DDL counters oracle could not see a counter that reports an
+// effect an absorbed no-op never applied (the rmp #2818 class). runSchemaChaos
+// issues MaxTicks/schemaChurnEvery = 10 steps, so all eight are reached.
 var schemaChurnSteps = []schemaChurnStep{
 	{
+		ddl:   "CREATE CONSTRAINT sim_contact_email_uq IF NOT EXISTS FOR (n:Contact) REQUIRE n.email IS UNIQUE",
+		apply: func(m *SchemaModel) { m.AddUniqueConstraint("sim_contact_email_uq", "Contact", "email") },
+	},
+	{
+		// Absorbed: the constraint was created by the previous step.
 		ddl:   "CREATE CONSTRAINT sim_contact_email_uq IF NOT EXISTS FOR (n:Contact) REQUIRE n.email IS UNIQUE",
 		apply: func(m *SchemaModel) { m.AddUniqueConstraint("sim_contact_email_uq", "Contact", "email") },
 	},
@@ -477,11 +493,26 @@ var schemaChurnSteps = []schemaChurnStep{
 		apply: func(m *SchemaModel) { m.DropConstraint("sim_contact_email_uq") },
 	},
 	{
+		// Absorbed: the constraint was dropped by the previous step.
+		ddl:   "DROP CONSTRAINT sim_contact_email_uq IF EXISTS",
+		apply: func(m *SchemaModel) { m.DropConstraint("sim_contact_email_uq") },
+	},
+	{
+		ddl:   "DROP INDEX sim_person_name IF EXISTS",
+		apply: func(m *SchemaModel) { m.DropIndex("sim_person_name") },
+	},
+	{
+		// Absorbed: the index was dropped by the previous step (the rmp #2818 shape).
 		ddl:   "DROP INDEX sim_person_name IF EXISTS",
 		apply: func(m *SchemaModel) { m.DropIndex("sim_person_name") },
 	},
 	{
 		ddl:   "CREATE INDEX sim_person_name FOR (n:Person) ON (n.name)",
+		apply: func(m *SchemaModel) { m.AddIndex("sim_person_name", SchemaIndexHash, "Person", "name") },
+	},
+	{
+		// Absorbed: the index was created by the previous step.
+		ddl:   "CREATE INDEX IF NOT EXISTS sim_person_name FOR (n:Person) ON (n.name)",
 		apply: func(m *SchemaModel) { m.AddIndex("sim_person_name", SchemaIndexHash, "Person", "name") },
 	},
 }

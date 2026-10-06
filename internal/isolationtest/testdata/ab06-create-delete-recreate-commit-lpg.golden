@@ -1,0 +1,131 @@
+spec ab06-create-delete-recreate-commit-lpg: 2 sessions, 6 permutations
+# AB06 through the lpg API, commit arm (the lpg API has no rollback of eager
+# writes). s1 adds z (v = 1), removes it, adds it again (v = 2), reads it and ends its
+# transaction; s2 reads z at a fresh snapshot. z is visible once with v = 2 after the
+# commit and absent before it.
+
+starting permutation: s1c1 s1d s1c2 s1r s1c s2r
+step s1c1: lpg: AddNode(z); SetNodeProperty(z, v, 1)
+step s1d: lpg: RemoveNode(z)
+step s1c2: lpg: AddNode(z); SetNodeProperty(z, v, 2)
+step s1r: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2r: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)
+final final: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)
+
+starting permutation: s1c1 s1d s1c2 s1r s2r s1c
+step s1c1: lpg: AddNode(z); SetNodeProperty(z, v, 1)
+step s1d: lpg: RemoveNode(z)
+step s1c2: lpg: AddNode(z); SetNodeProperty(z, v, 2)
+step s1r: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)
+step s2r: lpg: exists z, z.v
+exists|v   
+------+----
+false |null
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)
+
+starting permutation: s1c1 s1d s1c2 s2r s1r s1c
+step s1c1: lpg: AddNode(z); SetNodeProperty(z, v, 1)
+step s1d: lpg: RemoveNode(z)
+step s1c2: lpg: AddNode(z); SetNodeProperty(z, v, 2)
+step s2r: lpg: exists z, z.v
+exists|v   
+------+----
+false |null
+(1 row)
+step s1r: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)
+
+starting permutation: s1c1 s1d s2r s1c2 s1r s1c
+step s1c1: lpg: AddNode(z); SetNodeProperty(z, v, 1)
+step s1d: lpg: RemoveNode(z)
+step s2r: lpg: exists z, z.v
+exists|v   
+------+----
+false |null
+(1 row)
+step s1c2: lpg: AddNode(z); SetNodeProperty(z, v, 2)
+step s1r: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)
+
+starting permutation: s1c1 s2r s1d s1c2 s1r s1c
+step s1c1: lpg: AddNode(z); SetNodeProperty(z, v, 1)
+step s2r: lpg: exists z, z.v
+exists|v   
+------+----
+false |null
+(1 row)
+step s1d: lpg: RemoveNode(z)
+step s1c2: lpg: AddNode(z); SetNodeProperty(z, v, 2)
+step s1r: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)
+
+starting permutation: s2r s1c1 s1d s1c2 s1r s1c
+step s2r: lpg: exists z, z.v
+exists|v   
+------+----
+false |null
+(1 row)
+step s1c1: lpg: AddNode(z); SetNodeProperty(z, v, 1)
+step s1d: lpg: RemoveNode(z)
+step s1c2: lpg: AddNode(z); SetNodeProperty(z, v, 2)
+step s1r: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: lpg: exists z, z.v
+exists|v
+------+-
+true  |2
+(1 row)

@@ -76,13 +76,31 @@ package mvcc
 // It is not a general RWMutex and must not be used as one. It provides no
 // upgrade, no re-entrancy, and no fairness between weak acquirers, because none
 // of those is needed by the DDL-exclusion job it exists for. Strong acquirers are
-// serialised against one another by an ordinary mutex, which is correct because
-// DDL is rare and its cost is irrelevant next to the scan it performs anyway.
+// serialised against one another in arrival order by a small mutex-guarded queue,
+// which is correct because DDL is rare and its cost is irrelevant next to the scan
+// it performs anyway.
+//
+// # Every wait is cancellable, and a withdrawn request leaves no trace (rmp #2983)
+//
+// Every blocking wait — a strong acquirer queued behind another, a strong acquirer
+// draining weak holders, a weak acquirer parked behind a strong one — selects on a
+// broadcast channel and on the caller's ctx. A strong acquirer that gives up
+// withdraws its request in place: it leaves the queue, or lowers the strong flag
+// and wakes every parked weak acquirer, under the same mutex that admits them. No
+// goroutine is left behind to finish an acquisition the caller abandoned.
+//
+// The previous shape could not do that. It built the strong side from a
+// sync.Mutex, a sync.RWMutex and the flag, none cancellable, so a Ctx acquire ran
+// the whole of StrongLock on a helper goroutine and only the CALLER stopped
+// waiting. The helper kept the flag raised and the RWMutex write-pending until the
+// in-flight weak holder left, so every new weak acquirer blocked behind a strong
+// request whose caller had already returned its deadline error.
 
 import (
 	"context"
 	"math/rand/v2"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -145,12 +163,70 @@ type Gate struct {
 	strong atomic.Int32
 	_      [cacheLine - 4]byte
 
-	// strongMu serialises strong acquirers against one another.
-	strongMu sync.Mutex
-	// blocked parks weak acquirers that arrive while a strong holder is present,
-	// so they wait instead of spinning. A strong holder takes it exclusively for
-	// its whole tenure.
-	blocked sync.RWMutex
+	// mu guards the cold-path state below. Only strong acquirers and weak acquirers
+	// that found the strong flag raised ever take it.
+	mu sync.Mutex
+	// owned is true from the moment a strong acquirer raises the flag until it
+	// releases or withdraws. It is the condition a slow-path weak acquirer waits
+	// on, and it is set and cleared together with the flag, under mu.
+	owned bool
+	// slowHolders counts weak holders admitted on the slow path. It can grow only
+	// while owned is false, so once a strong acquirer has raised the flag the set
+	// it must drain is finite and cannot be replenished.
+	slowHolders int
+	// weakParked counts weak acquirers waiting for owned to clear. The head of the
+	// strong queue does not take the gate while it is non-zero, so weak acquirers
+	// parked behind one strong tenure are admitted before the next one begins and
+	// a run of strong acquirers cannot starve them. It can grow only while owned is
+	// set, so after a release it only shrinks and the wait is bounded.
+	weakParked int
+	// queue holds the tickets of strong acquirers waiting for owned to clear, in
+	// arrival order. The head is the next to proceed; a withdrawn ticket is removed.
+	queue []uint64
+	// nextTicket mints the tickets in queue.
+	nextTicket uint64
+	// wake is closed, and cleared, on every change of the state above that a
+	// waiter may be waiting for. A waiter creates it on demand, so the zero value
+	// of Gate needs no constructor.
+	wake chan struct{}
+}
+
+// waitChLocked returns the channel the next state change will close. The caller
+// holds g.mu.
+func (g *Gate) waitChLocked() chan struct{} {
+	if g.wake == nil {
+		g.wake = make(chan struct{})
+	}
+	return g.wake
+}
+
+// broadcastLocked wakes every waiter so each re-checks its condition. The caller
+// holds g.mu.
+func (g *Gate) broadcastLocked() {
+	if g.wake != nil {
+		close(g.wake)
+		g.wake = nil
+	}
+}
+
+// waitLocked releases g.mu, waits for the next state change or for done, and
+// re-acquires g.mu in both cases. It reports false when done fired. A nil done
+// never fires, which is how the context-free methods use the same code.
+//
+// When both are ready the select may report either; a caller that is told false
+// treats it as cancellation even though its condition may now hold, which is
+// correct because it then holds nothing and withdraws.
+func (g *Gate) waitLocked(done <-chan struct{}) bool {
+	w := g.waitChLocked()
+	g.mu.Unlock()
+	select {
+	case <-w:
+		g.mu.Lock()
+		return true
+	case <-done:
+		g.mu.Lock()
+		return false
+	}
 }
 
 // WeakLock acquires the gate in weak mode and returns the token that must be
@@ -177,8 +253,35 @@ func (g *Gate) WeakLock(hint uint64) int {
 	// blocking, or the drain below would wait on a goroutine that is itself
 	// waiting for the drain to finish.
 	g.slots[slot].n.Add(-1)
-	g.blocked.RLock()
+	g.weakSlow(nil)
 	return gateSlow
+}
+
+// weakSlow admits a weak acquirer on the slow path once no strong acquirer owns
+// the gate, or reports false, holding nothing, when done fires first.
+//
+// A weak acquirer comes here only after its fast-path claim found the flag
+// raised and was withdrawn. It is admitted as soon as owned is false, even when
+// strong acquirers are queued: a queued strong acquirer has not raised the flag,
+// so the fast path would admit the same caller anyway.
+func (g *Gate) weakSlow(done <-chan struct{}) bool {
+	g.mu.Lock()
+	for g.owned {
+		g.weakParked++
+		ok := g.waitLocked(done)
+		g.weakParked--
+		if g.weakParked == 0 {
+			// The head of the strong queue may be waiting for exactly this.
+			g.broadcastLocked()
+		}
+		if !ok {
+			g.mu.Unlock()
+			return false
+		}
+	}
+	g.slowHolders++
+	g.mu.Unlock()
+	return true
 }
 
 // WeakLockAuto is [Gate.WeakLock] for a caller that has no natural hint in hand.
@@ -243,20 +346,39 @@ func (g *Gate) WeakLockCtx(ctx context.Context, hint uint64) (int, error) {
 	if slot, ok := g.TryWeakLock(hint); ok {
 		return slot, nil
 	}
-	// Blocked behind a strong holder. Park on the blocking path from a helper
-	// goroutine so the caller can abandon the WAIT on ctx — the acquisition itself
-	// cannot be abandoned, because sync.RWMutex has no cancellable acquire, so a
-	// hold that lands after the caller gave up must still be released.
-	if !acquireCtx(ctx, g.blocked.RLock, g.blocked.RUnlock) {
+	// Blocked behind a strong holder. Wait on the slow path with ctx in the same
+	// select, so abandoning the wait abandons the acquisition: nothing is left
+	// queued and nothing is held.
+	if !g.weakSlow(ctx.Done()) {
 		return 0, ctx.Err()
+	}
+	// Admitted. Re-check ctx so a deadline that elapsed while parked is reported
+	// rather than handing back a hold the caller may no longer use; nothing has
+	// run under the hold, so releasing it here is correct.
+	if err := ctx.Err(); err != nil {
+		g.WeakUnlock(gateSlow)
+		return 0, err
 	}
 	return gateSlow, nil
 }
 
 // WeakUnlock releases a weak acquisition made with [Gate.WeakLock].
+//
+// It panics when the token names a slow-path hold and none is outstanding: that
+// is a double release, a programmer error the gate cannot repair.
 func (g *Gate) WeakUnlock(slot int) {
 	if slot == gateSlow {
-		g.blocked.RUnlock()
+		g.mu.Lock()
+		if g.slowHolders == 0 {
+			g.mu.Unlock()
+			panic("mvcc: Gate.WeakUnlock of a slow-path hold that is not held")
+		}
+		g.slowHolders--
+		if g.slowHolders == 0 {
+			// Only a draining strong acquirer waits for this count.
+			g.broadcastLocked()
+		}
+		g.mu.Unlock()
 		return
 	}
 	g.slots[slot].n.Add(-1)
@@ -265,19 +387,93 @@ func (g *Gate) WeakUnlock(slot int) {
 // StrongLock acquires the gate exclusively, excluding every weak holder and every
 // other strong holder. It returns once no weak holder remains.
 func (g *Gate) StrongLock() {
-	g.strongMu.Lock()
+	g.strongLock(nil)
+}
+
+// strongLock is the shared body of [Gate.StrongLock] and [Gate.StrongLockCtx]. It
+// reports false, holding nothing and leaving no request behind, when done fires
+// before the acquisition completes; a nil done never fires.
+//
+// It has three phases, each of which may be withdrawn from:
+//
+//  1. queue behind earlier strong acquirers, in arrival order, and behind the weak
+//     acquirers parked on the previous strong tenure;
+//  2. raise the flag and set owned, so no new weak holder is admitted on either
+//     path; then drain the fast-path slots;
+//  3. wait for the slow-path holders admitted before phase 2 to leave.
+//
+// Withdrawing in phase 1 removes the ticket. Withdrawing in phases 2 or 3 is
+// exactly [Gate.StrongUnlock]: lower the flag, clear owned, wake every waiter.
+func (g *Gate) strongLock(done <-chan struct{}) bool {
+	g.mu.Lock()
+	t := g.nextTicket
+	g.nextTicket++
+	g.queue = append(g.queue, t)
+	for g.owned || g.queue[0] != t || g.weakParked != 0 {
+		if g.waitLocked(done) {
+			continue
+		}
+		i := slices.Index(g.queue, t)
+		g.queue = slices.Delete(g.queue, i, i+1)
+		// The ticket behind this one may now be the head with the gate free; it is
+		// waiting for a state change, so make one.
+		g.broadcastLocked()
+		g.mu.Unlock()
+		return false
+	}
+	g.queue = slices.Delete(g.queue, 0, 1)
+	g.owned = true
 	// Raise the flag BEFORE draining, so no new fast-path holder can appear after
-	// the drain has passed its slot.
-	g.strong.Add(1)
-	// Shut the blocking path too, and wait for any weak acquirer already parked on
-	// it. Taken after the flag is raised so an acquirer that backs out of the fast
-	// path always finds this held rather than slipping between the two.
-	g.blocked.Lock()
+	// the drain has passed its slot. Sequentially consistent store, paired with the
+	// weak side's load: see the Dekker argument in the file header.
+	g.strong.Store(1)
+	g.mu.Unlock()
+
+	// Drain the fast path. Only acquirers already in flight when the flag rose can
+	// still hold a slot, and each either leaves or backs out to the slow path,
+	// where owned now refuses it.
 	for i := range g.slots {
 		for g.slots[i].n.Load() != 0 {
+			select {
+			case <-done:
+				g.releaseStrong()
+				return false
+			default:
+			}
 			runtime.Gosched()
 		}
 	}
+
+	// Drain the slow path. slowHolders cannot grow while owned is set.
+	g.mu.Lock()
+	for g.slowHolders != 0 {
+		if !g.waitLocked(done) {
+			g.mu.Unlock()
+			g.releaseStrong()
+			return false
+		}
+	}
+	g.mu.Unlock()
+	return true
+}
+
+// releaseStrong ends a strong tenure or withdraws a strong request that has raised
+// the flag. It panics when no strong acquirer owns the gate: a double release is a
+// programmer error the gate cannot repair.
+func (g *Gate) releaseStrong() {
+	g.mu.Lock()
+	if !g.owned {
+		g.mu.Unlock()
+		panic("mvcc: Gate.StrongUnlock of a gate that is not strongly held")
+	}
+	g.owned = false
+	g.strong.Store(0)
+	// Wakes the parked weak acquirers and the head of the strong queue together.
+	// The head waits for weakParked to reach zero, so the parked weak acquirers
+	// are admitted first — the order the sync.RWMutex this replaced gave readers
+	// queued behind a writer.
+	g.broadcastLocked()
+	g.mu.Unlock()
 }
 
 // StrongLockCtx is [Gate.StrongLock] with the wait bounded by ctx. It returns ctx's
@@ -287,105 +483,31 @@ func (g *Gate) StrongLock() {
 // every weak holder — and both are unbounded in principle, so a caller with a
 // deadline needs this for the same reason [Gate.WeakLockCtx] exists.
 //
-// As there, the acquisition itself cannot be abandoned once started: the underlying
-// mutexes have no cancellable acquire, so a hold that lands after the caller gave up
-// must still be released, which the helper below does.
+// Giving up WITHDRAWS the request rather than leaving it queued (rmp #2983): the
+// flag is lowered and every parked weak acquirer is woken before this returns, so
+// once the caller has its error the gate behaves as if the request had never been
+// made. No goroutine outlives the call.
 func (g *Gate) StrongLockCtx(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !acquireCtx(ctx, g.StrongLock, g.StrongUnlock) {
+	if !g.strongLock(ctx.Done()) {
 		return ctx.Err()
+	}
+	// Re-check ctx so a deadline that elapsed while queued is reported rather than
+	// handing back a hold the caller may no longer use. Nothing has run under the
+	// hold, so releasing it here is correct.
+	if err := ctx.Err(); err != nil {
+		g.releaseStrong()
+		return err
 	}
 	return nil
 }
 
-// acquireCtx runs a non-cancellable acquire on a helper goroutine and lets the
-// CALLER stop waiting when ctx finishes. It reports whether the caller now owns the
-// lock; when it reports false the caller owns nothing and ctx.Err() is the reason.
-//
-// # ONE helper per abandoned acquire, never two (rmp #2260, re-established by #2348)
-//
-// The obvious shape — a helper that acquires and closes a channel, plus a SECOND
-// goroutine spawned on the ctx.Done branch whose only job is to wait for the first
-// and unlock — costs two goroutines for every abandoned attempt. Both Ctx methods on
-// this gate had that shape until rmp #2348. The retired internal/ctxlock package had
-// already established the fix and measured what the transient costs; its argument
-// lives here now, which is the whole reason this helper exists rather than the inline
-// form it replaced.
-//
-// The three-way handoff is load-bearing and a plain boolean RACES: the helper can
-// read "the caller gave up" as false at the same instant the caller takes the
-// ctx.Done branch, leaving the lock held with no logical owner and nobody to release
-// it. With a CAS exactly one side wins and each side's losing branch knows that
-// cleaning up is its job.
-//
-// # What is bounded here, and what is not
-//
-// The live helper count tracks ARRIVAL RATE × HOLDER TENURE, not the number of
-// concurrent callers: each abandoned attempt parks one helper until the holder
-// releases. Measured (in ctxlock, against a barrier held for 3 s by acquirers with a
-// 2 ms deadline) the two-goroutine form reached 597 819 live goroutines and 1 677 MiB
-// from 256 callers. Halving the per-attempt cost does not change that asymptote, and
-// removing the transient altogether would mean refusing an acquire past some
-// admission limit — turning a blocking call into a failing one and changing every
-// caller's contract. That is a deliberate omission recorded here, not an oversight.
-func acquireCtx(ctx context.Context, lock, unlock func()) bool {
-	const (
-		stateWaiting   int32 = 0 // neither side has claimed the acquisition yet
-		stateHandedOff int32 = 1 // the helper published it; the caller owns the lock
-		stateAbandoned int32 = 2 // the caller gave up first; the helper must unlock
-	)
-	var state atomic.Int32
-	acquired := make(chan struct{})
-	go func() {
-		lock()
-		if state.CompareAndSwap(stateWaiting, stateHandedOff) {
-			close(acquired) // the caller is still waiting: hand it the lock
-			return
-		}
-		unlock() // the caller abandoned first; nothing ran under the lock
-	}()
-
-	select {
-	case <-acquired:
-		// Held. Re-check ctx so a deadline that elapsed WHILE QUEUED is reported
-		// rather than handing back a lock the caller may no longer use. Both Ctx
-		// methods here omitted this until rmp #2348.
-		//
-		// Its window is ONE SCHEDULING QUANTUM and it is stated that way rather than
-		// inflated: this arm is reachable with an expired ctx only when the helper's
-		// acquisition and the deadline become ready at the same instant, and the
-		// elapsed time is then still within budget. It is not the rmp #2174 defect —
-		// that one is being held for the HOLDER'S REMAINING TENURE, and what prevents
-		// it is abandoning the wait, not this check. Correct and free, so it stays;
-		// no test claims to cover it, because it is not observable from outside.
-		//
-		// Releasing here is correct: nothing has been done under the lock.
-		if ctx.Err() != nil {
-			unlock()
-			return false
-		}
-		return true
-	case <-ctx.Done():
-		if state.CompareAndSwap(stateWaiting, stateAbandoned) {
-			// Won the race: the helper has not published and will unlock once it
-			// acquires. No second goroutine is needed.
-			return false
-		}
-		// The helper published between ctx firing and this CAS, so the lock IS held
-		// and we own it. acquired is already closed, so this cannot block.
-		<-acquired
-		unlock()
-		return false
-	}
-}
-
-// StrongUnlock releases an acquisition made with [Gate.StrongLock].
+// StrongUnlock releases an acquisition made with [Gate.StrongLock] or a
+// successful [Gate.StrongLockCtx]. It panics when the gate is not strongly held.
 func (g *Gate) StrongUnlock() {
-	g.strong.Add(-1)
-	g.blocked.Unlock()
-	g.strongMu.Unlock()
+	g.releaseStrong()
 }
 
 // WeakHolders reports how many fast-path slot claims are outstanding.

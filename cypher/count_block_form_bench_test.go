@@ -116,7 +116,9 @@ func blockFormGraph(tb testing.TB, rows int) *lpg.Graph[string, float64] {
 			if err := g.AddEdge(a, d, 1); err != nil {
 				tb.Fatalf("AddEdge(%s,%s): %v", a, d, err)
 			}
-			g.SetEdgeLabel(a, d, "K")
+			if err := g.SetEdgeLabel(a, d, "K"); err != nil {
+				tb.Fatal(err)
+			}
 		}
 	}
 	actual, _ := blockFormGraphs.LoadOrStore(rows, g)

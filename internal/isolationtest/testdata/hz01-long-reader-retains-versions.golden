@@ -1,0 +1,40 @@
+spec hz01-long-reader-retains-versions: 2 sessions, 1 permutations
+# HZ01. s1 is a read-only transaction pinned at BEGIN; s2 commits ten SETs of x.v.
+# Each MVCCStats reading drains the vacuum first, so it is the settled state at that
+# point. The versions retained rise while s1 holds its snapshot, s1 still reads
+# v = 0, and after s1 ends a drain reclaims them (F13).
+
+starting permutation: s2st0 s1b s1r s2w s2st1 s1r2 s1c s2st2
+step s2st0: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+step s1b: BEGIN READ
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s2w: <10 autocommit SETs of x.v>
+step s2st1: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+10      |1               |0                    |0                
+(1 row)
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1c: COMMIT
+step s2st2: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v 
+--
+10
+(1 row)

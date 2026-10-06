@@ -246,7 +246,9 @@ func buildViaGoAPI(t *testing.T, f fixture) *lpg.Graph[string, int64] {
 			t.Fatalf("AddEdgeH: %v", err)
 		}
 		if e.Type != "" {
-			g.SetEdgeLabelByHandle(e.Src, e.Dst, h, e.Type)
+			if err := g.SetEdgeLabelByHandle(e.Src, e.Dst, h, e.Type); err != nil {
+				t.Fatal(err)
+			}
 		}
 		for k, v := range e.Properties {
 			if perr := g.SetEdgePropertyByHandle(e.Src, e.Dst, h, k, v); perr != nil {

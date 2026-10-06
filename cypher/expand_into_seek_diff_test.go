@@ -66,7 +66,9 @@ func seekFixture(t *testing.T, n int, arcs []seekArc) *lpg.Graph[string, float64
 		if err := g.AddEdge(from, to, 1.0); err != nil {
 			t.Fatalf("AddEdge(%s->%s): %v", from, to, err)
 		}
-		g.SetEdgeLabel(from, to, "K")
+		if err := g.SetEdgeLabel(from, to, "K"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return g
 }

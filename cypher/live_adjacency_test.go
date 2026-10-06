@@ -293,7 +293,9 @@ func newLiveFixture(t *testing.T, control bool) *Engine {
 		if err != nil {
 			t.Fatal(err)
 		}
-		g.SetEdgeLabelByHandle(src, dst, h, e.typ)
+		if err := g.SetEdgeLabelByHandle(src, dst, h, e.typ); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgePropertyByHandle(src, dst, h, "w", lpg.Int64Value(e.w)); err != nil {
 			t.Fatal(err)
 		}
@@ -471,8 +473,8 @@ var liveUnjournaledMethods = []string{
 	"NodeProperties", "NodeLabels", "HasEdge", "SetEdgeProperty", "DelEdgeProperty",
 	"EdgeProperties", "EdgeLabels", "EdgeCreateCount", "EdgeLabelsAt", "SetEdgePropertyAt",
 	"EdgePropertiesAt", "EdgeLabelsByHandle", "SetEdgePropertyByHandle", "DelEdgePropertyByHandle",
-	"EdgePropertiesByHandle", "FirstEdgeHandle", "OutNeighbours", "InNeighbours", "OutDegree",
-	"ResolveNodeID", "ResolveNodeLabel", "WalkNodeIDs",
+	"EdgePropertiesByHandle", "FirstEdgeHandle", "EdgeHandles", "HasEdgeHandle", "OutNeighbours",
+	"InNeighbours", "OutDegree", "ResolveNodeID", "ResolveNodeLabel", "WalkNodeIDs",
 }
 
 // TestLiveTopo_GraphMutatorMethodsAreClassified fails when a method is added to
@@ -508,13 +510,23 @@ func TestLiveTopo_EveryAdjacencyWriteIsJournaled(t *testing.T) {
 		"RemoveEdge":         func(m exec.GraphMutator) { m.RemoveEdge("a", "b") },
 		"RemoveEdgeByHandle": func(m exec.GraphMutator) { m.RemoveEdgeByHandle("a", "b", 1) },
 		"RemoveNode":         func(m exec.GraphMutator) { m.RemoveNode("c") },
-		"SetEdgeLabel":       func(m exec.GraphMutator) { m.SetEdgeLabel("a", "b", "T") },
+		"SetEdgeLabel": func(m exec.GraphMutator) {
+			if err := m.SetEdgeLabel("a", "b", "T"); err != nil {
+				t.Fatal(err)
+			}
+		},
 		"IncEdgeCreateCount": func(m exec.GraphMutator) { m.IncEdgeCreateCount("a", "b") },
 		"DecEdgeCreateCount": func(m exec.GraphMutator) { m.DecEdgeCreateCount("a", "b") },
-		"SetEdgeLabelAt":     func(m exec.GraphMutator) { m.SetEdgeLabelAt("a", "b", 1, "T") },
+		"SetEdgeLabelAt": func(m exec.GraphMutator) {
+			if err := m.SetEdgeLabelAt("a", "b", 1, "T"); err != nil {
+				t.Fatal(err)
+			}
+		},
 		"RemoveEdgeInstance": func(m exec.GraphMutator) { m.RemoveEdgeInstance("a", "b", 1) },
 		"SetEdgeLabelByHandle": func(m exec.GraphMutator) {
-			m.SetEdgeLabelByHandle("a", "b", 1, "T")
+			if err := m.SetEdgeLabelByHandle("a", "b", 1, "T"); err != nil {
+				t.Fatal(err)
+			}
 		},
 		"RemoveEdgeInstanceByHandle": func(m exec.GraphMutator) { m.RemoveEdgeInstanceByHandle("a", "b", 1) },
 		"RemoveAllEdgesFrom":         func(m exec.GraphMutator) { m.RemoveAllEdgesFrom("a") },
@@ -562,6 +574,17 @@ func TestLiveTopo_EveryAdjacencyWriteIsJournaled(t *testing.T) {
 					defer func() { _ = recover() }()
 					call(m)
 				}()
+				if kind == "wal" && (method == "SetEdgeLabelAt" || method == "RemoveEdgeInstance") {
+					// Retired on the durable engine (rmp #2968): the method writes
+					// nothing, so it has nothing to journal.
+					if log.seq.Load() != before {
+						t.Fatalf("%s on the wal adapter journaled a write it no longer makes", method)
+					}
+					if l := g.EdgeLabelsAt("a", "b", 1); len(l) != 0 {
+						t.Fatalf("%s on the wal adapter wrote the retired ordinal store: %v", method, l)
+					}
+					return
+				}
 				if log.seq.Load() == before {
 					t.Fatalf("%s on the %s adapter wrote without journaling", method, kind)
 				}

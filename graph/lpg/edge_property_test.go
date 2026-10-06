@@ -30,7 +30,9 @@ func TestGraph_EdgeProperties(t *testing.T) {
 		t.Fatalf("edge props len = %d, want 2", len(props))
 	}
 
-	g.DelEdgeProperty("alice", "bob", "weight")
+	if err := g.DelEdgeProperty("alice", "bob", "weight"); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := g.GetEdgeProperty("alice", "bob", "weight"); ok {
 		t.Fatalf("weight not deleted")
 	}

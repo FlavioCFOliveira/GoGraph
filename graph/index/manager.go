@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 // ErrIndexExists is returned by [Manager.CreateIndex] when the name
@@ -58,6 +60,13 @@ var ErrIndexValueTypeUnsupported = errors.New("index: value type not supported f
 // [Manager.BeginBuild] exists to prevent — an index registered while some of the
 // writes concurrent with its build were never applied to it.
 var ErrIndexBuildOverflow = errors.New("index: concurrent-change log overflowed during an index build")
+
+// ErrIndexStateUndefined is what [Manager.Undefined] wraps once a commit-time
+// delivery has been cut short by a panic ([Manager.MarkUndefined]): the indexes
+// may hold part of a commit's changes, or none of a durable commit's, so no answer
+// read from them can be trusted until they are rebuilt — which a reopen does, from
+// the recovered graph. Matchable with [errors.Is].
+var ErrIndexStateUndefined = errors.New("index: index state undefined: a commit-time delivery did not complete")
 
 // Subscriber is implemented by every concrete index that wishes to
 // receive change events from the [Manager]. The Apply method must
@@ -113,6 +122,57 @@ type Subscriber interface {
 type ResolvedApplier interface {
 	Subscriber
 	ApplyResolved(c Change, current any, eligible bool)
+}
+
+// NodeState answers, for one committing transaction, the two questions a bound
+// index asks about a changed node: its raw value of a property, and whether it is
+// eligible (live, and carrying a label). It is how the commit-time fan-out
+// ([Manager.ApplyBatchInState]) resolves a change against the state the commit
+// PRODUCES rather than against the graph's present, which also holds other
+// transactions' uncommitted writes (rmp #2931).
+//
+// propID and labelID are the interned ids a binding stores. value is returned in
+// the representation the subscriber's projection accepts; ok is false when the
+// node is absent or carries no such property.
+//
+// An implementation is called only from the goroutine performing the fan-out and
+// need not be safe for concurrent use.
+type NodeState interface {
+	// NodeValue's result is valid only until the next call on the same
+	// NodeState: an implementation may return a pointer to a scratch value so
+	// that the lookup allocates nothing. A caller that keeps the value calls
+	// NodeValueRetained instead.
+	NodeValue(id graph.NodeID, propID uint32) (value any, ok bool)
+	// NodeValueRetained is NodeValue for a caller that keeps the result.
+	NodeValueRetained(id graph.NodeID, propID uint32) (value any, ok bool)
+	NodeEligible(id graph.NodeID, labelID uint32) bool
+}
+
+// StateApplier is implemented by a [Subscriber] that can resolve a change from a
+// [NodeState] instead of reading the graph itself. [Manager.ApplyBatchInState]
+// delivers through it; a subscriber that does not implement it receives
+// [Subscriber.Apply].
+//
+// ApplyInState must apply c with exactly the rules Apply uses, substituting st's
+// answers for its own reads. Implementations must be safe for concurrent use on
+// the same terms as Apply.
+type StateApplier interface {
+	Subscriber
+	ApplyInState(c Change, st NodeState)
+}
+
+// ChangeFilter is implemented by a [Subscriber] that can tell, from a change
+// alone, whether applying it could modify the subscriber. [Manager.Concerns]
+// uses it to spare a commit that touches no indexed coordinate the ordered,
+// state-resolved fan-out. A subscriber that does not implement it is assumed to
+// be concerned by every node change.
+//
+// Implementations must be safe for concurrent use: [Manager.Concerns] calls
+// Concerns from every committing goroutine at once, under the Manager's read
+// lock only. Concerns must not mutate the subscriber; the module's
+// implementations read only the immutable index binding.
+type ChangeFilter interface {
+	Concerns(c Change) bool
 }
 
 // Serializer is implemented by indexes that can persist and restore
@@ -209,6 +269,186 @@ type Manager struct {
 	// for this mechanism: one length check per call.
 	builds []*BuildLog
 	mu     sync.RWMutex
+	// active mirrors len(indexes)+len(builds), republished under mu held
+	// exclusively by every method that changes either, so [Manager.Active] can
+	// answer without taking mu. It is read on the raw lpg write path, once per
+	// mutation, which is why it is an atomic and not a lock (rmp #2848).
+	active atomic.Int64
+	// drainedThrough is the highest commit timestamp whose changes have been
+	// fanned out, or [DrainedUnknown] once a change has arrived with no
+	// timestamp; applying counts the state-resolved deliveries in progress. See
+	// [Manager.DescribesSnapshot].
+	drainedThrough atomic.Uint64
+	applying       atomic.Int64
+	// frontier reports the owning graph's visible commit frontier; see
+	// [Manager.SetFrontierSource]. nil until set.
+	frontier atomic.Pointer[func() uint64]
+	// decisions counts the commits between their index decision and their
+	// publication; see [Manager.EnterCommit] (rmp #2936).
+	decisions mvcc.Gate
+	// undefined holds the cause recorded by [Manager.MarkUndefined], or nil.
+	undefined atomic.Pointer[error]
+}
+
+// MarkUndefined records that the indexes' state is undefined because a
+// commit-time delivery did not complete; cause says why. It is sticky: the first
+// cause is kept and later calls change nothing. The owner of the manager — the
+// Cypher engine — reads [Manager.Undefined] and fail-stops.
+//
+// Safe for concurrent use, and a no-op on a nil Manager.
+func (m *Manager) MarkUndefined(cause string) {
+	if m == nil {
+		return
+	}
+	err := fmt.Errorf("%w: %s", ErrIndexStateUndefined, cause)
+	m.undefined.CompareAndSwap(nil, &err)
+}
+
+// Undefined returns nil while the indexes' state is defined, and an error
+// wrapping [ErrIndexStateUndefined] once [Manager.MarkUndefined] has run. It is
+// one atomic load.
+//
+// Safe for concurrent use; a nil Manager reports nil.
+func (m *Manager) Undefined() error {
+	if m == nil {
+		return nil
+	}
+	if p := m.undefined.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// SetFrontierSource tells the manager how to read the visible commit frontier
+// of the graph it serves. The graph installs it when the manager is attached
+// ([github.com/FlavioCFOliveira/GoGraph/graph/lpg.Graph.SetIndexManager]).
+//
+// It is what lets registering an index raise the commit watermark of
+// [Manager.DescribesSnapshot]: an index registered now is built from, and caught
+// up to, commits a transaction that started earlier cannot see, so for that
+// transaction the index describes the wrong instant (rmp #2812). Without a
+// source, registration raises the watermark to [DrainedUnknown], which no
+// snapshot passes.
+//
+// Safe for concurrent use.
+func (m *Manager) SetFrontierSource(frontier func() uint64) {
+	if m == nil {
+		return
+	}
+	if frontier == nil {
+		m.frontier.Store(nil)
+		return
+	}
+	m.frontier.Store(&frontier)
+}
+
+// noteRegistration raises the commit watermark to the graph's visible frontier:
+// the index just registered describes every commit up to there, so no snapshot
+// that started earlier may treat it as its answer. The caller holds mu
+// exclusively, so no delivery can interleave with the registration.
+func (m *Manager) noteRegistration() {
+	if f := m.frontier.Load(); f != nil {
+		m.raiseDrainedThrough((*f)())
+		return
+	}
+	m.raiseDrainedThrough(DrainedUnknown)
+}
+
+// DrainedUnknown is what the commit watermark of [Manager.DescribesSnapshot]
+// becomes once a change has been fanned out without a commit timestamp
+// ([Manager.Apply], [Manager.ApplyBatch]). It is above every real timestamp, so
+// no snapshot can ever be proved described afterwards — the sound answer to "I
+// cannot tell which commit this was".
+const DrainedUnknown = ^uint64(0)
+
+// raiseDrainedThrough moves [Manager.drainedThrough] up to at least ts. It is a
+// compare-and-swap loop because concurrent committers finish out of timestamp
+// order; a plain store could move it backwards.
+func (m *Manager) raiseDrainedThrough(ts uint64) {
+	for {
+		cur := m.drainedThrough.Load()
+		if ts <= cur || m.drainedThrough.CompareAndSwap(cur, ts) {
+			return
+		}
+	}
+}
+
+// DescribesSnapshot reports whether the indexes, as read by a caller BEFORE this
+// call, held exactly the commits a snapshot started at startTS sees — no more and
+// no fewer. A caller that reads an index and then gets true may treat what it
+// read as that snapshot's answer; on false it must not. Safe for concurrent use;
+// a nil Manager has no index and reports true.
+//
+// # What it proves, and why the order of the loads matters
+//
+// The indexes are written at commit time and read at the present, so a reader
+// running at a snapshot cannot, on its own, tell whether an index describes that
+// snapshot. A committer's state-resolved delivery ([Manager.ApplyBatchInState],
+// closed by [Manager.FinishApplied]) counts itself in, applies its changes,
+// publishes its commit timestamp, raises the commit watermark to that timestamp,
+// and counts itself out, in that order. So, for a reader that loads the counter
+// and then the watermark after reading an index:
+//
+//   - every commit at or below startTS was published before the reader began,
+//     and its changes were applied before its publication;
+//   - a delivery whose effects the index read observed at all had counted itself
+//     in before making them, so either the counter is still non-zero, or it has
+//     since counted out, in which case it raised the watermark first — to its
+//     own timestamp, which is above startTS unless the reader's snapshot
+//     includes that commit.
+//
+// Either way a commit the snapshot cannot see makes this false.
+//
+// REGISTERING an index raises the same watermark, to the frontier at the instant
+// of registration ([Manager.SetFrontierSource]). An index is backfilled from a
+// snapshot and caught up to its registration, so it reflects commits a snapshot
+// that started earlier cannot see — a node deleted after that snapshot is already
+// missing from it — and such a snapshot must not treat it as its answer. Measured
+// before this rule (rmp #2812 audit): an explicit transaction that saw a node,
+// followed by a committed delete and a CREATE INDEX, made the transaction's MERGE
+// create a duplicate. It is a single
+// process-wide answer rather than a per-index one, which makes it coarse under
+// concurrent commits and never wrong.
+func (m *Manager) DescribesSnapshot(startTS uint64) bool {
+	if m == nil {
+		return true
+	}
+	// An index whose commit-time delivery was cut short describes no snapshot at
+	// all. A panic in the delivery's first step leaves applying at zero, so this
+	// is not implied by the counter below (rmp #2936 audit, L1).
+	if m.undefined.Load() != nil {
+		return false
+	}
+	if m.applying.Load() != 0 {
+		return false
+	}
+	return m.drainedThrough.Load() <= startTS
+}
+
+// publishActiveLocked republishes [Manager.active]. The caller holds mu
+// exclusively.
+func (m *Manager) publishActiveLocked() {
+	m.active.Store(int64(len(m.indexes) + len(m.builds)))
+}
+
+// Active reports whether at least one index is registered or being built. It is
+// safe to call on a nil Manager, which has none.
+//
+// It is the question the graph's raw, index-bypassing mutators ask before they
+// write (rmp #2848): an index is maintained ONLY by the change fan-out
+// ([Manager.Apply], [Manager.ApplyBatch]), so a write that delivers no change
+// while an index exists — or while one is being built, whose build log records
+// only fanned-out changes — leaves that index silently stale.
+//
+// Active reads one atomic and takes no lock, so it is safe for concurrent use
+// and cheap enough for every mutation to ask. A registration or build that
+// begins concurrently with a caller's check is ordered by that atomic alone: the
+// caller observes either the state before it or the state after it.
+func (m *Manager) Active() bool {
+	if m == nil {
+		return false
+	}
+	return m.active.Load() > 0
 }
 
 // NewManager returns an empty Manager.
@@ -225,6 +465,8 @@ func (m *Manager) CreateIndex(name string, sub Subscriber) error {
 		return fmt.Errorf("%w: %q", ErrIndexExists, name)
 	}
 	m.indexes[name] = sub
+	m.noteRegistration()
+	m.publishActiveLocked()
 	return nil
 }
 
@@ -236,6 +478,7 @@ func (m *Manager) DropIndex(name string) error {
 		return fmt.Errorf("%w: %q", ErrIndexNotFound, name)
 	}
 	delete(m.indexes, name)
+	m.publishActiveLocked()
 	return nil
 }
 
@@ -302,7 +545,11 @@ func (m *Manager) Count() int {
 // Recovery does not replay this stream at all — it rebuilds each index
 // from the live graph via BulkLoad — so no legal path ever delivers
 // same-key changes out of mutation order.
+//
+// Apply carries no commit timestamp, so it raises the commit watermark of [Manager.DescribesSnapshot] to
+// [DrainedUnknown]; the engine's commit path uses [Manager.ApplyBatchInState].
 func (m *Manager) Apply(c Change) {
+	m.raiseDrainedThrough(DrainedUnknown)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, sub := range m.indexes {
@@ -320,7 +567,16 @@ func (m *Manager) Apply(c Change) {
 // ApplyBatch fans an ordered slice of changes out to every subscriber
 // in order. The whole batch is applied under one read lock; this is
 // the substrate consumed by future transaction integration (Sprint 3).
+//
+// ApplyBatch carries no commit timestamp and no committed state: subscribers
+// resolve against the graph as it stands, and the watermark of [Manager.DescribesSnapshot] is raised
+// to [DrainedUnknown]. The engine's commit path uses [Manager.ApplyBatchInState].
+// An empty batch delivers nothing and raises nothing.
 func (m *Manager) ApplyBatch(changes []Change) {
+	if len(changes) == 0 {
+		return
+	}
+	m.raiseDrainedThrough(DrainedUnknown)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, sub := range m.indexes {
@@ -333,4 +589,96 @@ func (m *Manager) ApplyBatch(changes []Change) {
 	for _, b := range m.builds {
 		b.recordBatch(changes)
 	}
+}
+
+// Concerns reports whether delivering changes could modify any registered index
+// or any index being built — that is, whether the batch must be delivered at
+// all.
+//
+// A batch that concerns nothing may be dropped instead of delivered: every
+// registered subscriber would ignore it, and no build is in flight to record it.
+// A subscriber that implements [ChangeFilter] answers for itself; one that does
+// not is assumed concerned by every NODE change. Any build in flight concerns
+// every node change, because a build carries no filter of its own.
+//
+// Safe for concurrent use and safe on a nil Manager, which is concerned by
+// nothing.
+func (m *Manager) Concerns(changes []Change) bool {
+	if m == nil || len(changes) == 0 || !m.Active() {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for k := range changes {
+		c := changes[k]
+		if len(m.builds) > 0 && !c.IsEdgeChange() {
+			return true
+		}
+		for _, sub := range m.indexes {
+			if f, ok := sub.(ChangeFilter); ok {
+				if f.Concerns(c) {
+					return true
+				}
+				continue
+			}
+			if !c.IsEdgeChange() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ApplyBatchInState is [Manager.ApplyBatch] with every change resolved against
+// st, the state the committing transaction's commit produces: a subscriber that
+// implements [StateApplier] receives ApplyInState, any other receives Apply, and
+// a bound build in flight records st's answers (see [Manager.BeginBoundBuild]).
+//
+// This is the delivery the engine's commit path uses. Resolving against the
+// graph's present instead would read other transactions' uncommitted writes, and
+// an index entry derived from one of those outlives that transaction when it
+// rolls back (rmp #2931). The caller is responsible for making st describe
+// exactly the committed state — lpg.CommitApplier is how the engine does that.
+//
+// The delivery stays OPEN when this returns: the caller must publish the commit
+// timestamp and then close the delivery with exactly one [Manager.FinishApplied]
+// carrying it. The commit timestamp is not an argument here because the engine
+// allocates it only after the fan-out and publishes it at once, which keeps the
+// window in which an allocated timestamp holds back the visibility frontier to a
+// few instructions. See [Manager.DescribesSnapshot] for what the open delivery tells
+// a reader. An empty batch still opens a delivery, so the pairing never depends
+// on the batch.
+func (m *Manager) ApplyBatchInState(changes []Change, st NodeState) {
+	m.applying.Add(1)
+	if len(changes) == 0 {
+		return
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, sub := range m.indexes {
+		sa, stateful := sub.(StateApplier)
+		for k := range changes {
+			if stateful {
+				sa.ApplyInState(changes[k], st)
+				continue
+			}
+			sub.Apply(changes[k])
+		}
+	}
+	for _, b := range m.builds {
+		b.recordBatchInState(changes, st)
+	}
+}
+
+// FinishApplied closes the delivery the matching [Manager.ApplyBatchInState]
+// opened, for the transaction that has just published commitTS: it raises the
+// commit watermark to commitTS and only then counts the delivery out, the order
+// [Manager.DescribesSnapshot] depends on. A commitTS of 0 means unknown and
+// raises the watermark to [DrainedUnknown].
+func (m *Manager) FinishApplied(commitTS uint64) {
+	if commitTS == 0 {
+		commitTS = DrainedUnknown
+	}
+	m.raiseDrainedThrough(commitTS)
+	m.applying.Add(-1)
 }

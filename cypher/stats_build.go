@@ -355,14 +355,14 @@ func (e *Engine) scanStatsLocked(ctx context.Context) (
 			}
 		}
 		id, key := refs[i].id, refs[i].key
-		if g.IsTombstoned(id) {
+		if g.IsTombstonedStored(id) {
 			continue
 		}
-		labels := g.NodeLabels(key)
+		labels := g.NodeLabelsAsOf(key, nil)
 		if len(labels) == 0 {
 			continue
 		}
-		props := g.NodeProperties(key)
+		props := g.NodePropertiesAsOf(key, nil)
 		if len(props) == 0 {
 			continue
 		}

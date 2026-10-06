@@ -1,0 +1,202 @@
+spec ab01-failed-statement-rollback-then-retry: 2 sessions, 7 permutations
+# AB01, ROLLBACK arm. s1 sets x.v = 1, then a statement fails (integer division by
+# zero), then s1 ends; the vacuum is drained (H1); s1 then retries in a new
+# transaction (x.v = x.v + 10) and commits. A COMMIT of the failed transaction is
+# ErrTxPoisoned (F8) and applies nothing; the peer s2 never sees v = 1; the retry
+# commits, so the final value is 10.
+
+starting permutation: s1w s1e s1rb s1dr s1b2 s1w2 s1c2 s2r
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1e: MATCH (n:Item {name:'x'}) RETURN n.v / 0 AS boom
+ERROR: exec: Project item "boom" eval: eval: ArithmeticError: / by zero
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s1b2: BEGIN
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = n.v + 10 RETURN n.v AS v
+v 
+--
+10
+(1 row)
+step s1c2: COMMIT
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v 
+--
+10
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v 
+--
+10
+(1 row)
+
+starting permutation: s1w s1e s1rb s1dr s1b2 s1w2 s2r s1c2
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1e: MATCH (n:Item {name:'x'}) RETURN n.v / 0 AS boom
+ERROR: exec: Project item "boom" eval: eval: ArithmeticError: / by zero
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s1b2: BEGIN
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = n.v + 10 RETURN n.v AS v
+v 
+--
+10
+(1 row)
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1c2: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v 
+--
+10
+(1 row)
+
+starting permutation: s1w s1e s1rb s1dr s1b2 s2r s1w2 s1c2
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1e: MATCH (n:Item {name:'x'}) RETURN n.v / 0 AS boom
+ERROR: exec: Project item "boom" eval: eval: ArithmeticError: / by zero
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s1b2: BEGIN
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = n.v + 10 RETURN n.v AS v
+v 
+--
+10
+(1 row)
+step s1c2: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v 
+--
+10
+(1 row)
+
+starting permutation: s1w s1e s1rb s1dr s2r s1b2 s1w2 s1c2
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1e: MATCH (n:Item {name:'x'}) RETURN n.v / 0 AS boom
+ERROR: exec: Project item "boom" eval: eval: ArithmeticError: / by zero
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1b2: BEGIN
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = n.v + 10 RETURN n.v AS v
+v 
+--
+10
+(1 row)
+step s1c2: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v 
+--
+10
+(1 row)
+
+starting permutation: s1w s1e s2r s1rb s1dr s1b2 s1w2 s1c2
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1e: MATCH (n:Item {name:'x'}) RETURN n.v / 0 AS boom
+ERROR: exec: Project item "boom" eval: eval: ArithmeticError: / by zero
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s1b2: BEGIN
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = n.v + 10 RETURN n.v AS v
+v 
+--
+10
+(1 row)
+step s1c2: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v 
+--
+10
+(1 row)
+
+starting permutation: s1w s2r s1e s1rb s1dr s1b2 s1w2 s1c2
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1e: MATCH (n:Item {name:'x'}) RETURN n.v / 0 AS boom
+ERROR: exec: Project item "boom" eval: eval: ArithmeticError: / by zero
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s1b2: BEGIN
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = n.v + 10 RETURN n.v AS v
+v 
+--
+10
+(1 row)
+step s1c2: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v 
+--
+10
+(1 row)
+
+starting permutation: s2r s1w s1e s1rb s1dr s1b2 s1w2 s1c2
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1e: MATCH (n:Item {name:'x'}) RETURN n.v / 0 AS boom
+ERROR: exec: Project item "boom" eval: eval: ArithmeticError: / by zero
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s1b2: BEGIN
+step s1w2: MATCH (n:Item {name:'x'}) SET n.v = n.v + 10 RETURN n.v AS v
+v 
+--
+10
+(1 row)
+step s1c2: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v 
+--
+10
+(1 row)

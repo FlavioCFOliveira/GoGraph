@@ -150,12 +150,16 @@ func nameAnonymousPathEntities(pp *ast.PathPattern, mint func() string) {
 // It recurses into nested subqueries itself rather than leaving them to the
 // top-level walk, so "inside a subquery body" never has to be tracked as state:
 // it is simply which function is running.
-func (a *anonSubqueryNamer) nameSubqueryBody(pattern *ast.Pattern, where *ast.Where, body *ast.SingleQuery) {
+func (a *anonSubqueryNamer) nameSubqueryBody(pattern *ast.Pattern, where *ast.Where, body ast.Query) {
 	a.namePattern(pattern)
 	if where != nil {
 		a.nameExpr(where.Predicate)
 	}
-	a.nameSingleQuery(body)
+	// Every branch of a UNION body is translated per execution exactly as a
+	// one-branch body is, so every branch is named here (rmp #2627).
+	for _, branch := range ast.QueryBranches(body) {
+		a.nameSingleQuery(branch)
+	}
 }
 
 func (a *anonSubqueryNamer) namePattern(pat *ast.Pattern) {

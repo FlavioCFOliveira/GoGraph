@@ -188,44 +188,29 @@ parentheses are optional, matching the behaviour of the standalone
 which inserts `()` when YIELD follows directly; the parser patch covers
 the rarer case where YIELD is absent.
 
-### E. `reduce()` expression (task #1426)
+### E. `reduce()` expression (task #1426) — retired by rmp #2923
 
-`reduce(acc = init, x IN list | expr)` is a dedicated openCypher construct
-that does not parse correctly as a `FunctionInvocation`: the `|` (STICK)
-token between the iterator expression and the projection expression is not
-valid inside `expressionChain`, and a function call's argument list has no
-notion of the accumulator binding.
+`reduce(acc = init, x IN list | expr)` was once parsed by a hand-written
+`ReduceExpression()` function spliced into `cypher_parser.go`, reached from an
+intercept in `Atom()` that fired when an identifier spelled `reduce` preceded
+`(`. That function was invisible to the ATN, so adaptive prediction for any
+decision that looked past a `reduce()` call rejected the `|` inside it:
+`x[reduce(a = 0, y IN l | a)]` failed to parse, because the subscript-versus-slice
+decision of a postfix list operator is one such decision.
 
-Rather than modify the ATN, a hand-written `ReduceExpression()` parser
-function was added to `cypher_parser.go` together with a short-circuit in
-`Atom()` that fires before the switch statement:
+Since rmp #2923 the construct is part of the grammar and this patch no longer
+exists:
 
-```go
-// atomReduceFix: intercept ID "reduce"/"REDUCE" + LPAREN before the
-// FunctionInvocation (alt 10) or Symbol (alt 11) case can run.
-if (atomAlt == 10 || atomAlt == 11) && isReduceToken(p.GetTokenStream().LT(1)) &&
-    p.GetTokenStream().LT(2).GetTokenType() == CypherParserLPAREN {
-    atomAlt = 100
-}
-```
+- `CypherLexer.g4` defines a `REDUCE` keyword token, immediately after `PROFILE`
+  and before `ID`, so it shifts no keyword token id;
+- `CypherParser.g4` lists `REDUCE` in `symbol`, so the word stays usable as a
+  variable, label, property key and map key, and defines
+  `reduceExpression : REDUCE LPAREN symbol ASSIGN expression COMMA filterExpression STICK expression RPAREN`
+  as its last rule, reached from a last alternative of `atom`.
 
-The `isReduceToken` helper (case-insensitive ID comparison) and the
-`ReduceExpression()` function live at the **end** of `cypher_parser.go`.
-The visitor interfaces (`cypherparser_visitor.go`, `cypherparser_base_visitor.go`,
-`cypherparser_listener.go`, `cypherparser_base_listener.go`) have matching
-`VisitReduceExpression` / `Enter|ExitReduceExpression` methods added.
-
-`ReduceExpression()` manually consumes: ID ("reduce") → LPAREN →
-`Symbol()` (accumulator variable) → ASSIGN → `Expression()` (init) →
-COMMA → `FilterExpression()` (iterator variable + source list) →
-STICK → `Expression()` (projection) → RPAREN.
-
-When you regenerate, you must:
-1. Restore `isReduceToken` and `ReduceExpression()` at the bottom of
-   `cypher_parser.go`, together with the `IReduceExpressionContext`
-   interface and `ReduceExpressionContext` struct.
-2. Re-apply the `(atomAlt == 10 || atomAlt == 11) && isReduceToken(...)` intercept inside `Atom()`.
-3. Re-add `VisitReduceExpression` to `cypherparser_visitor.go` and
-   its default implementation to `cypherparser_base_visitor.go`.
-4. Re-add `EnterReduceExpression` / `ExitReduceExpression` to
-   `cypherparser_listener.go` and `cypherparser_base_listener.go`.
+The rule is last so that it keeps rule index 93, the index the hand-written rule
+carried; the `atom` alternative is last so that the Literal and Symbol
+alternatives which section A selects by number keep their numbers. The change
+moved every ATN state by +2 in the rules before `atom` and by +3 from `atom` on;
+no decision number moved. The remaining hunks of `gen-patches.patch` were
+re-offset accordingly.

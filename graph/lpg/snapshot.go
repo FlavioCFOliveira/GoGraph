@@ -98,8 +98,58 @@ type Snapshot struct {
 	// never consults the verdict on those reads. Dropping that counter alone does
 	// not fix it either (measured 3/100), because the verdict still moves mid-read.
 	// Together: 0 failures in 300 runs.
+	//
+	// # Why the memo is behind a pointer (rmp #2965, round 5)
+	//
+	// A shared snapshot's memo is guarded by a mutex, and a mutex held INSIDE the
+	// snapshot makes every *Snapshot the read paths receive escape to the heap
+	// (sync.Mutex's slow path leaks its receiver). The direct present-state
+	// accessors read through a snapshot of their own on the caller's stack
+	// ([Graph.latestCommitted]), and that stack value must stay on the stack for
+	// a read to allocate nothing. So the shared memo lives behind memo, and a
+	// snapshot with a nil memo is OWNED by the one goroutine that made it and pins
+	// into owned instead, without a lock.
+	memo *snapMemo
+	// owned is the pin of an owned snapshot (memo == nil): the first len(owned)
+	// in-flight records it has classified, with their verdicts. A single-object
+	// read meets few in-flight records — one per transaction holding a version
+	// on that object — so the array covers it. A read that walks MANY objects
+	// through one owned snapshot ([Graph.TombstonedIDs] and
+	// [Graph.committedLifeCounts] do) can meet more distinct in-flight
+	// transactions than that, and stops pinning the excess: an unpinned record
+	// is classified afresh at each visit, so one such transaction committing
+	// part-way through the walk can be seen as uncommitted on objects visited
+	// before its commit and as committed on objects visited after it. Those
+	// walks therefore promise each object's committed state as of its visit,
+	// not one instant for the whole walk.
+	owned [4]pinnedVerdict
+}
+
+// snapMemo is a shared snapshot's verdict memo; see [Snapshot.memo].
+type snapMemo struct {
 	mu      sync.Mutex
 	verdict map[*commitInfo]bool
+}
+
+// pinnedVerdict is one pinned classification of an owned snapshot.
+type pinnedVerdict struct {
+	info    *commitInfo
+	visible bool
+}
+
+// sharedSnapshot is a [Snapshot] together with its memo, so a shared snapshot
+// costs one allocation, as it did before the memo moved behind a pointer.
+type sharedSnapshot struct {
+	Snapshot
+	m snapMemo
+}
+
+// newSharedSnapshot returns a snapshot that may be read by several goroutines
+// at once.
+func newSharedSnapshot(startTS, txID uint64, slot int) *Snapshot {
+	p := &sharedSnapshot{Snapshot: Snapshot{startTS: startTS, txID: txID, slot: slot}}
+	p.memo = &p.m
+	return &p.Snapshot
 }
 
 // visible reports whether a change stamped by info — or by the raw ts when info
@@ -114,9 +164,13 @@ func (s *Snapshot) visible(info *commitInfo, ts, startTS, txID uint64) bool {
 	if s == nil || info == nil {
 		return mvcc.Visible(ts, startTS, txID)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if v, ok := s.verdict[info]; ok {
+	m := s.memo
+	if m == nil {
+		return s.visibleOwned(info, startTS, txID)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if v, ok := m.verdict[info]; ok {
 		return v
 	}
 	cur := info.TS()
@@ -129,10 +183,36 @@ func (s *Snapshot) visible(info *commitInfo, ts, startTS, txID uint64) bool {
 	// dominant cost of typing it (rmp #2888). The in-flight case, the one the
 	// pin exists for, is recorded exactly as before.
 	if cur >= mvcc.TxIDBase && cur != mvcc.AbortedTS {
-		if s.verdict == nil {
-			s.verdict = make(map[*commitInfo]bool, 4)
+		if m.verdict == nil {
+			m.verdict = make(map[*commitInfo]bool, 4)
 		}
-		s.verdict[info] = v
+		m.verdict[info] = v
+	}
+	return v
+}
+
+// visibleOwned is [Snapshot.visible] for an owned snapshot: the same pin, kept
+// in the inline array and taken without a lock, because only the goroutine that
+// made the snapshot reads through it.
+func (s *Snapshot) visibleOwned(info *commitInfo, startTS, txID uint64) bool {
+	for i := range s.owned {
+		p := &s.owned[i]
+		if p.info == nil {
+			break
+		}
+		if p.info == info {
+			return p.visible
+		}
+	}
+	cur := info.TS()
+	v := mvcc.Visible(cur, startTS, txID)
+	if cur >= mvcc.TxIDBase && cur != mvcc.AbortedTS {
+		for i := range s.owned {
+			if s.owned[i].info == nil {
+				s.owned[i] = pinnedVerdict{info: info, visible: v}
+				break
+			}
+		}
 	}
 	return v
 }
@@ -169,7 +249,7 @@ func (g *Graph[N, W]) BeginRead() *Snapshot {
 	slot := g.horizon.EnterHolding()
 	startTS := g.mvccClock.ReadTS()
 	g.horizon.Publish(slot, startTS)
-	return &Snapshot{startTS: startTS, slot: slot}
+	return newSharedSnapshot(startTS, 0, slot)
 }
 
 // EndRead releases a read view obtained from [Graph.BeginRead].
@@ -201,4 +281,45 @@ func snapshotTimes(s *Snapshot) (startTS, txID uint64, walk bool) {
 		return 0, 0, false
 	}
 	return s.startTS, s.txID, true
+}
+
+// latestCommitted prepares cs as the read position of a direct present-state
+// accessor — [Graph.GetNodeProperty], [Graph.HasNodeLabel], [Graph.NodeLabels]
+// and every other accessor that takes no snapshot — and returns it, or nil when
+// the versioning substrate is disarmed and the stored value is the only state.
+//
+// # Committed only (rmp #2965, round 5, finding R5-F3)
+//
+// A version a transaction has written and not yet published is invisible to
+// every other reader. Before this, the direct accessors read the stored value,
+// which carries every such version: a durable commit applied but not yet fsynced
+// was readable through GetNodeProperty, HasNodeLabel and AdjList().HasEdge, and
+// if the fsync then failed the commit was withdrawn — the reader had seen a
+// write that never happened. The accessors now resolve as an implicit
+// transaction reads: every committed version is visible and every uncommitted
+// one is stepped back over, to the pre-image it replaced.
+//
+// The position needs no horizon slot: the versions it steps over are
+// uncommitted, which no reclaimer frees, and it stops at the first committed
+// one. cs is the caller's stack value, so a read whose newest version is
+// committed — the common case — allocates nothing; the snapshot's verdict memo
+// pins any in-flight transaction it classifies, so a transaction that commits
+// mid-read is seen wholly or not at all.
+//
+// This is how Memgraph's accessors resolve a read: ApplyDeltasForRead walks an
+// object's delta chain from the newest version back, undoing every delta the
+// reading transaction may not see, and stops at the first one it may
+// (memgraph/memgraph commit 3f2d6f8ed27ef6610933a218403f05f7a51a4d81;
+// src/storage/v2/mvcc.hpp). PostgreSQL's HeapTupleSatisfiesMVCC likewise
+// treats a tuple whose inserting transaction is still in progress as invisible
+// to every other backend (postgres/postgres commit
+// 50d6e533e4d9a0f70d798c534254007c83c0d428;
+// src/backend/access/heap/heapam_visibility.c). A transaction reading its own
+// writes does so through its own view ([Graph.WriterViewOf], [Graph.Writer]).
+func (g *Graph[N, W]) latestCommitted(cs *Snapshot) *Snapshot {
+	if !g.mvccArmed {
+		return nil
+	}
+	cs.startTS = implicitStartTS
+	return cs
 }

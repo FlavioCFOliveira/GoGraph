@@ -24,7 +24,7 @@ package cypher
 //     access paths, so this obligation is correctness and not conservatism.
 //  3. THE NORMALISATION IS THE EXACT INVERSE OF THE DESUGARING. The boundary is
 //     not a hand-drawn line: it is the set of bodies that
-//     [countToSingleQuery] / [existsToSingleQuery] could have BUILT from a
+//     [countToQuery] / [existsToQuery] could have BUILT from a
 //     pattern form. TestPatternFormOf_IsInverseOfDesugaring asserts the round
 //     trip, which is what makes obligation 1 semantics-preserving by
 //     construction rather than by argument.
@@ -424,7 +424,7 @@ func TestBlockFormNormalisation_OptionalMatchIsNotADegree(t *testing.T) {
 // TestPatternFormOf_IsInverseOfDesugaring is obligation 3, and it is what makes
 // obligation 1 sound.
 //
-// [countToSingleQuery] and [existsToSingleQuery] turn a pattern form into a
+// [countToQuery] and [existsToQuery] turn a pattern form into a
 // synthetic single-MATCH body for the translator. [ir.PatternFormOf] turns a
 // single-MATCH body back into a pattern form for the recognisers. If the second
 // is the exact inverse of the first over every pattern form, then normalising a
@@ -448,15 +448,15 @@ func TestPatternFormOf_IsInverseOfDesugaring(t *testing.T) {
 			sub := parseSubqueryExpr(t, src)
 
 			var (
-				body      *ast.SingleQuery
+				body      ast.Query
 				wantPat   *ast.Pattern
 				wantWhere *ast.Where
 			)
 			switch s := sub.(type) {
 			case *ast.CountSubquery:
-				body, wantPat, wantWhere = countToSingleQuery(s), s.Pattern, s.Where
+				body, wantPat, wantWhere = countToQuery(s), s.Pattern, s.Where
 			case *ast.ExistsSubquery:
-				body, wantPat, wantWhere = existsToSingleQuery(s), s.Pattern, s.Where
+				body, wantPat, wantWhere = existsToQuery(s), s.Pattern, s.Where
 			default:
 				t.Fatalf("parsed expression is %T, not a subquery", sub)
 			}
@@ -464,7 +464,11 @@ func TestPatternFormOf_IsInverseOfDesugaring(t *testing.T) {
 				t.Fatalf("the parser produced no pattern form for %q, so this case tests nothing", src)
 			}
 
-			gotPat, gotWhere, ok := ir.PatternFormOf(body)
+			single, isSingle := body.(*ast.SingleQuery)
+			if !isSingle {
+				t.Fatalf("the desugaring of a pattern form built a %T, not a one-branch body", body)
+			}
+			gotPat, gotWhere, ok := ir.PatternFormOf(single)
 			if !ok {
 				t.Fatalf("PatternFormOf refused the body that the desugaring itself built from a "+
 					"pattern form, so the two are not inverses.\n  query: %s", src)
@@ -506,7 +510,11 @@ func TestPatternFormOf_RefusesEveryOtherBody(t *testing.T) {
 				t.Fatalf("the parser did not produce a block form for %q, so this case tests "+
 					"nothing about the boundary", tc.src)
 			}
-			if _, _, admitted := ir.PatternFormOf(body.Query); admitted {
+			single, isSingle := body.Query.(*ast.SingleQuery)
+			if !isSingle {
+				t.Fatalf("the parser produced a %T body for %q, not a one-branch body", body.Query, tc.src)
+			}
+			if _, _, admitted := ir.PatternFormOf(single); admitted {
 				t.Errorf("PatternFormOf ADMITTED a body carrying %s. The pattern it hands back "+
 					"would be read as if the rest of the body were not there.\n  query: %s", tc.why, tc.src)
 			}
@@ -529,7 +537,11 @@ func TestPatternFormOf_AdmitsTheTargetShape(t *testing.T) {
 			if !ok || body.Query == nil {
 				t.Fatalf("the parser did not produce a block-form COUNT for %q (got %T)", src, sub)
 			}
-			pat, _, admitted := ir.PatternFormOf(body.Query)
+			single, isSingle := body.Query.(*ast.SingleQuery)
+			if !isSingle {
+				t.Fatalf("the parser produced a %T body for %q, not a one-branch body", body.Query, src)
+			}
+			pat, _, admitted := ir.PatternFormOf(single)
 			if !admitted {
 				t.Fatalf("PatternFormOf refused the target shape; the whole normalisation is "+
 					"inert.\n  query: %s", src)

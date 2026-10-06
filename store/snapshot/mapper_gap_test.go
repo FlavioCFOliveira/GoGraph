@@ -244,8 +244,8 @@ func TestCapture_TombstoneIDsAreAscending(t *testing.T) {
 	var removed int
 	for i := 0; i < n; i += 3 {
 		if err := g.ApplyVersioned(func(tx lpg.WriteTx) error {
-			g.Writer(tx).RemoveNode(fmt.Sprintf("tomb-%05d", i))
-			return nil
+			_, err := g.Writer(tx).RemoveNode(fmt.Sprintf("tomb-%05d", i))
+			return err
 		}); err != nil {
 			t.Fatalf("RemoveNode: %v", err)
 		}

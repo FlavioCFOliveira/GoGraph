@@ -111,7 +111,9 @@ func relDirGoAPIFixture(t *testing.T) *lpg.Graph[string, float64] {
 		if err := g.AddEdge(s, d, 1); err != nil {
 			t.Fatal(err)
 		}
-		g.SetEdgeLabel(s, d, typ)
+		if err := g.SetEdgeLabel(s, d, typ); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgeProperty(s, d, "w", lpg.Int64Value(w)); err != nil {
 			t.Fatal(err)
 		}
@@ -160,7 +162,9 @@ func relDirColumnarFixture(t *testing.T) *lpg.Graph[string, float64] {
 		if err := g.AddEdge(a, b, 1); err != nil {
 			t.Fatal(err)
 		}
-		g.SetEdgeLabel(a, b, "K")
+		if err := g.SetEdgeLabel(a, b, "K"); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgeProperty(a, b, "w", lpg.Int64Value(w)); err != nil {
 			t.Fatal(err)
 		}
@@ -875,11 +879,15 @@ func TestRelStoredDir_MutationEachGuardCanFail(t *testing.T) {
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatal(err)
 	}
-	g.SetEdgeLabel("a", "b", "T")
+	if err := g.SetEdgeLabel("a", "b", "T"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.AddEdge("b", "a", 1); err != nil {
 		t.Fatal(err)
 	}
-	g.SetEdgeLabel("b", "a", "T")
+	if err := g.SetEdgeLabel("b", "a", "T"); err != nil {
+		t.Fatal(err)
+	}
 
 	view := g.ReadAt(nil)
 	aID, okA := view.AdjList().Mapper().Lookup("a")
@@ -966,7 +974,9 @@ func TestRelStoredDir_ColumnValueIsLoadBearing(t *testing.T) {
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatal(err)
 	}
-	g.SetEdgeLabel("a", "b", "T")
+	if err := g.SetEdgeLabel("a", "b", "T"); err != nil {
+		t.Fatal(err)
+	}
 	view := g.ReadAt(nil)
 	aID, _ := view.AdjList().Mapper().Lookup("a")
 	bID, _ := view.AdjList().Mapper().Lookup("b")
@@ -1012,7 +1022,9 @@ func TestRelStoredDir_ZeroValueMetaIsSlowNotWrong(t *testing.T) {
 	if err := g.AddEdge("b", "a", 1); err != nil {
 		t.Fatal(err)
 	}
-	g.SetEdgeLabel("b", "a", "T")
+	if err := g.SetEdgeLabel("b", "a", "T"); err != nil {
+		t.Fatal(err)
+	}
 	view := g.ReadAt(nil)
 	aID, _ := view.AdjList().Mapper().Lookup("a")
 	bID, _ := view.AdjList().Mapper().Lookup("b")
@@ -1068,7 +1080,9 @@ func TestRelStoredDir_AnchorSwapReadsTheExecutedDirection(t *testing.T) {
 	if err := g.AddEdge("n7", "t", 1); err != nil {
 		t.Fatal(err)
 	}
-	g.SetEdgeLabel("n7", "t", "HAS")
+	if err := g.SetEdgeLabel("n7", "t", "HAS"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.SetEdgeProperty("n7", "t", "w", lpg.Int64Value(6)); err != nil {
 		t.Fatal(err)
 	}
@@ -1112,11 +1126,11 @@ func relDirBenchFixture(fan int, reciprocal bool) *lpg.Graph[string, float64] {
 		_ = g.AddNode(k)
 		_ = g.SetNodeLabel(k, "P")
 		_ = g.AddEdge("hub", k, 1)
-		g.SetEdgeLabel("hub", k, "K")
+		_ = g.SetEdgeLabel("hub", k, "K")
 		_ = g.SetEdgeProperty("hub", k, "w", lpg.Int64Value(int64(i)))
 		if reciprocal {
 			_ = g.AddEdge(k, "hub", 1)
-			g.SetEdgeLabel(k, "hub", "K")
+			_ = g.SetEdgeLabel(k, "hub", "K")
 			_ = g.SetEdgeProperty(k, "hub", "w", lpg.Int64Value(int64(-i)))
 		}
 	}

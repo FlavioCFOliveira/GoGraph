@@ -9,7 +9,8 @@ package mvcc
 //
 // [Clock.RatchetTo] restores the clock at recovery. Its first version raised the two
 // atomics — the allocation counter and the visible frontier — and stopped there. But
-// the CONTIGUITY that produces the frontier lives in [commitLog.oldest], and a log
+// the CONTIGUITY that produced the frontier lived in the commit log's `oldest` (the
+// ring that replaced it in rmp #2932 keeps no such copy), and a log
 // that still believes timestamp 1 is unfinished computes a frontier of 0 for ever.
 //
 // Since [Clock.finishCommitTS] only ever RAISES visible, the frontier could then

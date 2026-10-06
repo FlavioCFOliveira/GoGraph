@@ -373,7 +373,7 @@ name.
 | `overload` | concurrent | Giant transactions / huge `UNWIND` / large result sets / deep variable-length expansion; bounded-resource graceful degradation. |
 | `cpu-starvation` | liveness | A compute-hog workload (60% overload) competing with honest queries on a single clamped `GOMAXPROCS` core, then a liveness convergence assertion. Verifies fair scheduling under CPU starvation: the system keeps making forward progress (no deadlock/livelock — the watchdog classifies a stuck run as resonance), no panic, no goroutine leak. Latency percentiles are deliberately not asserted (statistical). |
 | `bulk-vs-online` | bulk-vs-online | A concurrent offline bulk CSR load alongside transactional online writes; resource stability. |
-| `bulkimport-parity` | deterministic | **Offline bulk-import publication, round-tripped through real recovery** (rmp #2466). `bulk-vs-online` above drives `store/bulk`, whose record is adjacency only — `(src, dst, weight)`, no labels and no properties — so every label, property, relationship type and parallel-edge handle that `store/bulkimport` carries was unexercised. This scenario builds a seed-derived labelled property multigraph through `bulkimport.Builder`, publishes it to a **real temporary directory**, reopens it through `recovery.Open`, and requires the recovered graph to equal a harness model EXACTLY: node set (two-sided — live order *and* per-key presence), labels, properties (**kind and value**, so an integer `7` and the string `"7"` cannot compare equal), and the per-handle multiset of (type, weight, properties) on every pair, including the parallel twins a pair-addressed carriage would collapse. It also pins the package's lifecycle contract **as measured**, reopens the directory a second time and adjudicates again, and pins the publish's byte-reproducibility boundary — an identical republish is byte-identical only while items carry at most one property, because `Node.Properties` is a map (logically identical every run, physically not). **Fault injection is out of reach:** `bulkimport.Publish` is hard-wired to the OS filesystem (`os.MkdirAll`, `os.ReadDir`, the non-seamed `snapshot.WriteSnapshotFullCtx`) and `ImportInto` takes a `storeDir string` with no filesystem in its `Options`, so no `SimDisk` can be placed underneath a publish without a production change — filed as rmp #2518. See [Bulk-import publication parity](#bulk-import-publication-parity-rmp-2466). |
+| `bulkimport-parity` | deterministic | **Offline bulk-import publication, round-tripped through real recovery** (rmp #2466). `bulk-vs-online` above drives `store/bulk`, whose record is adjacency only — `(src, dst, weight)`, no labels and no properties — so every label, property, relationship type and parallel-edge handle that `store/bulkimport` carries was unexercised. This scenario builds a seed-derived labelled property multigraph through `bulkimport.Builder`, publishes it to a **real temporary directory**, reopens it through `recovery.Open`, and requires the recovered graph to equal a harness model EXACTLY: node set (two-sided — live order *and* per-key presence), labels, properties (**kind and value**, so an integer `7` and the string `"7"` cannot compare equal), and the per-handle multiset of (type, weight, properties) on every pair, including the parallel twins a pair-addressed carriage would collapse. It also pins the package's lifecycle contract **as measured**, reopens the directory a second time and adjudicates again, and asserts the publish is byte-reproducible: an identical republish yields byte-identical data components at every property regime (rmp #2519). Its fifth arm publishes through `bulkimport.PublishFS` / `ImportIntoFS` onto a `SimDisk` and injects ENOSPC, fsync, rename and crash faults, requiring every outcome to be all or nothing (rmp #2518). See [Bulk-import publication parity](#bulk-import-publication-parity-rmp-2466). |
 | `merge-rel` | deterministic | The `MERGE`-relationship + `ON CREATE` / `ON MATCH SET` surface: the workload repeatedly MERGEs `KNOWS` edges carrying a hit counter, and `CheckMergeRel` confirms the counter round-trips and — with crash + checkpoint injected — survives both WAL and snapshot recovery. Edge-count parity (idempotency) is enforced by the shared durability check. |
 | `constraint-existence` | deterministic | NOT NULL existence-constraint enforcement (`internal/sim/constraint_existence.go`), beside the UNIQUE enforcement of `constraint-enforce`. |
 | `durable-commit-crash` | concurrent | ST2. A real WAL-backed store on a `SimDisk`, served over the genuine Bolt wire, with many concurrent writer connections whose every commit is a `wal.Writer.SyncGroup` round — a solo leader or a coalesced group, never always the former. A deterministic mid-flight fsync fault poisons one commit at a seed-chosen ordinal (its client sees a wire FAILURE, never an ack; the WAL discards the un-synced suffix), then the engine is dropped and reopened through real recovery. The invariants are asserted as SETS of node names, never equality under the fault, so a durable-but-ack-lost commit stays legal. |
@@ -520,14 +520,20 @@ parallel pairs, through `edgehandles.bin`). Both gate on in-loop checkpointing
 having fired *before* crossing — the forced checkpoint would otherwise inflate the
 count and silence `Simulator.checkCheckpointsFired`.
 
-**Do not assert an exact WAL byte count.** Measured for this section: an identical
-50-op WAL is 10 790 bytes at 4 ms into a process and 10 850 bytes from 608 ms
-onwards, then flat — the per-frame timestamps are varint-encoded, so their width
-(and the whole image's size) tracks the wall clock. The logical run is unaffected
-and stays bit-reproducible: repeated identical runs in one process produce an
-identical op history and identical crash ticks while the byte image grows. The
-seed-stable facts are the ones the oracle uses — the WAL was non-empty before the
-checkpoint, is empty after it, and the recovery replayed zero ops.
+**Do not assert an exact WAL byte count.** The durable WAL image is not
+byte-stable across runs in one process, while the logical run is: repeated
+identical runs produce an identical op history and identical crash ticks while
+the byte image grows (measured on `edge-properties`, four runs in one process:
+2390, 2421, 2447 and 2487 bytes). The field is the hidden node key
+`"__cx_" + hex(n)` that Cypher `CREATE` and `MERGE` mint from a process-global
+counter (`cypher/exec/create_node.go:445-446`), written into every op frame that
+names the node; its hex width grows with the number of nodes the process has
+minted. It is **not** the wall clock and **not** a varint timestamp, as this
+section previously stated: no WAL frame carries a timestamp, and a fresh process
+writes the same bytes whether it starts at once or 700 ms later (rmp #2521; see
+`docs/test-layers.md`, "Golden images"). The seed-stable facts are the ones the
+oracle uses — the WAL was non-empty before the checkpoint, is empty after it, and
+the recovery replayed zero ops.
 
 ## The key and weight codec matrix (rmp #2473)
 
@@ -716,77 +722,78 @@ the two entry points disagree about **when** the directory is inspected —
 `Publish` checks the builder and the context first, `ImportInto` checks the
 directory before doing anything.
 
-### What this scenario CANNOT reach — read before assuming coverage
+### Fault regimes, through the filesystem seam (rmp #2518)
 
-**Bulk-import publication is not fault-covered.** Every other durability scenario
-here injects faults through `SimDisk`, which reaches the persistence packages via
-their filesystem seams (`wal.OpenFS`, `recovery.OpenFS`,
-`snapshot.WriteSnapshotFullWithMapperCodecAndConstraintsFS` and siblings).
-`bulkimport.Publish` has **no such seam**: it calls `os.MkdirAll` and
-`os.ReadDir` directly and writes through the **non-seamed**
-`snapshot.WriteSnapshotFullCtx`, and `ImportInto` takes a `storeDir string` plus
-an `Options` that carries no filesystem. There is therefore no way to put a
-`SimDisk` underneath a publish without changing the production API. That change
-is **filed for a user decision as rmp #2518** and was deliberately not made here.
+`bulkimport.PublishFS` and `bulkimport.ImportIntoFS` route the empty-directory
+check (`ReadDir`), the store-directory creation (`Stat`, `MkdirAll` and
+`DirSync`) and the whole snapshot write
+(`snapshot.WriteSnapshotFullWithWeightCodecCtxFS`) through a caller-supplied
+filesystem whose type is intentionally unexported, as `store/snapshot`'s is. The
+OS-backed `Publish`, `PublishWithWeightCodec` and `ImportInto` make the same
+calls against the operating system. The scenario's fifth arm
+(`internal/sim/bulkimport_faults.go`) backs the seam with a `SimDisk` and, after
+each fault, host-crashes the disk and reopens the store through
+`recovery.OpenFS`. The outcome must be **all or nothing**: no snapshot and an
+empty graph, or the snapshot and a graph equal to the model. Every regime also
+proves its fault fired. Measured on the default seed:
 
-Unreachable, and covered by nothing below:
+| Regime | Fault seen by | Outcome |
+|---|---|---|
+| clean publish, then a host crash (control) | — | complete |
+| ENOSPC at the growing write (`ImportIntoFS`) | `errors.Is(err, syscall.ENOSPC)` | empty |
+| ENOSPC at sync | `errors.Is(err, syscall.ENOSPC)` | empty |
+| fsync fault on the first component | `ErrSimFault`, `SyncCount() >= 1` | empty |
+| fsync fault on the last component (6th fsync) | `ErrSimFault`, `SyncCount() == 6` | empty |
+| rename fault on `snapshot.tmp` → `snapshot` | `RenameFaultCount() == 1` | empty |
+| crash after the publish rename, rename written back | `RenameWritebackCount() == 1` | complete |
+| process crash at each of the 40 filesystem operations | crash fired at 40 of 40 | 38 empty, 2 complete |
 
-* `ENOSPC` part-way through writing the snapshot components.
-* A failing `fsync` on a component file, on the staging directory, or on the
-  store's parent directory.
-* A failing or crash-interrupted rename of `snapshot.tmp` to `snapshot` — the
-  exact instant `Publish`'s atomicity claim rests on.
-* A crash landing **inside** the publish window, with the crash-window
-  non-determinism (`ArmRenameWritebackForPath`) that `checkpoint-crash-storm`
-  uses to select which dirent survived.
+The crash sweep counts every directory operation and every `Write`, `Sync` and
+`Close` on a component file; from the crash point on the process is dead and
+touches nothing. The one sweep point at which the publish still returned nil is
+the best-effort removal of a stale backup after the publish is already durable;
+the arm requires any such acknowledged publish to recover complete.
 
-What **is** reachable against a real directory is the publish's *outcome* state
-rather than its interruption. The scenario's third arm publishes a complete
-snapshot to a scratch directory and moves it to the assembly name
-(`snapshot.tmp`) in a fresh one. That is byte-for-byte the directory shape a
-crash between assembly and rename leaves, and recovery must find nothing
-(`SnapshotHit` false, live order 0) and remove the debris — with the staged
-bytes measured *before* the reopen, so "recovery removed it" is a measured delta
-rather than an assumption that anything was there. It is a **reconstruction, not
-an interruption**: it proves recovery's treatment of that state, not the writer's
-behaviour while reaching it.
+The store directory is nested (`root/bistore`), so the publish itself creates
+both `root` and `root/bistore`. The `SimDisk` crash model exempts only root-level
+names from revocation, so `root/bistore` survives a host crash only if the
+publish fsyncs `root`. It does: when the publish creates the store directory or
+any ancestor, it fsyncs each directory it created and the first ancestor that
+already existed, before writing the snapshot (rmp #2970). Before that fix, the
+clean-publish control and the acknowledged sweep point both recovered empty.
 
-### Byte-reproducibility: where it begins and ends
+The third arm, which runs against a real directory, still reconstructs the
+*outcome* state of a crash between assembly and rename: a complete snapshot is
+moved to the assembly name (`snapshot.tmp`) in a fresh directory, and recovery
+must find nothing (`SnapshotHit` false, live order 0) and remove the debris, with
+the staged bytes measured *before* the reopen.
 
-A publish of the same records twice produces data components with the same names
-and the same **sizes**, but **not the same bytes**. The cause was isolated by
-measurement rather than inferred, by republishing at three property regimes:
+### Byte-reproducibility (rmp #2519)
+
+A publish of the same records twice produces **byte-identical** data components.
+`TestBulkImportParity_ByteBoundary` asserts it over three publish pairs of the
+full property matrix and over two controls:
 
 | Regime | Identical republish is byte-identical? |
 |---|---|
-| Items carrying two or more properties (the fixture) | **no** |
+| Items carrying two or more properties, every kind (the fixture) | yes |
 | Items carrying exactly one property | yes |
 | No properties at all (labels and types kept) | yes |
 
-Publishing the *identical record slices* twice within one process already
-diverges, which rules out the fixture's construction, a timestamp, or an address.
-The whole of the divergence is Go map iteration order over
-`bulkimport.Node.Properties` / `Edge.Properties` — both are maps, so no caller
-can avoid it.
+Before #2519 the first regime was **not** byte-identical while the two controls
+were, which isolated the cause: the importer applied each `Node.Properties` /
+`Edge.Properties` map in Go iteration order, and that order fixed both the
+property-key interning order and each item's property-bag layout, which the
+snapshot writer serialises. The importer now applies properties in ascending key
+order (the GraphML writer's precedent), and the snapshot writer emits each node's
+property records in ascending key-index order, as it already did for a pair's
+edge properties — a bag promoted to the map tier was otherwise serialised in map
+order on every checkpoint, not only on a bulk import.
 
-**This is not a correctness defect.** `bulkimport.Node` documents that properties
-are set "in map-iteration order, which is unspecified. That is safe because each
-key is written once, so no ordering can change the result", and that claim holds
-exactly as written: the *logical* result is identical on every run, which the
-parity pass re-proves each execution. What is not promised, and is not true, is
-byte-identity of the *physical* image. The practical consequence is worth knowing
-before relying on it: **two imports of identical data cannot be compared by
-checksum, and bulk-import snapshots will not deduplicate in content-addressed
-storage.**
-
-Two further things are therefore deliberately *not* asserted as seed-stable. The
-snapshot's total byte count is excluded because `manifest.json` carries a
-`created_at` wall clock whose rendering drops a trailing zero about one run in
-ten (a measured 654-vs-655-byte swing). Byte-identity of the data components is
-excluded for the reason above; their combined **size** is asserted instead, since
-the same keys are written whatever the order. `TestBulkImportParity_ByteBoundary`
-pins all three regimes, so a flip — including an improvement, such as ordering
-property keys — is noticed rather than quietly making this section false.
+`manifest.json` is still excluded: it carries a `created_at` wall clock whose
+rendering drops a trailing zero about one run in ten (a measured 654-vs-655-byte
+swing). See `docs/test-layers.md`, "Golden images", for what else is and is not
+byte-stable.
 
 ### Proving the check can fail
 

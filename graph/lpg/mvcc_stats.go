@@ -180,6 +180,13 @@ type MVCCStats struct {
 	// a value that does not return to zero is both the staleness and the memory
 	// growth, named once.
 	InFlightCommits uint64
+	// OutOfOrderPublications is how many commit timestamps finished while an
+	// earlier one was still in flight; HelpedPublications is how many commits a
+	// later publication stamped and published on a descheduled owner's behalf.
+	// See [mvcc.Clock.OutOfOrderPublications] and [mvcc.Clock.HelpedPublications]
+	// (rmp #2932).
+	OutOfOrderPublications uint64
+	HelpedPublications     uint64
 	// SessionsWaiting is how many callers are blocked waiting for the frontier to
 	// reach their own last commit (rmp #2328).
 	//
@@ -251,24 +258,26 @@ func (s *MVCCStats) WithinCeiling() bool { return s.Total <= s.Ceiling }
 // Safe for concurrent use.
 func (g *Graph[N, W]) MVCCStats() MVCCStats {
 	s := MVCCStats{
-		LabelDeltas:           g.labelDeltaActive.Load(),
-		PropDeltas:            g.propDeltaActive.Load(),
-		AdjVersions:           g.adj.VersionCount(),
-		EdgeSideVersions:      g.EdgeSideVersionCount(),
-		NodeLifeRecords:       g.nodeLifeActive.Load(),
-		IndexRemovalBacklog:   g.idxPendingActive.Load(),
-		AdjConflictStamps:     int64(g.adjVer.len()),
-		ConstraintStamps:      int64(g.conVer.len()),
-		Bound:                 reclaimThreshold,
-		Ceiling:               reclaimDebtCeiling,
-		Now:                   g.mvccClock.ReadTS(),
-		ActiveSnapshots:       g.horizon.Active(),
-		UnregisteredSnapshots: g.horizon.Unregistered(),
-		SnapshotCapacity:      mvcc.HorizonCapacity,
-		Write:                 g.writeCounts.Load(),
-		ChainDepth:            g.ChainDepths(),
-		InFlightCommits:       g.mvccClock.InFlightCommits(),
-		SessionsWaiting:       g.mvccClock.AwaitingVisible(),
+		LabelDeltas:            g.labelDeltaActive.Load(),
+		PropDeltas:             g.propDeltaActive.Load(),
+		AdjVersions:            g.adj.VersionCount(),
+		EdgeSideVersions:       g.EdgeSideVersionCount(),
+		NodeLifeRecords:        g.nodeLifeActive.Load(),
+		IndexRemovalBacklog:    g.idxPendingActive.Load(),
+		AdjConflictStamps:      int64(g.adjVer.len()),
+		ConstraintStamps:       int64(g.conVer.len()),
+		Bound:                  reclaimThreshold,
+		Ceiling:                reclaimDebtCeiling,
+		Now:                    g.mvccClock.ReadTS(),
+		ActiveSnapshots:        g.horizon.Active(),
+		UnregisteredSnapshots:  g.horizon.Unregistered(),
+		SnapshotCapacity:       mvcc.HorizonCapacity,
+		Write:                  g.writeCounts.Load(),
+		ChainDepth:             g.ChainDepths(),
+		InFlightCommits:        g.mvccClock.InFlightCommits(),
+		OutOfOrderPublications: g.mvccClock.OutOfOrderPublications(),
+		HelpedPublications:     g.mvccClock.HelpedPublications(),
+		SessionsWaiting:        g.mvccClock.AwaitingVisible(),
 		// The two detectors of the same family, kept SEPARATE: the watermark moving
 		// backwards, and a horizon slot released that nobody held. Both must be zero.
 		WatermarkRegressions: g.vac.wmRegress.Load(),
@@ -308,6 +317,8 @@ func (g *Graph[N, W]) publishMVCCMetrics() {
 	// see [MVCCStats.OldestSnapshotAge] for why it is not published twice.
 	metrics.SetGauge("lpg.mvcc.oldest_snapshot_age", float64(s.OldestSnapshotAge()))
 	metrics.SetGauge("lpg.mvcc.in_flight_commits", float64(s.InFlightCommits))
+	metrics.SetGauge("lpg.mvcc.publications.out_of_order", float64(s.OutOfOrderPublications))
+	metrics.SetGauge("lpg.mvcc.publications.helped", float64(s.HelpedPublications))
 	metrics.SetGauge("lpg.mvcc.sessions.waiting", float64(s.SessionsWaiting))
 	metrics.SetGauge("lpg.mvcc.snapshots.active", float64(s.ActiveSnapshots))
 	metrics.SetGauge("lpg.mvcc.snapshots.unregistered", float64(s.UnregisteredSnapshots))

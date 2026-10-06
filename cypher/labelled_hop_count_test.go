@@ -332,7 +332,9 @@ func TestLabelledHopCount_ShortCircuits(t *testing.T) {
 		if err := g.AddEdge("hub", k, 1); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
-		g.SetEdgeLabel("hub", k, "K")
+		if err := g.SetEdgeLabel("hub", k, "K"); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	sh := &labelledHopShape{anchorVar: "a", typed: true, typeName: "K", farLabels: []string{"Q"}}

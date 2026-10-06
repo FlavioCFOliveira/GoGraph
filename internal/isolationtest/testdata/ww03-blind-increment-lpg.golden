@@ -1,0 +1,80 @@
+spec ww03-blind-increment-lpg: 2 sessions, 6 permutations
+# WW03 through the lpg API: each increment reads through WriterViewOf(tx).
+
+starting permutation: s1i s1c s2i s2c
+step s1i: lpg: SetNodeProperty(c, n, n + 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2i: lpg: SetNodeProperty(c, n, n + 1)
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+1
+(1 row)
+
+starting permutation: s1i s2i s1c s2c
+step s1i: lpg: SetNodeProperty(c, n, n + 1)
+step s2i: lpg: SetNodeProperty(c, n, n + 1)
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+1
+(1 row)
+
+starting permutation: s1i s2i s2c s1c
+step s1i: lpg: SetNodeProperty(c, n, n + 1)
+step s2i: lpg: SetNodeProperty(c, n, n + 1)
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+1
+(1 row)
+
+starting permutation: s2i s1i s1c s2c
+step s2i: lpg: SetNodeProperty(c, n, n + 1)
+step s1i: lpg: SetNodeProperty(c, n, n + 1)
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+1
+(1 row)
+
+starting permutation: s2i s1i s2c s1c
+step s2i: lpg: SetNodeProperty(c, n, n + 1)
+step s1i: lpg: SetNodeProperty(c, n, n + 1)
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+1
+(1 row)
+
+starting permutation: s2i s2c s1i s1c
+step s2i: lpg: SetNodeProperty(c, n, n + 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1i: lpg: SetNodeProperty(c, n, n + 1)
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+1
+(1 row)

@@ -1,0 +1,917 @@
+spec ix05-rollback-leaves-no-trace: 2 sessions, 15 permutations
+# IX05. Hash index on (:L).s, UNIQUE on (:K).k. s1 sets an indexed property
+# (n7.s = 'zzz'), adds the indexed label to m (s = 'lab'), creates an indexed node
+# (s = 'created') and takes a UNIQUE value (k = 'taken'), then rolls back; the vacuum
+# is drained (H1). s2 re-values m in an autocommit statement while s1 may hold m's
+# label, then creates k = 'taken'. Every seek — hash, label count, UNIQUE — must equal
+# its scan, and the final state must be the pre-state plus s2's commits alone: a
+# rolled-back transaction leaves no index entry and no reservation behind.
+
+starting permutation: s1p s1l s1c s1rb s1dr s2w s2u
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+s     
+------
+"peer"
+(1 row)
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s1p s1l s1c s2w s1rb s1dr s2u
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s1p s1l s1c s2w s2u s1rb s1dr
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+ERROR: serialization conflict
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "taken" already exists
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1p s1l s2w s1c s1rb s1dr s2u
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+ERROR: serialization conflict
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s1p s1l s2w s1c s2u s1rb s1dr
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+ERROR: serialization conflict
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "taken" already exists
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1p s1l s2w s2u s1c s1rb s1dr
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+ERROR: serialization conflict
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "taken" already exists
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s1p s2w s1l s1c s1rb s1dr s2u
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+s     
+------
+"peer"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s1p s2w s1l s1c s2u s1rb s1dr
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+s     
+------
+"peer"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: serialization conflict
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s1p s2w s1l s2u s1c s1rb s1dr
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+s     
+------
+"peer"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s1p s2w s2u s1l s1c s1rb s1dr
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+s     
+------
+"peer"
+(1 row)
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s2w s1p s1l s1c s1rb s1dr s2u
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+s     
+------
+"peer"
+(1 row)
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s2w s1p s1l s1c s2u s1rb s1dr
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+s     
+------
+"peer"
+(1 row)
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: serialization conflict
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s2w s1p s1l s2u s1c s1rb s1dr
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+s     
+------
+"peer"
+(1 row)
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s2w s1p s2u s1l s1c s1rb s1dr
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+s     
+------
+"peer"
+(1 row)
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+
+starting permutation: s2w s2u s1p s1l s1c s1rb s1dr
+step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
+s     
+------
+"peer"
+(1 row)
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+k      
+-------
+"taken"
+(1 row)
+step s1p: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' RETURN n.s AS s
+s    
+-----
+"zzz"
+(1 row)
+step s1l: MATCH (m:M {name:'m'}) SET m:L RETURN m.s AS s
+s    
+-----
+"lab"
+(1 row)
+step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final flab: MATCH (n:L {s:'lab'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'lab' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fpeer: MATCH (n:L {s:'peer'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'peer' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcr: MATCH (n:L {s:'created'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'created' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)

@@ -1,0 +1,234 @@
+spec ix08-index-created-after-snapshot: 3 sessions, 12 permutations
+# IX08. No index at first; one node has s = 'x'. s1 is a read-only transaction
+# pinned at BEGIN. s2 creates a hash index on (:L).s in an autocommit statement; s3
+# creates a second node with s = 'x'. s1 counts only its snapshot's node, whether
+# its read is planned before or after the index exists (commit 71a0541e). The
+# final read counts both.
+
+starting permutation: s1r s1c s2ix s3w
+step s1r: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3w: CREATE (n:L {name:'x2', s:'x'}) RETURN n.name AS name
+name
+----
+"x2"
+(1 row)
+final final: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s1r s1c s3w s2ix
+step s1r: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+step s3w: CREATE (n:L {name:'x2', s:'x'}) RETURN n.name AS name
+name
+----
+"x2"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final final: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s1r s2ix s1c s3w
+step s1r: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1c: COMMIT
+step s3w: CREATE (n:L {name:'x2', s:'x'}) RETURN n.name AS name
+name
+----
+"x2"
+(1 row)
+final final: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s1r s2ix s3w s1c
+step s1r: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3w: CREATE (n:L {name:'x2', s:'x'}) RETURN n.name AS name
+name
+----
+"x2"
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s1r s3w s1c s2ix
+step s1r: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s3w: CREATE (n:L {name:'x2', s:'x'}) RETURN n.name AS name
+name
+----
+"x2"
+(1 row)
+step s1c: COMMIT
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final final: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s1r s3w s2ix s1c
+step s1r: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s3w: CREATE (n:L {name:'x2', s:'x'}) RETURN n.name AS name
+name
+----
+"x2"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1c: COMMIT
+final final: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s2ix s1r s1c s3w
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1r: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+step s3w: CREATE (n:L {name:'x2', s:'x'}) RETURN n.name AS name
+name
+----
+"x2"
+(1 row)
+final final: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s2ix s1r s3w s1c
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1r: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s3w: CREATE (n:L {name:'x2', s:'x'}) RETURN n.name AS name
+name
+----
+"x2"
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s2ix s3w s1r s1c
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3w: CREATE (n:L {name:'x2', s:'x'}) RETURN n.name AS name
+name
+----
+"x2"
+(1 row)
+step s1r: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s3w s1r s1c s2ix
+step s3w: CREATE (n:L {name:'x2', s:'x'}) RETURN n.name AS name
+name
+----
+"x2"
+(1 row)
+step s1r: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final final: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s3w s1r s2ix s1c
+step s3w: CREATE (n:L {name:'x2', s:'x'}) RETURN n.name AS name
+name
+----
+"x2"
+(1 row)
+step s1r: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1c: COMMIT
+final final: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s3w s2ix s1r s1c
+step s3w: CREATE (n:L {name:'x2', s:'x'}) RETURN n.name AS name
+name
+----
+"x2"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1r: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)

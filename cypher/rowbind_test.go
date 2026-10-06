@@ -485,6 +485,23 @@ func TestRowBindPlan_NameCollisionShapes(t *testing.T) {
 			[]string{"r=1", "r=2", "r=3", "r=4"},
 		},
 		{
+			// An aggregate output re-binds a relationship name. The relationship's
+			// facts outlived the aggregation because the output kept the name, so
+			// the projection above re-ran `count(*)` as a scalar function and
+			// failed with `count() takes exactly 1 argument(s), got 0` (rmp #2878).
+			"aggregate_alias_reuses_a_relationship_name",
+			`MATCH (:N)-[r:T]->() WITH count(*) AS r RETURN r`,
+			[]string{"r=4"},
+		},
+		{
+			// A projected value re-binds a relationship name, beside a carried
+			// node. The relationship's triplet coordinates outlived the WITH and
+			// decoded the new row, so every row came back NULL (rmp #2920).
+			"projection_alias_reuses_a_relationship_name",
+			`MATCH (:N {k:'a'})-[r:T]->(b) WITH b, 5 AS r RETURN r`,
+			[]string{"r=5", "r=5"},
+		},
+		{
 			// A named path and its relationship list bind under one plan, and the
 			// path variable is in pathVarMeta while the relationship variable is
 			// in vleRelMeta.

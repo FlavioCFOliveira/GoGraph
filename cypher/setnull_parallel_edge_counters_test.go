@@ -188,9 +188,10 @@ func TestSetReplaceParamParallelEdge_WalStore_CountersPerInstance(t *testing.T) 
 
 // mergeSetNullPerInstanceCounters probes the MERGE ON MATCH SET null-RHS
 // removal route (#2501 suspected path 3). Setup: the pair's FIRST slot (eid 1)
-// carries no `since` while the sibling wrote it into the per-pair aggregate —
-// a per-pair -properties gate counts a removal although the merge-bound
-// instance (the pair's first-slot handle) never carried the key.
+// carries no `since` while the sibling (eid 2) does, and both reach the per-pair
+// aggregate. The MERGE matches BOTH parallel instances and runs ON MATCH once on
+// each (rmp #2939), so exactly one removal is counted — eid 2's — where a
+// per-pair -properties gate would count two, one per matched row.
 func mergeSetNullPerInstanceCounters(t *testing.T, eng *cypher.Engine) {
 	t.Helper()
 	_ = runCounted(t, eng, `CREATE (:P {key:'x'})`)
@@ -200,16 +201,22 @@ func mergeSetNullPerInstanceCounters(t *testing.T, eng *cypher.Engine) {
 	_ = runCounted(t, eng,
 		`MATCH (a:P {key:'x'}),(b:P {key:'y'}) CREATE (a)-[:KNOWS {eid:2, since:'2026-02-02', weight:2.0}]->(b)`)
 
-	// Standalone MERGE (MergeRelationship): matches the existing pair, binds
-	// the first-slot instance, and the null-evaluating RHS removes `since` —
-	// absent on that instance, so nothing may be counted.
+	// Standalone MERGE (MergeRelationship): matches both instances of the pair,
+	// and the null-evaluating RHS removes `since` from each — present on eid 2
+	// only, so exactly one removal is counted.
 	q := `MATCH (a:P {key:'x'}),(b:P {key:'y'}) MERGE (a)-[r:KNOWS]->(b) ON MATCH SET r.since = r.missing`
-	assertCounters(t, q, runCounted(t, eng, q), wantCounters{})
+	assertCounters(t, q, runCounted(t, eng, q), wantCounters{propsRemoved: 1, containsUpdates: true})
+	assertMergeSetNullPerInstanceState(t, eng)
+}
 
-	// The sibling's own `since` must be untouched.
+// assertMergeSetNullPerInstanceState checks the state the #2501 MERGE probes
+// leave: `since` removed from eid 2, and every other property of both
+// instances intact.
+func assertMergeSetNullPerInstanceState(t *testing.T, eng *cypher.Engine) {
+	t.Helper()
 	if rows := drainOK(t, eng,
-		`MATCH (:P {key:'x'})-[r:KNOWS]->(:P {key:'y'}) WHERE r.eid = 2 AND r.since = '2026-02-02' RETURN r.eid`); rows != 1 {
-		t.Fatalf("post-MERGE state: sibling eid 2 lost since (rows = %d, want 1)", rows)
+		`MATCH (:P {key:'x'})-[r:KNOWS]->(:P {key:'y'}) WHERE r.since IS NULL AND r.weight = r.eid RETURN r.eid`); rows != 2 {
+		t.Fatalf("post-MERGE state: %d of 2 instances have since removed and weight intact, want 2", rows)
 	}
 }
 
@@ -240,12 +247,8 @@ func mergePatternSetNullPerInstanceCounters(t *testing.T, eng *cypher.Engine) {
 		`MATCH (a:P {key:'x'}),(b:P {key:'y'}) CREATE (a)-[:KNOWS {eid:2, since:'2026-02-02', weight:2.0}]->(b)`)
 
 	q := `MERGE (a:P {key:'x'})-[r:KNOWS]->(b:P {key:'y'}) ON MATCH SET r.since = r.missing`
-	assertCounters(t, q, runCounted(t, eng, q), wantCounters{})
-
-	if rows := drainOK(t, eng,
-		`MATCH (:P {key:'x'})-[r:KNOWS]->(:P {key:'y'}) WHERE r.eid = 2 AND r.since = '2026-02-02' RETURN r.eid`); rows != 1 {
-		t.Fatalf("post-MERGE state: sibling eid 2 lost since (rows = %d, want 1)", rows)
-	}
+	assertCounters(t, q, runCounted(t, eng, q), wantCounters{propsRemoved: 1, containsUpdates: true})
+	assertMergeSetNullPerInstanceState(t, eng)
 }
 
 // TestMergePatternSetNullParallelEdge_InMemory_CountersPerInstance is the

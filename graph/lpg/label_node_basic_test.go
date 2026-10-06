@@ -101,7 +101,9 @@ func exerciseShape(t *testing.T, shape shapegen.Shape[int, int64]) {
 	// --- Phase 3: remove one label from every node ---
 	for _, id := range allIDs {
 		nodeVal := int(id)
-		g.RemoveNodeLabel(nodeVal, "Beta")
+		if err := g.RemoveNodeLabel(nodeVal, "Beta"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(nodeVal, \"Beta\"): %v", err)
+		}
 		oracle.remove(id, "Beta")
 	}
 	checkOracle(t, "after-remove-beta", g, oracle, labels, allIDs)
@@ -109,7 +111,9 @@ func exerciseShape(t *testing.T, shape shapegen.Shape[int, int64]) {
 	// --- Phase 4: double Remove is a no-op; no panic ---
 	for _, id := range allIDs {
 		nodeVal := int(id)
-		g.RemoveNodeLabel(nodeVal, "Beta") // already absent
+		if err := g.RemoveNodeLabel(nodeVal, "Beta"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(nodeVal, \"Beta\"): %v", err)
+		} // already absent
 		// Oracle unchanged.
 	}
 	checkOracle(t, "after-double-remove-beta", g, oracle, labels, allIDs)
@@ -117,9 +121,13 @@ func exerciseShape(t *testing.T, shape shapegen.Shape[int, int64]) {
 	// --- Phase 5: remove remaining labels to leave nodes label-free ---
 	for _, id := range allIDs {
 		nodeVal := int(id)
-		g.RemoveNodeLabel(nodeVal, "Alpha")
+		if err := g.RemoveNodeLabel(nodeVal, "Alpha"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(nodeVal, \"Alpha\"): %v", err)
+		}
 		oracle.remove(id, "Alpha")
-		g.RemoveNodeLabel(nodeVal, "Gamma")
+		if err := g.RemoveNodeLabel(nodeVal, "Gamma"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(nodeVal, \"Gamma\"): %v", err)
+		}
 		oracle.remove(id, "Gamma")
 	}
 	checkOracle(t, "after-remove-all", g, oracle, labels, allIDs)
@@ -178,7 +186,9 @@ func TestLPG_NodeLabel(t *testing.T) {
 		if err := g.SetNodeLabel(1, "Ghost"); err != nil {
 			t.Fatalf("SetNodeLabel: %v", err)
 		}
-		g.RemoveNodeLabel(1, "Ghost")
+		if err := g.RemoveNodeLabel(1, "Ghost"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(1, \"Ghost\"): %v", err)
+		}
 		allocs := testing.AllocsPerRun(100, func() {
 			_ = g.HasNodeLabel(0, "Ghost")
 		})

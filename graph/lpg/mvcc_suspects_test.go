@@ -37,10 +37,10 @@ func TestLabelBitmapAsOf_CorrectsWhenTheSweepLandsDuringTheClone(t *testing.T) {
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
-	if err := g.ApplyAtomically(func() error { return g.SetNodeLabel("a", "L") }); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error { return g.Writer(tx).SetNodeLabel("a", "L") }); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	lid := g.reg.Intern("L")
+	lid := g.reg.intern("L")
 	id, ok := g.adj.Mapper().Lookup("a")
 	if !ok {
 		t.Fatal("node a not found")
@@ -50,7 +50,12 @@ func TestLabelBitmapAsOf_CorrectsWhenTheSweepLandsDuringTheClone(t *testing.T) {
 	// and only a correction can take it out.
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
-	if err := g.ApplyAtomically(func() error { g.RemoveNodeLabel("a", "L"); return nil }); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).RemoveNodeLabel("a", "L"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"a\", \"L\"): %v", err)
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("RemoveNodeLabel: %v", err)
 	}
 	if !g.nodeIdx.Intersect(uint32(lid)).Contains(uint64(id)) {
@@ -105,10 +110,10 @@ func TestLabelBitmapAsOf_SpanningSurvivesTheDeferredClone(t *testing.T) {
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
-	if err := g.ApplyAtomically(func() error { return g.SetNodeLabel("a", "L") }); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error { return g.Writer(tx).SetNodeLabel("a", "L") }); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	lid := g.reg.Intern("L")
+	lid := g.reg.intern("L")
 	id, ok := g.adj.Mapper().Lookup("a")
 	if !ok {
 		t.Fatal("node a not found")
@@ -116,7 +121,12 @@ func TestLabelBitmapAsOf_SpanningSurvivesTheDeferredClone(t *testing.T) {
 
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
-	if err := g.ApplyAtomically(func() error { g.RemoveNodeLabel("a", "L"); return nil }); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).RemoveNodeLabel("a", "L"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"a\", \"L\"): %v", err)
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("RemoveNodeLabel: %v", err)
 	}
 	if !g.nodeIdx.BitmapShared(uint32(lid)).Contains(uint64(id)) {

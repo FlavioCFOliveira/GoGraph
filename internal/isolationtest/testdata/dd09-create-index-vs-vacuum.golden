@@ -1,0 +1,366 @@
+spec dd09-create-index-vs-vacuum: 3 sessions, 12 permutations
+# DD09. 1 100 :L nodes, no index. s1 moves n7 to s = 'zzz' and creates c1 with s = 'zz'
+# in an explicit transaction, then rolls back; s2 creates a hash index on (:L).s; s3
+# drains the vacuum, which withdraws s1's aborted versions. In every order the index
+# loses no node and holds no aborted one: seek = scan after the run. The drain runs
+# between steps, not inside the backfill: no seam reaches a point inside it.
+
+starting permutation: s1w s1rb s2ix s3dr
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' WITH n CREATE (c:L {name:'c1', s:'zz'}) RETURN c.s AS s
+s   
+----
+"zz"
+(1 row)
+step s1rb: ROLLBACK
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fzz: MATCH (n:L {s:'zz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s1w s1rb s3dr s2ix
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' WITH n CREATE (c:L {name:'c1', s:'zz'}) RETURN c.s AS s
+s   
+----
+"zz"
+(1 row)
+step s1rb: ROLLBACK
+step s3dr: <vacuum drain>
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fzz: MATCH (n:L {s:'zz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s1w s2ix s1rb s3dr
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' WITH n CREATE (c:L {name:'c1', s:'zz'}) RETURN c.s AS s
+s   
+----
+"zz"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1rb: ROLLBACK
+step s3dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fzz: MATCH (n:L {s:'zz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s1w s2ix s3dr s1rb
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' WITH n CREATE (c:L {name:'c1', s:'zz'}) RETURN c.s AS s
+s   
+----
+"zz"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3dr: <vacuum drain>
+step s1rb: ROLLBACK
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fzz: MATCH (n:L {s:'zz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s1w s3dr s1rb s2ix
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' WITH n CREATE (c:L {name:'c1', s:'zz'}) RETURN c.s AS s
+s   
+----
+"zz"
+(1 row)
+step s3dr: <vacuum drain>
+step s1rb: ROLLBACK
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fzz: MATCH (n:L {s:'zz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s1w s3dr s2ix s1rb
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' WITH n CREATE (c:L {name:'c1', s:'zz'}) RETURN c.s AS s
+s   
+----
+"zz"
+(1 row)
+step s3dr: <vacuum drain>
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1rb: ROLLBACK
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fzz: MATCH (n:L {s:'zz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s2ix s1w s1rb s3dr
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' WITH n CREATE (c:L {name:'c1', s:'zz'}) RETURN c.s AS s
+s   
+----
+"zz"
+(1 row)
+step s1rb: ROLLBACK
+step s3dr: <vacuum drain>
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fzz: MATCH (n:L {s:'zz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s2ix s1w s3dr s1rb
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' WITH n CREATE (c:L {name:'c1', s:'zz'}) RETURN c.s AS s
+s   
+----
+"zz"
+(1 row)
+step s3dr: <vacuum drain>
+step s1rb: ROLLBACK
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fzz: MATCH (n:L {s:'zz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s2ix s3dr s1w s1rb
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3dr: <vacuum drain>
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' WITH n CREATE (c:L {name:'c1', s:'zz'}) RETURN c.s AS s
+s   
+----
+"zz"
+(1 row)
+step s1rb: ROLLBACK
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fzz: MATCH (n:L {s:'zz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s3dr s1w s1rb s2ix
+step s3dr: <vacuum drain>
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' WITH n CREATE (c:L {name:'c1', s:'zz'}) RETURN c.s AS s
+s   
+----
+"zz"
+(1 row)
+step s1rb: ROLLBACK
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fzz: MATCH (n:L {s:'zz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s3dr s1w s2ix s1rb
+step s3dr: <vacuum drain>
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' WITH n CREATE (c:L {name:'c1', s:'zz'}) RETURN c.s AS s
+s   
+----
+"zz"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1rb: ROLLBACK
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fzz: MATCH (n:L {s:'zz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+
+starting permutation: s3dr s2ix s1w s1rb
+step s3dr: <vacuum drain>
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz' WITH n CREATE (c:L {name:'c1', s:'zz'}) RETURN c.s AS s
+s   
+----
+"zz"
+(1 row)
+step s1rb: ROLLBACK
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fzz: MATCH (n:L {s:'zz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)

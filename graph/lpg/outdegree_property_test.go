@@ -75,7 +75,9 @@ func TestOutDegreeProperty_MatchesEnumeration(t *testing.T) {
 		// Tombstone an arbitrary subset, which is what forces the filtered path.
 		for _, n := range nodes {
 			if rapid.Bool().Draw(rt, "tombstone_"+n) {
-				g.RemoveNode(n)
+				if err := g.RemoveNode(n); err != nil {
+					t.Fatalf("g.RemoveNode(n): %v", err)
+				}
 			}
 		}
 

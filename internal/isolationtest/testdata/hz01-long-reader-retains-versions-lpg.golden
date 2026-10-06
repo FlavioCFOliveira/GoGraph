@@ -1,0 +1,39 @@
+spec hz01-long-reader-retains-versions-lpg: 2 sessions, 1 permutations
+# HZ01 through the lpg API: s1 pins Graph.BeginRead; s2 commits ten SETs of x.v; s1
+# reads x.v before and after them and releases its snapshot. The drained version
+# count rises while the snapshot is held and falls after it is released.
+
+starting permutation: s2st0 s1b s1r s2w s2st1 s1r2 s1c s2st2
+step s2st0: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+step s1b: lpg: Graph.BeginRead
+step s1r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s2w: <10 lpg transactions setting x.v>
+step s2st1: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+10      |1               |0                    |0                
+(1 row)
+step s1r2: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s2st2: <vacuum drain; MVCCStats>
+versions|active_snapshots|index_removal_backlog|in_flight_commits
+--------+----------------+---------------------+-----------------
+0       |0               |0                    |0                
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v 
+--
+10
+(1 row)

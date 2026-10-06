@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"time"
 
@@ -43,6 +44,16 @@ var ErrPropertyNestingTooDeep = errors.New("jsonl: property value nesting too de
 // Write streams every node and edge of a to w as JSON Lines. Nodes
 // come first, then edges, so that on-read every endpoint is known
 // before its referencing edge.
+//
+// Concurrency: Write and [WriteCtx] are safe to call while other goroutines
+// add nodes and edges to a. The node set is bounded by the [adjlist.AdjList.MaxNodeID]
+// read before the name table is built: a node created after that read is
+// omitted, together with every edge incident to it, so every emitted edge
+// references an emitted node.
+// Each source's adjacency is read once, as an immutable snapshot, when the
+// loop reaches it, so the output is not an atomic snapshot of the graph: a
+// concurrent write may be reflected for some nodes and not for others. For a
+// transactionally consistent export, stop the writers first.
 func Write(w io.Writer, a *adjlist.AdjList[string, int64]) (int, error) {
 	n, err := WriteCtx(context.Background(), w, a)
 	if err != nil {
@@ -69,6 +80,11 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 	names := make([]string, maxID)
 	live := make([]bool, maxID)
 	a.Mapper().Walk(func(id graph.NodeID, v string) bool {
+		// A node interned after maxID was read carries an id at or above
+		// the table length; it is outside this export's node set (rmp #2902).
+		if uint64(id) >= maxID {
+			return true
+		}
 		names[uint64(id)] = v
 		live[uint64(id)] = true
 		return true
@@ -130,6 +146,16 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 // Tombstoned nodes — those removed via [lpg.Graph.RemoveNode] — are
 // excluded, together with every edge and property record referencing
 // them, so an export→import round trip never resurrects deleted data.
+//
+// Concurrency: WriteWithProps and [WriteWithPropsCtx] are safe to call while
+// other goroutines write to g. The node set is bounded by the
+// [adjlist.AdjList.MaxNodeID] read before the name table is built: a node
+// created after that read is omitted, together with its edges and properties.
+// Labels, adjacency and properties are read per node, as the phases reach it,
+// so the output is not an atomic snapshot of the graph: a concurrent write may
+// be reflected for some nodes and not for others, and a node removed during
+// the export may still appear. For a transactionally consistent export, stop
+// the writers first.
 func WriteWithProps(w io.Writer, g *lpg.Graph[string, int64]) (int, error) {
 	n, err := WriteWithPropsCtx(context.Background(), w, g)
 	if err != nil {
@@ -157,6 +183,11 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 	names := make([]string, maxID)
 	live := make([]bool, maxID)
 	a.Mapper().Walk(func(id graph.NodeID, v string) bool {
+		// A node interned after maxID was read carries an id at or above
+		// the table length; it is outside this export's node set (rmp #2902).
+		if uint64(id) >= maxID {
+			return true
+		}
 		names[uint64(id)] = v
 		live[uint64(id)] = true
 		return true
@@ -166,7 +197,7 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 	// re-import. Clear them from the live set once so the node, edge,
 	// and property phases below skip the node and every incident edge
 	// at zero per-record cost.
-	for _, id := range g.TombstonedIDs() {
+	for _, id := range g.TombstonedIDsStored() {
 		if uint64(id) < maxID {
 			live[uint64(id)] = false
 		}
@@ -184,6 +215,10 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		if len(labels) == 0 {
 			labels = nil
 		}
+		// NodeLabels returns a fresh slice in unspecified order — a node with
+		// more than eight labels holds them in a Go map — so sort it, keeping
+		// the export a deterministic function of the graph (rmp #2534).
+		slices.Sort(labels)
 		if err := enc.Encode(Record{Type: "node", ID: &names[id], Labels: labels}); err != nil {
 			metrics.IncCounter("graph.io.jsonl.WriteWithPropsCtx.errors", 1)
 			return written, err
@@ -226,13 +261,24 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 	}
 
 	// Phase 3: property records.
+	var propNames []string
 	for id := uint64(0); id < maxID; id++ {
 		if !live[id] {
 			continue
 		}
 		nodeKey := names[id]
 		props := g.NodeProperties(nodeKey)
-		for propName, pv := range props {
+		// Emit in ascending key order, never in map-iteration order, so two
+		// exports of the same graph are byte-identical (rmp #2534). This is
+		// the GraphML writer's precedent. The reader applies each property
+		// record independently, so it depends on no order.
+		propNames = propNames[:0]
+		for propName := range props {
+			propNames = append(propNames, propName)
+		}
+		slices.Sort(propNames)
+		for _, propName := range propNames {
+			pv := props[propName]
 			if written&0xFFF == 0 {
 				if cerr := ctx.Err(); cerr != nil {
 					_ = bw.Flush()

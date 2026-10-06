@@ -87,8 +87,8 @@ package ir
 // produced two shapes — so GoGraph normalises block → pattern.
 //
 // The boundary is the EXACT INVERSE of GoGraph's own desugaring: the body must
-// be precisely what cypher/subquery_eval.go's countToSingleQuery /
-// existsToSingleQuery would have BUILT from a pattern form — one non-optional
+// be precisely what cypher/subquery_eval.go's countToQuery /
+// existsToQuery would have BUILT from a pattern form — one non-optional
 // MATCH, its optional WHERE, and nothing else. At that point the two spellings
 // are provably the same query, so the normalisation preserves semantics by
 // construction rather than by argument. TestPatternFormOf_IsInverseOfDesugaring

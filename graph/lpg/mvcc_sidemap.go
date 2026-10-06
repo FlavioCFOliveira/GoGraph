@@ -325,3 +325,29 @@ func chainLen[V any](d *preimageDelta[V]) int {
 	}
 	return n
 }
+
+// conflictWhere returns the effective timestamp of the newest version of the
+// first key matching match whose head tx may not displace, or zero when there is
+// none. It walks the keys that carry a live version, so it sees a key that a
+// pending removal has already taken out of the store itself — which a walk of the
+// store's map cannot (rmp #2947, audit F3). A nil tx never conflicts.
+//
+// The caller must hold the owning shard's lock.
+func (sv *sideVersions[K, V]) conflictWhere(match func(K) bool, tx *writeCtx) uint64 {
+	if tx == nil {
+		return 0
+	}
+	for k, d := range sv.d {
+		if !match(k) {
+			continue
+		}
+		head := d.ts
+		if d.info != nil {
+			head = d.info.TS()
+		}
+		if tx.conflicts(head) {
+			return head
+		}
+	}
+	return 0
+}

@@ -221,7 +221,9 @@ func TestWriter_HoldsReclamationBackWhileItRuns(t *testing.T) {
 		if err := g.SetNodeLabel("a", "L"); err != nil {
 			t.Fatalf("SetNodeLabel: %v", err)
 		}
-		g.RemoveNodeLabel("a", "L")
+		if err := g.RemoveNodeLabel("a", "L"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"a\", \"L\"): %v", err)
+		}
 	}
 
 	if err := g.ApplyAtomically(func() error {

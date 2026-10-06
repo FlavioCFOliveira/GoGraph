@@ -495,9 +495,10 @@ func TestTypedSchema_EngineRejectionNeverReachesTheWAL(t *testing.T) {
 // prints what it MEASURED, so the finding is legible from the log rather than
 // only from a red run.
 //
-// What it pins (MEASURED 2026-08-24): `txn.Tx.Commit` appends and fsyncs every
-// buffered op BEFORE it applies them, so a validator rejection during the apply
-// returns txn.ErrCommittedNotApplied with the frame already durable — and the
+// What it pins (MEASURED 2026-08-24): `txn.Tx.Commit` then appended and fsynced
+// every buffered op BEFORE it applied them (until the ACID audit of rmp #2965),
+// so a validator rejection during the apply returned
+// txn.ErrCommittedNotApplied with the frame already durable — and the
 // reopen, which installs no validator, would materialise the value the live
 // validator refused — which is what it MEASURED until rmp #2602 moved the guard
 // to buffer time. It now asserts the opposite: the refusal lands before the op is

@@ -320,11 +320,15 @@ func (m *MapProjection) String() string {
 
 // ExistsSubquery is an EXISTS { … } subquery expression.
 type ExistsSubquery struct {
-	Pattern *Pattern     // pattern form: EXISTS { (a)-[r]->(b) }
-	Where   *Where       // optional inline WHERE clause for the pattern form
-	Query   *SingleQuery // full subquery form: EXISTS { MATCH … RETURN … }
-	Pos     Position
-	EndPos  Position
+	Pattern *Pattern // pattern form: EXISTS { (a)-[r]->(b) }
+	Where   *Where   // optional inline WHERE clause for the pattern form
+	// Query is the full subquery form: EXISTS { MATCH … RETURN … }. It holds a
+	// *SingleQuery for a one-branch body and a *MultiQuery for a UNION body
+	// (EXISTS { … RETURN … UNION … RETURN … }); it is nil for the pattern form.
+	// [QueryBranches] enumerates the branches of either shape.
+	Query  Query
+	Pos    Position
+	EndPos Position
 }
 
 func (*ExistsSubquery) astNode()  {}
@@ -344,11 +348,15 @@ func (e *ExistsSubquery) String() string {
 
 // CountSubquery is a COUNT { … } subquery expression.
 type CountSubquery struct {
-	Pattern *Pattern     // pattern form: COUNT { (a)-[r]->(b) }
-	Where   *Where       // optional inline WHERE clause for the pattern form
-	Query   *SingleQuery // full subquery form: COUNT { MATCH … RETURN … }
-	Pos     Position
-	EndPos  Position
+	Pattern *Pattern // pattern form: COUNT { (a)-[r]->(b) }
+	Where   *Where   // optional inline WHERE clause for the pattern form
+	// Query is the full subquery form: COUNT { MATCH … RETURN … }. It holds a
+	// *SingleQuery for a one-branch body and a *MultiQuery for a UNION body; it
+	// is nil for the pattern form. [QueryBranches] enumerates the branches of
+	// either shape.
+	Query  Query
+	Pos    Position
+	EndPos Position
 }
 
 func (*CountSubquery) astNode()  {}

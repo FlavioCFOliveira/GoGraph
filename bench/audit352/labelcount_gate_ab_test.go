@@ -76,17 +76,18 @@ package audit352_test
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
-	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 const pushdownLabel = "Item"
@@ -373,23 +374,16 @@ func drainQuery(tb testing.TB, e *cypher.Engine, query string) {
 //     reintroduced size gate puts +49 786 allocations and +475 776 bytes on the
 //     n = 50 000 point, i.e. 49 786x and 7 434x these bounds.
 //
-//   - timeRatioMax bounds max(ns/op)/min(ns/op) over the whole size range. This
-//     is the loose gate, because wall-clock is the noisy metric: the measured
-//     ratio is ~1.01, the harness noise floor is ~2%, and any reintroduced size
-//     gate — at whatever threshold — splits the range into a slow half and a fast
-//     half and drives the ratio to at least 87x (the two endpoints under the
-//     historical 26.56 ns/node slope). 1.5 sits two orders of magnitude above the
-//     noise and roughly 58x below the smallest regression it must catch.
-//
-//     Its measurement precondition is a QUIET MACHINE, and under `make ci` that
-//     precondition is absent — see [TestLabelCountPushdownIsConstantTime] for the
-//     two failures that established it. The tolerance is deliberately UNCHANGED
-//     (widening it past the observed load would forfeit the 87x regression it
-//     exists to catch); what changed is WHERE it is evaluated.
+//   - the PROFILE arm is the structural gate on what the pushdown visits: at
+//     every size the plan is Project over LabelCountScan and each operator
+//     emits exactly one row, so the number of rows the plan produces is the
+//     same constant at n = 1 000 and at n = 100 000. A reintroduced size gate,
+//     or a pushdown that declines, puts a NodeByLabelScan emitting n rows in the
+//     plan, n rows against a bound of one. It replaced a wall-clock ratio that
+//     measured the machine's load rather than the pushdown (rmp #2959).
 const (
-	allocsSlack  = 1
-	bytesSlack   = 64
-	timeRatioMax = 1.5
+	allocsSlack = 1
+	bytesSlack  = 64
 )
 
 // TestLabelCountPushdownIsConstantTime is the forward regression gate for
@@ -404,42 +398,21 @@ const (
 // so a size gate reappearing anywhere in the range shows up as a slope no noise
 // floor can hide, and it does so without depending on the machine being quiet.
 //
-// # The wall-clock arm is guarded, the allocation arms are not (rmp #2673)
+// The rows each operator emits, read from PROFILE, are the structural half:
+// exactly one per operator at every size, which only the constant-time
+// LabelCountScan plan produces. Both are load-independent.
 //
-// The ns/op ratio at the end of this test is a comparison of two wall-clock
-// windows measured while `go test` is running the whole repository in parallel
-// (`-p` defaults to GOMAXPROCS), so its subject is the machine's load rather than
-// the pushdown. That is not a conjecture here; it failed twice on 2026-09-01, on a
-// tree whose functional tests were green, and the two failures point in OPPOSITE
-// directions, which no property of the code can produce:
+// # No wall-clock assertion (rmp #2959)
 //
-//	test-short, -race:      n=1000: 25354 ns   n=100000: 15532 ns   ratio=1.632
-//	cover-gate, no -race:   n=1000:  2214 ns   n=100000:  3607 ns   ratio=1.629
-//
-// The first run had the SMALL graph timing 1.63x SLOWER than the 100x larger one.
-// An inverted ratio is only possible if the compared quantity is scheduling noise:
-// there is no size gate, real or imagined, that makes 1 000 nodes cost more than
-// 100 000.
-//
-// In BOTH runs the allocation arms were flat and identical at all five sizes
-// (29.0 allocs / 2176 B in run A, 31.0 / 2408 in run B; the +2 is the
-// per-query-build cost rmp #2657 disclosed, fixed in n). So the constant-time
-// property this test defends HELD in both failing runs; only its wall-clock half
-// was broken. Re-measured under -race after the guard landed: 31.0 allocs/op and
-// 2 416 B/op at every one of the five sizes, zero variance.
-//
-// [testlayers.RequireQuietMachine] therefore guards ONLY the ratio, and only after
-// it has been measured and logged, so the skip prints the number it would have
-// asserted on. Nothing is disabled: `bench/audit352` is in TIMING_PKGS and this
-// test is in TIMING_RUN, so the ratio ASSERTS in `make test-timing`, which `make
-// ci` runs serially (-p 1) without GOGRAPH_PARALLEL_SUITE, and it asserts on any
-// single-package or -run invocation too. The allocation and byte arms above the
-// guard are load-independent and keep asserting in the short layer — they are the
-// half that actually catches a reintroduced size gate (+49 786 allocations at
-// n = 50 000, against a slack of 1), and because a recorded failure outranks a
-// later skip, a broken alloc arm still fails the package under the guard.
-//
-// Recorded in docs/short-layer-wallclock-audit.md alongside the other instances.
+// The test used to assert max/min ns/op <= 1.5 over the extreme sizes. That
+// ratio compared two wall-clock windows, so its subject was the machine's load:
+// it failed twice on 2026-09-01 in opposite directions (the 1 000-node graph
+// timed 1.63x SLOWER than the 100 000-node one in one run), and again at 1.645
+// under parallel load, each time with the allocation arms flat at every size. A
+// quiet-machine guard only moved where it could fail. The rows the plan visits
+// carry the same proof without depending on the scheduler: a size gate puts a
+// NodeByLabelScan emitting n rows in the plan, which the row arm refuses at any
+// load. The time per query is still measured and logged, never asserted.
 func TestLabelCountPushdownIsConstantTime(t *testing.T) {
 	type point struct {
 		n      int
@@ -461,14 +434,20 @@ func TestLabelCountPushdownIsConstantTime(t *testing.T) {
 		var m0, m1 runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&m0)
+		start := time.Now()
 		for i := 0; i < iters; i++ {
 			drainQuery(t, e, pushdownQuery)
 		}
+		elapsed := time.Since(start)
 		runtime.ReadMemStats(&m1)
 		bytes := (m1.TotalAlloc - m0.TotalAlloc) / iters
 
+		assertPushdownVisitsConstantRows(t, e, n)
+
 		pts = append(pts, point{n: n, allocs: allocs, bytes: bytes})
-		t.Logf("n=%6d  allocs/op=%6.1f  B/op=%7d", n, allocs, bytes)
+		// Logged, never asserted: wall-clock time measures the machine's load
+		// as much as the code (rmp #2959).
+		t.Logf("n=%6d  allocs/op=%6.1f  B/op=%7d  ns/op=%d (logged only)", n, allocs, bytes, elapsed.Nanoseconds()/iters)
 	}
 
 	base := pts[0]
@@ -486,48 +465,40 @@ func TestLabelCountPushdownIsConstantTime(t *testing.T) {
 		}
 	}
 
-	// Wall-clock flatness, over the two extremes only: the ratio is what the
-	// property is about, and timing every size would add benchmark time to the
-	// short layer for no extra discriminating power.
-	lo := testing.Benchmark(func(b *testing.B) {
-		e := pushdownEngine(b, ratchetSizes[0])
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			drainQuery(b, e, pushdownQuery)
-		}
-	})
-	hi := testing.Benchmark(func(b *testing.B) {
-		e := pushdownEngine(b, ratchetSizes[len(ratchetSizes)-1])
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			drainQuery(b, e, pushdownQuery)
-		}
-	})
-	loNs, hiNs := float64(lo.NsPerOp()), float64(hi.NsPerOp())
-	ratio := hiNs / loNs
-	if ratio < 1 {
-		ratio = 1 / ratio
+}
+
+// profileRowsRe captures an operator's name and emitted row count from one line
+// of a rendered PROFILE tree.
+var profileRowsRe = regexp.MustCompile(`^[\s│├└─]*([A-Za-z]+)\b.*\brows=(\d+)`)
+
+// assertPushdownVisitsConstantRows profiles pushdownQuery on the n-node graph
+// and requires the constant-time plan's row profile: Project over
+// LabelCountScan, one row each. The serial plan a declined pushdown builds
+// emits n rows from its NodeByLabelScan.
+func assertPushdownVisitsConstantRows(t *testing.T, e *cypher.Engine, n int) {
+	t.Helper()
+	prof, err := e.Profile(context.Background(), pushdownQuery, nil)
+	if err != nil {
+		t.Fatalf("n=%d Profile(%q): %v", n, pushdownQuery, err)
 	}
-	t.Logf("ns/op  n=%d: %.0f   n=%d: %.0f   ratio=%.3f (tolerance %.1f)",
-		ratchetSizes[0], loNs, ratchetSizes[len(ratchetSizes)-1], hiNs, ratio, timeRatioMax)
-
-	// ONLY THIS ARM is guarded, and only from HERE — the ratio above is measured
-	// and logged unconditionally, so the skip states the quantity it declined to
-	// assert on instead of an absence. Everything before this line (allocs/op and
-	// B/op at all five sizes) is load-independent and keeps asserting in the short
-	// layer. See this test's godoc for the two opposed failures that motivated it.
-	testlayers.RequireQuietMachine(t, fmt.Sprintf(
-		"max/min ns/op for %s over n=%d..%d — %.0f ns at n=%d against %.0f ns at n=%d, "+
-			"ratio %.3f, tolerance %.1f. The allocation and byte arms of this test ran and "+
-			"ASSERTED; only the wall-clock ratio is deferred",
-		pushdownQuery, ratchetSizes[0], ratchetSizes[len(ratchetSizes)-1],
-		loNs, ratchetSizes[0], hiNs, ratchetSizes[len(ratchetSizes)-1], ratio, timeRatioMax))
-
-	if ratio > timeRatioMax {
-		t.Errorf("ns/op is NOT flat in graph size: %.0f ns at n=%d vs %.0f ns at n=%d "+
-			"(ratio %.2f > %.1f). Constant-time means the 100x larger graph is not "+
-			"measurably slower.", loNs, ratchetSizes[0], hiNs,
-			ratchetSizes[len(ratchetSizes)-1], ratio, timeRatioMax)
+	want := []string{"Project", "LabelCountScan"}
+	lines := strings.Split(strings.TrimSpace(prof), "\n")
+	ops := make([]string, 0, len(lines))
+	for _, line := range lines {
+		m := profileRowsRe.FindStringSubmatch(line)
+		if m == nil {
+			t.Fatalf("n=%d PROFILE line %q carries no row count:\n%s", n, line, prof)
+		}
+		ops = append(ops, m[1])
+		if rows, _ := strconv.ParseInt(m[2], 10, 64); rows != 1 {
+			t.Errorf("n=%d: %s emitted %d rows, want 1: a bare labelled count must read the "+
+				"label's count, not visit its nodes; a per-node row count means a size gate is "+
+				"back on tryBuildLabelCountScan, or the pushdown is declining for this shape:\n%s",
+				n, m[1], rows, prof)
+		}
+	}
+	if strings.Join(ops, ",") != strings.Join(want, ",") {
+		t.Errorf("n=%d: PROFILE operators %v, want %v:\n%s", n, ops, want, prof)
 	}
 }
 

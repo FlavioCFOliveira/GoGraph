@@ -1,0 +1,167 @@
+spec ro01-read-only-tx-stable-and-rejects-writes: 2 sessions, 6 permutations
+# RO01. s1 is a read-only transaction: it reads x, attempts a SET and a CREATE INDEX,
+# reads x again and commits; s2 sets x.v = 2 in an autocommit statement. Both reads of
+# s1 return v = 0 (F6); the SET and the DDL are ErrWriteInReadOnlyTx and apply nothing
+# (F9).
+
+starting permutation: s1r s1w s1ddl s1r2 s1c s2w
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 9 RETURN n.v AS v
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1ddl: CREATE INDEX item_v FOR (n:Item) ON (n.v)
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1r s1w s1ddl s1r2 s2w s1c
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 9 RETURN n.v AS v
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1ddl: CREATE INDEX item_v FOR (n:Item) ON (n.v)
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1r s1w s1ddl s2w s1r2 s1c
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 9 RETURN n.v AS v
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1ddl: CREATE INDEX item_v FOR (n:Item) ON (n.v)
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1r s1w s2w s1ddl s1r2 s1c
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 9 RETURN n.v AS v
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1ddl: CREATE INDEX item_v FOR (n:Item) ON (n.v)
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1r s2w s1w s1ddl s1r2 s1c
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 9 RETURN n.v AS v
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1ddl: CREATE INDEX item_v FOR (n:Item) ON (n.v)
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s2w s1r s1w s1ddl s1r2 s1c
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 9 RETURN n.v AS v
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1ddl: CREATE INDEX item_v FOR (n:Item) ON (n.v)
+ERROR: cypher: write or DDL statement not allowed in a read-only transaction
+step s1r2: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)

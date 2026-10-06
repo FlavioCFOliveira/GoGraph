@@ -25,6 +25,19 @@ import (
 //
 // GraphMutator is NOT safe for concurrent use from multiple goroutines; each
 // physical operator tree owns exactly one instance.
+//
+// # Token limit (rmp #2748, #2956)
+//
+// Every method that takes a label, a relationship type or a property key
+// returns an error, and refuses a name longer than [lpg.MaxTokenLen] bytes with
+// one wrapping [lpg.ErrTokenTooLong] BEFORE it changes anything — the graph,
+// the undo record, the counters, the constraint reservations or the staged
+// WAL ops. The seven methods that used to return nothing (RemoveNodeLabel,
+// DelNodeProperty, SetEdgeLabel, DelEdgeProperty, SetEdgeLabelAt,
+// SetEdgeLabelByHandle, DelEdgePropertyByHandle) gained that error result: a
+// breaking change, made because the WAL-backed implementation could not
+// report the refusal at all, and a relationship type it could not log was
+// acknowledged and recovered as empty (rmp #2956). Callers must propagate it.
 type GraphMutator interface {
 	// AddNode interns n and returns its stable NodeID. Returns the
 	// error from the underlying graph implementation (currently only
@@ -70,7 +83,7 @@ type GraphMutator interface {
 	SetNodeLabel(n, label string) error
 
 	// RemoveNodeLabel detaches label from n (no-op if absent).
-	RemoveNodeLabel(n, label string)
+	RemoveNodeLabel(n, label string) error
 
 	// RemoveNode tombstones n in the underlying graph so subsequent reads
 	// (AllNodesScan, count(*), Order) treat the node as absent. Callers
@@ -88,7 +101,7 @@ type GraphMutator interface {
 	SetNodeProperty(n, key string, value lpg.PropertyValue) error
 
 	// DelNodeProperty removes the named property from n (no-op if absent).
-	DelNodeProperty(n, key string)
+	DelNodeProperty(n, key string) error
 
 	// NodeProperties returns a snapshot of all properties currently on n.
 	NodeProperties(n string) map[string]lpg.PropertyValue
@@ -101,7 +114,7 @@ type GraphMutator interface {
 	HasEdge(src, dst string) bool
 
 	// SetEdgeLabel attaches label to the directed edge (src, dst).
-	SetEdgeLabel(src, dst, label string)
+	SetEdgeLabel(src, dst, label string) error
 
 	// SetEdgeProperty sets the named property on the directed edge (src, dst).
 	// Returns any error from the underlying graph (e.g. schema violation).
@@ -109,7 +122,7 @@ type GraphMutator interface {
 
 	// DelEdgeProperty removes the named property from the directed edge
 	// (src, dst) (no-op if absent).
-	DelEdgeProperty(src, dst, key string)
+	DelEdgeProperty(src, dst, key string) error
 
 	// EdgeProperties returns a snapshot of every property currently set on
 	// the directed edge (src, dst). Returns an empty map when the edge has
@@ -145,7 +158,7 @@ type GraphMutator interface {
 	// (src, dst) at the supplied 1-based CREATE index. Used by
 	// CreateRelationship so parallel CREATEs of the same endpoint
 	// pair retain their distinct labels (Match2 [6] / Match7 [29]).
-	SetEdgeLabelAt(src, dst string, idx int64, label string)
+	SetEdgeLabelAt(src, dst string, idx int64, label string) error
 	// EdgeLabelsAt returns the labels recorded at instance `idx` of
 	// the directed edge (src, dst), or nil when the instance has no
 	// per-CREATE labels.
@@ -169,7 +182,7 @@ type GraphMutator interface {
 	// The handle-keyed analogue of SetEdgeLabelAt; the read path resolves a
 	// parallel CREATE's type by this identity instead of a positional CSR
 	// index. No-op when handle is 0.
-	SetEdgeLabelByHandle(src, dst string, handle uint64, label string)
+	SetEdgeLabelByHandle(src, dst string, handle uint64, label string) error
 	// EdgeLabelsByHandle returns the labels recorded for the edge
 	// identified by `handle` on the (src, dst) pair, or nil when none.
 	EdgeLabelsByHandle(src, dst string, handle uint64) []string
@@ -183,7 +196,7 @@ type GraphMutator interface {
 	// never carried the key. The single-key removal analogue of
 	// RemoveEdgeInstanceByHandle (which drops ALL of a handle's metadata); used
 	// by REMOVE r.x / SET r.x = null on one parallel relationship instance.
-	DelEdgePropertyByHandle(src, dst string, handle uint64, key string)
+	DelEdgePropertyByHandle(src, dst string, handle uint64, key string) error
 	// EdgePropertiesByHandle returns the property map recorded for the edge
 	// identified by `handle` on the (src, dst) pair, or nil when none.
 	EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue
@@ -203,6 +216,21 @@ type GraphMutator interface {
 	// in which case the caller mutates the per-pair store only and never a
 	// by-handle instance.
 	FirstEdgeHandle(src, dst string) (uint64, bool)
+
+	// EdgeHandles appends to buf the stable handle of every stored src→dst
+	// relationship instance, one entry per adjacency slot in slot order, and
+	// returns the extended slice. A slot stamped without a handle contributes
+	// the 0 sentinel, so the appended count is the number of parallel src→dst
+	// relationships. It is the per-instance enumerator MERGE's match path binds
+	// one row per matching relationship from; FirstEdgeHandle names only the
+	// first. Allocates only when buf must grow.
+	EdgeHandles(src, dst string, buf []uint64) []uint64
+
+	// HasEdgeHandle reports whether a stored src→dst slot carries the non-zero
+	// handle. A bound relationship value names a stored instance of the pair
+	// exactly when this holds for one of the pair's two orders; DELETE uses it
+	// to remove that instance rather than the pair's first slot.
+	HasEdgeHandle(src, dst string, handle uint64) bool
 
 	// OutNeighbours returns the outgoing neighbour node keys of n as a
 	// snapshot slice. Callers must not mutate the returned slice.

@@ -90,7 +90,9 @@ func degreeFixture(t *testing.T, n int) *lpg.Graph[string, float64] {
 			if j%2 == 0 {
 				typ = "M"
 			}
-			g.SetEdgeLabel(src, dst, typ)
+			if err := g.SetEdgeLabel(src, dst, typ); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	return g
@@ -575,7 +577,9 @@ func TestDegreeRewrite_ShortCircuits(t *testing.T) {
 		if err := g.AddEdge("hub", leaf, 1); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
-		g.SetEdgeLabel("hub", leaf, "K")
+		if err := g.SetEdgeLabel("hub", leaf, "K"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	relID, ok := g.Registry().Lookup("K")
 	if !ok {

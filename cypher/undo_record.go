@@ -151,7 +151,9 @@ func (m mutationUndo) recordAddNode(n string, wasNew bool) {
 		return
 	}
 	m.undo.record(func() {
-		m.wv.RemoveNode(n)
+		// An inverse has nowhere to return an error, and this view carries the
+		// statement's transaction, which records any refusal on itself.
+		_, _ = m.wv.RemoveNode(n)
 		m.wv.Graph().DecrNodesAdded()
 	})
 }
@@ -194,11 +196,11 @@ func (m mutationUndo) recordAddEdge(src, dst string, handle uint64, srcNew, dstN
 		m.wv.RemoveEdgeByHandle(src, dst, handle)
 		m.wv.Graph().DecrEdgesAdded()
 		if srcNew {
-			m.wv.RemoveNode(src)
+			_, _ = m.wv.RemoveNode(src) // as above: the refusal is recorded on the transaction
 			m.wv.Graph().DecrNodesAdded()
 		}
 		if dstNew && !selfLoop {
-			m.wv.RemoveNode(dst)
+			_, _ = m.wv.RemoveNode(dst) // as above: the refusal is recorded on the transaction
 			m.wv.Graph().DecrNodesAdded()
 		}
 	})
@@ -220,7 +222,7 @@ func (m mutationUndo) recordSetNodeLabel(n, label string, hadLabel bool) {
 	if !m.active() {
 		return
 	}
-	m.undo.record(func() { m.wv.RemoveNodeLabel(n, label) })
+	m.undo.record(func() { _ = m.wv.RemoveNodeLabel(n, label) })
 }
 
 // recordRemoveNodeLabel records the inverse of detaching label from n. hadLabel
@@ -262,7 +264,11 @@ func (m mutationUndo) recordRemoveNode(n string, wasLive bool) {
 		// the node's committed birth record, so the reclaim must read the
 		// died-then-born order as "alive before the transaction", never the
 		// chain-level primordial flag).
-		m.wv.Revive(n)
+		//
+		// Revive reports a refusal only over the zero WriteTx (rmp #2947); this
+		// view carries the statement's transaction, which records a conflict on
+		// itself, and an inverse has nowhere to return one.
+		_ = m.wv.Revive(n)
 		m.wv.Graph().DecrNodesRemoved()
 	})
 }
@@ -283,7 +289,7 @@ func (m mutationUndo) recordSetNodeProperty(n, key string, prev lpg.PropertyValu
 		if had {
 			_ = m.wv.SetNodeProperty(n, key, prev)
 		} else {
-			m.wv.DelNodeProperty(n, key)
+			_ = m.wv.DelNodeProperty(n, key) // replays a name the forward write accepted (rmp #2748)
 		}
 	})
 }
@@ -315,7 +321,7 @@ func (m mutationUndo) recordSetEdgeLabel(src, dst, label string, hadLabel bool) 
 	if !m.active() || hadLabel {
 		return
 	}
-	m.undo.record(func() { m.wv.RemoveEdgeLabel(src, dst, label) })
+	m.undo.record(func() { _ = m.wv.RemoveEdgeLabel(src, dst, label) })
 }
 
 // recordSetEdgeProperty records the inverse of SetEdgeProperty(src, dst, key, …)
@@ -328,7 +334,7 @@ func (m mutationUndo) recordSetEdgeProperty(src, dst, key string, prev lpg.Prope
 		if had {
 			_ = m.wv.SetEdgeProperty(src, dst, key, prev)
 		} else {
-			m.wv.DelEdgeProperty(src, dst, key)
+			_ = m.wv.DelEdgeProperty(src, dst, key) // replays a name the forward write accepted (rmp #2748)
 		}
 	})
 }
@@ -365,7 +371,7 @@ func (m mutationUndo) recordSetEdgePropertyByHandle(src, dst string, handle uint
 		if had {
 			_ = m.wv.SetEdgePropertyByHandle(src, dst, handle, key, prev)
 		} else {
-			m.wv.DelEdgePropertyByHandle(src, dst, handle, key)
+			_ = m.wv.DelEdgePropertyByHandle(src, dst, handle, key) // replays a name the forward write accepted (rmp #2748)
 		}
 	})
 }
@@ -458,7 +464,7 @@ func (m mutationUndo) captureRemovedEdge(src, dst string) removedEdgePreimage {
 	// The FIRST src→dst slot is the one [Graph.RemoveEdge] drops; capture its
 	// handle so the by-handle capture path below records the exact instance.
 	var handle uint64
-	if h, ok := m.wv.Graph().FirstEdgeHandle(src, dst); ok {
+	if h, ok := m.wv.Graph().FirstEdgeHandleAsOf(src, dst, nil); ok {
 		handle = h
 	}
 	return m.captureRemovedEdgeH(src, dst, handle)
@@ -493,23 +499,23 @@ func (m mutationUndo) captureRemovedEdgeByHandle(src, dst string, handle uint64)
 func (m mutationUndo) captureRemovedEdgeH(src, dst string, handle uint64) removedEdgePreimage {
 	src, dst = m.creationOrientation(src, dst, handle)
 	pre := removedEdgePreimage{src: src, dst: dst}
-	if !m.wv.Graph().AdjList().HasEdge(src, dst) {
+	if !m.wv.Graph().HasEdgeAsOf(src, dst, nil) {
 		return pre
 	}
 	pre.hadEdge = true
-	if w, ok := m.wv.Graph().EdgeWeight(src, dst); ok {
+	if w, ok := m.wv.Graph().EdgeWeightAsOf(src, dst, nil); ok {
 		pre.weight = w
 	}
-	pre.labels = m.wv.Graph().EdgeLabels(src, dst)
-	pre.props = m.wv.Graph().EdgeProperties(src, dst)
+	pre.labels = m.wv.Graph().EdgeLabelsAsOf(src, dst, nil)
+	pre.props = m.wv.Graph().EdgePropertiesAsOf(src, dst, nil)
 	pre.createCount = m.wv.Graph().EdgeCreateCount(src, dst)
 	// When the removed instance carries a stable handle, snapshot that handle's
 	// per-instance labels and properties so the inverse re-adds the instance
 	// with its own metadata even if the removal cleared the handle store.
 	if handle != 0 {
 		pre.handle = handle
-		pre.handleLabels = m.wv.Graph().EdgeLabelsByHandle(src, dst, handle)
-		pre.handleProps = m.wv.Graph().EdgePropertiesByHandle(src, dst, handle)
+		pre.handleLabels = m.wv.Graph().EdgeLabelsByHandleAsOf(src, dst, handle, nil)
+		pre.handleProps = m.wv.Graph().EdgePropertiesByHandleAsOf(src, dst, handle, nil)
 	}
 	return pre
 }
@@ -549,7 +555,7 @@ func (m mutationUndo) creationOrientation(src, dst string, handle uint64) (strin
 	if !ok {
 		return src, dst
 	}
-	if g.HasEdgeHandleLabelRecordByID(srcID, dstID, handle) || !g.HasEdgeHandleLabelRecordByID(dstID, srcID, handle) {
+	if g.HasEdgeHandleLabelRecordByIDAsOf(srcID, dstID, handle, nil) || !g.HasEdgeHandleLabelRecordByIDAsOf(dstID, srcID, handle, nil) {
 		return src, dst
 	}
 	return dst, src
@@ -578,7 +584,7 @@ func (m mutationUndo) recordRemoveEdge(pre *removedEdgePreimage, wasPresent bool
 		_, _ = m.wv.AddEdgeHIfAbsent(pre.src, pre.dst, pre.weight, pre.handle)
 		m.wv.Graph().DecrEdgesRemoved()
 		for _, lbl := range pre.labels {
-			m.wv.SetEdgeLabel(pre.src, pre.dst, lbl)
+			_ = m.wv.SetEdgeLabel(pre.src, pre.dst, lbl) // replays a name the forward write accepted (rmp #2748)
 		}
 		for k, v := range pre.props {
 			_ = m.wv.SetEdgeProperty(pre.src, pre.dst, k, v)
@@ -588,7 +594,7 @@ func (m mutationUndo) recordRemoveEdge(pre *removedEdgePreimage, wasPresent bool
 		// case: RemoveEdge keeps it while a sibling survives); authoritative
 		// when it did not. No-op when handle is 0.
 		for _, lbl := range pre.handleLabels {
-			m.wv.SetEdgeLabelByHandle(pre.src, pre.dst, pre.handle, lbl)
+			_ = m.wv.SetEdgeLabelByHandle(pre.src, pre.dst, pre.handle, lbl) // replays a name the forward write accepted (rmp #2748)
 		}
 		for k, v := range pre.handleProps {
 			// Restoring a value that passed validation at the original write; ignore the error.
@@ -632,7 +638,7 @@ func captureAllOutEdgePreimages(
 	pre := make([]removedEdgePreimage, len(outgoing))
 	if !r.active() {
 		for i, dst := range outgoing {
-			pre[i] = removedEdgePreimage{src: n, dst: dst, hadEdge: g.AdjList().HasEdge(n, dst)}
+			pre[i] = removedEdgePreimage{src: n, dst: dst, hadEdge: g.HasEdgeAsOf(n, dst, nil)}
 		}
 		return pre
 	}

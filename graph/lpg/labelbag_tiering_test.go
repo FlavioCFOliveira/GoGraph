@@ -54,13 +54,17 @@ func TestLabelBag_TierTransitions_LockstepWithIndex(t *testing.T) {
 	// Remove every other label, then the rest, checking lockstep each time.
 	remaining := append([]string(nil), names...)
 	for _, name := range []string{"L11", "L09", "L07", "L05", "L03", "L01"} {
-		g.RemoveNodeLabel("n", name)
+		if err := g.RemoveNodeLabel("n", name); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"n\", name): %v", err)
+		}
 		remaining = deleteStr(remaining, name)
 		assertLabelState(t, g, "n", id, remaining)
 	}
 	// Now 6 labels remain (small tier). Drain to 1 (singleton collapse) and 0.
 	for _, name := range append([]string(nil), remaining...) {
-		g.RemoveNodeLabel("n", name)
+		if err := g.RemoveNodeLabel("n", name); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"n\", name): %v", err)
+		}
 		remaining = deleteStr(remaining, name)
 		assertLabelState(t, g, "n", id, remaining)
 	}
@@ -86,7 +90,7 @@ func assertLabelState(t *testing.T, g *Graph[string, float64], key string, id gr
 		if !g.HasNodeLabel(key, name) {
 			t.Fatalf("HasNodeLabel(%s) = false, want true", name)
 		}
-		lid := uint32(g.Registry().Intern(name))
+		lid := uint32(g.Registry().intern(name))
 		if !labelIndexHas(g, uint32(lid), id) {
 			t.Fatalf("nodeIdx missing %s for id %d (bag/index out of lockstep)", name, id)
 		}

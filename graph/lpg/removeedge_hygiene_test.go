@@ -1,6 +1,6 @@
 package lpg_test
 
-// removeedge_hygiene_test.go — gate test for clearEdgePairState completeness.
+// removeedge_hygiene_test.go — gate test for clearPairSides completeness.
 //
 // Verifies that RemoveEdge removes the last edge between (src, dst) and
 // clears ALL three previously-missing sidecar stores:
@@ -56,7 +56,9 @@ func TestRemoveEdge_ClearsSidecarStores(t *testing.T) {
 	}
 
 	// --- populate the three instance sidecar stores ---
-	g.SetEdgeLabelAt(a, b, idx, "KNOWS")
+	if err := g.SetEdgeLabelAt(a, b, idx, "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
 	g.IncEdgeCreateCount(a, b) // bumps counter to 1
 	if err := g.SetEdgePropertyAt(a, b, idx, "since", lpg.StringValue("2024")); err != nil {
 		t.Fatalf("SetEdgePropertyAt: %v", err)
@@ -74,7 +76,7 @@ func TestRemoveEdge_ClearsSidecarStores(t *testing.T) {
 	}
 
 	// --- remove the last (and only) edge ---
-	g.RemoveEdge(a, b)
+	must(t).E(g.RemoveEdge(a, b))
 
 	// All three stores must be clean after removal.
 	assertEdgeClean(t, g, a, b, "after RemoveEdge")

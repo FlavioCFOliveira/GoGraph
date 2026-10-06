@@ -49,7 +49,9 @@ import (
 // Obtain one with [AdjList.Writer]. The zero value is unusable; a Writer built
 // from the zero [mvcc.Tx] is legal and behaves exactly as the [AdjList]'s own
 // methods do — every write is its own transaction, committed the instant it is
-// made.
+// made, and refused with a [*mvcc.Conflict] while another transaction holds an
+// uncommitted write on an entry it would replace. It never joins a transaction
+// the write stamp's slot names (rmp #2967; see [AdjList.SetWriteStamp]).
 //
 // It is valid only while its transaction's bracket is open and must not be
 // retained past it. A retained Writer does not corrupt anything — a retracted
@@ -103,59 +105,77 @@ func (wr Writer[N, W]) AddEdgeLabeledWithProp(src, dst N, w W, label uint32, pay
 	}, wr.tx)
 }
 
+// AppendEdge appends one src→dst slot (mirrored on an undirected graph) carrying
+// the stable handle, the opaque label when hasLabel is set, and the aux payload
+// when payload is non-nil, inside this writer's transaction, and reports whether
+// a slot was inserted — false only for a simple graph's duplicate, which leaves
+// the adjacency as it was.
+//
+// It is the one append form that names the slot it creates: a caller that must
+// withdraw the append it just made — because a check that can only run after the
+// insert refused the write — removes exactly that slot with
+// [Writer.RemoveEdgeByHandle], and no sibling (rmp #2947).
+func (wr Writer[N, W]) AppendEdge(src, dst N, w W, handle uint64, label uint32, hasLabel bool, payload any) (bool, error) {
+	return wr.a.addEdgeReport(src, dst, w, edgeExtra{
+		handle: handle, hasHandle: true,
+		label: label, hasLabel: hasLabel,
+		auxPayload: payload, hasAuxPayload: payload != nil,
+	}, wr.tx)
+}
+
 // RemoveEdge is [AdjList.RemoveEdge] inside this writer's transaction.
-func (wr Writer[N, W]) RemoveEdge(src, dst N) { wr.a.removeEdgeTx(src, dst, wr.tx) }
+func (wr Writer[N, W]) RemoveEdge(src, dst N) error { return wr.a.removeEdgeTx(src, dst, wr.tx) }
 
 // RemoveEdgeByHandle is [AdjList.RemoveEdgeByHandle] inside this writer's
 // transaction.
-func (wr Writer[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
+func (wr Writer[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) (bool, error) {
 	return wr.a.removeEdgeByHandleTx(src, dst, handle, wr.tx)
 }
 
 // RemoveAllEdgesFrom is [AdjList.RemoveAllEdgesFrom] inside this writer's
 // transaction.
-func (wr Writer[N, W]) RemoveAllEdgesFrom(src N) { wr.a.removeAllEdgesFromTx(src, wr.tx) }
+func (wr Writer[N, W]) RemoveAllEdgesFrom(src N) error { return wr.a.removeAllEdgesFromTx(src, wr.tx) }
 
 // UpdateEntryAux is [AdjList.UpdateEntryAux] inside this writer's transaction.
 func (wr Writer[N, W]) UpdateEntryAux(
 	src graph.NodeID,
 	fn func(cur AuxColumn, neighbours []graph.NodeID) (AuxColumn, bool),
-) bool {
+) (bool, error) {
 	return wr.a.updateEntryAuxTx(src, fn, wr.tx)
 }
 
 // SetEdgeLabelSlot is [AdjList.SetEdgeLabelSlot] inside this writer's
 // transaction.
-func (wr Writer[N, W]) SetEdgeLabelSlot(src, dst graph.NodeID, v uint32) bool {
+func (wr Writer[N, W]) SetEdgeLabelSlot(src, dst graph.NodeID, v uint32) (bool, error) {
 	return wr.a.setEdgeLabelSlotTx(src, dst, v, wr.tx)
 }
 
 // ClearEdgeLabelSlotValue is [AdjList.ClearEdgeLabelSlotValue] inside this
 // writer's transaction.
-func (wr Writer[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32) bool {
+func (wr Writer[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32) (bool, error) {
 	return wr.a.clearEdgeLabelSlotValueTx(src, dst, v, wr.tx)
 }
 
 // SetEdgeLabelSlotsAt is [AdjList.SetEdgeLabelSlotsAt] inside this writer's
 // transaction.
-func (wr Writer[N, W]) SetEdgeLabelSlotsAt(src, dst graph.NodeID, idxs []int, v uint32) int {
+func (wr Writer[N, W]) SetEdgeLabelSlotsAt(src, dst graph.NodeID, idxs []int, v uint32) (int, error) {
 	return wr.a.setEdgeLabelSlotsAtTx(src, dst, idxs, v, wr.tx)
 }
 
 // ClearEdgeLabelSlotsValue is [AdjList.ClearEdgeLabelSlotsValue] inside this
 // writer's transaction.
-func (wr Writer[N, W]) ClearEdgeLabelSlotsValue(src, dst graph.NodeID, v uint32) int {
+func (wr Writer[N, W]) ClearEdgeLabelSlotsValue(src, dst graph.NodeID, v uint32) (int, error) {
 	return wr.a.clearEdgeLabelSlotsValueTx(src, dst, v, wr.tx)
 }
 
 // ClearEdgeLabelSlots is [AdjList.ClearEdgeLabelSlots] inside this writer's
 // transaction.
-func (wr Writer[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) {
-	wr.a.clearEdgeLabelSlotsTx(src, dst, wr.tx)
+func (wr Writer[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) error {
+	return wr.a.clearEdgeLabelSlotsTx(src, dst, wr.tx)
 }
 
 // SetEdgeLabelSlots is [AdjList.SetEdgeLabelSlots] inside this writer's
 // transaction.
-func (wr Writer[N, W]) SetEdgeLabelSlots(src graph.NodeID, updates map[graph.NodeID]uint32) int {
+func (wr Writer[N, W]) SetEdgeLabelSlots(src graph.NodeID, updates map[graph.NodeID]uint32) (int, error) {
 	return wr.a.setEdgeLabelSlotsTx(src, updates, wr.tx)
 }

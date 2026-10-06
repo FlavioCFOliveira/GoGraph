@@ -88,9 +88,13 @@ type Result[N comparable, W any] struct {
 	// graph topology, so they are surfaced here rather than applied to Graph.
 	// The slice is deterministically ordered (kind, label, property, name).
 	Constraints []ConstraintRecord
-	// Indexes reports the durable index definitions recovered from the WAL
-	// ([txn.OpCreateIndex] / [txn.OpDropIndex] ops). The engine re-registers
-	// and re-backfills these on open so a user-created index survives a crash
+	// Indexes reports the durable index definitions recovered for the graph:
+	// the set declared in the snapshot's indexdefs.bin component (the
+	// checkpoint-survival path) reconciled with the [txn.OpCreateIndex] /
+	// [txn.OpDropIndex] ops replayed from the WAL tail (last writer wins by
+	// name), so the result is the index set as of the last durable commit.
+	// The engine re-registers and re-backfills these on open so a
+	// user-created index survives a crash
 	// and a restart (Durability). Index definitions are engine schema, not
 	// graph topology, so they are surfaced here rather than applied to Graph.
 	// The slice is deterministically ordered (by name).
@@ -1514,7 +1518,9 @@ func openCodec[N comparable, W any](
 			// by replaying OpRemoveNode, so applying a possibly-stale
 			// snapshot set there could wrongly re-tombstone a re-created
 			// node.
-			snapshot.ApplyTombstonesToGraph(g, loaded.Tombstones)
+			if err := snapshot.ApplyTombstonesToGraph(g, loaded.Tombstones); err != nil {
+				return res, fmt.Errorf("recovery: apply snapshot tombstones: %w", err)
+			}
 			res.SnapshotTombstones = len(loaded.Tombstones.IDs)
 
 			// Self-sufficient path: the mapper is fully restored, so every
@@ -1551,7 +1557,10 @@ func openCodec[N comparable, W any](
 			// handle high-water counter so post-recovery edge creation never
 			// re-mints a live handle (invariant I5).
 			if haveSnapEdgeHandles {
-				snapshot.ApplyEdgeHandlesToGraph(g, loaded.EdgeHandles)
+				if err := snapshot.ApplyEdgeHandlesToGraph(g, loaded.EdgeHandles); err != nil {
+					metrics.IncCounter("store.recovery.openCodec.errors", 1)
+					return res, fmt.Errorf("recovery: apply snapshot edge handles: %w", err)
+				}
 			}
 			snapshotSideAppliedEarly = true
 		}
@@ -1697,7 +1706,10 @@ func openCodec[N comparable, W any](
 	// column. The self-sufficient path applied these before WAL replay
 	// (snapshotSideAppliedEarly), so it is skipped here.
 	if haveSnapEdgeHandles && !snapshotSideAppliedEarly {
-		snapshot.ApplyEdgeHandlesToGraph(g, snapEdgeHandles)
+		if err := snapshot.ApplyEdgeHandlesToGraph(g, snapEdgeHandles); err != nil {
+			metrics.IncCounter("store.recovery.openCodec.errors", 1)
+			return res, fmt.Errorf("recovery: apply snapshot edge handles: %w", err)
+		}
 	}
 	// SECONDARY INDEXES ARE REPORTED, NEVER LOADED (rmp #2490).
 	//
@@ -2108,9 +2120,14 @@ func applyOrAccumulate[N comparable, W any](
 // When wcodec is non-nil and the op is [txn.OpAddEdgeWeighted], the
 // typed weight payload between codec.dst and the trailing label is
 // decoded and applied to the graph. When wcodec is nil and the op is
-// [txn.OpAddEdgeWeighted], the apply falls back to a zero weight and
-// the `store.recovery.applyOp.fallbackZeroWeight` counter is
-// incremented.
+// [txn.OpAddEdgeWeighted], the weight payload cannot be decoded: the
+// op is NOT applied, the `store.recovery.applyOp.fallbackZeroWeight`
+// counter is incremented (the name predates this behaviour; no zero
+// weight is applied), and false is returned. Inside a committed v3
+// transaction the replay loop then raises [ErrCommittedTxnCorruptOp]
+// and stops, so that transaction and every transaction after it in the
+// WAL are discarded; [Open] still returns a nil error and
+// [Result.IsClean] reports false.
 //
 // It also returns false when the graph REFUSES a decoded op — every mutation
 // whose lpg.Graph primitive can fail (node add, node label, node property, edge
@@ -2223,11 +2240,17 @@ func applyOpCodec[N comparable, W any](
 			// itself.
 			for _, lbl := range g.NodeLabels(src) {
 				touched.addLabel(lbl)
-				g.RemoveNodeLabel(src, lbl)
+				if err := g.RemoveNodeLabel(src, lbl); err != nil {
+					metrics.IncCounter("store.recovery.applyOp.removeNodeLabelErrors", 1)
+					return false
+				}
 			}
 			for k := range g.NodeProperties(src) {
 				touched.addKey(k)
-				g.DelNodeProperty(src, k)
+				if err := g.DelNodeProperty(src, k); err != nil {
+					metrics.IncCounter("store.recovery.applyOp.delNodePropertyErrors", 1)
+					return false
+				}
 			}
 			// Reconstruct the tombstone so the node is logically deleted
 			// after replay, not merely a label-stripped live node. Without
@@ -2235,10 +2258,16 @@ func applyOpCodec[N comparable, W any](
 			// resurrect the node as an undeletable ghost. A later OpAddNode
 			// for the same key revives it (g.AddNode clears the tombstone),
 			// so replay order is honoured.
-			g.RemoveNode(src)
+			if err := g.RemoveNode(src); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.removeNodeErrors", 1)
+				return false
+			}
 		case txn.OpRemoveNodeLabel:
 			touched.addLabel(label)
-			g.RemoveNodeLabel(src, label)
+			if err := g.RemoveNodeLabel(src, label); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.removeNodeLabelErrors", 1)
+				return false
+			}
 		case txn.OpSetNodeLabel:
 			touched.addLabel(label)
 			if err := g.SetNodeLabel(src, label); err != nil {
@@ -2246,12 +2275,17 @@ func applyOpCodec[N comparable, W any](
 				return false
 			}
 		case txn.OpSetEdgeLabel:
-			g.SetEdgeLabel(src, dst, label)
+			// A refusal here can only be the token bound, which no op the
+			// uint16-prefixed WAL decoded can exceed: an undecodable op.
+			if err := g.SetEdgeLabel(src, dst, label); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.setEdgeLabelErrors", 1)
+				return false
+			}
 		case txn.OpRemoveEdge:
 			// LPG edge removal: a fully-disconnected pair also sheds its
 			// per-pair edge labels/properties, so a later OpAddEdge for the
 			// same endpoints does not resurrect the removed edge's labels.
-			g.RemoveEdge(src, dst)
+			return replayRemoveEdge(g, src, dst)
 		}
 
 	case txn.OpAddEdgeH:
@@ -2298,7 +2332,10 @@ func applyOpCodec[N comparable, W any](
 			}
 		case txn.OpDelNodeProperty:
 			touched.addKey(key)
-			g.DelNodeProperty(src, key)
+			if err := g.DelNodeProperty(src, key); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.delNodePropertyErrors", 1)
+				return false
+			}
 		case txn.OpSetEdgeProperty:
 			val, _, verr := decodeRecoveryPropertyValue(rest)
 			if verr != nil {
@@ -2309,7 +2346,10 @@ func applyOpCodec[N comparable, W any](
 				return false
 			}
 		case txn.OpDelEdgeProperty:
-			g.DelEdgeProperty(src, dst, key)
+			if err := g.DelEdgeProperty(src, dst, key); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.delEdgePropertyErrors", 1)
+				return false
+			}
 		}
 	}
 	return true
@@ -2410,7 +2450,10 @@ func applySetEdgeLabelByHandle[N comparable, W any](g *lpg.Graph[N, W], src, dst
 	if !ok {
 		return false
 	}
-	g.SetEdgeLabelByHandle(src, dst, handle, label)
+	if err := g.SetEdgeLabelByHandle(src, dst, handle, label); err != nil {
+		metrics.IncCounter("store.recovery.applyOp.setEdgeLabelErrors", 1)
+		return false
+	}
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }
@@ -2475,7 +2518,10 @@ func applyDelEdgePropertyByHandle[N comparable, W any](g *lpg.Graph[N, W], src, 
 	if !ok {
 		return false
 	}
-	g.DelEdgePropertyByHandle(src, dst, handle, key)
+	if err := g.DelEdgePropertyByHandle(src, dst, handle, key); err != nil {
+		metrics.IncCounter("store.recovery.applyOp.delEdgePropertyErrors", 1)
+		return false
+	}
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }
@@ -2498,7 +2544,11 @@ func applyRemoveEdgeInstanceByHandle[N comparable, W any](g *lpg.Graph[N, W], sr
 	if !ok {
 		return false
 	}
-	g.RemoveEdgeInstanceByHandle(src, dst, handle)
+	if err := g.RemoveEdgeInstanceByHandle(src, dst, handle); err != nil {
+		// Nothing can be pending during replay; a refusal is reported, never dropped.
+		metrics.IncCounter("store.recovery.applyOp.removeEdgeErrors", 1)
+		return false
+	}
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }
@@ -2529,7 +2579,11 @@ func applyRemoveEdgeByHandle[N comparable, W any](g *lpg.Graph[N, W], src, dst N
 	if !ok {
 		return false
 	}
-	g.RemoveEdgeByHandle(src, dst, handle)
+	if _, err := g.RemoveEdgeByHandle(src, dst, handle); err != nil {
+		// See OpRemoveEdge: nothing can be pending during replay.
+		metrics.IncCounter("store.recovery.applyOp.removeEdgeErrors", 1)
+		return false
+	}
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }
@@ -2743,4 +2797,16 @@ func decodeRecoveryTimeProp(buf []byte) (lpg.PropertyValue, []byte, error) {
 		return lpg.PropertyValue{}, buf, errors.New("recovery: short time property")
 	}
 	return lpg.TimeValue(time.Unix(0, nanos).UTC()), buf[n:], nil
+}
+
+// replayRemoveEdge applies a logged OpRemoveEdge. Replay runs before the store
+// accepts any transaction, so no write can be pending and the direct-write
+// refusal of rmp #2947 cannot occur; if it does, it is counted and reported as
+// a failed op, never dropped.
+func replayRemoveEdge[N comparable, W any](g *lpg.Graph[N, W], src, dst N) bool {
+	if err := g.RemoveEdge(src, dst); err != nil {
+		metrics.IncCounter("store.recovery.applyOp.removeEdgeErrors", 1)
+		return false
+	}
+	return true
 }

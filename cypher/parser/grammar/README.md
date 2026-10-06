@@ -82,6 +82,25 @@ re-applied after any upstream refresh:
   `propertyExpression` onward; `gen-patches.patch` was regenerated with those
   offsets.
 
+- **reduce()** (rmp #2923) — the `REDUCE` lexer token, placed immediately after
+  `PROFILE` and before `ID` for the reason FOREACH is there; `REDUCE` listed in
+  the `symbol` parser rule for the reason EXPLAIN and PROFILE are, so `reduce`
+  stays usable wherever an identifier is; the `reduceExpression` parser rule
+  (`REDUCE LPAREN symbol ASSIGN expression COMMA filterExpression STICK expression RPAREN`),
+  added as the last parser rule; and `reduceExpression` as the last alternative
+  of `atom`. It replaces a hand-written parser function that the ATN did not
+  know, which made adaptive prediction reject `x[reduce(a = 0, y IN l | a)]`.
+
+  The new rule takes rule index 93, the index the hand-written rule carried, so
+  no rule index moved. The atom alternative is last so the Literal (1) and
+  Symbol (11) alternatives the numeric-ID patch selects keep their numbers.
+  `REDUCE` is token 92; `ID` and the literal/whitespace tokens below it moved by
+  +1. ATN state numbers moved by **+2** in every rule before `atom` (the new
+  rule's start and stop states) and by **+3** from `atom` onward (one state for
+  the new alternative); no `AdaptivePredict` decision number moved.
+  `gen-patches.patch` lost its reduce hunks and was regenerated with those
+  offsets applied.
+
 ## How to update
 
 1. Identify the new commit hash:
@@ -113,7 +132,7 @@ re-applied after any upstream refresh:
    plus checkout-independent header normalisation), then `goimports`, then
    re-applies the hand-written parser patches captured in `gen-patches.patch`
    (see `docs/tck/parser-report.md` — numeric-ID workarounds, chained-WITH,
-   optional CALL parentheses, and `reduce()`). For an unchanged grammar this
+   and optional CALL parentheses). For an unchanged grammar this
    reproduces `cypher/parser/gen/` byte-for-byte.
 
    If a grammar change shifts the code the patches target, the `git apply`
@@ -137,17 +156,17 @@ re-applied after any upstream refresh:
    Two practices contain this:
 
    - **Prefer adding an *alternative* to an existing rule over adding a new
-     rule.** A new rule shifts every rule index, which invalidates the
-     `CypherParserRULE_*` constants — including `reduceExpression`, which the
-     patch appends by hand — and regenerates the listener and visitor files.
+     rule.** A new rule shifts every rule index after it, which invalidates
+     the `CypherParserRULE_*` constants, and regenerates the listener and
+     visitor files. A rule added last shifts no index, but still moves every
+     ATN state by two.
      An added alternative leaves rule indices and those files untouched.
    - **Run `TestGenPatchBehaviours`** (`cypher/genpatch_behaviour_test.go`)
      after every regeneration. It pins each patched behaviour to a concrete
      result, which a compile check cannot do.
    - **Run `TestHandWrittenRuleInvokingStates`**
      (`cypher/parser/invoking_state_2899_test.go`) after every regeneration.
-     The hand-written rule bodies in the patch (`MultiPartQ`,
-     `ReduceExpression`, and the reduce alternative of `Atom`) call
+     The hand-written rule body in the patch (`MultiPartQ`) calls
      `p.SetState(N)` before each sub-rule call, with `N` taken from the
      generated code, because antlr4-go requires every context's invoking
      state to be a rule-invocation state (rmp #2899). These are absolute

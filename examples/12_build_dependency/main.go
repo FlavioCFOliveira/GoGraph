@@ -447,7 +447,9 @@ func (d *buildDAG) withBackEdge() (*csr.CSR[struct{}], error) {
 	// Remove the back-edge again so the receiver's adjacency stays acyclic
 	// for any later use; the build-order stage ran against d.c (a snapshot
 	// taken before this method), so it is unaffected regardless.
-	d.a.RemoveEdge(bottom, top)
+	if err := d.a.RemoveEdge(bottom, top); err != nil {
+		return nil, fmt.Errorf("RemoveEdge %s->%s (back-edge): %w", bottom, top, err)
+	}
 	return cyclic, nil
 }
 

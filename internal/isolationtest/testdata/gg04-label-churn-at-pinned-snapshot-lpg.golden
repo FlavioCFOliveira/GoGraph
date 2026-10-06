@@ -1,0 +1,447 @@
+spec gg04-label-churn-at-pinned-snapshot-lpg: 2 sessions, 10 permutations
+# GG04. s0 pins a read snapshot and counts :L twice — the label store (seek) beside a
+# label test over every node (scan); s1 adds :L to u and removes it from l0 in two
+# autocommit statements. The pinned reader's count is unchanged (10) and seek = scan.
+# Through the lpg API: Graph.BeginRead, SetNodeLabel, RemoveNodeLabel.
+# The final dangling probe must count 0 in every permutation: an edge to a dead node
+# is never committed (catalogue §9 point 3).
+
+starting permutation: s0c1 s0c2 s0c s1a s1r
+step s0c1: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s0c2: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s0c: lpg: Graph.EndRead
+step s1a: lpg: SetNodeLabel(u, L)
+step s1r: lpg: RemoveNodeLabel(l0, L)
+final count: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+10  |10  
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"l0"
+"l1"
+"l2"
+"l3"
+"l4"
+"l5"
+"l6"
+"l7"
+"l8"
+"l9"
+"u" 
+(11 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s0c1 s0c2 s1a s0c s1r
+step s0c1: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s0c2: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s1a: lpg: SetNodeLabel(u, L)
+step s0c: lpg: Graph.EndRead
+step s1r: lpg: RemoveNodeLabel(l0, L)
+final count: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+10  |10  
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"l0"
+"l1"
+"l2"
+"l3"
+"l4"
+"l5"
+"l6"
+"l7"
+"l8"
+"l9"
+"u" 
+(11 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s0c1 s0c2 s1a s1r s0c
+step s0c1: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s0c2: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s1a: lpg: SetNodeLabel(u, L)
+step s1r: lpg: RemoveNodeLabel(l0, L)
+step s0c: lpg: Graph.EndRead
+final count: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+10  |10  
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"l0"
+"l1"
+"l2"
+"l3"
+"l4"
+"l5"
+"l6"
+"l7"
+"l8"
+"l9"
+"u" 
+(11 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s0c1 s1a s0c2 s0c s1r
+step s0c1: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s1a: lpg: SetNodeLabel(u, L)
+step s0c2: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s0c: lpg: Graph.EndRead
+step s1r: lpg: RemoveNodeLabel(l0, L)
+final count: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+10  |10  
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"l0"
+"l1"
+"l2"
+"l3"
+"l4"
+"l5"
+"l6"
+"l7"
+"l8"
+"l9"
+"u" 
+(11 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s0c1 s1a s0c2 s1r s0c
+step s0c1: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s1a: lpg: SetNodeLabel(u, L)
+step s0c2: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s1r: lpg: RemoveNodeLabel(l0, L)
+step s0c: lpg: Graph.EndRead
+final count: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+10  |10  
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"l0"
+"l1"
+"l2"
+"l3"
+"l4"
+"l5"
+"l6"
+"l7"
+"l8"
+"l9"
+"u" 
+(11 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s0c1 s1a s1r s0c2 s0c
+step s0c1: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s1a: lpg: SetNodeLabel(u, L)
+step s1r: lpg: RemoveNodeLabel(l0, L)
+step s0c2: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s0c: lpg: Graph.EndRead
+final count: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+10  |10  
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"l0"
+"l1"
+"l2"
+"l3"
+"l4"
+"l5"
+"l6"
+"l7"
+"l8"
+"l9"
+"u" 
+(11 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s1a s0c1 s0c2 s0c s1r
+step s1a: lpg: SetNodeLabel(u, L)
+step s0c1: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s0c2: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s0c: lpg: Graph.EndRead
+step s1r: lpg: RemoveNodeLabel(l0, L)
+final count: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+10  |10  
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"l0"
+"l1"
+"l2"
+"l3"
+"l4"
+"l5"
+"l6"
+"l7"
+"l8"
+"l9"
+"u" 
+(11 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s1a s0c1 s0c2 s1r s0c
+step s1a: lpg: SetNodeLabel(u, L)
+step s0c1: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s0c2: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s1r: lpg: RemoveNodeLabel(l0, L)
+step s0c: lpg: Graph.EndRead
+final count: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+10  |10  
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"l0"
+"l1"
+"l2"
+"l3"
+"l4"
+"l5"
+"l6"
+"l7"
+"l8"
+"l9"
+"u" 
+(11 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s1a s0c1 s1r s0c2 s0c
+step s1a: lpg: SetNodeLabel(u, L)
+step s0c1: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s1r: lpg: RemoveNodeLabel(l0, L)
+step s0c2: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s0c: lpg: Graph.EndRead
+final count: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+10  |10  
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"l0"
+"l1"
+"l2"
+"l3"
+"l4"
+"l5"
+"l6"
+"l7"
+"l8"
+"l9"
+"u" 
+(11 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s1a s1r s0c1 s0c2 s0c
+step s1a: lpg: SetNodeLabel(u, L)
+step s1r: lpg: RemoveNodeLabel(l0, L)
+step s0c1: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s0c2: lpg: live nodes labelled L at the pinned snapshot
+labelled
+--------
+10      
+(1 row)
+step s0c: lpg: Graph.EndRead
+final count: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+10  |10  
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"l0"
+"l1"
+"l2"
+"l3"
+"l4"
+"l5"
+"l6"
+"l7"
+"l8"
+"l9"
+"u" 
+(11 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)

@@ -1,0 +1,124 @@
+spec ww07-non-matching-not-blocked: 2 sessions, 6 permutations
+# WW07. s1 holds an uncommitted write to node a; s2 writes only the nodes matching
+# {k:'b'}, which a is not. s2 must neither wait nor conflict in any interleaving (F7):
+# no step may report <waiting ...> and both transactions commit.
+
+starting permutation: s1w s1c s2w s2c
+step s1w: MATCH (n:Item {name:'a'}) SET n.k = 1 RETURN n.k AS k
+k
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (n:Item {k:'b'}) SET n.v = 1 RETURN n.name AS name
+name
+----
+"b" 
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.k AS k, n.v AS v ORDER BY name
+name|k  |v
+----+---+-
+"a" |1  |0
+"b" |"b"|1
+(2 rows)
+
+starting permutation: s1w s2w s1c s2c
+step s1w: MATCH (n:Item {name:'a'}) SET n.k = 1 RETURN n.k AS k
+k
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {k:'b'}) SET n.v = 1 RETURN n.name AS name
+name
+----
+"b" 
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.k AS k, n.v AS v ORDER BY name
+name|k  |v
+----+---+-
+"a" |1  |0
+"b" |"b"|1
+(2 rows)
+
+starting permutation: s1w s2w s2c s1c
+step s1w: MATCH (n:Item {name:'a'}) SET n.k = 1 RETURN n.k AS k
+k
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {k:'b'}) SET n.v = 1 RETURN n.name AS name
+name
+----
+"b" 
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.k AS k, n.v AS v ORDER BY name
+name|k  |v
+----+---+-
+"a" |1  |0
+"b" |"b"|1
+(2 rows)
+
+starting permutation: s2w s1w s1c s2c
+step s2w: MATCH (n:Item {k:'b'}) SET n.v = 1 RETURN n.name AS name
+name
+----
+"b" 
+(1 row)
+step s1w: MATCH (n:Item {name:'a'}) SET n.k = 1 RETURN n.k AS k
+k
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.k AS k, n.v AS v ORDER BY name
+name|k  |v
+----+---+-
+"a" |1  |0
+"b" |"b"|1
+(2 rows)
+
+starting permutation: s2w s1w s2c s1c
+step s2w: MATCH (n:Item {k:'b'}) SET n.v = 1 RETURN n.name AS name
+name
+----
+"b" 
+(1 row)
+step s1w: MATCH (n:Item {name:'a'}) SET n.k = 1 RETURN n.k AS k
+k
+-
+1
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.k AS k, n.v AS v ORDER BY name
+name|k  |v
+----+---+-
+"a" |1  |0
+"b" |"b"|1
+(2 rows)
+
+starting permutation: s2w s2c s1w s1c
+step s2w: MATCH (n:Item {k:'b'}) SET n.v = 1 RETURN n.name AS name
+name
+----
+"b" 
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (n:Item {name:'a'}) SET n.k = 1 RETURN n.k AS k
+k
+-
+1
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.k AS k, n.v AS v ORDER BY name
+name|k  |v
+----+---+-
+"a" |1  |0
+"b" |"b"|1
+(2 rows)
