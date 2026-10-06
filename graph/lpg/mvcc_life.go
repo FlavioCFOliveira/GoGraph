@@ -125,6 +125,62 @@ type lifeStamp struct {
 	// shard's lock, and carried forward only across one transaction's own
 	// records (see [Graph.noteNodeLife]).
 	unbornBefore bool
+	// displaced is the record this one OVERWROTE in the same direction when it
+	// was written by a different transaction, or nil when the slot was empty
+	// (rmp #3001). A record written over the same transaction's own earlier
+	// record inherits that record's displaced, so the chain holds one record per
+	// transaction, never one per write.
+	//
+	// The store is one record deep per direction, so without this a write
+	// destroyed the record before it. Two readers needed it:
+	//
+	//   - a reader that cannot see this record observes the state BEFORE it,
+	//     which is the displaced record's; see [lifeStamp.asOfLocked];
+	//   - an abort withdraws this record, and the slot must return to the
+	//     displaced record rather than to empty, or every reader older than the
+	//     displaced commit falls back to the present tombstone bitmap — a node
+	//     created after a read transaction began reappeared in it once a DETACH
+	//     DELETE of that node rolled back. See [lifeWithdrawal.withdrawLocked].
+	//
+	// The chain is changed only under the shard's write lock, by
+	// [Graph.reclaimNodeLife], which drops every displaced record at or before
+	// the watermark ([trimDisplacedLocked]). Readers walk it under the read lock.
+	displaced *lifeStamp
+}
+
+// displacing returns st with its displaced chain set for a write that replaces
+// prev (hasPrev reports whether there was one). A record of the same transaction
+// is not kept: the transaction's own earlier state is never what another reader
+// should see, so st inherits what prev displaced instead.
+func (st lifeStamp) displacing(prev lifeStamp, hasPrev bool) lifeStamp {
+	switch {
+	case !hasPrev:
+		st.displaced = nil
+	case sameTx(prev, st):
+		st.displaced = prev.displaced
+	default:
+		p := prev
+		st.displaced = &p
+	}
+	return st
+}
+
+// asOfLocked returns the record a reader at (startTS, txID) resolves st to: st
+// itself when the reader can see it, otherwise the newest displaced record the
+// reader can see, or the oldest one recorded when it can see none. A record the
+// reader cannot see is an event in its future (or one that never happened), so
+// the state it observes is the state before that event — the displaced record's.
+//
+// The walk stops at the oldest recorded record rather than reporting "no
+// record": a chain's last record may be a first birth, before which the node did
+// not exist, and only that record (through [aliveBefore]) can say so.
+//
+// The caller must hold the shard lock (read or write).
+func (st lifeStamp) asOfLocked(startTS, txID uint64) lifeStamp {
+	for !st.visibleTo(startTS, txID) && st.displaced != nil {
+		st = *st.displaced
+	}
+	return st
 }
 
 // aliveBefore answers what a reader that can see NEITHER recorded event
@@ -159,28 +215,21 @@ type lifeStamp struct {
 // this branch returned before, and true only on a revive that withdrew its own
 // transaction's death.
 //
-// # What this still cannot answer, and why one more field does not fix it
+// # A reader older than a displaced record (rmp #3001)
 //
-// A reader older than the node's own CREATION is told the node exists, once a
-// rolled-back delete has republished the birth over the committed one. That is
-// pre-existing — the died-first branch has answered it that way since rmp #2445
-// — and the repair above widens it from the intact pair to the split one,
-// because the same record now carries the same claim in both shapes.
+// A reader older than the node's own CREATION used to be told the node exists
+// once a rolled-back delete had republished the birth over the committed one.
+// Carrying only the displaced birth's INSTANT beside the flag was tried and
+// refuted (DST crash seed 932): when the node was deleted and re-created before
+// the rolled-back delete, the displaced birth is the resurrection's, and a reader
+// older than the committed death in between needs the BRACKETING PAIR, not one
+// instant.
 //
-// The obvious completion was tried and REFUTED, so do not re-attempt it blind:
-// carrying the DISPLACED birth's instant beside the flag and testing the reader
-// against it. It reintroduced the very defect this repair closes, on DST crash
-// seed 932, 10 runs out of 10 and deterministic. The counterexample is a node
-// genuinely deleted and re-created before the rolled-back delete: the displaced
-// birth is then the RESURRECTION's instant, and a reader older than the
-// committed death in between is told the node did not exist when it demonstrably
-// did. Measured: a reader at startTS=1 lost a node whose displaced birth read 3.
-//
-// The question needs the BRACKETING PAIR — the birth before the reader and the
-// death after it — and one record per direction cannot hold both once a birth
-// has been displaced. Closing it is a change to the record layout (keep the
-// displaced birth, or let a rollback WITHDRAW its death instead of republishing
-// a birth, which rmp #2687's ordering currently forbids), not another field.
+// Each record therefore keeps the whole record it displaced
+// ([lifeStamp.displaced]), and [Graph.NodeExistsAsOf] resolves both directions
+// to the records the reader can see ([lifeStamp.asOfLocked]) before this
+// function is consulted. Its inputs are then the bracketing pair, with their own
+// seq and wasAlive, and the rules above apply to them unchanged.
 func aliveBefore(born, died lifeStamp) bool {
 	if died.seq < born.seq && !sameTx(born, died) {
 		// The death is the earliest recorded event AND it is committed history
@@ -394,15 +443,17 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive, unbornB
 		if sh.born == nil {
 			sh.born = make(map[graph.NodeID]lifeStamp, 8)
 		}
-		_, overwrote = sh.born[id]
-		sh.born[id] = st
+		var prev lifeStamp
+		prev, overwrote = sh.born[id]
+		sh.born[id] = st.displacing(prev, overwrote)
 		displaced = sh.setChurnHeld(true, id, held)
 	} else {
 		if sh.died == nil {
 			sh.died = make(map[graph.NodeID]lifeStamp, 8)
 		}
-		_, overwrote = sh.died[id]
-		sh.died[id] = st
+		var prev lifeStamp
+		prev, overwrote = sh.died[id]
+		sh.died[id] = st.displacing(prev, overwrote)
 		displaced = sh.setChurnHeld(false, id, held)
 	}
 	// THE GATE IS RAISED UNDER THE LOCK THAT PUBLISHES THE RECORD (rmp #2842).
@@ -684,14 +735,38 @@ func (g *Graph[N, W]) NodeExistsAsOf(id graph.NodeID, s *Snapshot) bool {
 	// class of bug that tore example 27's bank-transfer invariant; see
 	// [Graph.propBagAsOf]. The lock is uncontended and the two nil checks are in
 	// the same cache line as the maps.
+	//
+	// The tombstone bitmap is read UNDER the same lock, never after it is
+	// released (rmp #2999). A removal records its death under this lock and
+	// flips the bitmap only afterwards, and a revival does the same with its
+	// birth, so a reader that holds the lock and finds no record also finds the
+	// bitmap from before the flip. Reading it after the unlock let a removal
+	// land in between: no record, bitmap already dead, and a node alive at the
+	// reader's instant read as gone — its arcs left out of a CSR built at that
+	// instant, so a count repeated inside one read transaction moved.
+	// The bitmap read is a lock-free atomic load, so it adds no lock nesting.
 	sh := g.nodeLifeShardFor(id)
 	sh.mu.RLock()
 	if sh.born == nil && sh.died == nil {
+		dead := g.IsTombstonedStored(id)
 		sh.mu.RUnlock()
-		return !g.IsTombstonedStored(id)
+		return !dead
 	}
 	born, hasBorn := sh.born[id]
 	died, hasDied := sh.died[id]
+	// Only a node with neither record falls back to the bitmap; see above for
+	// why it is read here.
+	deadStored := !hasBorn && !hasDied && g.IsTombstonedStored(id)
+	// Each record is resolved to the one this reader observes, under the lock
+	// that guards the displaced chains (rmp #3001). A record the reader cannot
+	// see stands for an event in its future; the record it displaced is the
+	// state before that event.
+	if hasBorn {
+		born = born.asOfLocked(s.startTS, s.txID)
+	}
+	if hasDied {
+		died = died.asOfLocked(s.startTS, s.txID)
+	}
 	sh.mu.RUnlock()
 
 	bornVisible := hasBorn && born.visibleTo(s.startTS, s.txID)
@@ -741,7 +816,7 @@ func (g *Graph[N, W]) NodeExistsAsOf(id graph.NodeID, s *Snapshot) bool {
 		// which is the direction the tombstone bitmap alone cannot express.
 		return true
 	}
-	return !g.IsTombstonedStored(id)
+	return !deadStored
 }
 
 // reclaimNodeLife drops the birth and death records the watermark has made
@@ -774,6 +849,11 @@ func (g *Graph[N, W]) reclaimNodeLife(watermark uint64) int {
 				delete(sh.born, id)
 				released = append(released, sh.takeChurnHeld(true, id)...)
 				freed++
+				continue
+			}
+			if d := trimDisplacedLocked(st.displaced, watermark); d != st.displaced {
+				st.displaced = d
+				sh.born[id] = st
 			}
 		}
 		for id, st := range sh.died {
@@ -781,6 +861,11 @@ func (g *Graph[N, W]) reclaimNodeLife(watermark uint64) int {
 				delete(sh.died, id)
 				released = append(released, sh.takeChurnHeld(false, id)...)
 				freed++
+				continue
+			}
+			if d := trimDisplacedLocked(st.displaced, watermark); d != st.displaced {
+				st.displaced = d
+				sh.died[id] = st
 			}
 		}
 		for id, c := range sh.claim {
@@ -810,6 +895,30 @@ func (g *Graph[N, W]) reclaimNodeLife(watermark uint64) int {
 	// on them (rmp #2686).
 	g.labelChurn.releaseAll(released)
 	return freed
+}
+
+// trimDisplacedLocked returns d, a displaced chain, without its records at or
+// before the watermark, and the caller stores the result back.
+//
+// Such a record is in every live reader's past, so no reader resolves past it,
+// and keeping it would only change what an abort restores. It is DROPPED rather
+// than kept as the chain's floor, because the watermark reclaims its partner
+// record in the other direction on the same rule: restoring one half of a pair
+// the reclaimer has already split revived a dead node — its birth back, its
+// death gone (TestWriteViewNoOpOverInFlight_Existence, "x dead" × Revive). A
+// dropped record is what the present tombstone bitmap already says, exactly as
+// for a reclaimed head. The caller holds the shard's write lock.
+func trimDisplacedLocked(d *lifeStamp, watermark uint64) *lifeStamp {
+	if d == nil || d.at() <= watermark {
+		return nil
+	}
+	for c := d; c.displaced != nil; c = c.displaced {
+		if c.displaced.at() <= watermark {
+			c.displaced = nil
+			break
+		}
+	}
+	return d
 }
 
 // LiveCountExactAsOf reports whether the CURRENT live node count is also the
@@ -953,6 +1062,11 @@ func (g *Graph[N, W]) NodeInternedAsOf(id graph.NodeID, s *Snapshot) bool {
 		return true
 	}
 	born, hasBorn := sh.born[id]
+	if hasBorn {
+		// A later birth over an earlier one (a revival) does not un-intern the
+		// node for a reader that can see the earlier one (rmp #3001).
+		born = born.asOfLocked(s.startTS, s.txID)
+	}
 	sh.mu.RUnlock()
 	if !hasBorn {
 		// No birth record: reclaimed or pre-versioning, so it is in every reader's

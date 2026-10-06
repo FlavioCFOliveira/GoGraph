@@ -78,7 +78,9 @@ func TestReclaimAbortedLife_AbortBetweenTheLoopsKeepsARolledBackDeleteAlive(t *t
 	// tx1 ends; its abort runs the next reclaim pass.
 	g.EndVersionedTx(tx1)
 
-	if _, hasBorn, _, hasDied := lifePair(g, id); hasBorn || hasDied {
+	// The withdrawal puts back what the aborted records displaced (rmp #3001):
+	// the seed's committed birth may survive, and no record of tx1 may.
+	if born, hasBorn, died, hasDied := lifePair(g, id); (hasBorn && born.at() == ^uint64(0)) || (hasDied && died.at() == ^uint64(0)) {
 		t.Errorf("the aborted transaction's life records survived: hasBorn=%v hasDied=%v", hasBorn, hasDied)
 	}
 	if g.IsTombstoned(id) {

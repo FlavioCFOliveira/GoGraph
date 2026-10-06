@@ -478,20 +478,53 @@ func (g *Graph[N, W]) labelBitmapAsOfFiltered(s *Snapshot, ls labelSet, acquire 
 	if preLive {
 		pre = g.appendSuspects(nil)
 	}
+	// The image identities are taken BEFORE the acquire for a conjunction, whose
+	// acquire builds a private intersection. A single-label acquire returns the
+	// shared image itself, which IS its identity, so it costs no extra lookup.
+	var imgs labelImageIDs
+	if ls.conj {
+		imgs = g.labelImages(ls)
+	}
 	bm, owned := acquire()
+	if !ls.conj {
+		imgs.one = bm
+		if owned {
+			imgs = g.labelImages(ls)
+		}
+	}
 	postLive := g.churnLive(ls)
-	if !preLive && !postLive {
-		// No label this read concerns has a live suspect on either side of the
-		// acquire, so no member of this bitmap can differ from what s should see.
-		return bm
-	}
-	if !g.labelBitmapNeedsFilter(s) && len(pre) == 0 {
-		return bm
-	}
+	// quiet: no label this read concerns has a live suspect on either side of
+	// the acquire. unfiltered: no history a snapshot could disagree with, and
+	// nothing sampled before the acquire. Either way the post-sample is not
+	// taken, exactly as before.
+	quiet := !preLive && !postLive
+	unfiltered := !quiet && !g.labelBitmapNeedsFilter(s) && len(pre) == 0
 	sus := pre
-	if postLive {
+	if postLive && !unfiltered {
 		sus = g.appendSuspects(sus)
 	}
+	// A member that ARRIVED and LEFT around the samples (rmp #2999). An aborted
+	// CREATE puts its node into the index, its rollback's undo takes it out, and
+	// the abort then withdraws its records and releases the gate — so a sample
+	// taken before the CREATE and one taken after the abort both miss it, and
+	// both gate reads can be quiet, while the acquired image still holds it. A
+	// reader older than the node counted a node that never existed for it.
+	//
+	// Such a member is exactly one the index no longer holds, so it is found by
+	// comparing the image with the present, and the comparison is skipped while
+	// no image this read concerns has been replaced. It is taken AFTER the
+	// post-sample, and that order is what closes the window: the paths that drop
+	// an entry of a node with suspect records — the undo of a label add, the
+	// withdrawal of an aborted one ([Graph.reclaimAbortedLabelsLocked]) and the
+	// deferred-removal sweep ([Graph.applyDeferredIndexRemovals]) — drop it
+	// before the records, or under the same lock, so a member the post-sample
+	// missed had already lost its entry, and this comparison sees that. Taken
+	// before the post-sample, it missed a rollback that completed in between.
+	departed := g.departedSince(ls, imgs, bm)
+	if (quiet || unfiltered) && len(departed) == 0 {
+		return bm
+	}
+	sus = append(sus, departed...)
 	if !owned {
 		// The correction mutates, so it needs a private copy — and only here.
 		// This reproduces the image acquire() fixed, NOT the index's present
@@ -501,6 +534,78 @@ func (g *Graph[N, W]) labelBitmapAsOfFiltered(s *Snapshot, ls labelSet, acquire 
 	}
 	g.correctBitmapOver(bm, s, want, dedupSuspects(sus))
 	return bm
+}
+
+// labelImageIDs is the identity of every label image a read of ls depends on:
+// [label.Index.BitmapShared]'s shared images, which the index REPLACES on every
+// mutation of the label and never edits. Two equal sets therefore mean no
+// member was added to or removed from any of those labels in between.
+//
+// The single-label form allocates nothing.
+type labelImageIDs struct {
+	one  *roaring64.Bitmap
+	many []*roaring64.Bitmap
+}
+
+// labelImages returns the current [labelImageIDs] of ls.
+func (g *Graph[N, W]) labelImages(ls labelSet) labelImageIDs {
+	if !ls.conj {
+		return labelImageIDs{one: g.nodeIdx.BitmapShared(uint32(ls.one))}
+	}
+	many := make([]*roaring64.Bitmap, len(ls.many))
+	for i, lid := range ls.many {
+		many[i] = g.nodeIdx.BitmapShared(uint32(lid))
+	}
+	return labelImageIDs{many: many}
+}
+
+// same reports whether no image changed between im and o.
+func (im labelImageIDs) same(o labelImageIDs) bool {
+	if im.one != o.one || len(im.many) != len(o.many) {
+		return false
+	}
+	for i := range im.many {
+		if im.many[i] != o.many[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// departedSince returns the members of bm, an image acquired after before was
+// taken, that the index no longer holds — the members a withdrawal or a sweep
+// removed after the acquire. It returns nil without comparing anything while
+// none of the label images before names has been replaced, and when bm is
+// empty.
+//
+// A departed member is handed to [Graph.correctBitmapOver] as a suspect, which
+// decides it from the versioned stores like any other: a member whose removal
+// the reader can see, or which never existed for it, leaves; one the reader
+// still sees as a member stays.
+func (g *Graph[N, W]) departedSince(ls labelSet, before labelImageIDs, bm *roaring64.Bitmap) []graph.NodeID {
+	if bm.IsEmpty() || before.same(g.labelImages(ls)) {
+		return nil
+	}
+	var now *roaring64.Bitmap
+	if ls.conj {
+		raw := make([]uint32, len(ls.many))
+		for i, l := range ls.many {
+			raw[i] = uint32(l)
+		}
+		now = g.nodeIdx.Intersect(raw...)
+	} else {
+		now = g.nodeIdx.BitmapShared(uint32(ls.one))
+	}
+	gone := roaring64.AndNot(bm, now)
+	if gone.IsEmpty() {
+		return nil
+	}
+	out := make([]graph.NodeID, 0, gone.GetCardinality())
+	it := gone.Iterator()
+	for it.HasNext() {
+		out = append(out, graph.NodeID(it.Next()))
+	}
+	return out
 }
 
 // dedupSuspects sorts and compacts the suspect union in place.

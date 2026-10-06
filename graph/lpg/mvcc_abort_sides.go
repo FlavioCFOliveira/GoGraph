@@ -349,31 +349,55 @@ func (lw *lifeWithdrawal) withdrawLocked(sh *nodeLifeShard, id graph.NodeID) {
 	diedAborted := hasDied && died.at() == mvcc.AbortedTS
 	switch {
 	case bornAborted && diedAborted:
-		delete(sh.born, id)
-		delete(sh.died, id)
-		lw.released = append(lw.released, sh.takeChurnHeld(true, id)...)
-		lw.released = append(lw.released, sh.takeChurnHeld(false, id)...)
-		lw.freed += 2
+		lw.withdrawRecordLocked(sh, true, id, born)
+		lw.withdrawRecordLocked(sh, false, id, died)
 		if aliveBefore(born, died) {
 			lw.toRevive = append(lw.toRevive, id)
 		} else {
 			lw.toTombstone = append(lw.toTombstone, lifeTombstone{id: id, unborn: born.unbornBefore})
 		}
 	case bornAborted:
-		delete(sh.born, id)
-		lw.released = append(lw.released, sh.takeChurnHeld(true, id)...)
-		lw.freed++
+		lw.withdrawRecordLocked(sh, true, id, born)
 		if born.wasAlive {
 			lw.toRevive = append(lw.toRevive, id)
 			return
 		}
 		lw.toTombstone = append(lw.toTombstone, lifeTombstone{id: id, unborn: born.unbornBefore})
 	case diedAborted:
-		delete(sh.died, id)
-		lw.released = append(lw.released, sh.takeChurnHeld(false, id)...)
-		lw.freed++
+		lw.withdrawRecordLocked(sh, false, id, died)
 		lw.toRevive = append(lw.toRevive, id)
 	}
+}
+
+// withdrawRecordLocked withdraws st, id's aborted birth (alive) or death record,
+// by putting back the record it displaced (rmp #3001), and deletes the slot only
+// when it displaced nothing. A displaced record that is itself aborted is
+// stepped over.
+//
+// Deleting unconditionally lost the displaced commit: a reader older than it fell
+// back to the present tombstone bitmap, so a node created after a read
+// transaction began reappeared in it once a DETACH DELETE of that node rolled
+// back (the undo's revival is a birth that displaces the committed one).
+//
+// A restored record keeps the churn holds the withdrawn one took, which name the
+// node's labels as the restored record's own did: a hold outliving its reason
+// only over-counts, the safe direction. The caller holds sh's write lock.
+func (lw *lifeWithdrawal) withdrawRecordLocked(sh *nodeLifeShard, alive bool, id graph.NodeID, st lifeStamp) {
+	m := sh.died
+	if alive {
+		m = sh.born
+	}
+	r := st.displaced
+	for r != nil && r.at() == mvcc.AbortedTS {
+		r = r.displaced
+	}
+	if r != nil {
+		m[id] = *r
+		return
+	}
+	delete(m, id)
+	lw.released = append(lw.released, sh.takeChurnHeld(alive, id)...)
+	lw.freed++
 }
 
 // finishLifeWithdrawal applies what lw accumulated — the bitmap flips, the

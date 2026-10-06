@@ -1224,6 +1224,11 @@ func rowHubChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 	}
 	var st txStats
 	var readerTx, readerMismatch atomic.Int64
+	// Which component moved when a repeated traversal did not repeat (rmp #2999):
+	// the Hub label scan, the untyped adjacency with node liveness, or neither —
+	// the typed traversal itself. Each is a cheap read taken in both rounds, so a
+	// mismatch names its layer instead of only its symptom.
+	var movedScan, movedAdj, movedNeither atomic.Int64
 	var mismatch atomic.Pointer[string]
 	ops := lc.opsPerWorker(level)
 	done := make(chan struct{})
@@ -1245,6 +1250,9 @@ func rowHubChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 				qs := []string{
 					"MATCH (h:Hub)<-[:R]-(x:X) RETURN count(*) AS c",
 					"MATCH (x:X {id:$x})-[:R*1..3]-(y) RETURN count(y) AS c",
+					// Diagnostics only: see movedScan.
+					"MATCH (h:Hub) RETURN count(h) AS c",
+					"MATCH (:X)-[r]->() RETURN count(r) AS c",
 				}
 				tx, err := m.eng.BeginReadTx(ctx)
 				if err != nil {
@@ -1265,8 +1273,17 @@ func rowHubChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 				}
 				_ = tx.Commit()
 				readerTx.Add(1)
-				if got[0] != got[2] || got[1] != got[3] {
+				if n := len(qs); got[0] != got[n] || got[1] != got[n+1] {
 					readerMismatch.Add(1)
+					scan, adj := got[2] != got[n+2], got[3] != got[n+3]
+					switch {
+					case scan:
+						movedScan.Add(1)
+					case adj:
+						movedAdj.Add(1)
+					default:
+						movedNeither.Add(1)
+					}
 					d := strings.Join(got, " | ")
 					mismatch.CompareAndSwap(nil, &d)
 				}
@@ -1329,7 +1346,9 @@ func rowHubChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 	if p := mismatch.Load(); p != nil {
 		bad = *p
 	}
-	out.tele("L16", level, "reader_txns", readerTx.Load(), "readers", readers)
+	out.tele("L16", level, "reader_txns", readerTx.Load(), "readers", readers,
+		"mismatch_hub_scan_moved", movedScan.Load(), "mismatch_adjacency_moved", movedAdj.Load(),
+		"mismatch_traversal_only", movedNeither.Load())
 	out.check("L16", level, "traversal_repeatable", readerMismatch.Load() == 0, "%d mismatches, first %s", readerMismatch.Load(), bad)
 	out.check("L16", level, "readers_ran", readerTx.Load() > 0, "no traversal reader completed")
 	smp.report(out, "L15", level, level+readers)
