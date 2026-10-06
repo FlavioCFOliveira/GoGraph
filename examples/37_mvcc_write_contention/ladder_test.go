@@ -46,7 +46,7 @@ func requiredKeys(lc *ladderConfig) []string {
 	}
 	keys = append(keys,
 		"L01.forbidden", "L01.permitted_g2_item", "L02.write_skew_permitted", "L03.repeatable_reads",
-		"L05.large_longest_refused_streak", "L06.seek_scan_mismatches", "L06.seek_scan_first_mismatches", "L06.seek_equals_scan", "L07.own_seek_equals_scan",
+		"L05.large_longest_refused_streak", "L06.seek_scan_mismatches", "L06.seek_scan_first_mismatches", "L06.seek_equals_scan", "L06.btree_index_equals_scan", "L06.noop_set_over_peer_committed", "L06.btree_value_mismatches", "L07.own_seek_equals_scan",
 		"L08.versions_held", "L08.retention_shown", "L10.sessionless.store_bytes_after",
 		"L10.sessionless.commit_p99_during_checkpoint", "L13.duplicates", "L13.memory.failed_callers", "L14.duplicates",
 		"L15.dangling_arcs", "L16.traversal_repeatable", "L17.cancel_return_lag", "L18.dangling_arcs",

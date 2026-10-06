@@ -1267,24 +1267,23 @@ func tornArms(ctx context.Context, out *ladderOut, level int, base string, br br
 		return fmt.Errorf("D13: recover torn image: %w", err)
 	}
 	// Recovery is read-only until the store opens for writing, so an interrupted
-	// recovery is abandoned at whatever point its context is observed; several
-	// delays are tried so at least one lands mid-replay.
-	interrupted := 0
-	for _, d := range []time.Duration{0, 20 * time.Microsecond, 100 * time.Microsecond, 500 * time.Microsecond, 2 * time.Millisecond} {
-		ictx, cancel := context.WithCancel(ctx)
-		timer := time.AfterFunc(d, cancel)
-		ires, ierr := recovery.OpenCtx[string, float64](ictx, double, recovery.Options[string, float64]{
-			Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec(),
-		})
-		timer.Stop()
-		cancel()
-		if ires.Graph != nil {
-			_ = ires.Graph.Close()
-		}
-		if ierr != nil {
-			interrupted++
-		}
+	// recovery is abandoned at whatever point it observes its context. The
+	// interruption is STRUCTURAL, not a time window (rmp #3000): the context
+	// reports cancellation from its second Err() call on. Recovery checks its
+	// context once at entry (passes) and then when it replays the first WAL frame
+	// (recovery.OpenCtx: every 4096 frames, starting at the first), so the
+	// interruption lands inside the replay, after the snapshot probe and the WAL
+	// open, on any machine at any load. A delay-based cancel missed every replay
+	// in a saturated -race run, where recovery finished before the timer fired.
+	ictx := newErrCountdown(ctx, 1)
+	ires, ierr := recovery.OpenCtx[string, float64](ictx, double, recovery.Options[string, float64]{
+		Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec(),
+	})
+	ictx.stop()
+	if ires.Graph != nil {
+		_ = ires.Graph.Close()
 	}
+	interruptedInReplay := errors.Is(ierr, context.Canceled) && ictx.calls.Load() > 1
 	o, err := store.Open[string, float64](double, store.Options[string, float64]{
 		Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec(),
 	})
@@ -1298,13 +1297,45 @@ func tornArms(ctx context.Context, out *ladderOut, level int, base string, br br
 		out.check("D13", level, "recovers_after_double_crash", false, "recovery: %v", err)
 		return nil
 	}
-	out.tele("D13", level, "interrupted_recoveries", interrupted, "fingerprint_single", tornState.fingerpr,
-		"fingerprint_double", again.fingerpr)
-	out.check("D13", level, "recovery_interrupted", interrupted > 0, "no recovery attempt was interrupted: the double crash was not exercised")
+	out.tele("D13", level, "interrupted_in_replay", interruptedInReplay, "context_checks", ictx.calls.Load(),
+		"interrupted_wal_ops", ires.WALOps, "fingerprint_single", tornState.fingerpr, "fingerprint_double", again.fingerpr)
+	out.check("D13", level, "recovery_interrupted", interruptedInReplay,
+		"recovery was not interrupted inside the WAL replay (error %v after %d context checks): the double crash was not exercised",
+		ierr, ictx.calls.Load())
 	out.check("D13", level, "double_recovery_identical", again.fingerpr == tornState.fingerpr,
 		"double-crash state %s, single recovery %s", again.fingerpr, tornState.fingerpr)
 	return nil
 }
+
+// errCountdown is a context whose Err reports cancellation from its
+// (allow+1)-th call on: it cancels itself on that call, so Done, Err and the
+// parent's cancellation stay consistent. D13 uses it to interrupt recovery at a
+// chosen context check rather than after a delay.
+type errCountdown struct {
+	context.Context //nolint:containedctx // errCountdown IS a context: it wraps its parent to count Err calls
+	cancel          context.CancelFunc
+	left            atomic.Int64
+	calls           atomic.Int64
+}
+
+func newErrCountdown(parent context.Context, allow int64) *errCountdown {
+	ctx, cancel := context.WithCancel(parent)
+	c := &errCountdown{Context: ctx, cancel: cancel}
+	c.left.Store(allow)
+	return c
+}
+
+// Err counts the call and cancels the context once the allowance is spent.
+func (c *errCountdown) Err() error {
+	c.calls.Add(1)
+	if c.left.Add(-1) < 0 {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+// stop releases the context's resources.
+func (c *errCountdown) stop() { c.cancel() }
 
 // seamCut is the D14 negative control: it cuts the WAL at path at the start of
 // the last frame carrying the tag of a transaction acknowledged before the

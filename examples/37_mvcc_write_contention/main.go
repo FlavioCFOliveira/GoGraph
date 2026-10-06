@@ -108,7 +108,7 @@ func main() {
 	levels := flag.String("ladder-levels", "1,8,64",
 		"phase 6: comma-separated goroutine counts of the concurrency ladder; empty skips the phase")
 	flag.IntVar(&cfg.ladder.totalOps, "ladder-ops", cfg.ladder.totalOps,
-		"phase 6: operations per arm and level, shared among its goroutines")
+		"phase 6: operations per arm and level, shared among its goroutines; set, it also replaces the smaller default totals of L13 and L15")
 	rows := flag.String("ladder-rows", "",
 		"phase 6: comma-separated arm ids to run (L01,L04,L05,L06,L08,L09,L10,L11,L13,L15,L17,L18,L19); empty runs all")
 	flag.BoolVar(&cfg.ladder.soak, "ladder-soak", false,
@@ -154,6 +154,11 @@ func main() {
 		}
 	}
 	cfg.ladder.seed = cfg.seed
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "ladder-ops" || f.Name == "ladder-soak" {
+			cfg.ladder.rowOps = nil // an explicit size, or the soak shape, applies to every arm
+		}
+	})
 	if err := cfg.validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)

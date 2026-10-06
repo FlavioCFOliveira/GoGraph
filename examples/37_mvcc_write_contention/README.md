@@ -707,6 +707,12 @@ layer (`ladder_soak_test.go`, `-tags soak`, `TestLadderSoak`) runs 256 and 1024 
 self-conflict streak gate. The binary runs the phase after phase 5 with
 `-ladder-levels` (default `1,8,64`), `-ladder-ops`, `-ladder-rows` and `-ladder-soak`.
 
+Every arm runs on the durable store (`store.Open`: WAL, durable commit, recovery) in its
+own directory under `TMPDIR`, removed when the arm ends (rmp #2993). Pointing `TMPDIR` at a
+RAM drive changes only the medium. The short layer and the binary's default run 256
+operations per arm and level, except L13 (32) and L15 (64); see "Sizes" below.
+`-ladder-ops` or `-ladder-soak` applies one total to every arm.
+
 ### Arms
 
 | Arm | Rows | Workload | Gates (bare `ladder.<arm> level=<n> <check>=true` lines) |
@@ -714,12 +720,12 @@ self-conflict streak gate. The binary runs the phase after phase 5 with
 | `L01` | L01, L02, L03 | Bank transfers (`BeginTx`, two reads, two writes, a `Log` insert; 10% rolled back) and read transactions (`BeginReadTx` or read-only `BeginTx`) that read every account and the `Log` count twice; one doctors write-skew round per goroutine, two transactions interleaved by the goroutine itself. Every attempt is recorded with `internal/anomaly` (aborts as aborted) and the history checked at `SnapshotIsolation` | `history_clean` (0 forbidden, not truncated), `write_skew_permitted` (G2-item in `Report.Permitted`), `repeatable_reads`, `no_phantoms`, `conservation` |
 | `L04.<arm>` | L04 | Hot counter, `SET c.n = c.n + 1` with retries, session and sessionless arms | Final value = acknowledged increments |
 | `L05` | L05 | One transaction over 16 hot nodes against single-node writers | Sum = acknowledged; the large transaction's success rate and refused streak are reported (G3: no fairness mechanism) |
-| `L06` | L06, L07 | Label add/remove, hash- and btree-indexed writes, UNIQUE writes, 30% rollbacks; 1 in 5 statements writes a fresh value and seeks it inside its transaction | No duplicate UNIQUE value; in-transaction seek = scan = 1. Seek = scan at quiescence for the hash index, btree range and prefix, label scan, count store and UNIQUE backing index (`seek_equals_scan`, gated since rmp #2989, D7) |
+| `L06` | L06, L07 | Label add/remove, hash- and btree-indexed writes, UNIQUE writes, 30% rollbacks; 1 in 5 statements writes a fresh value and seeks it inside its transaction | No duplicate UNIQUE value; in-transaction seek = scan = 1. Seek = scan at quiescence for the hash index, btree range and prefix, label scan, count store and UNIQUE backing index (`seek_equals_scan`, gated since rmp #2989, D7). The btree index's CONTENT (`Lookup` cardinality per value) = a scan (`btree_index_equals_scan`, rmp #2995): the btree seek/scan pairs cannot fail, because the range seek is planned only with >= 64 labelled nodes and <= 10% selectivity and keeps the full predicate as a residual filter. Before the UNIQUE constraint is declared, one #2989 interleaving is CONSTRUCTED on two nodes the churn never draws (a no-op `SET` committed over a peer's commit, `noop_set_over_peer_committed`), so the btree gate does not depend on the churn producing it |
 | `L08` | L08 | A read transaction held while writers leave 3 x `Bound` versions | `retention_shown` (Total > Bound while held), repeatable read, reclaimed after release |
 | `L09` | L09 (soak) | 1 032 read transactions held while the graph churns | `UnregisteredSnapshots` > 0, every read correct, released after close |
 | `L10.<arm>`, `L20.<arm>` | L10, L20 | WAL-backed store (`store.Open`), disjoint writers, a checkpointer triggered back to back | Final = acknowledged; session arm 0 self-conflicts; checkpoints ran; commit tail during a checkpoint below `hangBudget`; storage size before and after |
-| `L11.<arm>` | L11, L12 | In-memory disjoint writers, session and sessionless | Session arm 0 self-conflicts (and so 0 conflicts) |
-| `L13`, `L13.memory`, `MG11`, `L14` | L13, MG11, L14 | `MERGE` storms on 4 keys: autocommit under UNIQUE (WAL-backed and in-memory), explicit under UNIQUE, autocommit without a constraint | One node per key under UNIQUE; every failure typed; L13 and L14 every caller succeeds (D5), L14 duplicates counted |
+| `L11.<arm>` | L11, L12 | Disjoint writers, no checkpointer, session and sessionless | Session arm 0 self-conflicts (and so 0 conflicts) |
+| `L13`, `L13.memory`, `MG11`, `L14` | L13, MG11, L14 | `MERGE` storms on 4 keys: autocommit under UNIQUE (twice: `L13.memory` ran on the in-memory engine until rmp #2993 and is now a second run of the same arm on the durable store), explicit under UNIQUE, autocommit without a constraint | One node per key under UNIQUE; every failure typed; L13 and L14 every caller succeeds (D5), L14 duplicates counted |
 | `L15`, `L16` | L15, L16 | Edge `CREATE` (parallel edges)/delete on hubs and `DETACH DELETE` + recreate of hubs; read transactions repeat a one-hop and a `*1..3` traversal | No dangling arc at quiescence; repeated traversals identical |
 | `L17` | L17 | 8 transactions hold 16 000 (soak: 150 000) uncommitted nodes; counts; a 9 M-row statement cancelled after 2 ms | Count = committed only; cancelled statement returns `context.Canceled` within 1 s |
 | `L18` | L18 | Property writes, edge creates and `DETACH DELETE`s, 50% rolled back | Total <= Bound after quiescence; 0 dangling arcs; every hub writable by a lone writer |
@@ -781,6 +787,27 @@ tests (`graph/mvcc/publish_convoy_test.go`) cover its regression.
   with this workload; the deterministic catch remains `graph/mvcc/publish_convoy_test.go`.
 - **Long-reader retention, shown.** `retention_shown` holds at every level: with the reader
   open, Total reached 12 288 against Bound 4 096 (64 goroutines), and fell to 0 after release.
+
+### Sizes (rmp #2993)
+
+Each arm's short-layer size is the smallest measured to still fail with its target defect
+restored. Detection was measured on the durable store under `-race`, by building the
+example with `go build -overlay` over a copy of the engine file with the fix reversed
+(`git diff <fix>^ <fix>` applied in reverse to the current file), seeds 1-5:
+
+| Gate | Target defect (fix reverted) | Total ops, old → new | Detection at the new size | Wall clock, 1+8+64, old → new |
+|---|---|---|---|---|
+| `L13`, `L13.memory` `every_caller_succeeds` | rmp #2987 (`fe8864b0`) | 256 → 32 | 6 of 6 runs at 8 and at 64 goroutines (10 of 10 at 256) | 0.47 s → 0.13 s |
+| `L15` `no_dangling_edge` | rmp #2988 (`9d0d315e`) | 256 → 64 | 9 of 9 runs at every level (8 of 9 at 32, so 32 was rejected) | 0.71 s → 0.50 s |
+| `L06` `btree_index_equals_scan` | rmp #2989 (`8999e4b4`), the property-write and the whole fix | 256 (kept) | 15 of 15 at 1, 8 and 64 for both reverts, at 32, 64, 128 and 256: the interleaving is constructed | — |
+| `L06` `seek_equals_scan` | rmp #2989, the whole fix | 256 (kept) | at 64 goroutines only: 2 of 5 at 128, 1 of 5 at 64, 0 of 5 at 32, so not reduced | — |
+
+Not reduced, because no defect was available to prove that a smaller size still detects:
+L01, L04, L05, L08, L10, L11, L17, L18, L19. **L16 `traversal_repeatable` and L15 detect
+neither rmp #2999 (`676a6b94`) nor rmp #2997 (`32efbe73`) reverted**: 0 of 15 runs at 1, 8
+and 64 goroutines and 0 of 4 at 256 and 1 024 (4 096 operations), on the durable store and
+on the in-memory engine the ladder used before; both reverts fail their own regression
+tests in `graph/lpg`. Their L15 size therefore rests on rmp #2988 alone.
 
 ### Coverage
 
@@ -855,7 +882,7 @@ are verdicts, and `# durability.<row> level=<n> ...` lines are telemetry.
 | D10 | every fully opened image | Seek = scan for every attempted id on `:D(id)` and `:E(id)`, on `:L(id)`, and on the `:D`/`:E` count store | `seek_equals_scan`, `unique_holds` |
 | D11 | `D11`, `D01.*` | `CREATE`/`DROP INDEX cyc_g` and `CREATE`/`DROP CONSTRAINT cyc_e` cycled during the abandon arm | `ddl_ran`; after recovery, seek = scan on `cyc_g` when it is present (`seek_equals_scan`); no duplicate `:E(id)` while `cyc_e` is present (`unique_holds`) |
 | D12 | `D01.*` | Four transactions, each with one 1 MiB string | `blobs_identical` |
-| D13 | `D13` | The torn image: recovery interrupted (context cancelled at 0 µs to 2 ms), then opened for writing (which repairs the torn tail) and closed, then recovered again | `recovery_interrupted`, `double_recovery_identical` |
+| D13 | `D13` | The torn image: recovery interrupted inside the WAL replay (a context that reports cancellation from its second check, so at the first replayed frame; structural, rmp #3000), then opened for writing (which repairs the torn tail) and closed, then recovered again | `recovery_interrupted`, `double_recovery_identical` |
 | D14 | `D14` | Negative control: the seam cuts the durable image at the last WAL frame carrying an acknowledged transaction's tag. Off by default (`durabilityConfig.dropLastAcked`) | `TestDurabilityNegativeControl`: `acked_present` must fail |
 | D15 | `D01.*`, `D02.*` | Transactions ordered by the WAL offset of their tag | `wal_tags_seen`, `no_hole`: no acknowledged transaction is absent below a recovered one |
 | D16 | `D16` | The pre-truncate image recovered with its snapshot, and without it (a full WAL replay) | `snapshot_used`, `checkpoint_plus_tail_equals_full_replay` (identical state fingerprints) |

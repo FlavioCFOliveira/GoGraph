@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/RoaringBitmap/roaring/v2/roaring64"
+
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -243,7 +245,10 @@ func (h *hist) skew(ctx context.Context, sh *anomaly.Shard, gid int) error {
 }
 
 func rowHistory(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
-	m := newMemEngine()
+	m, err := newLadderEngine("L01", level, "store")
+	if err != nil {
+		return err
+	}
 	defer m.close()
 	h := &hist{eng: m.eng, rec: &anomaly.Recorder{}}
 	h.verSeq.Store(100)
@@ -273,7 +278,7 @@ func rowHistory(ctx context.Context, lc *ladderConfig, out *ladderOut, level int
 	ops := lc.opsPerWorker(level)
 	smp := startSampler(m.g, true)
 	t0 := time.Now()
-	err := fanOut(ctx, level, func(ctx context.Context, gid int) error {
+	err = fanOut(ctx, level, func(ctx context.Context, gid int) error {
 		sh := h.rec.Shard(ops*3 + 4)
 		rng := newRand(lc.seed, 0x0100+uint64(gid)) // #nosec G115 -- small id
 		for range ops {
@@ -349,7 +354,10 @@ func rowHistory(ctx context.Context, lc *ladderConfig, out *ladderOut, level int
 func rowHotCounter(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	for _, session := range []bool{false, true} {
 		row := "L04." + armName(session)
-		m := newMemEngine()
+		m, err := newLadderEngine("L04", level, armName(session))
+		if err != nil {
+			return err
+		}
 		if err := mustRun(ctx, m.eng, "CREATE (:C {id:0, n:0})", nil); err != nil {
 			m.close()
 			return err
@@ -358,7 +366,7 @@ func rowHotCounter(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 		ops := lc.hotOps(level)
 		smp := startSampler(m.g, true)
 		t0 := time.Now()
-		err := fanOut(ctx, level, func(ctx context.Context, _ int) error {
+		err = fanOut(ctx, level, func(ctx context.Context, _ int) error {
 			r := runnerFor(m.eng, session)
 			for range ops {
 				if werr := workerErr(st.retry(ctx, func() error {
@@ -403,7 +411,10 @@ func rowHotCounter(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 
 func rowLargeTxn(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	const hot = 16
-	m := newMemEngine()
+	m, err := newLadderEngine("L05", level, "store")
+	if err != nil {
+		return err
+	}
 	defer m.close()
 	if err := mustRun(ctx, m.eng, "UNWIND range(0, $n - 1) AS i CREATE (:H {id:i, n:0})", P("n", hot)); err != nil {
 		return err
@@ -449,7 +460,7 @@ func rowLargeTxn(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 			}
 		}
 	}()
-	err := fanOut(ctx, level-1, func(ctx context.Context, gid int) error {
+	err = fanOut(ctx, level-1, func(ctx context.Context, gid int) error {
 		rng := newRand(lc.seed, 0x0500+uint64(gid)) // #nosec G115 -- small id
 		for range ops {
 			id := rng.IntN(hot)
@@ -535,18 +546,30 @@ func seekScanAll(ctx context.Context, r cyRunner, q string, values []string) (in
 
 func rowIndexChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	items, uNodes := 64+level, 32+level/4
-	m := newMemEngine()
+	m, err := newLadderEngine("L06", level, "store")
+	if err != nil {
+		return err
+	}
 	defer m.close()
 	for _, q := range []string{
 		"UNWIND range(0, $n - 1) AS i CREATE (:Item {id:i})",
 		"MATCH (x:Item) SET x.s = 's' + toString(x.id % 8), x.b = 'b' + right('0' + toString(x.id % 16), 2)",
 		"MATCH (x:Item) WHERE x.id % 2 = 0 SET x:L",
 		"UNWIND range(0, $u - 1) AS i CREATE (:U {id:i, u:'u' + toString(i)})",
-		ixChurnHash, ixChurnBtree, ixChurnUniq,
+		ixChurnHash, ixChurnBtree,
 	} {
 		if err := mustRun(ctx, m.eng, q, P("n", items, "u", uNodes)); err != nil {
 			return err
 		}
+	}
+	// Before the UNIQUE constraint: with any constraint declared, the no-op SET
+	// claims the node and the peer is refused (see noopSetOverPeerCommit).
+	noopCommitted, err := noopSetOverPeerCommit(ctx, m.eng, items)
+	if err != nil {
+		return err
+	}
+	if err := mustRun(ctx, m.eng, ixChurnUniq, nil); err != nil {
+		return err
 	}
 	var st txStats
 	var ownChecks, ownMismatch atomic.Int64
@@ -555,7 +578,7 @@ func rowIndexChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 	own := make([][]string, level)
 	smp := startSampler(m.g, true)
 	t0 := time.Now()
-	err := fanOut(ctx, level, func(ctx context.Context, gid int) error {
+	err = fanOut(ctx, level, func(ctx context.Context, gid int) error {
 		rng := newRand(lc.seed, 0x0600+uint64(gid)) // #nosec G115 -- small id
 		for k := range ops {
 			stmts := 1 + rng.IntN(3)
@@ -659,6 +682,10 @@ func rowIndexChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 			mismatches = append(mismatches, c.name+" "+b)
 		}
 	}
+	btreeCompared, btreeBad, err := btreeContentMismatches(ctx, m)
+	if err != nil {
+		return err
+	}
 	dupRows, err := drain(m.eng.Run(ctx, qDupU, nil))
 	if err != nil {
 		return err
@@ -678,6 +705,17 @@ func rowIndexChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 	// index drift this used to report as a metric only.
 	out.check("L06", level, "seek_equals_scan", compared > 0 && len(mismatches) == 0,
 		"%d of %d seek/scan pairs differ, first: %s", len(mismatches), compared, first)
+	btreeFirst := "none"
+	if len(btreeBad) > 0 {
+		btreeFirst = strings.Join(btreeBad[:min(5, len(btreeBad))], "; ")
+	}
+	out.tele("L06", level, "btree_values_compared", btreeCompared, "btree_value_mismatches", len(btreeBad))
+	// rmp #2995: the btree seek/scan pairs above cannot fail (see
+	// btreeContentMismatches); this is the btree index's drift gate.
+	out.check("L06", level, "noop_set_over_peer_committed", noopCommitted,
+		"the constructed no-op SET was refused: the btree content gate has no constructed drift to see")
+	out.check("L06", level, "btree_index_equals_scan", btreeCompared > 0 && len(btreeBad) == 0,
+		"%d of %d values differ between the btree index and a scan, first: %s", len(btreeBad), btreeCompared, btreeFirst)
 	out.check("L06", level, "unique_holds", intAt(dupRows, 0, 0) == 0, "%d duplicated UNIQUE values", intAt(dupRows, 0, 0))
 	out.check("L06", level, "no_unexpected_errors", st.otherErrs.Load() == 0, "first: %s", st.errText())
 	bad := ""
@@ -691,12 +729,106 @@ func rowIndexChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 	return nil
 }
 
+// noopSetOverPeerCommit CONSTRUCTS the interleaving of rmp #2989 on the btree
+// index once, so the btree content gate does not depend on the random churn
+// producing it by chance. It creates two Item nodes the churn never draws (ids
+// first and first+1; the churn draws ids below first): W, carrying :L and b, and
+// R. Transaction T writes R for real (a transaction that versions nothing
+// publishes nothing) and sets W's b to the value it already stores; a peer then
+// commits a different b on W, and T commits. A no-op SET claims nothing, so T
+// commits; an engine that fans T's index change out at its commit re-indexes the
+// value W gave up, and the btree index holds W under two values for good — no
+// later write reaches W. It reports whether T committed.
+//
+// It runs before any constraint is declared: with one declared, the engine
+// stamps the per-node constraint store on the no-op SET (measured with a UNIQUE
+// constraint on another label), and the peer is refused instead.
+func noopSetOverPeerCommit(ctx context.Context, eng *cypher.Engine, first int) (bool, error) {
+	const stored, other = "b00", "b01"
+	w, r := P("id", first, "v", stored), P("id", first+1)
+	if err := mustRun(ctx, eng, "CREATE (:Item:L {id:$id, b:$v})", w); err != nil {
+		return false, err
+	}
+	if err := mustRun(ctx, eng, "CREATE (:Item {id:$id})", r); err != nil {
+		return false, err
+	}
+	tx, err := eng.BeginTx(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, q := range []struct {
+		q string
+		p map[string]expr.Value
+	}{
+		{"MATCH (n:Item {id:$id}) SET n.z = 1", r},
+		{"MATCH (n:Item {id:$id}) SET n.b = $v", w},
+	} {
+		if _, err := drain(tx.Exec(q.q, q.p)); err != nil {
+			_ = tx.Rollback()
+			return false, err
+		}
+	}
+	if err := mustRun(ctx, eng, "MATCH (n:Item {id:$id}) SET n.b = $v", P("id", first, "v", other)); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		if isConflict(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// btreeContentMismatches compares the CONTENT of the L06 btree index ch_b, read
+// through its own Lookup, with a scan of the graph, for every value of the b
+// domain, and returns the number of values compared and the mismatches (rmp
+// #2995).
+//
+// The btree seek/scan pairs (btree_range, btree_prefix) cannot detect a stale
+// entry: the planner seeks the btree range only with at least 64 labelled nodes
+// and a selectivity of at most 10%, and the seek keeps the full predicate as a
+// residual filter, so an entry for a node that no longer carries :L or the value
+// is filtered out of the seek's count. Lookup's cardinality is read below the
+// planner, as cypher/index_noop_write_2989_test.go reads it.
+func btreeContentMismatches(ctx context.Context, m *ladderEngine) (int, []string, error) {
+	sub, err := m.g.IndexManager().GetIndex("ch_b")
+	if err != nil {
+		return 0, nil, err
+	}
+	ix, ok := sub.(interface {
+		Lookup(value string) *roaring64.Bitmap
+	})
+	if !ok {
+		return 0, nil, fmt.Errorf("index ch_b (%T) has no string Lookup", sub)
+	}
+	const q = "MATCH (m:Item) WHERE 'L' IN labels(m) AND m.b + '' = $v RETURN count(m) AS scan"
+	var bad []string
+	const values = 16 // bDomain
+	for i := range values {
+		v := bDomain(i)
+		rows, err := drain(m.eng.Run(ctx, q, P("v", v)))
+		if err != nil {
+			return 0, nil, fmt.Errorf("%s [%s]: %w", q, v, err)
+		}
+		scan := intAt(rows, 0, 0)
+		if got := ix.Lookup(v).GetCardinality(); scan < 0 || got != uint64(scan) {
+			bad = append(bad, fmt.Sprintf("%q index=%d scan=%d", v, got, scan))
+		}
+	}
+	return values, bad, nil
+}
+
 // ---------------------------------------------------------------------------
 // L08 — long-reader retention and release.
 
 func rowLongReader(ctx context.Context, _ *ladderConfig, out *ladderOut, level int) error {
 	const nodes, residues = 256, 8
-	m := newMemEngine()
+	m, err := newLadderEngine("L08", level, "store")
+	if err != nil {
+		return err
+	}
 	defer m.close()
 	if err := mustRun(ctx, m.eng, "UNWIND range(0, $n - 1) AS i CREATE (:V {id:i, v:0})", P("n", nodes)); err != nil {
 		return err
@@ -780,7 +912,10 @@ func rowLongReader(ctx context.Context, _ *ladderConfig, out *ladderOut, level i
 
 func rowHorizonCliff(ctx context.Context, _ *ladderConfig, out *ladderOut, level int) error {
 	const nodes = 64
-	m := newMemEngine()
+	m, err := newLadderEngine("L09", level, "store")
+	if err != nil {
+		return err
+	}
 	defer m.close()
 	if err := mustRun(ctx, m.eng, "UNWIND range(0, $n - 1) AS i CREATE (:V {id:i, v:0})", P("n", nodes)); err != nil {
 		return err
@@ -838,8 +973,9 @@ func rowHorizonCliff(ctx context.Context, _ *ladderConfig, out *ladderOut, level
 }
 
 // ---------------------------------------------------------------------------
-// Disjoint writers: L10 + L20 (WAL-backed, checkpoint running), L11 + L12
-// (in-memory). Each goroutine owns one node, so every refusal is a SELF-conflict.
+// Disjoint writers: L10 + L20 (checkpointer running), L11 + L12 (no
+// checkpointer); both on the durable store. Each goroutine owns one node, so
+// every refusal is a SELF-conflict.
 
 // disjointRun drives level writers, each incrementing its own node ops times.
 func disjointRun(ctx context.Context, lc *ladderConfig, eng *cypher.Engine, level int, session bool,
@@ -906,7 +1042,10 @@ func checkDisjoint(ctx context.Context, lc *ladderConfig, out *ladderOut, row st
 func rowDisjoint(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	for _, session := range []bool{false, true} {
 		row := "L11." + armName(session)
-		m := newMemEngine()
+		m, err := newLadderEngine("L11", level, armName(session))
+		if err != nil {
+			return err
+		}
 		if err := mustRun(ctx, m.eng, "UNWIND range(0, $n - 1) AS i CREATE (:W {id:i, v:0})", P("n", level)); err != nil {
 			m.close()
 			return err
@@ -1053,49 +1192,28 @@ func rowMergeStorm(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 		row        string
 		constraint bool
 		explicit   bool
-		wal        bool
 		// gated says whether "every caller succeeds" is a gate on this arm.
 		gated bool
 	}{
-		// L13: autocommit MERGE under UNIQUE, on a WAL-backed engine (the one
-		// cypher/merge_race_test.go pins F10 on) and on an in-memory engine. F10
-		// says every caller succeeds: a loser of the creation race re-runs on a
-		// snapshot that sees the winner and matches it (rmp #2987, D5 in README.md
-		// "Defects found"). Gated on both engines, with one node per key.
-		{"L13", true, false, true, true},
-		{"L13.memory", true, false, false, true},
+		// L13: autocommit MERGE under UNIQUE (the shape cypher/merge_race_test.go
+		// pins F10 on). F10 says every caller succeeds: a loser of the creation
+		// race re-runs on a snapshot that sees the winner and matches it (rmp
+		// #2987, D5 in README.md "Defects found"). Gated, with one node per key.
+		// L13.memory ran the same arm on the in-memory engine until every arm
+		// moved to the durable store (rmp #2993); it keeps its id and is now a
+		// second, independent run of the L13 arm.
+		{"L13", true, false, true},
+		{"L13.memory", true, false, true},
 		// MG11: explicit MERGE under UNIQUE: one node per key, losers refused.
-		{"MG11", true, true, false, false},
+		{"MG11", true, true, false},
 		// L14: autocommit MERGE, no constraint: no failure, duplicates counted.
-		{"L14", false, false, false, true},
+		{"L14", false, false, true},
 	} {
-		var (
-			eng      *cypher.Engine
-			g        *lpg.Graph[string, float64]
-			closeArm func()
-		)
-		if arm.wal {
-			dir, err := storeDirFor(arm.row, level, "wal")
-			if err != nil {
-				return err
-			}
-			o, err := store.Open[string, float64](dir, store.Options[string, float64]{
-				Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec(),
-			})
-			if err != nil {
-				_ = os.RemoveAll(dir)
-				return err
-			}
-			eng, g = cypher.NewEngineWithOpened(o), o.Graph()
-			closeArm = func() {
-				_ = o.Close()
-				_ = eng.Close()
-				_ = os.RemoveAll(dir)
-			}
-		} else {
-			m := newMemEngine()
-			eng, g, closeArm = m.eng, m.g, m.close
+		m, err := newLadderEngine(arm.row, level, "store")
+		if err != nil {
+			return err
 		}
+		eng, g, closeArm := m.eng, m.g, m.close
 		if arm.constraint {
 			if err := mustRun(ctx, eng, "CREATE CONSTRAINT k_u FOR (n:K) REQUIRE n.k IS UNIQUE", nil); err != nil {
 				closeArm()
@@ -1107,7 +1225,7 @@ func rowMergeStorm(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 		ops := lc.hotOps(level)
 		smp := startSampler(g, true)
 		t0 := time.Now()
-		err := fanOut(ctx, level, func(ctx context.Context, gid int) error {
+		err = fanOut(ctx, level, func(ctx context.Context, gid int) error {
 			rng := newRand(lc.seed, 0x1300+uint64(gid)) // #nosec G115 -- small id
 			for range ops {
 				p := P("k", rng.IntN(keys))
@@ -1211,7 +1329,10 @@ func countDangling(g *lpg.Graph[string, float64]) (arcs, dead int) {
 
 func rowHubChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	const hubs, xs = 4, 64
-	m := newMemEngine()
+	m, err := newLadderEngine("L15", level, "store")
+	if err != nil {
+		return err
+	}
 	defer m.close()
 	for _, q := range []string{
 		"UNWIND range(0, $h - 1) AS i CREATE (:Hub {id:i})",
@@ -1292,7 +1413,7 @@ func rowHubChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 	}
 	smp := startSampler(m.g, true)
 	t0 := time.Now()
-	err := fanOut(ctx, level, func(ctx context.Context, gid int) error {
+	err = fanOut(ctx, level, func(ctx context.Context, gid int) error {
 		rng := newRand(lc.seed, 0x1500+uint64(gid)) // #nosec G115 -- small id
 		for range ops {
 			x, h := rng.IntN(xs), rng.IntN(hubs)
@@ -1369,7 +1490,10 @@ func rowParallelCount(ctx context.Context, lc *ladderConfig, out *ladderOut, lev
 	if lc.soak {
 		perHolder = 150000 / holders
 	}
-	m := newMemEngine()
+	m, err := newLadderEngine("L17", level, "store")
+	if err != nil {
+		return err
+	}
 	defer m.close()
 	if err := mustRun(ctx, m.eng, "UNWIND range(1, $n) AS i CREATE (:P {i:i})", P("n", base)); err != nil {
 		return err
@@ -1449,7 +1573,10 @@ func rowParallelCount(ctx context.Context, lc *ladderConfig, out *ladderOut, lev
 
 func rowAbortHeavy(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	const hubs, ts = 8, 64
-	m := newMemEngine()
+	m, err := newLadderEngine("L18", level, "store")
+	if err != nil {
+		return err
+	}
 	defer m.close()
 	for _, q := range []string{
 		"UNWIND range(0, $h - 1) AS i CREATE (:A {id:i, v:0})",
@@ -1465,7 +1592,7 @@ func rowAbortHeavy(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 	ops := lc.opsPerWorker(level)
 	smp := startSampler(m.g, true)
 	t0 := time.Now()
-	err := fanOut(ctx, level, func(ctx context.Context, gid int) error {
+	err = fanOut(ctx, level, func(ctx context.Context, gid int) error {
 		rng := newRand(lc.seed, 0x1800+uint64(gid)) // #nosec G115 -- small id
 		for range ops {
 			r, a, commit := rng.IntN(10), rng.IntN(hubs), rng.IntN(2) == 0
@@ -1530,7 +1657,10 @@ func rowDDLCycles(ctx context.Context, lc *ladderConfig, out *ladderOut, level i
 	if lc.soak {
 		cycles = 8
 	}
-	m := newMemEngine()
+	m, err := newLadderEngine("L19", level, "store")
+	if err != nil {
+		return err
+	}
 	defer m.close()
 	if err := mustRun(ctx, m.eng, "UNWIND range(0, $n - 1) AS i CREATE (:L {id:i, s:'s' + toString(i % 8)})", P("n", nodes)); err != nil {
 		return err
@@ -1587,7 +1717,7 @@ func rowDDLCycles(ctx context.Context, lc *ladderConfig, out *ladderOut, level i
 	ops := lc.opsPerWorker(level)
 	smp := startSampler(m.g, true)
 	t0 := time.Now()
-	err := fanOut(ctx, level, func(ctx context.Context, gid int) error {
+	err = fanOut(ctx, level, func(ctx context.Context, gid int) error {
 		rng := newRand(lc.seed, 0x1900+uint64(gid)) // #nosec G115 -- small id
 		for range ops {
 			id, v, commit := rng.IntN(nodes), sDomain(rng.IntN(8)), rng.IntN(10) >= 3
