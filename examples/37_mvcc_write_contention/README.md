@@ -851,7 +851,7 @@ are verdicts, and `# durability.<row> level=<n> ...` lines are telemetry.
 | D06 | `D01.*`, `D02.*` | One transaction left open across the crash (the kill child reopens it every 5 ms) | `open_absent` |
 | D07 | every image | Clock read with the "before" count; new session; new commit | `clock_not_rewound`, `new_session_sees_acked`, `post_recovery_commit_is_new` |
 | D08 | `D08.reference`, `D08.torn`, `D08.garbled` | The durable image with its last frame cut by 3 bytes, or with its last byte inverted | `damaged_record_discarded_alone`: against the undamaged image, at most one transaction is lost, none is gained and none is partial. The garbled image must be opened for writing exactly when recovery reports it clean (`refused_unless_clean`) |
-| D09 | `D09`, `D09.pre_capture`, `D09.pre_truncate`, `D09.post_truncate` | The run's first successful checkpoint under load, imaged before the capture, after the snapshot is published and before the WAL prefix is truncated, and after the truncation | `checkpoint_ran` and every image gate at each phase. The kill runs add crashes at random checkpoint points |
+| D09 | `D09`, `D09.pre_capture`, `D09.pre_truncate`, `D09.post_truncate`, `D09.missing_segment` | One checkpoint under load, with no retry, imaged before the capture, after the snapshot is published and before the WAL prefix is truncated, and after the truncation; the post-truncate image is then recovered without its snapshot directory | `checkpoint_ran`, `capture_not_refused` (`checkpoint_refused_not_quiesced=0`), every image gate at each phase, and `missing_segment.refused_loudly` (recovery returns `recovery.ErrMissingSnapshot` and is not clean). The kill runs add crashes at random checkpoint points |
 | D10 | every fully opened image | Seek = scan for every attempted id on `:D(id)` and `:E(id)`, on `:L(id)`, and on the `:D`/`:E` count store | `seek_equals_scan`, `unique_holds` |
 | D11 | `D11`, `D01.*` | `CREATE`/`DROP INDEX cyc_g` and `CREATE`/`DROP CONSTRAINT cyc_e` cycled during the abandon arm | `ddl_ran`; after recovery, seek = scan on `cyc_g` when it is present (`seek_equals_scan`); no duplicate `:E(id)` while `cyc_e` is present (`unique_holds`) |
 | D12 | `D01.*` | Four transactions, each with one 1 MiB string | `blobs_identical` |
@@ -871,28 +871,39 @@ reader.
 
 ### Defects found
 
-Both are reported as metrics, not gated.
+Both were found by this phase, are fixed, and are now gated.
 
-- **D09 — a lost snapshot directory is not detected after a WAL prefix truncation.**
-  After a checkpoint truncates the WAL prefix it folded, removing `snapshot/` leaves a
-  directory that recovery opens with a nil error and `IsClean() = true`. The commits in
-  the truncated prefix are missing: 130 acknowledged commits at both 8 and 64 writers.
-  PostgreSQL refuses to start when a needed WAL segment is missing
-  (`050_redo_segment_missing`). Reproduction: `store.Open`; commit; `checkpoint.New(...)`
-  wired with `WithCommitSerialiser(o.Store().RunUnderCommitLock)` and the codecs, then
-  `RunCheckpoint()`; close; `rm -r <dir>/snapshot`; `recovery.Open(dir)` returns a nil
-  error, the result is clean, and the folded commits are absent. Expected: an error, or
-  `IsClean() = false`. Reported as `# durability.D09.missing_segment ... refused_loudly`.
-- **D09 — a checkpoint capture is refused under explicit-transaction load.**
-  `RunCheckpoint`, wired with `RunUnderCommitLock` while writers run three-statement
-  explicit transactions, intermittently returns `snapshot.ErrCaptureNotQuiesced`. One
-  observed message was: "capture instant taken while a write transaction was open:
-  shard 98 drops node 2402 (interned, not visible at instant 132) but keeps node 2658
-  above it". It occurred on the first attempt at 8 writers in one run, and 3 times in 4
-  attempts at 64 writers under `-race`. `docs/isolation-design.md` states that the drain
-  leaves no interned-but-uncommitted id. The refusal publishes and truncates nothing, so
-  durability holds, but checkpoints can stall. The root cause has not been established.
-  The arm retries, and reports `checkpoint_attempts` and `checkpoint_refused_not_quiesced`.
+- **D09 — a lost snapshot directory was not detected after a WAL prefix truncation
+  (rmp #2990, fixed).** After a checkpoint truncated the WAL prefix it folded, removing
+  `snapshot/` left a directory that recovery opened with a nil error and
+  `IsClean() = true`; the commits in the truncated prefix were missing: 130
+  acknowledged commits at both 8 and 64 writers. PostgreSQL refuses to start when a
+  needed WAL segment is missing (`050_redo_segment_missing`). Reproduction:
+  `store.Open`; commit; `checkpoint.New(...)` wired with
+  `WithCommitSerialiser(o.Store().RunUnderCommitLock)` and the codecs, then
+  `RunCheckpoint()`; close; `rm -r <dir>/snapshot`; `recovery.Open(dir)`. The WAL writer
+  now makes a marker file (`wal.PrefixTruncatedMarkerPath`) durable before it first
+  discards history (`TruncatePrefix`, or `Truncate` on a non-empty log), and recovery
+  refuses a directory that holds the marker but no snapshot with
+  `recovery.ErrMissingSnapshot`; `store.Open` refuses it with `store.ErrUncleanRecovery`.
+  Gated as `durability.D09.missing_segment ... refused_loudly`.
+- **D09 — a checkpoint capture was refused under explicit-transaction load
+  (rmp #2991, fixed).** `RunCheckpoint`, wired with `RunUnderCommitLock` while writers
+  run three-statement explicit transactions, intermittently returned
+  `snapshot.ErrCaptureNotQuiesced`. One observed message was: "capture instant taken
+  while a write transaction was open: shard 98 drops node 2402 (interned, not visible at
+  instant 132) but keeps node 2658 above it". It occurred on the first attempt at 8
+  writers in one run, and 3 times in 4 attempts at 64 writers under `-race`. The
+  capture walks the mapper after the commit lock is released; an id interned after the
+  instant by a transaction that then rolled back lost its birth record when the abort
+  was withdrawn, so it read as interned before the instant and was kept above a dropped
+  id. The checkpointer now opens its instant with `lpg.Graph.BeginCaptureRead`, which
+  reads the mapper watermark just after the instant, and the capture keeps exactly the
+  per-shard prefix the watermark names. The drain does not stop every interning: an id
+  the watermark covers but that is not visible at the instant is captured as a tombstone
+  with its key, and WAL replay revives it when its transaction committed after the
+  instant. The arm makes one attempt, with no retry, and gates `capture_not_refused`
+  (`checkpoint_refused_not_quiesced=0`).
 
 ### Observed, by contract
 

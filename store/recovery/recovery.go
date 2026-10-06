@@ -447,8 +447,8 @@ func clampProducerCapToReplay(producer, replay int) int {
 // on-disk corruption (true) versus a benign / absent stop condition
 // (false). It mirrors [wal.Reader.Replay], which surfaces every WAL-reader
 // error except [wal.ErrTornFrame] as a hard error, and additionally treats
-// recovery's own [ErrUnsupportedRecordVersion], [ErrTransactionTooLarge] and
-// [ErrCommittedTxnCorruptOp] as corruption.
+// recovery's own [ErrUnsupportedRecordVersion], [ErrTransactionTooLarge],
+// [ErrMissingSnapshot] and [ErrCommittedTxnCorruptOp] as corruption.
 //
 // A nil error, a torn tail, and the CRC-valid-but-unparseable trailing-frame
 // markers raised by the codec apply path (a truncated v2 body, a missing
@@ -502,6 +502,7 @@ func tailErrIsCorruption(err error) bool {
 		errors.Is(err, wal.ErrFrameTooLarge),
 		errors.Is(err, ErrUnsupportedRecordVersion),
 		errors.Is(err, ErrTransactionTooLarge),
+		errors.Is(err, ErrMissingSnapshot),
 		errors.Is(err, ErrCommittedTxnCorruptOp):
 		// ErrCommittedTxnCorruptOp is not-clean but not fail-stop; see the
 		// recorded-departure section above and [tailErrIsOpenFatal].
@@ -722,6 +723,22 @@ var ErrTransactionTooLarge = errors.New("recovery: v3 transaction exceeds the pe
 // its default arm, called the state benign, and reported it clean while two
 // acknowledged transactions were gone (rmp #2794).
 var ErrCommittedTxnCorruptOp = errors.New("recovery: corrupt op inside a committed v3 transaction")
+
+// ErrMissingSnapshot is returned by [Open], [OpenCtx] and [OpenFS] (and is
+// [Result.TailErr]) when the directory's WAL is a suffix whose prefix a
+// checkpoint truncated, and no snapshot covers that prefix (rmp #2990).
+//
+// [wal.Writer.TruncatePrefix] makes the marker [wal.PrefixTruncatedMarkerPath]
+// durable before its first truncation; a directory that holds the marker but no
+// snapshot manifest has lost the only copy of every commit the checkpoint
+// folded. Recovery refuses it rather than replaying the suffix onto an empty
+// graph and reporting a shorter history as clean. [Result.IsClean] is false and
+// no WAL frame is replayed, so the returned graph is empty.
+//
+// It is a fail-stop condition with no automatic repair: restore the snapshot
+// directory from a backup. Removing the marker opens the WAL suffix alone, which
+// discards the folded commits.
+var ErrMissingSnapshot = errors.New("recovery: WAL prefix was truncated by a checkpoint but no snapshot covers it")
 
 // Decode parses one payload back into an [Op]. The parser peeks the
 // first byte to select the decoder:
@@ -1092,6 +1109,10 @@ func accumulateIndexOp(is *indexSet, op *Op) (isIndex, ok bool) {
 // Open is safe to call on a dir that contains only a snapshot, only
 // a WAL, both, or neither: missing components are tolerated and the
 // returned [Result.Graph] is a fresh empty graph when neither exists.
+// The one exception is a WAL whose prefix a checkpoint truncated
+// ([wal.PrefixTruncatedMarkerPath] present) with no snapshot: Open returns
+// [ErrMissingSnapshot] and replays nothing, because the WAL alone is not the
+// store's history.
 //
 // A torn or truncated WAL tail — the normal state after a crash between
 // two fsyncs — is benign: Open recovers the committed prefix, returns a
@@ -1387,6 +1408,29 @@ func openCodec[N comparable, W any](
 				fmt.Errorf("recovery: snapshot open: %w", err)
 		}
 		haveManifest = true
+	}
+
+	// A WAL whose prefix a checkpoint truncated is a SUFFIX of the history, and
+	// only the snapshot that folded the prefix makes it whole (rmp #2990). The
+	// WAL cannot say so itself — frames carry no position — so the writer makes
+	// a marker durable before its first truncation, and recovery refuses a
+	// directory that holds the marker but no snapshot. Replaying the suffix onto
+	// an empty graph would open a shorter history and report it clean: every
+	// commit the snapshot folded lost in silence. The refusal happens before any
+	// replay, so the diagnostic graph is empty.
+	if !haveManifest {
+		marker := wal.PrefixTruncatedMarkerPath(filepath.Join(dir, "wal"))
+		if _, err := fsys.Stat(marker); err == nil {
+			metrics.IncCounter("store.recovery.openCodec.errors", 1)
+			metrics.IncCounter("store.recovery.openCodec.missingSnapshot", 1)
+			missErr := fmt.Errorf("%w: %s records a truncated WAL prefix and %s holds no snapshot manifest",
+				ErrMissingSnapshot, marker, snapDir)
+			return Result[N, W]{Graph: lpg.New[N, W](defaultRecoveryConfig()), TailErr: missErr}, missErr
+		} else if !errors.Is(err, os.ErrNotExist) {
+			metrics.IncCounter("store.recovery.openCodec.errors", 1)
+			return Result[N, W]{Graph: lpg.New[N, W](defaultRecoveryConfig())},
+				fmt.Errorf("recovery: probe WAL prefix marker: %w", err)
+		}
 	}
 
 	// Reconstruct the graph with the persisted shape (or the default when no

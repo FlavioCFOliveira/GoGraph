@@ -939,7 +939,20 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		// in the window so the reading is a fact about the ordering.
 		//
 		// The snapshot is released by the deferred EndRead below, on every path.
-		at = c.g.BeginRead()
+		//
+		// It is a CAPTURE read (rmp #2991): it also records the mapper watermark,
+		// read just after the instant. The capture below walks the mapper lock-free
+		// while writers intern, commit and abort; a withdrawn aborted creation has no
+		// life record left to say it was interned after the instant, and without the
+		// watermark it was kept above a dropped id and the capture refused itself
+		// with snapshot.ErrCaptureNotQuiesced. The drain does NOT stop every
+		// interning: an lpg write transaction or an eager engine write that is not a
+		// registered store writer can hold an interned, uncommitted key here. The
+		// watermark covers that id; the capture writes it as a tombstone with its
+		// key, and because the transaction can only commit after the instant, its
+		// frames follow the watermark W and recovery's replay revives the id. See
+		// lpg.Graph.BeginCaptureRead.
+		at = c.g.BeginCaptureRead()
 		if c.afterWatermarkHook != nil {
 			c.afterWatermarkHook()
 		}

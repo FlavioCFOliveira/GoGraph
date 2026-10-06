@@ -255,8 +255,16 @@ func TestTruncatePrefix_PostRenamePoisons(t *testing.T) {
 
 	// Inject a post-rename failure: the parent-dir fsync fails AFTER the rename
 	// has already replaced the WAL with the suffix-only file.
+	// Only the WAL's own directory fsync fails: the prefix marker's fsync (made
+	// before the rename, through the same seam) must succeed so the failure lands
+	// after the rename.
 	injErr := errors.New("injected dir fsync failure")
-	w.dirFsync = func(string) error { return injErr }
+	w.dirFsync = func(p string) error {
+		if p == path {
+			return injErr
+		}
+		return nil
+	}
 
 	if _, err := w.TruncatePrefix(watermark); !errors.Is(err, injErr) {
 		t.Fatalf("TruncatePrefix = %v, want injected error %v", err, injErr)

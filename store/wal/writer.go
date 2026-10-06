@@ -204,6 +204,10 @@ type Writer struct {
 	// It is the truncation target when a sync failure must discard
 	// the un-synced suffix.
 	durableSize int64
+	// prefixMarked records that this Writer has made the prefix-truncation
+	// marker ([PrefixTruncatedMarkerPath]) durable, so later truncations skip
+	// rewriting it. Guarded by mu.
+	prefixMarked bool
 	// appendedSize is durableSize plus every frame byte accepted by
 	// AppendCtx since the last successful fsync — the logical file
 	// size once the buffer is flushed. Guarded by mu. Tracking it
@@ -973,6 +977,12 @@ func (w *Writer) Stats() Stats {
 // success every frame previously durable in the WAL is logically
 // folded into the snapshot.
 //
+// When the file is non-empty and the Writer has a path, Truncate first makes
+// the marker [PrefixTruncatedMarkerPath] durable, exactly as
+// [Writer.TruncatePrefix] does, so recovery refuses the directory if the
+// snapshot is later lost (rmp #2990). If writing the marker fails, nothing is
+// truncated and the error is returned.
+//
 // Lifetime counters in [Writer.Stats] are NOT reset; the returned
 // int64 reports the number of bytes that were in the file at the
 // moment of truncation (after the in-memory buffer was flushed),
@@ -1029,6 +1039,19 @@ func (w *Writer) Truncate() (int64, error) {
 	if err != nil {
 		metrics.IncCounter("store.wal.Truncate.errors", 1)
 		return 0, err
+	}
+	// Emptying a non-empty log discards history exactly as a prefix truncation
+	// does, so the prefix-truncation marker is made durable first (rmp #2990,
+	// storage audit F1): without it, losing the snapshot this call relies on
+	// leaves an empty WAL that recovery opens as a clean, empty store. A failure
+	// here is before any byte is discarded. A path-less Writer ([OpenWith]) has no
+	// directory to mark and is left as it was.
+	if w.path != "" && sz > 0 && !w.prefixMarked {
+		if err := w.writePrefixMarker(); err != nil {
+			metrics.IncCounter("store.wal.Truncate.errors", 1)
+			return 0, err
+		}
+		w.prefixMarked = true
 	}
 	if err := w.f.Truncate(0); err != nil {
 		metrics.IncCounter("store.wal.Truncate.errors", 1)
@@ -1159,6 +1182,11 @@ func (w *Writer) Poisoned() error {
 // must satisfy 0 <= upTo <= durableSize; an out-of-range upTo is rejected
 // without touching the file. upTo == 0 is a no-op (nothing to reclaim).
 //
+// Before the first truncation a Writer performs, it makes the marker file
+// [PrefixTruncatedMarkerPath] durable next to the WAL, so recovery can tell a
+// suffix-only log from a complete one and refuse a directory whose snapshot is
+// missing (rmp #2990).
+//
 // On success the returned int64 is the number of bytes reclaimed (upTo)
 // and the Writer continues against the suffix-only file. On a path-less
 // Writer ([OpenWith]) it returns [ErrPrefixTruncateUnsupported].
@@ -1228,6 +1256,21 @@ func (w *Writer) TruncatePrefix(upTo int64) (int64, error) {
 		// writer a less identifiable error than every other caller gets from now on
 		// (rmp #2306, see [ErrDurabilityFailed]).
 		return 0, w.syncErr
+	}
+
+	// Make the prefix-truncation marker durable BEFORE the first byte of history
+	// is discarded (rmp #2990). After the rename below the WAL no longer starts
+	// at the beginning of the store's history, and nothing in the suffix-only
+	// file says so: frames are self-describing and carry no position. Without
+	// the marker, a directory whose snapshot was lost replays the suffix onto an
+	// empty graph and reports a clean, shorter history. A failure here is before
+	// the rename, so the full WAL is intact and the Writer stays usable.
+	if !w.prefixMarked {
+		if err := w.writePrefixMarker(); err != nil {
+			metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
+			return 0, err
+		}
+		w.prefixMarked = true
 	}
 
 	end := w.appendedSize // == durableSize after the flush under the quiesce boundary
@@ -1304,6 +1347,67 @@ func (w *Writer) TruncatePrefix(upTo int64) (int64, error) {
 
 	metrics.IncCounter("store.wal.TruncatePrefix.bytes_reclaimed", uint64(upTo))
 	return upTo, nil
+}
+
+// prefixMarkerSuffix is appended to the WAL path to name the prefix-truncation
+// marker; see [PrefixTruncatedMarkerPath].
+const prefixMarkerSuffix = ".prefix-truncated"
+
+// prefixMarkerBody is the marker's content. Only the file's presence is
+// significant; the body names what the file means for an operator who finds it.
+const prefixMarkerBody = "GoGraph WAL: the prefix of this log was truncated by a checkpoint; " +
+	"recovery requires the snapshot that folded it.\n"
+
+// PrefixTruncatedMarkerPath returns the path of the marker file that
+// [Writer.TruncatePrefix] and [Writer.Truncate] make durable, next to the WAL at
+// walPath, before they discard the first byte of the log.
+//
+// The marker records a fact the WAL itself cannot carry: the log no longer
+// begins at the start of the store's history, so a snapshot must cover the
+// truncated prefix. Recovery refuses a directory that holds the marker but no
+// snapshot. The marker is never removed by this package; deleting it together
+// with the snapshot directory reproduces the silent loss it exists to detect.
+//
+// It is a pure function of walPath and is safe for concurrent use.
+func PrefixTruncatedMarkerPath(walPath string) string { return walPath + prefixMarkerSuffix }
+
+// writePrefixMarker makes the prefix-truncation marker durable: it writes the
+// body to a sibling temp file, fsyncs it, renames it over the marker path and
+// fsyncs the parent directory, so a crash leaves either no marker or a complete
+// one. Called by [Writer.TruncatePrefix] and [Writer.Truncate] with w.mu held,
+// before any byte of the log is discarded, so a failure leaves the WAL intact
+// and the Writer unpoisoned. The temp file is removed best-effort on failure.
+func (w *Writer) writePrefixMarker() error {
+	marker := PrefixTruncatedMarkerPath(w.path)
+	tmpPath := marker + ".tmp"
+	f, err := w.fsys.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		return fmt.Errorf("wal: TruncatePrefix: create prefix marker: %w", err)
+	}
+	if _, err := io.WriteString(f, prefixMarkerBody); err != nil {
+		_ = f.Close()
+		_ = w.fsys.Remove(tmpPath)
+		return fmt.Errorf("wal: TruncatePrefix: write prefix marker: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = w.fsys.Remove(tmpPath)
+		return fmt.Errorf("wal: TruncatePrefix: fsync prefix marker: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = w.fsys.Remove(tmpPath)
+		return fmt.Errorf("wal: TruncatePrefix: close prefix marker: %w", err)
+	}
+	if err := w.fsys.Rename(tmpPath, marker); err != nil {
+		_ = w.fsys.Remove(tmpPath)
+		return fmt.Errorf("wal: TruncatePrefix: publish prefix marker: %w", err)
+	}
+	// Through the dirFsync seam, as the suffix rename's own directory fsync is,
+	// so a fault injected there reaches the marker too (storage audit F3).
+	if err := w.dirFsync(marker); err != nil {
+		return fmt.Errorf("wal: TruncatePrefix: fsync parent dir of prefix marker: %w", err)
+	}
+	return nil
 }
 
 // poisonAfterRename fail-stops the Writer following an error that occurs

@@ -1048,12 +1048,22 @@ func (g *Graph[N, W]) TombstonedIDsAsOf(s *Snapshot) []graph.NodeID {
 //
 // A node with no birth record is treated as interned: it predates the versioned life
 // store, or its record has been reclaimed, and in both cases its birth is in the past
-// of every live reader.
+// of every live reader. That inference is WRONG for one case: an aborted first
+// creation whose record was withdrawn while the reader was live, which reads as
+// interned although it was interned after s. A snapshot opened by
+// [Graph.BeginCaptureRead] carries the mapper watermark of its instant and is
+// answered exactly from it instead (rmp #2991).
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) NodeInternedAsOf(id graph.NodeID, s *Snapshot) bool {
 	if s == nil {
 		return true
+	}
+	if s.interned != nil {
+		// A capture snapshot carries the mapper watermark of its instant, which
+		// answers exactly; see [Graph.BeginCaptureRead] for why the record-based
+		// inference below cannot (rmp #2991).
+		return s.interned.Covers(id)
 	}
 	sh := g.nodeLifeShardFor(id)
 	sh.mu.RLock()

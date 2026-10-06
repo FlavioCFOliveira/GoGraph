@@ -32,8 +32,8 @@ type component struct {
 }
 
 // ErrCaptureNotQuiesced is returned by [CaptureGraph] when the instant it was given
-// was opened while a write transaction was still open, so the image it would produce
-// cannot be loaded back.
+// is a plain [lpg.Graph.BeginRead] snapshot and the mapper filtered at that instant
+// would have an intra-index hole, so the image it would produce cannot be loaded back.
 //
 // # The precondition
 //
@@ -43,30 +43,30 @@ type component struct {
 // receives to form the contiguous sequence 0..N-1 within each shard, and rejects the
 // whole snapshot otherwise.
 //
-// A capture at an instant must drop the ids that instant cannot see. That is safe
-// only while the dropped ids form a per-shard SUFFIX, which holds exactly when every
-// interned id belongs to an already-committed transaction — because then the only
-// invisible ids are those interned after the instant, and interning is monotone
-// within a shard. An id interned by a transaction that is still open breaks it: the
-// id sits below ids that later transactions have already interned and committed, so
-// dropping it leaves a hole in the middle.
+// A capture at an instant drops the ids [lpg.Graph.NodeInternedAsOf] reports as not
+// interned at that instant. That is safe only while the dropped ids form a per-shard
+// SUFFIX. With a plain snapshot the answer is inferred from life records, and two
+// cases break the suffix: an id interned by a transaction still open at the instant
+// (it sits below ids interned and committed later), and an id interned after the
+// instant by a transaction that then aborted (its withdrawn birth record makes it
+// read as interned long ago, rmp #2991). Dropping ids above a hole would lose
+// committed nodes whose WAL prefix the checkpointer is about to truncate, so the
+// capture refuses: a checkpoint that returns an error has published nothing and
+// truncated nothing.
 //
-// # Why this fails rather than compensating
+// # How the checkpointer avoids it
 //
-// There is no correct image to produce. Including the open transaction's node would
-// put a node in the image that did not exist at the instant. Excluding every id above
-// the hole would drop nodes that were COMMITTED before the instant — and the
-// checkpointer is about to truncate the WAL prefix that holds them, so those commits
-// would be lost outright. Fail-stop is the only sound answer, and a checkpoint that
-// returns an error has published nothing and truncated nothing.
-//
-// # How the checkpointer satisfies it
-//
-// It opens the instant inside the commit serialiser, which closes writer admission
-// and drains the admitted writers to zero before running. A writer's registration
-// spans its whole commit, so when the drain completes there is no open transaction
-// and therefore no interned-but-uncommitted id. The same drain is what makes the
-// durable-offset watermark and the instant describe one transaction boundary.
+// It opens the instant with [lpg.Graph.BeginCaptureRead], inside the commit
+// serialiser's drain. That snapshot carries the mapper watermark read just after the
+// instant, and membership is the per-shard prefix the watermark names, so this error
+// cannot occur for it. The drain does not stop every interning — an lpg write
+// transaction or an eager engine write that is not a registered store writer can hold
+// an interned, uncommitted key at the instant. The watermark covers that id, the
+// capture writes it as a tombstone with its key (it is not alive at the instant), and
+// because its transaction can only commit after the instant, its WAL frames follow
+// the checkpoint's watermark and recovery's replay revives the id. The drain is what
+// makes the durable-offset watermark and the instant describe one transaction
+// boundary.
 var ErrCaptureNotQuiesced = errors.New("snapshot: capture instant taken while a write transaction was open")
 
 // capturedIndex is one serialisable secondary index's payload, captured with

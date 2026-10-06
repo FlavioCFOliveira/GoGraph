@@ -513,10 +513,18 @@ writer stays registered through its MVCC publish:
   durable below `W` but not yet published would be missing from the image and
   truncated away — an acknowledged commit lost. Asserted by
   `checkpoint.TestCheckpoint_WatermarkAndInstantDescribeTheSameBoundary`.
-- No id is interned by a still-open transaction when `at` is taken, which is what
-  keeps the instant-filtered mapper's per-shard intra indexes contiguous and therefore
-  loadable. Stated as `snapshot.ErrCaptureNotQuiesced`; the capture refuses rather than
-  publishing an image recovery would reject.
+- The instant-filtered mapper's per-shard intra indexes must stay contiguous, or
+  recovery cannot load the image (`snapshot.ErrCaptureNotQuiesced`). The checkpointer
+  opens `at` with `lpg.Graph.BeginCaptureRead`, which records the mapper watermark
+  just after the instant; the capture keeps exactly the per-shard prefix the
+  watermark names, so the image is contiguous by construction (rmp #2991). The drain
+  does not stop every interning: an lpg write transaction or an eager engine write
+  that is not a registered store writer can hold an interned, uncommitted key at
+  `at`. The watermark covers that id and the capture writes it as a tombstone with
+  its key; its transaction can only commit after `at`, so its frames follow `W` and
+  recovery's replay revives the id. Asserted by
+  `checkpoint.TestCheckpoint_CaptureIgnoresAbortedInternAfterInstant` and
+  `checkpoint.TestCheckpoint_CaptureTombstonesKeyOfTxnOpenAtInstant`.
 
 The reclamation horizon is pinned only for step 2 — an in-memory, O(V+E) window with
 no disk I/O — never across the snapshot write. Pinned by

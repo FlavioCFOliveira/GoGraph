@@ -29,7 +29,7 @@ var durabilityKeys = []string{
 	"D09.checkpoint_ran", "D09.pre_capture.acked_present", "D09.pre_truncate.acked_present",
 	"D09.post_truncate.acked_present", "D09.post_truncate.seek_equals_scan",
 	"D16.snapshot_used", "D16.checkpoint_plus_tail_equals_full_replay",
-	"D09.missing_segment.refused_loudly", "D09.checkpoint_refused_not_quiesced",
+	"D09.missing_segment.refused_loudly", "D09.checkpoint_refused_not_quiesced", "D09.capture_not_refused",
 	"D04.failure_seen", "D04.post_poison_commit_refused", "D04.failed_not_visible",
 	"D04.reopen.acked_present", "D04.reopen.refused_absent", "D04.recovers_exactly_the_acknowledged",
 }

@@ -1374,10 +1374,9 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 		br.after = log.acked()
 		imgs[phase], brs[phase] = dst, br
 	}
-	// A checkpoint calls the serialiser twice: the capture, then the truncation.
-	// A refused capture makes no second call, so the attempt's phase is tracked
-	// and reset by the caller after every attempt; the images of the attempt that
-	// succeeds are the ones kept.
+	// A checkpoint calls the serialiser twice: the capture, then the truncation. A
+	// refused capture makes no second call, so the phase is tracked by whether the
+	// capture succeeded.
 	var captured bool
 	serialise := func(fn func() error) error {
 		return ls.o.Store().RunUnderCommitLock(func() error {
@@ -1408,30 +1407,20 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 		close(writersDone)
 	}()
 	waitAcked(log, dc.totalTxns/3, writersDone)
-	// Retry until one checkpoint completes. A capture refused because an explicit
-	// transaction was open between its statements (snapshot.ErrCaptureNotQuiesced)
-	// publishes and truncates nothing; the refusals are counted and reported.
-	var cpErr error
-	refused, attempts := 0, 0
+	// ONE attempt, no retry (rmp #2991). A capture refused with
+	// snapshot.ErrCaptureNotQuiesced while writers run explicit transactions was a
+	// defect, not a mode: the checkpoint must succeed on its first attempt.
 	var running bool
-	for {
-		captured = false
-		delete(imgs, "pre_truncate")
-		delete(imgs, "post_truncate")
-		select {
-		case <-writersDone:
-			running = false
-		default:
-			running = true
-		}
-		attempts++
-		cpErr = cp.RunCheckpoint()
-		if cpErr == nil || attempts >= 10_000 {
-			break
-		}
-		if errors.Is(cpErr, snapshot.ErrCaptureNotQuiesced) {
-			refused++
-		}
+	select {
+	case <-writersDone:
+		running = false
+	default:
+		running = true
+	}
+	cpErr := cp.RunCheckpoint()
+	refused := 0
+	if errors.Is(cpErr, snapshot.ErrCaptureNotQuiesced) {
+		refused = 1
 	}
 	<-writersDone
 	if wErr != nil {
@@ -1442,8 +1431,10 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 	}
 	reportTx(out, "D09", level, "checkpoint", &ws.st, 0)
 	out.tele("D09", level, "writers_running_at_checkpoint", running, "checkpoint_error", fmt.Sprintf("%q", errText(cpErr)),
-		"checkpoint_attempts", attempts, "checkpoint_refused_not_quiesced", refused,
+		"checkpoint_refused_not_quiesced", refused,
 		"serialiser_calls", calls.Load(), "wal_truncated_bytes", cp.Stats().WALTruncBytes)
+	out.check("D09", level, "capture_not_refused", refused == 0,
+		"checkpoint_refused_not_quiesced=%d: the capture refused itself under load: %v", refused, cpErr)
 	out.check("D09", level, "checkpoint_ran", cpErr == nil && len(imgs) == len(phases),
 		"checkpoint error %v, %d of %d phase images taken", cpErr, len(imgs), len(phases))
 	if len(imgs) != len(phases) {
@@ -1491,7 +1482,6 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 		return err
 	}
 	sMiss, rMiss, _, merr := recoverState(ctx, post)
-	loud := merr != nil || !rMiss.IsClean()
 	missingAcked := -1
 	if sMiss != nil {
 		acks, attempts := log.snapshot(brs["post_truncate"].before)
@@ -1499,10 +1489,11 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 	}
 	out.tele("D09.missing_segment", level, "recovery_error", fmt.Sprintf("%q", errText(merr)),
 		"recovery_clean", rMiss.IsClean(), "acked_missing_if_opened", missingAcked)
-	// Reported, not gated: recovery does not detect a snapshot directory lost after
-	// the WAL prefix it folded was truncated, and opens the shorter history clean
-	// (README.md, phase 7, "Defects found").
-	out.tele("D09.missing_segment", level, "refused_loudly", loud || missingAcked == 0)
+	// Gated (rmp #2990): recovery must refuse with the typed error and report the
+	// directory not clean; opening the shorter history is the defect.
+	loud := errors.Is(merr, recovery.ErrMissingSnapshot) && !rMiss.IsClean()
+	out.check("D09.missing_segment", level, "refused_loudly", loud,
+		"recovery error %v, clean %v, %d acknowledged commit(s) missing if opened", merr, rMiss.IsClean(), missingAcked)
 	return nil
 }
 
