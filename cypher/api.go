@@ -21815,9 +21815,11 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) error {
 		}
 		a.buf.Enqueue(ch)
 	}
-	if statsActive && had {
+	if statsActive && had && took {
 		// A removed value: bump Δ and the delete counter for every tracked
 		// (label, property) the node carries (design docs/statistics-design.md §2).
+		// Gated on the removal's effect (rmp #3005): had describes the present
+		// state, which for a refused removal is a peer's uncommitted value.
 		recordStatsNodePropertyWrite(sc, a.g.NodeIndex(), a.resolveID(n),
 			checkedKeyID(a.g, key), true)
 	}
@@ -21970,7 +21972,7 @@ func (a *lpgMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) (took
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
-	if r.active() {
+	if r.active() || a.buf != nil {
 		prev, had = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
 	mark, counted := a.effectMark()
@@ -21979,7 +21981,13 @@ func (a *lpgMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) (took
 	}
 	took = a.tookEffect(mark, counted)
 	r.recordDelEdgeProperty(src, dst, key, prev, had && took)
-	if a.buf != nil {
+	// The index change is gated on the same effect as the inverse (rmp #3005): a
+	// removal of an absent property, or a refused one, changed nothing to index.
+	// took alone cannot say so here: the removal CLAIMS the adjacency entry before
+	// it looks for the key, and that claim is a version, so an absent key still
+	// counts. had closes it; it is exact whenever took is true, because a claimed
+	// entry carries no other transaction's uncommitted write.
+	if a.buf != nil && had && took {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,
 			Node:     a.resolveID(src),
@@ -23275,7 +23283,7 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) error {
 		}
 		a.buf.Enqueue(ch)
 	}
-	if statsActive && had {
+	if statsActive && had && took { // see the lpgMutatorAdapter twin (rmp #3005)
 		recordStatsNodePropertyWrite(sc, a.g.NodeIndex(), a.resolveID(n),
 			checkedKeyID(a.g, key), true)
 	}
@@ -23434,7 +23442,7 @@ func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) (took
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
-	if r.active() {
+	if r.active() || a.buf != nil {
 		prev, had = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
 	mark, counted := a.effectMark()
@@ -23450,7 +23458,13 @@ func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) (took
 	if took { // see [walMutatorAdapter.effectMark]
 		txErr = a.tx.DelEdgeProperty(src, dst, key)
 	}
-	if a.buf != nil {
+	// The index change is gated on the same effect as the inverse (rmp #3005): a
+	// removal of an absent property, or a refused one, changed nothing to index.
+	// took alone cannot say so here: the removal CLAIMS the adjacency entry before
+	// it looks for the key, and that claim is a version, so an absent key still
+	// counts. had closes it; it is exact whenever took is true, because a claimed
+	// entry carries no other transaction's uncommitted write.
+	if a.buf != nil && had && took {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,
 			Node:     a.resolveID(src),
