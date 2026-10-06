@@ -1,0 +1,174 @@
+spec gg05-delete-everything-vs-insert: 2 sessions, 6 permutations
+# GG05. s1 runs MATCH (n) DETACH DELETE n; s2 creates a new node. s1's snapshot
+# predates s2's commit in every order, so s1 cannot see the new node and it survives:
+# a phantom insert is permitted, and a delete never reaches across snapshots.
+# The final dangling probe must count 0 in every permutation: an edge to a dead node
+# is never committed (catalogue §9 point 3).
+
+starting permutation: s1d s1c s2n s2c
+step s1d: MATCH (n) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+3      
+(1 row)
+step s1c: COMMIT
+step s2n: CREATE (n:N {name:'new'}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"new"
+(1 row)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s1d s2n s1c s2c
+step s1d: MATCH (n) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+3      
+(1 row)
+step s2n: CREATE (n:N {name:'new'}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"new"
+(1 row)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s1d s2n s2c s1c
+step s1d: MATCH (n) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+3      
+(1 row)
+step s2n: CREATE (n:N {name:'new'}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"new"
+(1 row)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s2n s1d s1c s2c
+step s2n: CREATE (n:N {name:'new'}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s1d: MATCH (n) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+3      
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"new"
+(1 row)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s2n s1d s2c s1c
+step s2n: CREATE (n:N {name:'new'}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s1d: MATCH (n) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+3      
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"new"
+(1 row)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s2n s2c s1d s1c
+step s2n: CREATE (n:N {name:'new'}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s2c: COMMIT
+step s1d: MATCH (n) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+3      
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"new"
+(1 row)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)

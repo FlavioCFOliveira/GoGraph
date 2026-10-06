@@ -1,0 +1,183 @@
+spec gg06-delete-same-edge-instance-lpg: 2 sessions, 6 permutations
+# GG06 (same instance). Two parallel edges a->b (id 1, id 2) and a self-loop a->a (id 3).
+# s1 deletes edge id 1, s2 deletes edge id 1, each by instance. The same instance:
+# the second deleter is refused. Different instances: the catalogue expects both to
+# commit; every instance here has source a, the node the adjacency conflict rule
+# claims, so the golden pins which verdict holds.
+# Through the lpg API: RemoveEdgeByHandle (slot and per-handle records).
+# The final dangling probe must count 0 in every permutation: an edge to a dead node
+# is never committed (catalogue §9 point 3).
+
+starting permutation: s1d s1c s2d s2c
+step s1d: lpg: RemoveEdgeByHandle(a, b, <id 1>)
+removed
+-------
+true   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2d: lpg: RemoveEdgeByHandle(a, b, <id 1>)
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|2 |"b"
+"a"|3 |"a"
+(2 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+2        |0       
+(1 row)
+
+starting permutation: s1d s2d s1c s2c
+step s1d: lpg: RemoveEdgeByHandle(a, b, <id 1>)
+removed
+-------
+true   
+(1 row)
+step s2d: lpg: RemoveEdgeByHandle(a, b, <id 1>)
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|2 |"b"
+"a"|3 |"a"
+(2 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+2        |0       
+(1 row)
+
+starting permutation: s1d s2d s2c s1c
+step s1d: lpg: RemoveEdgeByHandle(a, b, <id 1>)
+removed
+-------
+true   
+(1 row)
+step s2d: lpg: RemoveEdgeByHandle(a, b, <id 1>)
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|2 |"b"
+"a"|3 |"a"
+(2 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+2        |0       
+(1 row)
+
+starting permutation: s2d s1d s1c s2c
+step s2d: lpg: RemoveEdgeByHandle(a, b, <id 1>)
+removed
+-------
+true   
+(1 row)
+step s1d: lpg: RemoveEdgeByHandle(a, b, <id 1>)
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|2 |"b"
+"a"|3 |"a"
+(2 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+2        |0       
+(1 row)
+
+starting permutation: s2d s1d s2c s1c
+step s2d: lpg: RemoveEdgeByHandle(a, b, <id 1>)
+removed
+-------
+true   
+(1 row)
+step s1d: lpg: RemoveEdgeByHandle(a, b, <id 1>)
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|2 |"b"
+"a"|3 |"a"
+(2 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+2        |0       
+(1 row)
+
+starting permutation: s2d s2c s1d s1c
+step s2d: lpg: RemoveEdgeByHandle(a, b, <id 1>)
+removed
+-------
+true   
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1d: lpg: RemoveEdgeByHandle(a, b, <id 1>)
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|2 |"b"
+"a"|3 |"a"
+(2 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+2        |0       
+(1 row)

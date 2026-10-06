@@ -1,0 +1,145 @@
+spec ri02-edge-into-deleted-node-lpg: 2 sessions, 6 permutations
+# RI02. Both transactions open before either writes: s1 DETACH DELETEs b, s2 creates
+# an edge into b. Whichever writes second is refused while the first is open and after
+# it commits; no permutation leaves an edge to a dead node.
+# Through the lpg API.
+# The final dangling probe must count 0 in every permutation: an edge to a dead node
+# is never committed (catalogue §9 point 3).
+
+starting permutation: s1d s1c s2e s2c
+step s1d: lpg: detach-delete b (RemoveEdge of each in-arc, RemoveAllEdgesFrom, RemoveNode)
+step s1c: lpg: Session.EndVersionedTx
+step s2e: lpg: AddEdge(a, b)
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+(1 row)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s1d s2e s1c s2c
+step s1d: lpg: detach-delete b (RemoveEdge of each in-arc, RemoveAllEdgesFrom, RemoveNode)
+step s2e: lpg: AddEdge(a, b)
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+(1 row)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s1d s2e s2c s1c
+step s1d: lpg: detach-delete b (RemoveEdge of each in-arc, RemoveAllEdgesFrom, RemoveNode)
+step s2e: lpg: AddEdge(a, b)
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+(1 row)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s2e s1d s1c s2c
+step s2e: lpg: AddEdge(a, b)
+step s1d: lpg: detach-delete b (RemoveEdge of each in-arc, RemoveAllEdgesFrom, RemoveNode)
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id  |dst
+---+----+---
+"a"|null|"b"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s1d s2c s1c
+step s2e: lpg: AddEdge(a, b)
+step s1d: lpg: detach-delete b (RemoveEdge of each in-arc, RemoveAllEdgesFrom, RemoveNode)
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id  |dst
+---+----+---
+"a"|null|"b"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s2c s1d s1c
+step s2e: lpg: AddEdge(a, b)
+step s2c: lpg: Session.EndVersionedTx
+step s1d: lpg: detach-delete b (RemoveEdge of each in-arc, RemoveAllEdgesFrom, RemoveNode)
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id  |dst
+---+----+---
+"a"|null|"b"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)

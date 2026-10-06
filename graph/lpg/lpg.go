@@ -960,8 +960,10 @@ type Graph[N comparable, W any] struct {
 	// Adjacency keeps no per-object delta chain — its only version signal is the
 	// global topoGeneration below — so it cannot use the rule every other store
 	// uses, and this holds the two stamps per node that replace it. See
-	// [adjVersions] for the rule, and for the Memgraph source that settled why an
-	// adjacency APPEND is commutative and must not conflict with another append.
+	// [adjVersions] for the rule: an adjacency APPEND claims both endpoints and
+	// conflicts with another transaction's pending or invisible append or removal
+	// on either (rmp #2445), and for why the Memgraph-derived premise that appends
+	// commute was retired.
 	adjVer adjVersions
 
 	// conVer is the per-node CONSTRAINT write-write conflict index (rmp #2353).

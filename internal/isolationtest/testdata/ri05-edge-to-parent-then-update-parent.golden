@@ -1,0 +1,826 @@
+spec ri05-edge-to-parent-then-update-parent: 2 sessions, 20 permutations
+# RI05. The foreign-key deadlock shape: s1 and s2 each create an edge to parent p,
+# then SET p.n. No step waits (F7): the second writer to p is refused at once, at the
+# edge create or at the SET, and p.n holds the committed writer's value.
+# The final dangling probe must count 0 in every permutation: an edge to a dead node
+# is never committed (catalogue §9 point 3).
+
+starting permutation: s1e s1u s1c s2e s2u s2c
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+n
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+1
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c1"|1 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s1e s1u s2e s1c s2u s2c
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+n
+-
+1
+(1 row)
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+1
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c1"|1 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s1e s1u s2e s2u s1c s2c
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+n
+-
+1
+(1 row)
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+1
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c1"|1 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s1e s1u s2e s2u s2c s1c
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+n
+-
+1
+(1 row)
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+1
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c1"|1 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s1e s2e s1u s1c s2u s2c
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+n
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+1
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c1"|1 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s1e s2e s1u s2u s1c s2c
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+n
+-
+1
+(1 row)
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+1
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c1"|1 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s1e s2e s1u s2u s2c s1c
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+n
+-
+1
+(1 row)
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+1
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c1"|1 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s1e s2e s2u s1u s1c s2c
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+ERROR: serialization conflict
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+n
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+1
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c1"|1 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s1e s2e s2u s1u s2c s1c
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+ERROR: serialization conflict
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+n
+-
+1
+(1 row)
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+1
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c1"|1 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s1e s2e s2u s2c s1u s1c
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+n
+-
+1
+(1 row)
+step s1c: COMMIT
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+1
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c1"|1 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s1e s1u s1c s2u s2c
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+2
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c2"|2 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s1e s1u s2u s1c s2c
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+ERROR: serialization conflict
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+2
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c2"|2 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s1e s1u s2u s2c s1c
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+ERROR: serialization conflict
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+2
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c2"|2 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s1e s2u s1u s1c s2c
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+n
+-
+2
+(1 row)
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+2
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c2"|2 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s1e s2u s1u s2c s1c
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+n
+-
+2
+(1 row)
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+2
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c2"|2 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s1e s2u s2c s1u s1c
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+2
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c2"|2 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s2u s1e s1u s1c s2c
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+n
+-
+2
+(1 row)
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+2
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c2"|2 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s2u s1e s1u s2c s1c
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+n
+-
+2
+(1 row)
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+2
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c2"|2 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s2u s1e s2c s1u s1c
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+n
+-
+2
+(1 row)
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+2
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c2"|2 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)
+
+starting permutation: s2e s2u s2c s1e s1u s1c
+step s2e: MATCH (c:N {name:'c2'}), (p:N {name:'p'}) CREATE (c)-[:R {id:2}]->(p) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2u: MATCH (p:N {name:'p'}) SET p.n = 2 RETURN p.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1e: MATCH (c:N {name:'c1'}), (p:N {name:'p'}) CREATE (c)-[:R {id:1}]->(p) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1u: MATCH (p:N {name:'p'}) SET p.n = 1 RETURN p.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final parent: MATCH (p:N {name:'p'}) RETURN p.n AS n
+n
+-
+2
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"c1"
+"c2"
+"p" 
+(3 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst
+----+--+---
+"c2"|2 |"p"
+(1 row)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+1        |0       
+(1 row)

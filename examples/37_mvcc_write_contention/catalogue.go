@@ -6,8 +6,9 @@ package main
 // interleaving of its steps (or, where the catalogue says so, over named
 // interleavings) and pinned by a golden transcript under testdata/. The rows,
 // their sources and their expected snapshot-isolation outcomes come from
-// docs/mvcc-scenario-catalogue.md §1.1 to §1.7 (§1.3 and §1.4 in
-// catalogue_mgix.go, §1.5 to §1.7 in catalogue_ddhz.go); README.md maps each row to its
+// docs/mvcc-scenario-catalogue.md §1.1 to §1.8 and §5 (§1.3 and §1.4 in
+// catalogue_mgix.go, §1.5 to §1.7 in catalogue_ddhz.go, §1.8 and the §5 rows
+// FP01-FP03 in catalogue_rigg.go); README.md maps each row to its
 // PostgreSQL or InnoDB source and states where GoGraph's outcome differs and why.
 //
 // # Two drivers over one graph (H3)
@@ -539,6 +540,43 @@ func catalogue() []scenario {
 		{ID: "RO03", Driver: driverCypher, build: ro03, check: fastPathEqualsScan},
 		{ID: "SE01", Driver: driverCypher, build: se01},
 		{ID: "SE03", Driver: driverCypher, build: se03},
+		{ID: "RI01", Driver: driverCypher, build: ri01Cypher, check: noDanglingEdge},
+		{ID: "RI01", Driver: driverLPG, build: ri01LPG, check: noDanglingEdge},
+		{ID: "RI02", Driver: driverCypher, build: ri02IntoCypher, check: noDanglingEdge},
+		{ID: "RI02", Driver: driverLPG, build: ri02IntoLPG, check: noDanglingEdge},
+		{ID: "RI02", Driver: driverCypher, build: ri02OutOfCypher, check: noDanglingEdge},
+		{ID: "RI02", Driver: driverLPG, build: ri02OutOfLPG, check: noDanglingEdge},
+		{ID: "RI03", Driver: driverCypher, build: ri03SameTarget, check: noDanglingEdge},
+		{ID: "RI03", Driver: driverLPG, build: ri03SameTargetLPG, check: noDanglingEdge},
+		{ID: "RI03", Driver: driverCypher, build: ri03SameSource, check: noDanglingEdge},
+		{ID: "RI03", Driver: driverLPG, build: ri03SameSourceLPG, check: noDanglingEdge},
+		{ID: "RI04", Driver: driverCypher, build: ri04Cypher, check: noDanglingEdge},
+		{ID: "RI04", Driver: driverLPG, build: ri04LPG, check: noDanglingEdge},
+		{ID: "RI05", Driver: driverCypher, build: ri05Cypher, check: noDanglingEdge},
+		{ID: "RI05", Driver: driverLPG, build: ri05LPG, check: noDanglingEdge},
+		{ID: "RI06", Driver: driverCypher, build: ri06Same, check: noDanglingEdge},
+		{ID: "RI06", Driver: driverLPG, build: ri06SameLPG, check: noDanglingEdge},
+		{ID: "RI06", Driver: driverCypher, build: ri06Parallel, check: noDanglingEdge},
+		{ID: "RI06", Driver: driverLPG, build: ri06ParallelLPG, check: noDanglingEdge},
+		{ID: "GG01", Driver: driverCypher, build: gg01, check: allOf(noDanglingEdge, sameRows([2]string{"s0r1", "s0r2"}))},
+		{ID: "GG02", Driver: driverCypher, build: gg02Cypher, check: noDanglingEdge},
+		{ID: "GG02", Driver: driverLPG, build: gg02LPG, check: noDanglingEdge},
+		{ID: "GG03", Driver: driverCypher, build: gg03, check: allOf(noDanglingEdge, seekEqualsScan,
+			sameRows([2]string{"s0d1", "s0d2"}, [2]string{"s0r1", "s0r2"}))},
+		{ID: "GG04", Driver: driverCypher, build: gg04Cypher, check: allOf(noDanglingEdge, seekEqualsScan,
+			sameRows([2]string{"s0c1", "s0c2"}))},
+		{ID: "GG04", Driver: driverLPG, build: gg04LPG, check: allOf(noDanglingEdge, sameRows([2]string{"s0c1", "s0c2"}))},
+		{ID: "GG05", Driver: driverCypher, build: gg05, check: noDanglingEdge},
+		{ID: "GG06", Driver: driverCypher, build: gg06Disjoint, check: noDanglingEdge},
+		{ID: "GG06", Driver: driverLPG, build: gg06DisjointLPG, check: noDanglingEdge},
+		{ID: "GG06", Driver: driverLPG, build: gg06SameLPG, check: noDanglingEdge},
+		{ID: "GG06", Driver: driverCypher, build: gg06SelfLoop, check: noDanglingEdge},
+		{ID: "GG06", Driver: driverLPG, build: gg06SelfLoopLPG, check: noDanglingEdge},
+		{ID: "FP01", Driver: driverCypher, build: fp01Cypher},
+		{ID: "FP01", Driver: driverLPG, build: fp01LPG},
+		{ID: "FP02", Driver: driverLPG, build: fp02, check: fp02Released},
+		{ID: "FP03", Driver: driverCypher, build: fp03Cypher},
+		{ID: "FP03", Driver: driverLPG, build: fp03LPG},
 	}
 }
 

@@ -48,7 +48,7 @@ const goldenDir = "../../internal/isolationtest/testdata"
 // catalogueGolden matches the catalogue's golden names: a catalogue row ID
 // prefix (ww01-, sk12-, mg02-, ix04-, dd01-, ...). The harness's own goldens carry no
 // such prefix.
-var catalogueGolden = regexp.MustCompile(`^(ww|sk|mg|ix|dd|ab|hz|ro|se)\d{2}-.*\.golden$`)
+var catalogueGolden = regexp.MustCompile(`^(ww|sk|mg|ix|dd|ab|hz|ro|se|ri|gg|fp)\d{2}-.*\.golden$`)
 
 // maxPermutations is the short-layer ceiling on one spec's interleavings. Every
 // spec is checked against it rather than assumed to fit, because the multinomial
