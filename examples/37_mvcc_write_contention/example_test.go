@@ -34,6 +34,8 @@ func testConfig() config {
 	c.opsPerProd = 25
 	c.producers = 4
 	c.readers = 2
+	// Phase 6 has its own gates (ladder_test.go); running it here would run it twice.
+	c.ladder.levels = nil
 	return c
 }
 

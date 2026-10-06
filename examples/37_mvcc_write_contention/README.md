@@ -399,7 +399,7 @@ GoGraph permits write skew and refuses a write-write conflict.
 | MG08 | `mg08-merge-vs-delete` | Cypher | PG `merge-delete` | `MERGE` onto a node deleted after its snapshot is refused; no resurrection | As expected. The refusal of the `DETACH DELETE` that comes second surfaces at its `COMMIT`. PG READ COMMITTED turns the `MERGE` into an `INSERT`. |
 | MG09 | `mg09-delete-recreate-same-tx`, `mg09-delete-commit-then-recreate`, `mg09-delete-open-then-rollback` | Cypher | MY `innodb-lock-inherit-read_commited`, `index-create-dml-rollback`, `lock-inherit-existing`; PG `read-write-unique-3` | (a) one holder; (b) re-create succeeds after the delete commits; (c) refused while the delete is open, one holder after its rollback | As expected in all three arms. In (b) the re-create succeeds once the delete has committed even when the creator's snapshot still sees the old node: the check reads the reservation set, not the snapshot. |
 | MG10 | `mg10-intra-statement-duplicate` | Cypher | MY `innodb-index`, `create_table_select` | Statement rejected, nothing applied | As expected. Between the failed statement and the client's `ROLLBACK` (F8) the value stays reserved and a peer is refused (G6); after the `ROLLBACK` the peer succeeds. |
-| MG11 | — | — | PG `insert-conflict-specconflict`, PG-inj `on_conflict_probe_window` | One node; loser ConstraintViolation | **Not implemented: random load, #2934.** No hook exists inside `MERGE` between its probe and its create (G5), so the race cannot be scripted. |
+| MG11 | — (phase 6, arm `MG11`) | Cypher, random load | PG `insert-conflict-specconflict`, PG-inj `on_conflict_probe_window` | One node; loser ConstraintViolation | **Implemented under random load (phase 6).** No hook exists inside `MERGE` between its probe and its create (G5), so the race is reached by explicit-transaction `MERGE` storms on four keys at every ladder level: one node per key, every refusal a ConstraintViolation or a serialization conflict. |
 | MG12 | `mg12-not-null-at-commit`, `mg12-not-null-peer-removal` | Cypher | PG `alter-table-1`; MY `constraint_check_locks_in_read_committed` | Set-later commits; removed arm refused at `COMMIT`; peer removal refused | As expected. A peer's `REMOVE n.p` is refused by the write-write conflict at `COMMIT` when the setter committed first, and by the constraint at `COMMIT` otherwise; `p` is never null after a commit. |
 | IX01 | `ix01-own-write-hash-seek` | Cypher | GoGraph #2814 (`efd32fb9`); MY `innodb_fts/transaction` | Own writes visible to the hash seek; seek = scan | As expected. InnoDB's full-text index hides own uncommitted rows by design. Negative control below. |
 | IX02 | `ix02-own-write-btree-seek` | Cypher | GoGraph #2814 | Range and prefix seek = scan after own writes | As expected. Negative control below. |
@@ -578,6 +578,39 @@ open.
   through `Engine.lockSchemaForDDL`, which waits with `mvcc.Gate.StrongLockCtx` and
   returns the context error holding nothing, before any schema, index, constraint or
   WAL state is touched. `dd06-ddl-bounded-by-context` pins it.
+- **D5 — autocommit `MERGE` under UNIQUE fails callers under concurrency (open, rmp #2987;
+  found by phase 6, L13).** F10 and `cypher/merge_race_test.go` state that concurrent autocommit
+  `MERGE` under a UNIQUE constraint converges on one node with every caller succeeding.
+  Reproduction (in-memory engine, `cypher.NewEngine` over `lpg.New`): `CREATE CONSTRAINT
+  k_u FOR (n:K) REQUIRE n.k IS UNIQUE`; 8 goroutines each run `RunInTx("MERGE (n:K
+  {k:0})")` once → 1 to 7 of the 8 fail with `exec: Merge: ON CREATE SetNodeProperty:
+  exec: constraint violation: UNIQUE constraint on (K).k: value 0 already exists` (5 of 5
+  repetitions; one node remains). On a WAL-backed engine the 8×1 shape of the existing
+  test passes, but the L13 storm (8 or 64 goroutines, 32 or 4 calls each, 4 keys) fails
+  16 of 256 and 74 of 256 callers the same way. One node per key always holds and stays
+  gated. L13 reports `failed_callers` as a metric; rmp #2987 restores the gate
+  `every_caller_succeeds`.
+- **D6 — `DETACH DELETE` of a node with two parallel in-edges from one source leaves one
+  arc behind (open, rmp #2988; found by phase 6, L15).** Reproduction: `CREATE (:Hub {id:1}), (:X
+  {id:53})`; twice `MATCH (x:X {id:53}), (h:Hub {id:1}) CREATE (x)-[:R]->(h)`; `MATCH
+  (h:Hub {id:1}) DETACH DELETE h`; `ReclaimNow`. Cypher counts 0 relationships, but at a
+  fresh snapshot the live `x` still lists the dead hub in its out-neighbours and the dead
+  hub lists `x` as an in-neighbour (the dangling probe counts 2). With one edge, or with
+  one of the two deleted first, the probe counts 0. L15 creates its edges with `MERGE`,
+  so it never builds this shape and keeps measuring hub churn; rmp #2988 adds the
+  parallel-edge shape back.
+- **D7 — the hash and label indexes diverge from the graph under random churn (open,
+  rmp #2989; found by phase 6, L06).** At quiescence, after the L06 workload (label add/remove,
+  indexed writes, 30% rollbacks, a UNIQUE set), the equality seek on `(:L).s` misses
+  nodes a scan finds — `hash "s3" seek=40 scan=41`, `hash "own-920-0-1" seek=0 scan=1`,
+  and once the label count `seek=694 scan=692`. Measured: 3 of 3 runs at 1024
+  goroutines, 1 of 1 soak run at 1024 (0 at 256), 2 of 3 `-race` runs at 64, 1 of 2
+  coverage-build runs at 64. In-transaction seeks of own writes (L07) never diverged
+  (0 of 1 457 at 1024). Reproduction: `go test -tags soak -run TestLadderSoak
+  ./examples/37_mvcc_write_contention/` (or `-race -run TestLadder`), or the binary with
+  `-ladder-levels 1024 -ladder-rows L06 -ladder-ops 4096`. L06 reports
+  `seek_scan_mismatches` and `seek_scan_first_mismatches` as metrics; rmp #2989 restores
+  the gate `seek_equals_scan`.
 - **D4 — a Cypher `DELETE` of a relationship another transaction removed is a silent
   no-op (fixed, rmp #2986).** Reproduction: `CREATE (a:N {name:'a'})-[:R {id:1}]->(b:N {name:'b'}),
   (a)-[:R {id:2}]->(b), (a)-[:R {id:3}]->(a)`; T1 and T2 `BeginTx`; T1
@@ -644,6 +677,96 @@ open.
   through Cypher, `COMMIT` returns `ErrTxPoisoned`; through `lpg`, the refused write
   dooms the transaction and its commit returns the serialization conflict. Both apply
   nothing, and a read after the refusal stays at the transaction's snapshot.
+
+## Phase 6 — concurrency ladder (rmp #2934)
+
+`ladder.go` (driver, sampler, output) and `ladder_rows.go` (arms) run the §2 rows of
+`docs/mvcc-scenario-catalogue.md` — L01-L20 — and MG11 as randomised concurrent arms at
+a ladder of goroutine counts. The short layer (`TestLadder`) runs 1, 8 and 64; the soak
+layer (`ladder_soak_test.go`, `-tags soak`, `TestLadderSoak`) runs 256 and 1024 with
+4 096 operations per arm and level, adds L09 and the full-size L17, and turns on the
+self-conflict streak gate. The binary runs the phase after phase 5 with
+`-ladder-levels` (default `1,8,64`), `-ladder-ops`, `-ladder-rows` and `-ladder-soak`.
+
+### Arms
+
+| Arm | Rows | Workload | Gates (bare `ladder.<arm> level=<n> <check>=true` lines) |
+|---|---|---|---|
+| `L01` | L01, L02, L03 | Bank transfers (`BeginTx`, two reads, two writes, a `Log` insert; 10% rolled back) and read transactions (`BeginReadTx` or read-only `BeginTx`) that read every account and the `Log` count twice; one doctors write-skew round per goroutine, two transactions interleaved by the goroutine itself. Every attempt is recorded with `internal/anomaly` (aborts as aborted) and the history checked at `SnapshotIsolation` | `history_clean` (0 forbidden, not truncated), `write_skew_permitted` (G2-item in `Report.Permitted`), `repeatable_reads`, `no_phantoms`, `conservation` |
+| `L04.<arm>` | L04 | Hot counter, `SET c.n = c.n + 1` with retries, session and sessionless arms | Final value = acknowledged increments |
+| `L05` | L05 | One transaction over 16 hot nodes against single-node writers | Sum = acknowledged; the large transaction's success rate and refused streak are reported (G3: no fairness mechanism) |
+| `L06` | L06, L07 | Label add/remove, hash- and btree-indexed writes, UNIQUE writes, 30% rollbacks; 1 in 5 statements writes a fresh value and seeks it inside its transaction | No duplicate UNIQUE value; in-transaction seek = scan = 1. Seek = scan at quiescence (hash index, btree range and prefix, label scan, count store, UNIQUE backing index) is a reported metric until rmp #2989 (D7) |
+| `L08` | L08 | A read transaction held while writers leave 3 x `Bound` versions | `retention_shown` (Total > Bound while held), repeatable read, reclaimed after release |
+| `L09` | L09 (soak) | 1 032 read transactions held while the graph churns | `UnregisteredSnapshots` > 0, every read correct, released after close |
+| `L10.<arm>`, `L20.<arm>` | L10, L20 | WAL-backed store (`store.Open`), disjoint writers, a checkpointer triggered back to back | Final = acknowledged; session arm 0 self-conflicts; checkpoints ran; commit tail during a checkpoint below `hangBudget`; storage size before and after |
+| `L11.<arm>` | L11, L12 | In-memory disjoint writers, session and sessionless | Session arm 0 self-conflicts (and so 0 conflicts) |
+| `L13`, `L13.memory`, `MG11`, `L14` | L13, MG11, L14 | `MERGE` storms on 4 keys: autocommit under UNIQUE (WAL-backed and in-memory), explicit under UNIQUE, autocommit without a constraint | One node per key under UNIQUE; every failure typed; L14 every caller succeeds, duplicates counted. L13's "every caller succeeds" is a reported metric (`failed_callers`) until rmp #2987 (D5) |
+| `L15`, `L16` | L15, L16 | Edge `MERGE`/delete on hubs and `DETACH DELETE` + recreate of hubs; read transactions repeat a one-hop and a `*1..3` traversal | No dangling arc at quiescence; repeated traversals identical |
+| `L17` | L17 | 8 transactions hold 16 000 (soak: 150 000) uncommitted nodes; counts; a 9 M-row statement cancelled after 2 ms | Count = committed only; cancelled statement returns `context.Canceled` within 1 s |
+| `L18` | L18 | Property writes, edge creates and `DETACH DELETE`s, 50% rolled back | Total <= Bound after quiescence; 0 dangling arcs; every hub writable by a lone writer |
+| `L19` | L19, DD08, DD09 | `CREATE`/`DROP INDEX` cycles and an overlapping `CREATE INDEX` on the same object while writers churn and the vacuum is swept in a loop | Seek = scan; every DDL refusal classified (`already_exists`); DDL latency below `hangBudget`; no writer starved |
+
+Every sampled arm also runs a sampler on `lpg.MVCCStats` every 500 µs and gates
+`WatermarkRegressions = 0` and `HorizonStaleLeaves = 0` at every sample, `WithinCeiling()`
+at every sample with no reader open (not in L08), `SessionsWaiting` <= goroutines,
+visibility lag (time for the frontier to reach the newest commit allocated at the sample)
+below the 2 s retry budget, and, after quiescence, `InFlightCommits = 0` and
+`Total <= Bound`. It reports peak `InFlightCommits`, peak `SessionsWaiting`,
+`OutOfOrderPublications`, `HelpedPublications`, max visibility lag, peak versions,
+active and unregistered snapshots, conflicts by store and the snapshot capacity (1 024).
+Each arm reports commits/s, refused attempts, rollbacks, unrecovered operations,
+constraint violations, the longest retry streak in attempts and in wall time, and commit
+latency percentiles. Each level emits a `runtime/trace` region per arm
+(`ladder/<arm>/<level>`) and a `runtime.MemStats` line.
+
+**Not observable: ring waits.** The engine has no ring-wait counter since `bfaf3ed6`
+(#2932): a commit-timestamp claim never waits for a ring slot; it chains behind the
+previous lap's record, counted only by the unexported `commitRegistry.chained`.
+
+**`InFlightCommits` is a window, not a count.** `Clock.InFlightCommits` returns the newest
+allocated timestamp minus the frontier, so finished commits above an unfinished one stay in
+it. A gate of "peak <= goroutines" failed on the first soak run (729 at 256 goroutines,
+WAL-backed L13) and was removed; the window is gated by the lag measurement and by
+`InFlightCommits = 0` after quiescence. The godoc of `Clock.InFlightCommits` and of
+`MVCCStats.InFlightCommits` opens with "how many allocated commit timestamps have not yet
+finished", which describes a count; the code returns the window. This is noted, not
+changed here.
+
+### The streak gate and where its threshold comes from
+
+A disjoint writer conflicts only with its own previous commit, which it can meet only
+while the frontier is held below that commit. The soak gate is that the longest such run
+of refusals, in wall time, stays below the writers' retry budget (`retryBudget`, 2 s,
+rmp #2330) and no operation exhausts it. The attempt count is reported but not gated: it
+measures how fast a refused WAL attempt returns (94 attempts in 1.2 ms at 64 writers).
+Measured at HEAD: 19.5 ms at 256 and 82.6 ms at 1 024 goroutines (WAL-backed, sessionless),
+0 in-memory and in every session arm.
+
+**The gate does not detect the absence of #2932.** Built against `43c69dbe`, which
+predates it, the longest sessionless streak measured 13–28 ms (0 with `GOMAXPROCS=2`),
+far inside the 2 s budget. The gate stays as a guard against retry stalls; #2932's own
+tests (`graph/mvcc/publish_convoy_test.go`) cover its regression.
+
+### Negative controls
+
+- **#2931 (index churn), shown failing.** The ladder files were compiled against a copy of
+  the tree at `43c69dbe` extracted with `git archive` (no git write on this tree), with
+  `ladder_frontier.go` replaced by a stub returning zeros and `store.Open` replaced by its
+  parts (`wal.Open`, `txn.NewStoreWithOptions`, `cypher.NewEngineWithStore`), which that
+  revision predates. L06 failed at 8 (`hash "s4" seek=5 scan=4`) and at 64 (`hash "s7"
+  seek=4 scan=5`) goroutines.
+- **#2932 (streak gate), NOT shown failing — accepted.** The same copy at `43c69dbe`
+  passed the soak streak gate: longest sessionless self-conflict streak 13.2 ms (L10) and
+  27.8 ms (L11) at 256 goroutines, 12.8 ms at 1 024; with `GOMAXPROCS=2`, 0 — against the
+  2 s budget, and against 19.5 / 82.6 ms at HEAD. The gate cannot detect #2932's absence
+  with this workload; the deterministic catch remains `graph/mvcc/publish_convoy_test.go`.
+- **Long-reader retention, shown.** `retention_shown` holds at every level: with the reader
+  open, Total reached 12 288 against Bound 4 096 (64 goroutines), and fell to 0 after release.
+
+### Coverage
+
+`docs/benchmarks/ex37-mvcc-coverage-2026-10-06.md` gives the command and the per-package
+figures for `graph/mvcc`, `graph/lpg` and `cypher`.
 
 ## Status
 

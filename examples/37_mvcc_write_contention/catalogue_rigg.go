@@ -62,30 +62,7 @@ const danglingStep = "dangling"
 func (w *world) dangling(name string) isolationtest.Step {
 	return isolationtest.Step{Name: name, Label: "<lpg: arcs touching a dead node, at a fresh snapshot>",
 		Probe: func(context.Context) ([]string, [][]string, error) {
-			g := w.g
-			snap := g.BeginRead()
-			defer g.EndRead(snap)
-			view := g.ReadAt(snap)
-			// Walk must not re-enter the Mapper: collect the ids, then read.
-			var ids []graph.NodeID
-			g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
-				ids = append(ids, id)
-				return true
-			})
-			var arcs, dead int
-			for _, id := range ids {
-				srcLive := view.Exists(id)
-				for _, dst := range view.EntryView(id).Neighbours {
-					if srcLive && view.Exists(dst) {
-						arcs++
-					} else {
-						dead++
-					}
-				}
-				if !srcLive {
-					dead += len(g.InNeighbourIDsAsOf(id, snap))
-				}
-			}
+			arcs, dead := countDangling(w.g)
 			return []string{"live_arcs", "dangling"}, [][]string{{strconv.Itoa(arcs), strconv.Itoa(dead)}}, nil
 		}}
 }

@@ -28,6 +28,8 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -53,6 +55,8 @@ type config struct {
 	// needed, which is why this is a fraction and not a flag.
 	hotPct int
 	seed   uint64
+	// ladder is phase 6, the concurrency ladder (ladder.go). Zero levels skip it.
+	ladder ladderConfig
 }
 
 func defaultConfig() config {
@@ -64,6 +68,7 @@ func defaultConfig() config {
 		readers:    4,
 		hotPct:     25,
 		seed:       1,
+		ladder:     defaultLadderConfig(),
 	}
 }
 
@@ -96,9 +101,29 @@ func main() {
 	flag.IntVar(&cfg.readers, "readers", cfg.readers, "concurrent reader goroutines")
 	flag.IntVar(&cfg.hotPct, "hot-pct", cfg.hotPct, "percent of orders that touch the shared inventory (the contention dial)")
 	flag.Uint64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	levels := flag.String("ladder-levels", "1,8,64",
+		"phase 6: comma-separated goroutine counts of the concurrency ladder; empty skips the phase")
+	flag.IntVar(&cfg.ladder.totalOps, "ladder-ops", cfg.ladder.totalOps,
+		"phase 6: operations per arm and level, shared among its goroutines")
+	rows := flag.String("ladder-rows", "",
+		"phase 6: comma-separated arm ids to run (L01,L04,L05,L06,L08,L09,L10,L11,L13,L15,L17,L18,L19); empty runs all")
+	flag.BoolVar(&cfg.ladder.soak, "ladder-soak", false,
+		"phase 6: also run the soak arms (horizon capacity cliff, full-size parallel count) and the self-conflict streak gate")
 	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
+	lv, err := parseLevels(*levels)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.ladder.levels = lv
+	for _, r := range strings.Split(*rows, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			cfg.ladder.rows = append(cfg.ladder.rows, r)
+		}
+	}
+	cfg.ladder.seed = cfg.seed
 	if err := cfg.validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
@@ -139,6 +164,16 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 	if err := phaseCatalogue(ctx, w); err != nil {
 		return err
 	}
+	// PHASE 6 — the concurrency ladder (ladder.go).
+	if len(cfg.ladder.levels) > 0 {
+		out, err := phaseLadder(ctx, w, &cfg.ladder)
+		if err != nil {
+			return err
+		}
+		if f := out.failed(); len(f) > 0 {
+			return fmt.Errorf("ladder: %d checks failed:\n%s", len(f), strings.Join(f, "\n"))
+		}
+	}
 
 	var m1 runtime.MemStats
 	runtime.ReadMemStats(&m1)
@@ -148,6 +183,22 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 	fmt.Fprintf(w, "# mem.total_alloc_bytes=%d\n", m1.TotalAlloc-m0.TotalAlloc)
 	fmt.Fprintf(w, "# mem.num_gc=%d\n", m1.NumGC-m0.NumGC)
 	return nil
+}
+
+// parseLevels parses the -ladder-levels list.
+func parseLevels(s string) ([]int, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var out []int
+	for _, f := range strings.Split(s, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(f))
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("ladder level %q: want a positive integer", f)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 // newGraph builds an in-memory graph for one phase.
