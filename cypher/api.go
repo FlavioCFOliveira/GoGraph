@@ -1455,6 +1455,13 @@ type Engine struct {
 	// that task's regression tests; no public setter exists and production never
 	// sets it.
 	trustIndexSnapshotForTest bool
+	// mergeRaceRetryHookForTest is a TEST SEAM for rmp #2987, set only by
+	// in-package tests before the engine is shared. When non-nil it runs in
+	// [Engine.runInTxMergeRaceRetry] after attempt number attempt lost a MERGE
+	// UNIQUE creation race and before the pause that precedes the re-run, so a
+	// test can CONSTRUCT the holder's outcome between two attempts. Production
+	// never sets it.
+	mergeRaceRetryHookForTest func(attempt int)
 	// commitDecidedHookForTest and indexDeliveredHookForTest are TEST SEAMS for
 	// the commit-decision bracket (rmp #2936), set only by in-package tests before
 	// the engine is shared. The first runs in [ExplicitTx.Commit] after the
@@ -20337,6 +20344,9 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 // executes exactly as the same statement does unprofiled — one transaction, one
 // commit, the same writes and counters — with the measuring wrapper installed by
 // the write builder (rmp #2790).
+//
+// It is also where an autocommit MERGE that lost a UNIQUE creation race is re-run
+// on a snapshot that sees the winner (rmp #2987); see [Engine.runInTxMergeRaceRetry].
 func (e *Engine) runInTxSessionProfiled(ctx context.Context, sess *lpg.Session[string, float64], query string, params map[string]expr.Value, profile bool) (res *Result, err error) {
 	defer cmetrics.Time("cypher.RunInTx").Stop()
 	defer func() {
@@ -20344,6 +20354,14 @@ func (e *Engine) runInTxSessionProfiled(ctx context.Context, sess *lpg.Session[s
 			cmetrics.IncCounter("cypher.RunInTx.errors", 1)
 		}
 	}()
+	return e.runInTxMergeRaceRetry(ctx, sess, query, params, profile)
+}
+
+// runInTxAttempt is ONE execution of an autocommit statement as its own
+// transaction: parse, plan, open, run, and commit or roll back. Everything it
+// applies is either committed or rolled back before it returns, which is what
+// lets [Engine.runInTxMergeRaceRetry] run it again.
+func (e *Engine) runInTxAttempt(ctx context.Context, sess *lpg.Session[string, float64], query string, params map[string]expr.Value, profile bool) (res *Result, err error) {
 	// walTx holds the store's writer registration from Begin() (below) until it
 	// is rolled back or handed to the Result for Commit/Rollback in
 	// Result.Close. It is declared here, before the recover boundary registers,
@@ -20352,8 +20370,8 @@ func (e *Engine) runInTxSessionProfiled(ctx context.Context, sess *lpg.Session[s
 	// deadlock every future write (ACID atomicity + liveness). On the normal
 	// build-error path the explicit Rollback below still applies.
 	var walTx *txn.Tx[string, float64]
-	// Registered last so it runs first on unwind: a recovered panic rolls back
-	// walTx and sets err before the cypher.RunInTx.errors counter defer above
+	// A recovered panic rolls back walTx and sets err before this attempt returns,
+	// so the cypher.RunInTx.errors counter in [Engine.runInTxSessionProfiled]
 	// observes it. RunInTxAny delegates here, so it is covered transitively.
 	defer recoverWriteQueryPanic(&err, &walTx, "cypher.RunInTx", "cypher.RunInTx.panics")
 	// Honour an already-cancelled/expired context before any synchronous parse,

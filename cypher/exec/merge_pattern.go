@@ -1032,7 +1032,8 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 			// before this loop, so the reservation sees the full label set.
 			if err := op.mutator.SetNodeProperty(key, p.key, p.value); err != nil {
 				if isConstraintViolation(err) {
-					return nil, err
+					// Marked when it is the concurrent-MERGE creation race (rmp #2987).
+					return nil, classifyMergeUniqueViolation(op.ctx, op.mutator, op.labelSrc, nil, n.labels, p, err)
 				}
 				return nil, fmt.Errorf("SetNodeProperty %q.%s: %w", n.varName, p.key, err)
 			}

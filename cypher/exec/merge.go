@@ -570,6 +570,9 @@ func (op *Merge) runOnCreatePathWithProps(childRow Row, props []propLiteral) err
 	}
 	for _, p := range props {
 		if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
+			// A refusal of the pattern's own key by a holder this snapshot cannot
+			// see is the concurrent-MERGE creation race, not a violation (rmp #2987).
+			serr = classifyMergeUniqueViolation(op.ctx, op.mutator, op.labelSrc, op.probe, op.labels, p, serr)
 			return fmt.Errorf("exec: Merge: ON CREATE SetNodeProperty: %w", serr)
 		}
 	}

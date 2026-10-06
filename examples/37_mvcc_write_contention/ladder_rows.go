@@ -1059,12 +1059,11 @@ func rowMergeStorm(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 	}{
 		// L13: autocommit MERGE under UNIQUE, on a WAL-backed engine (the one
 		// cypher/merge_race_test.go pins F10 on) and on an in-memory engine. F10
-		// says every caller succeeds; under this storm callers FAIL with a
-		// ConstraintViolation on both engines (D5, README.md "Defects found"), so
-		// `failed_callers` is reported, not gated, until rmp #2987 is fixed and
-		// restores the gate `every_caller_succeeds`. One node per key stays gated.
-		{"L13", true, false, true, false},
-		{"L13.memory", true, false, false, false},
+		// says every caller succeeds: a loser of the creation race re-runs on a
+		// snapshot that sees the winner and matches it (rmp #2987, D5 in README.md
+		// "Defects found"). Gated on both engines, with one node per key.
+		{"L13", true, false, true, true},
+		{"L13.memory", true, false, false, true},
 		// MG11: explicit MERGE under UNIQUE: one node per key, losers refused.
 		{"MG11", true, true, false, false},
 		// L14: autocommit MERGE, no constraint: no failure, duplicates counted.

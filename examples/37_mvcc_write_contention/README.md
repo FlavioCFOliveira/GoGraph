@@ -578,7 +578,7 @@ open.
   through `Engine.lockSchemaForDDL`, which waits with `mvcc.Gate.StrongLockCtx` and
   returns the context error holding nothing, before any schema, index, constraint or
   WAL state is touched. `dd06-ddl-bounded-by-context` pins it.
-- **D5 — autocommit `MERGE` under UNIQUE fails callers under concurrency (open, rmp #2987;
+- **D5 — autocommit `MERGE` under UNIQUE fails callers under concurrency (rmp #2987;
   found by phase 6, L13).** F10 and `cypher/merge_race_test.go` state that concurrent autocommit
   `MERGE` under a UNIQUE constraint converges on one node with every caller succeeding.
   Reproduction (in-memory engine, `cypher.NewEngine` over `lpg.New`): `CREATE CONSTRAINT
@@ -588,7 +588,12 @@ open.
   repetitions; one node remains). On a WAL-backed engine the 8×1 shape of the existing
   test passes, but the L13 storm (8 or 64 goroutines, 32 or 4 calls each, 4 keys) fails
   16 of 256 and 74 of 256 callers the same way. One node per key always holds and stays
-  gated. L13 reports `failed_callers` as a metric; rmp #2987 restores the gate
+  gated. **Fixed (rmp #2987):** the MERGE operator marks a UNIQUE refusal of its own
+  pattern key whose holder the statement's snapshot cannot see
+  (`cypher/exec/merge_unique_race.go`), and an autocommit statement so marked is re-run,
+  after waiting for every allocated commit to become visible, on a snapshot that sees the
+  winner (`cypher/merge_unique_retry.go`); the re-run is bounded and context-aware. A
+  statement of an explicit transaction is not re-run (MG11). L13 and L13.memory gate
   `every_caller_succeeds`.
 - **D6 — `DETACH DELETE` of a node with two parallel in-edges from one source leaves one
   arc behind (open, rmp #2988; found by phase 6, L15).** Reproduction: `CREATE (:Hub {id:1}), (:X
@@ -711,7 +716,7 @@ self-conflict streak gate. The binary runs the phase after phase 5 with
 | `L09` | L09 (soak) | 1 032 read transactions held while the graph churns | `UnregisteredSnapshots` > 0, every read correct, released after close |
 | `L10.<arm>`, `L20.<arm>` | L10, L20 | WAL-backed store (`store.Open`), disjoint writers, a checkpointer triggered back to back | Final = acknowledged; session arm 0 self-conflicts; checkpoints ran; commit tail during a checkpoint below `hangBudget`; storage size before and after |
 | `L11.<arm>` | L11, L12 | In-memory disjoint writers, session and sessionless | Session arm 0 self-conflicts (and so 0 conflicts) |
-| `L13`, `L13.memory`, `MG11`, `L14` | L13, MG11, L14 | `MERGE` storms on 4 keys: autocommit under UNIQUE (WAL-backed and in-memory), explicit under UNIQUE, autocommit without a constraint | One node per key under UNIQUE; every failure typed; L14 every caller succeeds, duplicates counted. L13's "every caller succeeds" is a reported metric (`failed_callers`) until rmp #2987 (D5) |
+| `L13`, `L13.memory`, `MG11`, `L14` | L13, MG11, L14 | `MERGE` storms on 4 keys: autocommit under UNIQUE (WAL-backed and in-memory), explicit under UNIQUE, autocommit without a constraint | One node per key under UNIQUE; every failure typed; L13 and L14 every caller succeeds (D5), L14 duplicates counted |
 | `L15`, `L16` | L15, L16 | Edge `MERGE`/delete on hubs and `DETACH DELETE` + recreate of hubs; read transactions repeat a one-hop and a `*1..3` traversal | No dangling arc at quiescence; repeated traversals identical |
 | `L17` | L17 | 8 transactions hold 16 000 (soak: 150 000) uncommitted nodes; counts; a 9 M-row statement cancelled after 2 ms | Count = committed only; cancelled statement returns `context.Canceled` within 1 s |
 | `L18` | L18 | Property writes, edge creates and `DETACH DELETE`s, 50% rolled back | Total <= Bound after quiescence; 0 dangling arcs; every hub writable by a lone writer |
