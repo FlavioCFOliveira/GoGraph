@@ -1,0 +1,94 @@
+spec se02-straggler-holds-frontier: 2 sessions, 2 permutations
+# SE02. s0 writes s and reserves its commit instant without publishing it (the commit
+# hold, the straggler). s1 then commits t1 through a cypher.Session (autocommit CREATE): the commit acknowledges without
+# waiting on s0. A sessionless read excludes t1 (the frontier is held below it), and
+# in_flight_commits is 2. s1's session read waits in the background for its own
+# commit (sessions_waiting = 1) and returns only when s0 publishes; then s's write and
+# t1 become visible in one step (F11). The control interleaving publishes s0 first.
+
+starting permutation: s0w s0a s1w s1lag s1fr s1aw s1wait s0p s1rel s1seen
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1w: <cypher.Session, deadline 30s> CREATE (n:N {name:'t1', v:1}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1lag: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |0
+(1 row)
+step s1fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+2                |0               
+(1 row)
+step s1aw: <start cypher.Session in the background> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+step s1wait: <background wait: sessions_waiting, returned>
+sessions_waiting|returned
+----------------+--------
+1               |false   
+(1 row)
+step s0p: lpg: Session.EndVersionedTx
+step s1rel: <collect the background statement's rows>
+name|v
+----+-
+"s" |1
+"t1"|1
+(2 rows)
+step s1seen: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |1
+"t1"|1
+(2 rows)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+
+starting permutation: s0w s0a s0p s1w s1lag s1fr s1aw s1wait s1rel s1seen
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0p: lpg: Session.EndVersionedTx
+step s1w: <cypher.Session, deadline 30s> CREATE (n:N {name:'t1', v:1}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1lag: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |1
+"t1"|1
+(2 rows)
+step s1fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s1aw: <start cypher.Session in the background> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+step s1wait: <background wait: sessions_waiting, returned>
+sessions_waiting|returned
+----------------+--------
+0               |true    
+(1 row)
+step s1rel: <collect the background statement's rows>
+name|v
+----+-
+"s" |1
+"t1"|1
+(2 rows)
+step s1seen: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"s" |1
+"t1"|1
+(2 rows)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)

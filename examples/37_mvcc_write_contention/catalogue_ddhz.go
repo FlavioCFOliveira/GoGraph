@@ -1286,7 +1286,7 @@ func se03(w *world) *isolationtest.Spec {
 			"commits: the COMMIT is refused by the constraint. s1 commits x.v = 1 in an explicit\n" +
 			"transaction. A sessionless read sees s1's commit, and no commit is left in flight\n" +
 			"(InFlightCommits = 0) after either: the refused commit does not hold the frontier.\n" +
-			"The injected-fsync arm needs a WAL-backed engine and is #2934's.",
+			"The fsync arm is se03-abandoned-fsync-does-not-stall-frontier, on the commit hold.",
 		Setup: steps(q("ddl", notNullP), q("mk", "CREATE (:Item {name:'x', v:0})")),
 		Sessions: []*isolationtest.Session{
 			{Name: "s0", Setup: steps(begin("s0b")), Steps: steps(

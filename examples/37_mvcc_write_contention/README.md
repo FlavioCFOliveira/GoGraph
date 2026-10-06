@@ -244,8 +244,9 @@ writer ends the phase with a non-zero count instead of hanging the run.
 `docs/mvcc-scenario-catalogue.md`, `catalogue_mgix.go` its MERGE/UNIQUE (§1.3) and
 index (§1.4) rows, `catalogue_ddhz.go` its DDL-vs-DML (§1.5), abort (§1.6) and
 horizon, read-only-transaction and session (§1.7) rows, and `catalogue_rigg.go` its
-referential-integrity and graph-shape (§1.8) rows and the frontier proposals FP01-FP03
-(§5), from PostgreSQL's isolation specs and InnoDB's tests. The PostgreSQL scenarios are re-implemented, not copied. Each row is an
+referential-integrity and graph-shape (§1.8) rows, the frontier proposals FP01-FP03
+(§5) and the frontier rows of §1.7 that need a held commit (SE02, SE04 and SE03's
+fsync arm), from PostgreSQL's isolation specs and InnoDB's tests. The PostgreSQL scenarios are re-implemented, not copied. Each row is an
 `internal/isolationtest` spec run over **every** order-preserving interleaving of its
 steps (or over named interleavings where the catalogue requires them) and pinned by a
 golden transcript. The transcript ends with a `final` block — the state the
@@ -296,8 +297,9 @@ against its golden by `TestCatalogue`.
   increments), HZ01 (versions rise while the reader is held and fall after), RO01
   (repeatable read) and RO03 (parallel count = scan) also assert a property on every
   step, independently of the golden. Every RI and GG row asserts no dangling edge; GG01,
-  GG03 and GG04 also assert repeatable reads, and GG03 and GG04 seek = scan; FP02
-  asserts that its background wait was parked behind the held straggler.
+  GG03 and GG04 also assert repeatable reads, and GG03 and GG04 seek = scan; FP02,
+  SE02 and SE04 assert that their background wait was parked behind the held
+  straggler.
 - **Go steps that drive the engine (§1.5-§1.7).** A sessionless read (SE01, SE03), a
   statement cancelled while it executes (AB02: the statement parks in a procedure,
   `cat.hold`, registered on every engine, and is cancelled there), a client retry
@@ -316,13 +318,16 @@ against its golden by `TestCatalogue`.
   (variable-length traversal), GG03 (degree and relationship count store) and GG05
   (delete everything) are Cypher only: the `lpg` API has no traversal operator, no
   relationship count store and no bulk delete.
-- **The commit hold (FP01-FP03).** `lpg.Graph.AllocateCommitTS` reserves a
+- **The commit hold (FP01-FP03, SE02, SE04, SE03's fsync arm).** `lpg.Graph.AllocateCommitTS` reserves a
   transaction's commit instant without publishing it — the first half of the WAL commit
   path, which allocates before its fsync and publishes after it. Called on an in-memory
   graph, with the transaction's `EndVersionedTx` in a later step, it holds a commit
   between allocation and publication at a fixed point of the interleaving. The
   straggler is therefore always an `lpg` transaction; the later commits and the reads
-  run through either driver.
+  run through either driver. A session statement that must wait for the straggler
+  (SE02, SE04) runs on a background goroutine: a `waiting` probe reports it parked
+  (`SessionsWaiting` = 1, not returned) and a later step collects its result, so no
+  step of the transcript blocks.
 - **COMMIT of a poisoned transaction.** The engine refuses it with `ErrTxPoisoned` and
   leaves the transaction open for the caller's `ROLLBACK`. The harness's COMMIT
   control now performs that rollback and still reports the COMMIT's error
@@ -344,6 +349,11 @@ against its golden by `TestCatalogue`.
   that domain (`'v999x'`, `k = 16`).
 
 ### Rows
+
+The catalogue's #2933 section has 89 rows. 88 are pinned: 84 by a catalogue spec and
+four (WW01, SK01, SK06, SK09) by goldens the harness already had. One is deferred:
+MG11, to random load (#2934), because no hook exists inside `MERGE` between its
+probe and its create (G5). The three §5 proposals FP01-FP03 are pinned as well.
 
 Expected outcomes are snapshot isolation (F1), not serializable snapshot isolation:
 GoGraph permits write skew and refuses a write-write conflict.
@@ -425,9 +435,9 @@ GoGraph permits write skew and refuses a write-write conflict.
 | RO02 | `ro02-read-view-before-two-writers`, `-lpg` | both | MY `innodb-read-view` | The reader sees neither commit; a new reader sees both | As expected in all 90 interleavings. |
 | RO03 | `ro03-read-only-tx-parallel-count` | Cypher | PG `serializable-parallel` | Same answer as the serial path | As expected. The engine's `ParallelScanThreshold` is lowered to 2 048 over 3 000 nodes; `TestRO03TakesTheParallelPath` proves the count is planned as `ParallelCountScan`. |
 | SE01 | `se01-session-reads-own-commit` | Cypher | `docs/isolation-design.md:236-248`; PG-rec `057_snapshot_commit_race` | The session sees its commit | As expected. In a serial script the frontier is always contiguous, so the sessionless reader sees it too; the case where they differ needs SE02's straggler. |
-| SE02 | — | — | PG-rec `057_snapshot_commit_race`, PG-inj `repack_commit_race`; MY `binlog_gtid/binlog_group_commit_gtid_order`, `binlog/binlog_after_commit_order_info_schema`, `hp_deadlock` | Sessionless read excludes T1; session read waits for T0 | **Not implemented: random load, #2934.** No exported commit-hold seam (G1, H2 below). |
-| SE03 | `se03-abandoned-commit-does-not-stall-frontier` (NOT NULL arm) | Cypher | `docs/isolation-design.md:389-395`; MY `binlog/binlog_group_commit_flush_crash` | T1 visible to a sessionless reader; `InFlightCommits` returns to 0 | As expected. The injected-fsync arm needs H2 and is **random load, #2934**. |
-| SE04 | — | — | `docs/isolation-design.md:141-150,199-213` | Sessionless self-write may be refused; session write is not | **Not implemented: random load, #2934.** It is SE02 plus a rewrite, so it needs the same seam. |
+| SE02 | `se02-straggler-holds-frontier`, `-lpg` | both | PG-rec `057_snapshot_commit_race`, PG-inj `repack_commit_race`; MY `binlog_gtid/binlog_group_commit_gtid_order`, `binlog/binlog_after_commit_order_info_schema`, `hp_deadlock` | Sessionless read excludes T1; session read waits for T0 | As expected, on the commit hold: T1's commit acknowledges while T0 is held; a sessionless read sees only s at its old value; `InFlightCommits` is 2; T1's session read (`cypher.Session.RunInTx`, `lpg.Session.Await`) is parked (`SessionsWaiting` = 1) and returns only when T0 publishes, after which T0's write and t1 are visible together. The control interleaving publishes T0 first. |
+| SE03 | `se03-abandoned-commit-does-not-stall-frontier` (NOT NULL arm), `se03-abandoned-fsync-does-not-stall-frontier` (fsync arm) | Cypher | `docs/isolation-design.md:389-395`; MY `binlog/binlog_group_commit_flush_crash` | T1 visible to a sessionless reader; `InFlightCommits` returns to 0 | As expected in both arms. The fsync arm is the WAL commit path's failure on the commit hold: T0 reserves its instant and then abandons it (`WriteTx.Abandon`, then `EndVersionedTx`). In all 35 interleavings `InFlightCommits` is 0 once T0 has abandoned and T0's write is never visible; T1's commit is hidden from a sessionless reader only while T0's lower instant is still held (3 interleavings). |
+| SE04 | `se04-self-conflict-through-frontier`, `-lpg` | both | `docs/isolation-design.md:141-150,199-213` | Sessionless self-write may be refused; session write is not | As expected, on the commit hold: with T0 held, T1's sessionless rewrite of its own node is refused with a serialization conflict (its snapshot is below T1's own commit); its session rewrite waits for T0 and then commits. With T0 published first both rewrites commit. |
 | RI01 | `ri01-edge-create-vs-endpoint-delete`, `-lpg` | both | PG `fk-snapshot-2`, `fk-concurrent-pk-upd`, `fk-partitioned-1`, PG-inj `ri_fastpath_snapshot` | Older-snapshot edge create refused after the endpoint delete commits | As expected in all 6 interleavings, through both drivers. When the edge create runs first, the Cypher `DETACH DELETE` returns its row and is refused at `COMMIT`; the `lpg` removal is refused at the statement. No dangling edge. |
 | RI02 | `ri02-edge-into-deleted-node`, `ri02-edge-out-of-deleted-node`, both `-lpg` | both | PG `fk-snapshot`, `fk-partitioned-1`; MY `update-cascade` | Later writer refused; no edge to a dead node | As expected for both endpoints, in every order. |
 | RI03 | `ri03-hub-same-target`, `ri03-hub-same-source`, both `-lpg` | both | PG `fk-contention`; MY `innodb_cats` | **G8**: the code says the second appender is refused; a comment said appends never conflict | **Second appender refused**, same target and same source, in every order, through both drivers: the code is right and the comment was stale (G8 below). PG's foreign-key contention waits instead. |
@@ -439,7 +449,7 @@ GoGraph permits write skew and refuses a write-write conflict.
 | GG03 | `gg03-degree-and-count-at-snapshot` | Cypher | GoGraph-specific (#2081) | Degree and count equal the snapshot's | As expected in all 21 interleavings; the count-store answer equals a typed scan in every read. |
 | GG04 | `gg04-label-churn-at-pinned-snapshot`, `-lpg` | both | GoGraph-specific (#2687) | Pinned reader unchanged | As expected: 10 labelled nodes at the snapshot in every interleaving; label store = label scan. |
 | GG05 | `gg05-delete-everything-vs-insert` | Cypher | PG `truncate-conflict` (adapted) | The new node survives | As expected in every order. |
-| GG06 | `gg06-delete-disjoint-parallel-edges`, `gg06-delete-self-loop-and-parallel-edge`, both `-lpg`; `gg06-delete-same-edge-instance-lpg` | both | GoGraph #2018 | Different instances commit; same instance: second refused | Same instance through `lpg`: as expected. **Different instances: the second deleter is refused** (at `COMMIT` through Cypher, at the statement through `lpg`): every instance has source `a`, and an arc removal claims its source node exclusively (F4). The refusal applies nothing. **The Cypher same-instance arm is not in the catalogue: it exposes defect D4 below**, and a golden would pin it as correct. |
+| GG06 | `gg06-delete-disjoint-parallel-edges`, `gg06-delete-self-loop-and-parallel-edge`, `gg06-delete-same-edge-instance`, each also `-lpg` | both | GoGraph #2018 | Different instances commit; same instance: second refused | Same instance: as expected through both drivers; through Cypher exactly one delete commits and the other is refused at `COMMIT`, in all 6 orders (D4, fixed by rmp #2986). **Different instances: the second deleter is refused** (at `COMMIT` through Cypher, at the statement through `lpg`): every instance has source `a`, and an arc removal claims its source node exclusively (F4). The refusal applies nothing. |
 | FP01 | `fp01-later-commits-ack-behind-held-straggler`, `-lpg` | both | GoGraph #2932 (catalogue §5) | 2 048 later commits acknowledge while one commit is held; one-step catch-up | As expected: 8 goroutines × 256 commits all return while s0 is held (no `<waiting ...>`), none is visible to a sessionless reader, `InFlightCommits` is 2 049, and all 2 048 become visible together when s0 publishes. The control interleaving runs the fan before the hold. |
 | FP02 | `fp02-straggler-abandons-lpg` | lpg | GoGraph (catalogue §5); MY `binlog/binlog_group_commit_flush_crash` | Frontier catches up; the waiting session is released | As expected: the session wait is parked behind the held straggler (`SessionsWaiting` = 1); when the straggler abandons (`WriteTx.Abandon`, the fsync-failure path), the wait returns with no error, t1 is visible, s's write is not, and no commit is in flight. Through `lpg` only: the hold is an `lpg` transaction and Cypher has no abandon of an allocated commit. |
 | FP03 | `fp03-session-read-bounded-by-context`, `fp03-session-wait-bounded-by-context-lpg` | both | GoGraph (catalogue §5); CLAUDE.md context-aware blocking | A session read behind a held straggler returns the context error | As expected: with a 50 ms deadline, `cypher.Session.RunInTx` and `lpg.Session.Await` return `context deadline exceeded`; after the straggler publishes the same read returns t1. |
@@ -569,7 +579,7 @@ open.
   returns the context error holding nothing, before any schema, index, constraint or
   WAL state is touched. `dd06-ddl-bounded-by-context` pins it.
 - **D4 — a Cypher `DELETE` of a relationship another transaction removed is a silent
-  no-op (open).** Reproduction: `CREATE (a:N {name:'a'})-[:R {id:1}]->(b:N {name:'b'}),
+  no-op (fixed, rmp #2986).** Reproduction: `CREATE (a:N {name:'a'})-[:R {id:1}]->(b:N {name:'b'}),
   (a)-[:R {id:2}]->(b), (a)-[:R {id:3}]->(a)`; T1 and T2 `BeginTx`; T1
   `MATCH (:N {name:'a'})-[r:R {id:1}]->() DELETE r RETURN count(*)` → 1; T2 the same
   statement → 1; T2 `Commit` → ok; T1 `Rollback`. Observed: relationship id 1 still
@@ -582,7 +592,11 @@ open.
   the handle is stored in the PRESENT adjacency (`relStoredOrder`); a handle a peer
   already removed is treated as "deleted by an earlier row of this statement" (rmp
   #2940) and nothing is called, so no conflict is recorded — the shape of rmp #2943.
-  The Cypher same-instance arm of GG06 is kept out of the catalogue until it is fixed.
+  **Fixed (rmp #2986):** the removal by handle is issued in that case too; the
+  engine's first-updater-wins check on the endpoints runs before its presence probe,
+  so a peer's removal records the conflict, while a removal this transaction already
+  made finds the claim held and removes nothing. `cypher/rel_delete_peer_conflict_test.go`
+  pins it on both engines, and `gg06-delete-same-edge-instance` is now in the catalogue.
 
 ### Gaps pinned
 
@@ -592,12 +606,12 @@ open.
   result). It can hold T0 between its timestamp allocation and its publication, but
   one WAL writer runs one fsync at a time: a committer whose frames follow the held
   leader's waits for the leader to finish (`store/wal/writer.go`, `syncToLocked`), so
-  T1 can never acknowledge while T0 is held, and SE02's shape cannot be built from it. SE02, SE04 and SE03's fsync arm are
-  left to random load (#2934). Stage C2 found a second route that stage C1 did not:
+  T1 can never acknowledge while T0 is held, and SE02's shape cannot be built from it.
+  **G1 is refuted**: frontier scenarios are not blocked by a missing hook.
   `lpg.Graph.AllocateCommitTS` reserves a commit instant without publishing it, on an
-  in-memory graph, and the transaction's later `EndVersionedTx` publishes or abandons
-  it. FP01-FP03 use it as the hold. SE02, SE04 and SE03's fsync arm are still assigned
-  to #2934; whether to build them on this hold is open.
+  in-memory graph, and the transaction's later `EndVersionedTx` publishes it or, after
+  `WriteTx.Abandon`, abandons it. FP01-FP03, SE02, SE04 and SE03's fsync arm are built
+  on it, deterministically.
 - **G2** (vacuum control): resolved with a drain `Hook` at a fixed point. The
   withdrawal of an aborted version now runs at abort (`withdrawAbortedNow`), so F5's
   race is narrower than the catalogue states; the no-drain arm is still not pinned.

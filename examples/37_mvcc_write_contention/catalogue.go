@@ -7,8 +7,9 @@ package main
 // interleavings) and pinned by a golden transcript under testdata/. The rows,
 // their sources and their expected snapshot-isolation outcomes come from
 // docs/mvcc-scenario-catalogue.md §1.1 to §1.8 and §5 (§1.3 and §1.4 in
-// catalogue_mgix.go, §1.5 to §1.7 in catalogue_ddhz.go, §1.8 and the §5 rows
-// FP01-FP03 in catalogue_rigg.go); README.md maps each row to its
+// catalogue_mgix.go, §1.5 to §1.7 in catalogue_ddhz.go, §1.8, the §5 rows
+// FP01-FP03 and the frontier rows SE02, SE04 and SE03's fsync arm in
+// catalogue_rigg.go); README.md maps each row to its
 // PostgreSQL or InnoDB source and states where GoGraph's outcome differs and why.
 //
 // # Two drivers over one graph (H3)
@@ -539,7 +540,12 @@ func catalogue() []scenario {
 		{ID: "RO02", Driver: driverLPG, build: ro02LPG},
 		{ID: "RO03", Driver: driverCypher, build: ro03, check: fastPathEqualsScan},
 		{ID: "SE01", Driver: driverCypher, build: se01},
+		{ID: "SE02", Driver: driverCypher, build: se02Cypher, check: parkedIn("s1wait", se02Held)},
+		{ID: "SE02", Driver: driverLPG, build: se02LPG, check: parkedIn("s1wait", "s0w s0a s1w s1lag0 s1lag s1fr s1aw s1wait s0p s1rel s1seen")},
 		{ID: "SE03", Driver: driverCypher, build: se03},
+		{ID: "SE03", Driver: driverCypher, build: se03Fsync},
+		{ID: "SE04", Driver: driverCypher, build: se04Cypher, check: parkedIn("s1wait", "s0w s0a s1w s1sl s1aw s1wait s0p s1rel")},
+		{ID: "SE04", Driver: driverLPG, build: se04LPG, check: parkedIn("s1wait", "s0w s0a s1w s1c s1sl s1aw s1wait s0p s1rel")},
 		{ID: "RI01", Driver: driverCypher, build: ri01Cypher, check: noDanglingEdge},
 		{ID: "RI01", Driver: driverLPG, build: ri01LPG, check: noDanglingEdge},
 		{ID: "RI02", Driver: driverCypher, build: ri02IntoCypher, check: noDanglingEdge},
@@ -568,6 +574,7 @@ func catalogue() []scenario {
 		{ID: "GG04", Driver: driverLPG, build: gg04LPG, check: allOf(noDanglingEdge, sameRows([2]string{"s0c1", "s0c2"}))},
 		{ID: "GG05", Driver: driverCypher, build: gg05, check: noDanglingEdge},
 		{ID: "GG06", Driver: driverCypher, build: gg06Disjoint, check: noDanglingEdge},
+		{ID: "GG06", Driver: driverCypher, build: gg06Same, check: noDanglingEdge},
 		{ID: "GG06", Driver: driverLPG, build: gg06DisjointLPG, check: noDanglingEdge},
 		{ID: "GG06", Driver: driverLPG, build: gg06SameLPG, check: noDanglingEdge},
 		{ID: "GG06", Driver: driverCypher, build: gg06SelfLoop, check: noDanglingEdge},

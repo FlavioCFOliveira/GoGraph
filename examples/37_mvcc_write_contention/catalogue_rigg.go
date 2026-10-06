@@ -32,8 +32,9 @@ package main
 // before its fsync and publishes after it. Called on an in-memory graph and
 // followed by a later step's EndVersionedTx, it holds a commit between timestamp
 // allocation and publication at a fixed point of the interleaving — the seam the
-// FP rows need. The straggler is therefore always an lpg transaction; the later
-// commits and the reads that observe the frontier run through either driver.
+// FP rows and SE02, SE04 and SE03's fsync arm need. The straggler is therefore
+// always an lpg transaction; the later commits and the reads that observe the
+// frontier run through either driver.
 
 import (
 	"context"
@@ -799,6 +800,7 @@ func gg06LPG(name, arm string, id1, id2 int) func(*world) *isolationtest.Spec {
 
 var (
 	gg06Disjoint    = gg06Cypher("gg06-delete-disjoint-parallel-edges", "disjoint parallel edges", 1, 2)
+	gg06Same        = gg06Cypher("gg06-delete-same-edge-instance", "same instance", 1, 1)
 	gg06SelfLoop    = gg06Cypher("gg06-delete-self-loop-and-parallel-edge", "self-loop and parallel edge", 3, 1)
 	gg06DisjointLPG = gg06LPG("gg06-delete-disjoint-parallel-edges-lpg", "disjoint parallel edges", 1, 2)
 	gg06SameLPG     = gg06LPG("gg06-delete-same-edge-instance-lpg", "same instance", 1, 1)
@@ -954,6 +956,9 @@ var (
 type awaiter struct {
 	done   chan error
 	cancel context.CancelFunc
+	// cols and rows are what a background statement returned ([awaiter.sessionQuery]).
+	cols []string
+	rows [][]string
 }
 
 func (w *world) newAwaiter() *awaiter {
@@ -1052,17 +1057,25 @@ func fp02(w *world) *isolationtest.Spec {
 // fp02Released asserts the parked wait was observed parked in the held
 // interleaving: the probe saw it registered and not returned.
 func fp02Released() isolationtest.Observer {
-	return func(o isolationtest.Observation) error {
-		if o.Step != "s1wait" || o.Permutation != "s0w s0a s1b s1w s1c s1aw s1wait s0x s1rel s1r" {
+	return parkedIn("s1wait", "s0w s0a s1b s1w s1c s1aw s1wait s0x s1rel s1r")()
+}
+
+// parkedIn returns a property asserting that the waiting probe step, in the
+// interleaving perm, saw the background wait registered and not returned.
+func parkedIn(step, perm string) func() isolationtest.Observer {
+	return func() isolationtest.Observer {
+		return func(o isolationtest.Observation) error {
+			if o.Step != step || o.Permutation != perm {
+				return nil
+			}
+			if o.Err != nil {
+				return fmt.Errorf("the wait probe failed: %w", o.Err)
+			}
+			if len(o.Rows) != 1 || o.Rows[0][0] != "1" || o.Rows[0][1] != "false" {
+				return fmt.Errorf("the wait behind the held straggler was not parked: %v", o.Rows)
+			}
 			return nil
 		}
-		if o.Err != nil {
-			return fmt.Errorf("the wait probe failed: %w", o.Err)
-		}
-		if len(o.Rows) != 1 || o.Rows[0][0] != "1" || o.Rows[0][1] != "false" {
-			return fmt.Errorf("the wait behind the held straggler was not parked: %v", o.Rows)
-		}
-		return nil
 	}
 }
 
@@ -1148,5 +1161,232 @@ func fp03Cypher(w *world) *isolationtest.Spec {
 			"s0w s0a s0p s1w s1r s1r2",
 		),
 		Final: steps(w.frontier("ffr"), w.sessionless("final", "MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name")),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// §1.7 SE02, SE04 and SE03's fsync arm, on the commit hold.
+
+// launch starts fn on its own goroutine, bounded by awaitOpen, so a later step
+// can observe it parked ([awaiter.waiting]) and collect what it returned
+// ([awaiter.result], [awaiter.collect]).
+func (a *awaiter) launch(fn func(ctx context.Context) error) {
+	ctx, cancel := context.WithTimeout(context.Background(), awaitOpen)
+	a.done, a.cancel = make(chan error, 1), cancel
+	go func() { a.done <- fn(ctx) }()
+}
+
+// sessionQuery launches query through the cypher.Session cs in the background
+// and keeps its rows for [awaiter.collect]. The session waits for its own
+// commits to become visible before the statement takes its snapshot (F11).
+func (a *awaiter) sessionQuery(name string, cs *cypherSession, query string) isolationtest.Step {
+	return isolationtest.Step{Name: name, Label: "<start cypher.Session in the background> " + query,
+		Hook: func(context.Context) error {
+			sess := cs.s
+			a.launch(func(ctx context.Context) error {
+				res, err := sess.RunInTx(ctx, query, nil)
+				if err != nil {
+					return err
+				}
+				// Written before the send on a.done that collect receives.
+				a.cols, a.rows = renderRows(res)
+				return errors.Join(res.Err(), res.Close())
+			})
+			return nil
+		}}
+}
+
+// sessionSet launches key.prop = v through s's lpg.Session in the background: a
+// write transaction that waits for the session's own commits first (F11).
+func (a *awaiter) sessionSet(name string, s *lpgSession, key, prop string, v int64) isolationtest.Step {
+	label := fmt.Sprintf("<start lpg: Session.ApplyVersionedCtx in the background> SetNodeProperty(%s, %s, %d)", key, prop, v)
+	return isolationtest.Step{Name: name, Label: label, Hook: func(context.Context) error {
+		if s.sess == nil {
+			return errors.New("lpg session has made no commit")
+		}
+		sess, g := s.sess, s.w.g
+		a.launch(func(ctx context.Context) error {
+			return sess.ApplyVersionedCtx(ctx, func(tx lpg.WriteTx) error {
+				return g.Writer(tx).SetNodeProperty(key, prop, lpg.Int64Value(v))
+			})
+		})
+		return nil
+	}}
+}
+
+// collect waits for the background statement and reports its rows and error.
+func (a *awaiter) collect(name string) isolationtest.Step {
+	return isolationtest.Step{Name: name, Label: "<collect the background statement's rows>",
+		Probe: func(context.Context) ([]string, [][]string, error) {
+			if a.cancel == nil {
+				return nil, nil, errors.New("no background statement")
+			}
+			err := <-a.done
+			a.cancel()
+			a.cancel = nil
+			return a.cols, a.rows, err
+		}}
+}
+
+// renderRows drains res into rendered rows, as the sessionless step does.
+func renderRows(res *cypher.Result) ([]string, [][]string) {
+	cols := res.Columns()
+	var rows [][]string
+	for res.Next() {
+		row := make([]string, len(cols))
+		for i := range cols {
+			if v := res.ValueAt(i); v != nil {
+				row[i] = v.String()
+			} else {
+				row[i] = "null"
+			}
+		}
+		rows = append(rows, row)
+	}
+	return cols, rows
+}
+
+// seNodes lists every node of an SE graph by name.
+const seNodes = "MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name"
+
+// se02Held and se02Control are SE02's named interleavings: the held
+// one runs s1 entirely behind s0's reserved instant and publishes s0 while s1's
+// session statement is parked; the control publishes s0 before s1 starts.
+const (
+	se02Held    = "s0w s0a s1w s1lag s1fr s1aw s1wait s0p s1rel s1seen"
+	se02Control = "s0w s0a s0p s1w s1lag s1fr s1aw s1wait s1rel s1seen"
+)
+
+const se02Doc = "SE02. s0 writes s and reserves its commit instant without publishing it (the commit\n" +
+	"hold, the straggler). s1 then commits t1%s: the commit acknowledges without\n" +
+	"waiting on s0. A sessionless read excludes t1 (the frontier is held below it), and\n" +
+	"in_flight_commits is 2. s1's session read waits in the background for its own\n" +
+	"commit (sessions_waiting = 1) and returns only when s0 publishes; then s's write and\n" +
+	"t1 become visible in one step (F11). The control interleaving publishes s0 first."
+
+func se02Cypher(w *world) *isolationtest.Spec {
+	s0, cs := w.lpgSession(), w.cypherSession()
+	a := w.newAwaiter()
+	return &isolationtest.Spec{
+		Name:  "se02-straggler-holds-frontier",
+		Doc:   fmt.Sprintf(se02Doc, " through a cypher.Session (autocommit CREATE)"),
+		Setup: steps(w.lpgFixture(lpgNode{key: "s", labels: []string{"S"}, props: map[string]int64{"v": 0}})),
+		Sessions: []*isolationtest.Session{
+			{Name: "s0", Setup: steps(s0.begin("s0b")), Steps: steps(s0.set("s0w", "s", "v", 1), s0.allocate("s0a"), s0.commit("s0p"))},
+			{Name: "s1", Steps: steps(
+				cs.run("s1w", "CREATE (n:N {name:'t1', v:1}) RETURN n.name AS name", awaitOpen),
+				w.sessionless("s1lag", seNodes), w.frontier("s1fr"),
+				a.sessionQuery("s1aw", cs, seNodes), a.waiting("s1wait", w), a.collect("s1rel"),
+				w.sessionless("s1seen", seNodes))},
+		},
+		Permutations: perms(se02Held, se02Control),
+		Final:        steps(w.frontier("ffr")),
+	}
+}
+
+func se02LPG(w *world) *isolationtest.Spec {
+	s0, s1 := w.lpgSession(), w.lpgSession()
+	a := w.newAwaiter()
+	return &isolationtest.Spec{
+		Name:  "se02-straggler-holds-frontier-lpg",
+		Doc:   fmt.Sprintf(se02Doc, " through a lpg.Session") + "\nThe session read is lpg Session.Await.",
+		Setup: steps(w.lpgFixture(lpgNode{key: "s", labels: []string{"S"}, props: map[string]int64{"v": 0}})),
+		Sessions: []*isolationtest.Session{
+			{Name: "s0", Setup: steps(s0.begin("s0b")), Steps: steps(s0.set("s0w", "s", "v", 1), s0.allocate("s0a"), s0.commit("s0p"))},
+			{Name: "s1", Setup: steps(s1.begin("s1b")), Steps: steps(
+				s1.createNode("s1w", "t1", 1), s1.commit("s1lag0"),
+				w.sessionless("s1lag", seNodes), w.frontier("s1fr"),
+				a.start("s1aw", s1), a.waiting("s1wait", w), a.result("s1rel"),
+				w.sessionless("s1seen", seNodes))},
+		},
+		Permutations: perms(
+			"s0w s0a s1w s1lag0 s1lag s1fr s1aw s1wait s0p s1rel s1seen",
+			"s0w s0a s0p s1w s1lag0 s1lag s1fr s1aw s1wait s1rel s1seen",
+		),
+		Final: steps(w.frontier("ffr")),
+	}
+}
+
+const se04Doc = "SE04. s0 holds its commit instant (the commit hold). s1 sets t.v = 1%s and the\n" +
+	"commit acknowledges. s1 then rewrites its own node twice: SESSIONLESS (t.v = 2), whose\n" +
+	"snapshot is the held frontier, below s1's own commit, so it finds s1's version\n" +
+	"committed after its snapshot and is refused (first-updater-wins, F2); and through\n" +
+	"its SESSION (t.v = 3), which waits in the background for its own commit and, once\n" +
+	"s0 publishes, is not refused. The control interleaving publishes s0 first: both\n" +
+	"rewrites succeed."
+
+func se04Fixture(w *world) isolationtest.Step {
+	return w.lpgFixture(
+		lpgNode{key: "s", labels: []string{"S"}, props: map[string]int64{"v": 0}},
+		lpgNode{key: "t", labels: []string{"T"}, props: map[string]int64{"v": 0}})
+}
+
+func se04Cypher(w *world) *isolationtest.Spec {
+	s0, cs := w.lpgSession(), w.cypherSession()
+	a := w.newAwaiter()
+	return &isolationtest.Spec{
+		Name:  "se04-self-conflict-through-frontier",
+		Doc:   fmt.Sprintf(se04Doc, " through a cypher.Session"),
+		Setup: steps(se04Fixture(w)),
+		Sessions: []*isolationtest.Session{
+			{Name: "s0", Setup: steps(s0.begin("s0b")), Steps: steps(s0.set("s0w", "s", "v", 1), s0.allocate("s0a"), s0.commit("s0p"))},
+			{Name: "s1", Steps: steps(
+				cs.run("s1w", "MATCH (n:T {name:'t'}) SET n.v = 1 RETURN n.v AS v", awaitOpen),
+				w.sessionless("s1sl", "MATCH (n:T {name:'t'}) SET n.v = 2 RETURN n.v AS v"),
+				a.sessionQuery("s1aw", cs, "MATCH (n:T {name:'t'}) SET n.v = 3 RETURN n.v AS v"),
+				a.waiting("s1wait", w), a.collect("s1rel"))},
+		},
+		Permutations: perms(
+			"s0w s0a s1w s1sl s1aw s1wait s0p s1rel",
+			"s0w s0a s0p s1w s1sl s1aw s1wait s1rel",
+		),
+		Final: steps(w.frontier("ffr"), w.sessionless("final", seNodes)),
+	}
+}
+
+func se04LPG(w *world) *isolationtest.Spec {
+	s0, s1 := w.lpgSession(), w.lpgSession()
+	a := w.newAwaiter()
+	return &isolationtest.Spec{
+		Name:  "se04-self-conflict-through-frontier-lpg",
+		Doc:   fmt.Sprintf(se04Doc, " through a lpg.Session") + "\nThe sessionless rewrite is Graph.ApplyVersionedCtx; the session rewrite is Session.ApplyVersionedCtx.",
+		Setup: steps(se04Fixture(w)),
+		Sessions: []*isolationtest.Session{
+			{Name: "s0", Setup: steps(s0.begin("s0b")), Steps: steps(s0.set("s0w", "s", "v", 1), s0.allocate("s0a"), s0.commit("s0p"))},
+			{Name: "s1", Setup: steps(s1.begin("s1b")), Steps: steps(
+				s1.set("s1w", "t", "v", 1), s1.commit("s1c"),
+				s1.set("s1sl", "t", "v", 2),
+				a.sessionSet("s1aw", s1, "t", "v", 3), a.waiting("s1wait", w), a.result("s1rel"))},
+		},
+		Permutations: perms(
+			"s0w s0a s1w s1c s1sl s1aw s1wait s0p s1rel",
+			"s0w s0a s0p s1w s1c s1sl s1aw s1wait s1rel",
+		),
+		Final: steps(w.frontier("ffr"), w.sessionless("final", seNodes)),
+	}
+}
+
+func se03Fsync(w *world) *isolationtest.Spec {
+	s0 := w.lpgSession()
+	return &isolationtest.Spec{
+		Name: "se03-abandoned-fsync-does-not-stall-frontier",
+		Doc: "SE03, fsync arm. s0 writes s, reserves its commit instant (the WAL commit path's\n" +
+			"allocation, before its fsync) and then abandons it — the fsync-failure path:\n" +
+			"WriteTx.Abandon, then EndVersionedTx. s1 commits x.v = 1 in an explicit Cypher\n" +
+			"transaction. In every interleaving a sessionless read sees s1's commit unless s0's\n" +
+			"reserved instant is below it and not yet abandoned, and no commit is left in\n" +
+			"flight (in_flight_commits = 0) once s0 has abandoned: the abandoned commit does\n" +
+			"not hold the frontier. s's write is never visible.",
+		Setup: steps(w.lpgFixture(
+			lpgNode{key: "s", labels: []string{"S"}, props: map[string]int64{"v": 0}},
+			lpgNode{key: "x", labels: []string{"Item"}, props: map[string]int64{"v": 0}})),
+		Sessions: []*isolationtest.Session{
+			{Name: "s0", Setup: steps(s0.begin("s0b")), Steps: steps(
+				s0.set("s0w", "s", "v", 1), s0.allocate("s0a"), s0.abort("s0x"), w.frontier("s0fr"))},
+			{Name: "s1", Setup: steps(begin("s1b")), Steps: steps(
+				q("s1w", "MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v"), commit("s1c"),
+				w.sessionless("s1r", "MATCH (n:Item {name:'x'}) RETURN n.v AS v"))},
+		},
+		Final: steps(w.frontier("ffr"), w.sessionless("final", seNodes)),
 	}
 }

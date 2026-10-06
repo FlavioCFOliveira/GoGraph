@@ -48,11 +48,15 @@ suite, 4 of 4 binlog group commit), 823 excluded.
 - **H1 — vacuum drain step.** Any golden with a write after a peer rollback (F5) is
   nondeterministic unless a `Hook` step drains the vacuum (`ReclaimNow`) at a fixed
   point. Without it the golden records a race.
-- **H2 — commit-hold seam.** Frontier scenarios (SE02, SE03, L10) need a commit held
-  between timestamp allocation and publication. No exported seam exists at HEAD
-  (`git grep` for publish/commit hooks in `graph/lpg`, `graph/mvcc`, `cypher` is
-  empty). The only route found is a WAL-backed engine whose fsync blocks on a gate
-  (the `store/wal` OpenFS seam). **Unverified** that example code can reach it.
+- **H2 — commit-hold seam.** Frontier scenarios (SE02, SE03, SE04, L10) need a commit
+  held between timestamp allocation and publication. **Met by an exported method:**
+  `lpg.Graph.AllocateCommitTS` reserves a transaction's commit instant without
+  publishing it (the first half of the WAL commit path), and the transaction's later
+  `EndVersionedTx` publishes it or, after `WriteTx.Abandon`, abandons it. Example 37
+  builds FP01-FP03, SE02, SE04 and SE03's fsync arm on it deterministically. The
+  WAL-backed route first considered (an fsync blocked on a gate through the
+  `store/wal` OpenFS seam) cannot build SE02: one WAL writer runs one fsync at a
+  time, so a later committer waits for the held leader and never acknowledges.
 - **H3 — two drivers.** Each #2933 scenario runs through `cypher.Engine` and, where the
   shape exists, the `lpg` API over the same graph (a_fr requirement).
 
@@ -284,8 +288,8 @@ sessions · **FP** frontier/publish · **DR** durability/recovery.
 | FP | SE02, SE03, L10 | **3** | at the floor |
 | DR | D01-D16 | 16 | no |
 
-**FP sits at the floor, and two of its three rows (SE02, L10) depend on seam H2**, which
-is unverified. Proposed GoGraph-specific additions:
+**FP sits at the floor.** Its rows rely on seam H2, which `lpg.Graph.AllocateCommitTS`
+provides (G1 refuted). Proposed GoGraph-specific additions:
 
 | ID | Proposal | Facet | Pri |
 |---|---|---|---|
@@ -305,7 +309,7 @@ edge churn), GG02 (detach delete vs edge create), GG04 (label index churn), RI01
 |---|---|---|
 | **#2814** seek missed own writes | IX01, IX02, IX03, IX10, L07; IX06 partially | High for IX01-IX03: they are the measured reproduction in the fix commit `efd32fb9` |
 | **#2931** commit writeback read a peer's uncommitted value; survived rollback | IX04 (the exact four-step), IX09, L06, L19. **Not IX05**: with a UNIQUE constraint registered, a label add and a property write on one node conflict ("node constraint"), which closes the peer route #2931 took; measured at `43c69dbe`, IX04 fails and IX05 passes. **Not DD01 or DD05**: the CREATE INDEX and CREATE CONSTRAINT backfills read a committed snapshot (G9, settled by DD01 and DD05) | High for IX04 and L06 (they are the working-tree regression tests' shapes) |
-| **#2932** publish convoy stalled the frontier | L10 and L04 (streak gate, b_ac); FP01 | Medium: the deterministic catch lives at the clock level (`graph/mvcc/publish_convoy_test.go`); SE02/FP01 observe the liveness shape only if seam H2 exists. A Cypher-level deterministic scenario is not guaranteed to reproduce a scheduling-dependent convoy |
+| **#2932** publish convoy stalled the frontier | L10 and L04 (streak gate, b_ac); FP01 | Medium: the deterministic catch lives at the clock level (`graph/mvcc/publish_convoy_test.go`); SE02/FP01 observe the liveness shape on seam H2 (`lpg.Graph.AllocateCommitTS`). A Cypher-level deterministic scenario is not guaranteed to reproduce a scheduling-dependent convoy |
 
 ---
 
@@ -350,7 +354,7 @@ edge churn), GG02 (detach delete vs edge create), GG04 (label index churn), RI01
 
 | # | Gap | Pointed to by | Consequence |
 |---|---|---|---|
-| G1 | **No commit-hold seam** for deterministic frontier scenarios (no exported hook between commit-timestamp allocation and publication). | PG-rec `057_snapshot_commit_race`, PG-inj `repack_commit_race`, MY `binlog_group_commit_gtid_order` (all use injection/sync points) | SE02, FP01-FP03 and part of L10 depend on a blocking-fsync FS wrapper that may not be reachable from example code. #2932 cannot be caught deterministically above the clock. |
+| G1 | **No commit-hold seam** for deterministic frontier scenarios (no exported hook between commit-timestamp allocation and publication). | PG-rec `057_snapshot_commit_race`, PG-inj `repack_commit_race`, MY `binlog_group_commit_gtid_order` (all use injection/sync points) | **Refuted: frontier scenarios are not blocked by a missing hook.** `lpg.Graph.AllocateCommitTS` reserves a commit instant without publishing it, and the transaction's later `EndVersionedTx` publishes or abandons it (H2). Example 37 pins SE02, SE04, SE03's fsync arm and FP01-FP03 on it in fixed interleavings. |
 | G2 | **No deterministic vacuum control in step scripts**; the vacuum is a background goroutine, so write-after-rollback goldens race (F5). | PG `horizons` (uses explicit VACUUM), MY `innodb_purge_stop_now`/`purge_run_now` in `flush-hang`, `lob_purge`, `virtual_purge` | Needs a Hook that calls `ReclaimNow`, or a "pause vacuum" control equal to InnoDB's `innodb_purge_stop_now`. |
 | G3 | **No fairness or priority mechanism** under first-updater-wins; a large transaction can be refused indefinitely by small ones. | MY `innodb_cats`, `innodb_trx_weight`, `high_prio_trx_*` | L05 can only report starvation, not bound it. |
 | G4 | **No locking read** (SELECT FOR UPDATE) to prevent write skew; the only remedy is a dummy write, and whether a value-preserving write conflicts is unverified here. | PG `simple-write-skew` et al. (SSI prevents), MY `t/locking_clause` | SK11 value-preserving arm must be pinned. |
