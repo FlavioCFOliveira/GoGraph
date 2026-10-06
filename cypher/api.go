@@ -21240,8 +21240,9 @@ func (a *lpgMutatorAdapter) countPropertySet() {
 // countPropertyRemoved records one property REMOVAL — openCypher's -properties, a
 // distinct side effect there (`REMOVE n.num` declares `-properties 1` in
 // cypher/tck/features/clauses/remove/Remove1.feature). Callers must invoke it only when
-// the property was actually PRESENT, because removing an absent property is a no-op that
-// counts nothing.
+// the property was actually PRESENT and the removal wrote a version, because removing an
+// absent property is a no-op that counts nothing and a refused removal removed nothing
+// (rmp #3003).
 func (a *lpgMutatorAdapter) countPropertyRemoved() {
 	if a.counters != nil && !a.countingOff {
 		a.counters.PropertiesRemoved++
@@ -21786,17 +21787,24 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) error {
 	}
 	idxOld, idxHad := indexOldValue(a.g, a.wtx, a.buf, r.active() || fanout || statsActive, n, key)
 	// #2212: removing an absent property is a no-op and counts nothing.
+	var present bool
 	if a.counters != nil {
-		if _, present := a.g.GetNodePropertyAsOf(n, key, nil); present {
-			a.countPropertyRemoved()
-		}
+		_, present = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
 	mark, counted := a.effectMark()
 	if err := a.w().DelNodeProperty(n, key); err != nil {
 		return err
 	}
-	r.recordDelNodeProperty(n, key, prev, had)
-	if a.buf != nil && a.tookEffect(mark, counted) {
+	// The removal is a void primitive: a REFUSED one (a peer's uncommitted write
+	// heads the chain) dooms the transaction and returns nil, while prev and
+	// present describe the peer's value. Only a removal that wrote a version is
+	// counted and inverted (rmp #3003); see [lpgMutatorAdapter.effectMark].
+	took := a.tookEffect(mark, counted)
+	if present && took {
+		a.countPropertyRemoved()
+	}
+	r.recordDelNodeProperty(n, key, prev, had && took)
+	if a.buf != nil && took {
 		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
 			Node:     a.resolveID(n),
@@ -21934,14 +21942,18 @@ func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) error {
 	if err := lpg.CheckToken("edge property key", key); err != nil {
 		return err
 	}
-	// #2212: removing an absent property is a no-op and counts nothing.
+	// #2212: removing an absent property is a no-op and counts nothing; nor does
+	// a refused one (rmp #3003, see delEdgePropertyUncounted).
+	var present bool
 	if a.counters != nil {
-		if _, present := a.g.GetEdgePropertyAsOf(src, dst, key, nil); present {
-			a.countPropertyRemoved()
-		}
+		_, present = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
-	if err := a.delEdgePropertyUncounted(src, dst, key); err != nil {
+	took, err := a.delEdgePropertyUncounted(src, dst, key)
+	if err != nil {
 		return err
+	}
+	if present && took {
+		a.countPropertyRemoved()
 	}
 	return nil
 }
@@ -21949,17 +21961,24 @@ func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) error {
 // delEdgePropertyUncounted is [lpgMutatorAdapter.DelEdgeProperty] without the
 // -properties gate, so DelEdgePropertyOnInstance can attribute the counter by
 // the targeted instance's own bag instead of the per-pair aggregate (#2500).
-func (a *lpgMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) error {
+//
+// It reports whether the removal wrote a version. The lpg primitive is void, so a
+// REFUSED removal — a peer's uncommitted write heads the entry — dooms the
+// transaction and returns nil while prev still holds the peer's value; such a
+// removal records no inverse (rmp #3003).
+func (a *lpgMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) (took bool, err error) {
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() {
 		prev, had = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().DelEdgeProperty(src, dst, key); err != nil {
-		return err
+		return false, err
 	}
-	r.recordDelEdgeProperty(src, dst, key, prev, had)
+	took = a.tookEffect(mark, counted)
+	r.recordDelEdgeProperty(src, dst, key, prev, had && took)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,
@@ -21968,7 +21987,7 @@ func (a *lpgMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) error
 			Property: checkedKeyID(a.g, key),
 		})
 	}
-	return nil
+	return took, nil
 }
 
 // DelEdgePropertyOnInstance removes key from the (src, dst) per-pair store and
@@ -21982,16 +22001,21 @@ func (a *lpgMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle ui
 	if err := lpg.CheckToken("edge property key", key); err != nil {
 		return err
 	}
+	var present bool
 	if a.counters != nil {
-		if _, present := a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]; present {
-			a.countPropertyRemoved()
-		}
+		_, present = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
 	}
-	if err := a.delEdgePropertyUncounted(src, dst, key); err != nil {
+	if _, err := a.delEdgePropertyUncounted(src, dst, key); err != nil {
 		return err
 	}
-	if err := a.DelEdgePropertyByHandle(src, dst, handle, key); err != nil {
+	took, err := a.delEdgePropertyByHandle(src, dst, handle, key)
+	if err != nil {
 		return err
+	}
+	// Counted on the targeted instance's own removal having written a version: a
+	// refused removal counts nothing (rmp #3003).
+	if present && took {
+		a.countPropertyRemoved()
 	}
 	return nil
 }
@@ -22104,8 +22128,16 @@ func (a *lpgMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	return nil
 }
 func (a *lpgMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) error {
+	_, err := a.delEdgePropertyByHandle(src, dst, handle, key)
+	return err
+}
+
+// delEdgePropertyByHandle is [lpgMutatorAdapter.DelEdgePropertyByHandle]
+// reporting whether the removal wrote a version. The lpg primitive is void, so a
+// refused removal returns nil; it records no inverse (rmp #3003).
+func (a *lpgMutatorAdapter) delEdgePropertyByHandle(src, dst string, handle uint64, key string) (took bool, err error) {
 	if err := lpg.CheckToken("edge property key", key); err != nil {
-		return err
+		return false, err
 	}
 	r := a.rec()
 	var prev lpg.PropertyValue
@@ -22113,11 +22145,13 @@ func (a *lpgMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	if r.active() && handle != 0 {
 		prev, had = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().DelEdgePropertyByHandle(src, dst, handle, key); err != nil {
-		return err
+		return false, err
 	}
-	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
-	return nil
+	took = a.tookEffect(mark, counted)
+	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had && took)
+	return took, nil
 }
 func (a *lpgMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)
@@ -22486,8 +22520,9 @@ func (a *walMutatorAdapter) countPropertySet() {
 // countPropertyRemoved records one property REMOVAL — openCypher's -properties, a
 // distinct side effect there (`REMOVE n.num` declares `-properties 1` in
 // cypher/tck/features/clauses/remove/Remove1.feature). Callers must invoke it only when
-// the property was actually PRESENT, because removing an absent property is a no-op that
-// counts nothing.
+// the property was actually PRESENT and the removal wrote a version, because removing an
+// absent property is a no-op that counts nothing and a refused removal removed nothing
+// (rmp #3003).
 func (a *walMutatorAdapter) countPropertyRemoved() {
 	if a.counters != nil && !a.countingOff {
 		a.counters.PropertiesRemoved++
@@ -23202,22 +23237,28 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) error {
 	}
 	idxOld, idxHad := indexOldValue(a.g, a.wtx, a.buf, r.active() || fanout || statsActive, n, key)
 	// #2212: removing an absent property is a no-op and counts nothing.
+	var present bool
 	if a.counters != nil {
-		if _, present := a.g.GetNodePropertyAsOf(n, key, nil); present {
-			a.countPropertyRemoved()
-		}
+		_, present = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
 	mark, counted := a.effectMark()
 	if err := a.w().DelNodeProperty(n, key); err != nil {
 		return err
 	}
-	r.recordDelNodeProperty(n, key, prev, had)
+	// The removal is a void primitive: a REFUSED one (a peer's uncommitted write
+	// heads the chain) dooms the transaction and returns nil, while prev and
+	// present describe the peer's value. Only a removal that wrote a version is
+	// counted and inverted (rmp #3003); see [lpgMutatorAdapter.effectMark].
+	took := a.tookEffect(mark, counted)
+	if present && took {
+		a.countPropertyRemoved()
+	}
+	r.recordDelNodeProperty(n, key, prev, had && took)
 	// rmp #2956: propagated, never discarded. The token gate at the top of this
 	// method refuses every name the WAL cannot carry before any write, so the
 	// in-memory write and this staged op succeed or fail together. Buffered only
 	// when the property was present (see [walMutatorAdapter.effectMark]).
 	var txErr error
-	took := a.tookEffect(mark, counted)
 	if took {
 		txErr = a.tx.DelNodeProperty(n, key)
 	}
@@ -23367,14 +23408,18 @@ func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) error {
 	if err := txn.CheckSchemaField("edge property key", key); err != nil {
 		return err
 	}
-	// #2212: removing an absent property is a no-op and counts nothing.
+	// #2212: removing an absent property is a no-op and counts nothing; nor does
+	// a refused one (rmp #3003, see delEdgePropertyUncounted).
+	var present bool
 	if a.counters != nil {
-		if _, present := a.g.GetEdgePropertyAsOf(src, dst, key, nil); present {
-			a.countPropertyRemoved()
-		}
+		_, present = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
-	if err := a.delEdgePropertyUncounted(src, dst, key); err != nil {
+	took, err := a.delEdgePropertyUncounted(src, dst, key)
+	if err != nil {
 		return err
+	}
+	if present && took {
+		a.countPropertyRemoved()
 	}
 	return nil
 }
@@ -23382,7 +23427,10 @@ func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) error {
 // delEdgePropertyUncounted is [walMutatorAdapter.DelEdgeProperty] without the
 // -properties gate, so DelEdgePropertyOnInstance can attribute the counter by
 // the targeted instance's own bag instead of the per-pair aggregate (#2500).
-func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) error {
+//
+// It reports whether the removal wrote a version; a refused one records no
+// inverse (rmp #3003, see [lpgMutatorAdapter.delEdgePropertyUncounted]).
+func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) (took bool, err error) {
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
@@ -23391,14 +23439,15 @@ func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) error
 	}
 	mark, counted := a.effectMark()
 	if err := a.w().DelEdgeProperty(src, dst, key); err != nil {
-		return err
+		return false, err
 	}
-	r.recordDelEdgeProperty(src, dst, key, prev, had)
+	took = a.tookEffect(mark, counted)
+	r.recordDelEdgeProperty(src, dst, key, prev, had && took)
 	// rmp #2956: propagated, never discarded. The token gate at the top of this
 	// method refuses every name the WAL cannot carry before any write, so the
 	// in-memory write and this staged op succeed or fail together.
 	var txErr error
-	if a.tookEffect(mark, counted) { // see [walMutatorAdapter.effectMark]
+	if took { // see [walMutatorAdapter.effectMark]
 		txErr = a.tx.DelEdgeProperty(src, dst, key)
 	}
 	if a.buf != nil {
@@ -23409,7 +23458,7 @@ func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) error
 			Property: checkedKeyID(a.g, key),
 		})
 	}
-	return txErr
+	return took, txErr
 }
 
 // DelEdgePropertyOnInstance is [lpgMutatorAdapter.DelEdgePropertyOnInstance]
@@ -23420,16 +23469,21 @@ func (a *walMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle ui
 	if err := txn.CheckSchemaField("edge property key", key); err != nil {
 		return err
 	}
+	var present bool
 	if a.counters != nil {
-		if _, present := a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]; present {
-			a.countPropertyRemoved()
-		}
+		_, present = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
 	}
-	if err := a.delEdgePropertyUncounted(src, dst, key); err != nil {
+	if _, err := a.delEdgePropertyUncounted(src, dst, key); err != nil {
 		return err
 	}
-	if err := a.DelEdgePropertyByHandle(src, dst, handle, key); err != nil {
+	took, err := a.delEdgePropertyByHandle(src, dst, handle, key)
+	if err != nil {
 		return err
+	}
+	// Counted on the targeted instance's own removal having written a version: a
+	// refused removal counts nothing (rmp #3003).
+	if present && took {
+		a.countPropertyRemoved()
 	}
 	return nil
 }
@@ -23578,8 +23632,16 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	return a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value)
 }
 func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) error {
+	_, err := a.delEdgePropertyByHandle(src, dst, handle, key)
+	return err
+}
+
+// delEdgePropertyByHandle is [walMutatorAdapter.DelEdgePropertyByHandle]
+// reporting whether the removal wrote a version; a refused one records no
+// inverse (rmp #3003, see [lpgMutatorAdapter.delEdgePropertyByHandle]).
+func (a *walMutatorAdapter) delEdgePropertyByHandle(src, dst string, handle uint64, key string) (took bool, err error) {
 	if err := txn.CheckSchemaField("edge property key", key); err != nil {
-		return err
+		return false, err
 	}
 	r := a.rec()
 	var prev lpg.PropertyValue
@@ -23589,17 +23651,18 @@ func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	}
 	mark, counted := a.effectMark()
 	if err := a.w().DelEdgePropertyByHandle(src, dst, handle, key); err != nil {
-		return err
+		return false, err
 	}
-	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
+	took = a.tookEffect(mark, counted)
+	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had && took)
 	// rmp #2956: propagated, never discarded. The token gate at the top of this
 	// method refuses every name the WAL cannot carry before any write, so the
 	// in-memory write and this staged op succeed or fail together.
 	var txErr error
-	if a.tookEffect(mark, counted) { // see [walMutatorAdapter.effectMark]
+	if took { // see [walMutatorAdapter.effectMark]
 		txErr = a.tx.DelEdgePropertyByHandle(src, dst, handle, key)
 	}
-	return txErr
+	return took, txErr
 }
 func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)
