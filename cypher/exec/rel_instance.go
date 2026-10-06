@@ -119,7 +119,9 @@ func relValueEntity(mut GraphMutator, v expr.RelationshipValue) (entityBinding, 
 // when the pair holds a slot without a handle — handle 0, or the positional
 // identity a graph without handles emits — because that is the only identity
 // such a slot has. A non-zero handle that no slot carries names an instance
-// already removed, and removes nothing (rmp #2940).
+// already removed, and removes nothing (rmp #2940); its removal by handle is
+// still issued so that an instance a concurrent transaction removed records a
+// serialization conflict instead of a silent no-op (rmp #2986).
 //
 // wantType selects whether the removed instance's type is resolved; callers
 // whose deleted-row value already carries its type pass false and skip the read.
@@ -150,10 +152,25 @@ func removeBoundRelationship(mut GraphMutator, srcKey, dstKey string, handle uin
 		return relType, props
 	}
 	if handle != 0 && !pairHasHandlelessSlot(mut, srcKey, dstKey) {
-		// The value names a handled instance that is no longer stored — an
-		// earlier row of the same statement already deleted it (an undirected
-		// match binds one relationship on two rows). Removing the pair's first
-		// slot here would delete a DIFFERENT relationship.
+		// The value names a handled instance that is no longer stored. Removing
+		// the pair's first slot here would delete a DIFFERENT relationship, so
+		// nothing is removed by position. Two causes reach this point, and the
+		// stored-entry probe above cannot tell them apart:
+		//
+		//   - this transaction already deleted it — an earlier row of the same
+		//     statement (an undirected match binds one relationship on two rows)
+		//     or an earlier statement (rmp #2940);
+		//   - a concurrent transaction removed it, with its removal still in
+		//     flight or committed after this transaction's snapshot (rmp #2986).
+		//
+		// The removal by handle is still issued: the engine's first-updater-wins
+		// check on the endpoints runs before its presence probe, so the second
+		// cause records a serialization conflict on this transaction, while the
+		// first finds the claim already held and removes nothing. Returning
+		// without the call lost the peer case silently: the peer rolled back,
+		// the relationship came back, and this transaction committed a delete
+		// that never happened.
+		mut.RemoveEdgeByHandle(srcKey, dstKey, handle)
 		return "", nil
 	}
 	st, en := srcKey, dstKey
