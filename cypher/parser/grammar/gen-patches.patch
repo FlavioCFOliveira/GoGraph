@@ -1,8 +1,8 @@
 diff --git a/cypher/parser/gen/cypher_parser.go b/cypher/parser/gen/cypher_parser.go
-index e6eb90d..3319e76 100644
+index e6eb90d..41dedfd 100644
 --- a/cypher/parser/gen/cypher_parser.go
 +++ b/cypher/parser/gen/cypher_parser.go
-@@ -3622,84 +3622,146 @@ func (s *MultiPartQContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
+@@ -3622,84 +3622,188 @@ func (s *MultiPartQContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
  	}
  }
  
@@ -14,16 +14,26 @@ index e6eb90d..3319e76 100644
 +// Top-level means: not nested inside parentheses or brackets — so EXISTS{},
 +// COUNT{}, and CALL { … } subqueries that happen to contain a WITH do not
 +// trigger a false positive.
++//
++// A WITH token that is the second word of the STARTS WITH or ENDS WITH string
++// operator is not a clause and is skipped (rmp #2981); see
++// [isStringOperatorWith]. The scan reads default-channel tokens, so string
++// literals, comments, escaped identifiers, letter case and the whitespace
++// between the two words are already resolved by the lexer.
 +func (p *CypherParser) peekHasWithBeforeReturn() bool {
 +	const maxLook = 4096
++	stream := p.GetTokenStream()
++	// prev1 and prev2 are the types of the one and two default-channel tokens
++	// before LT(i); they start at the tokens the current WITH clause consumed.
++	prev1, prev2 := tokenTypeOrInvalid(stream.LT(-1)), tokenTypeOrInvalid(stream.LT(-2))
 +	depth := 0
 +	for i := 1; i <= maxLook; i++ {
-+		tok := p.GetTokenStream().LT(i).GetTokenType()
++		tok := stream.LT(i).GetTokenType()
 +		switch tok {
 +		case antlr.TokenEOF, CypherParserRETURN:
 +			return false
 +		case CypherParserWITH:
-+			if depth == 0 {
++			if depth == 0 && !isStringOperatorWith(prev1, prev2) {
 +				return true
 +			}
 +		case CypherParserLPAREN, CypherParserLBRACK, CypherParserLBRACE:
@@ -33,8 +43,40 @@ index e6eb90d..3319e76 100644
 +				depth--
 +			}
 +		}
++		prev1, prev2 = tok, prev1
 +	}
 +	return false
++}
++
++// tokenTypeOrInvalid returns tok's type, or antlr.TokenInvalidType when tok is
++// nil (a look-behind past the start of the stream).
++func tokenTypeOrInvalid(tok antlr.Token) int {
++	if tok == nil {
++		return antlr.TokenInvalidType
++	}
++	return tok.GetTokenType()
++}
++
++// isStringOperatorWith reports whether a WITH token preceded by tokens of types
++// prev1 (immediately before) and prev2 (before prev1) is the second word of the
++// STARTS WITH or ENDS WITH operator rather than a WITH clause.
++//
++// STARTS and ENDS are reserved words, so outside the operator they occur only
++// where the grammar accepts a name: a property key after DOT, a label or
++// relationship type after COLON or STICK, or a map key, which COLON always
++// follows. A STARTS or ENDS directly after DOT, COLON or STICK is therefore a
++// name, and a WITH following it opens a clause (`ORDER BY n.ends WITH n`,
++// `WHERE n:STARTS WITH n`). Any other STARTS or ENDS before WITH follows an
++// operand and is the operator.
++func isStringOperatorWith(prev1, prev2 int) bool {
++	if prev1 != CypherParserSTARTS && prev1 != CypherParserENDS {
++		return false
++	}
++	switch prev2 {
++	case CypherParserDOT, CypherParserCOLON, CypherParserSTICK:
++		return false
++	}
++	return true
 +}
 +
 +// MultiPartQ is patched to handle chained WITH clauses (e.g.
@@ -57,13 +99,13 @@ index e6eb90d..3319e76 100644
 -		goto errorExit
 -	}
 -	_la = p.GetTokenStream().LA(1)
- 
+-
 -	for (int64(_la) & ^0x3f) == 0 && ((int64(1)<<_la)&577727389967056896) != 0 {
 -		{
 -			p.SetState(298)
 -			p.ReadingStatement()
 -		}
--
+ 
 -		p.SetState(303)
 -		p.GetErrorHandler().Sync(p)
 +	// multiPartQInvokingStates (rmp #2899): every rule call below is preceded
@@ -205,7 +247,7 @@ index e6eb90d..3319e76 100644
  
  errorExit:
  	if p.HasError() {
-@@ -11683,11 +11745,21 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
+@@ -11683,11 +11787,21 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
  	p.EnterRule(localctx, 116, CypherParserRULE_atom)
  	p.SetState(644)
  	p.GetErrorHandler().Sync(p)
@@ -228,7 +270,7 @@ index e6eb90d..3319e76 100644
  	case 1:
  		p.EnterOuterAlt(localctx, 1)
  		{
-@@ -16173,9 +16245,16 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
+@@ -16173,9 +16287,16 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
  	localctx = NewLiteralContext(p, p.GetParserRuleContext(), p.GetState())
  	p.EnterRule(localctx, 160, CypherParserRULE_literal)
  	p.SetState(855)
@@ -248,7 +290,7 @@ index e6eb90d..3319e76 100644
  	}
  
  	switch p.GetTokenStream().LA(1) {
-@@ -16193,6 +16272,21 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
+@@ -16193,6 +16314,21 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
  			p.NumLit()
  		}
  
@@ -270,7 +312,7 @@ index e6eb90d..3319e76 100644
  	case CypherParserNULL_W:
  		p.EnterOuterAlt(localctx, 3)
  		{
-@@ -16380,7 +16474,6 @@ func (s *RangeLitContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
+@@ -16380,7 +16516,6 @@ func (s *RangeLitContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
  func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
  	localctx = NewRangeLitContext(p, p.GetParserRuleContext(), p.GetState())
  	p.EnterRule(localctx, 162, CypherParserRULE_rangeLit)
@@ -278,7 +320,7 @@ index e6eb90d..3319e76 100644
  
  	p.EnterOuterAlt(localctx, 1)
  	{
-@@ -16391,28 +16484,19 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
+@@ -16391,28 +16526,19 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
  			goto errorExit
  		}
  	}
@@ -314,7 +356,7 @@ index e6eb90d..3319e76 100644
  		{
  			p.SetState(861)
  			p.Match(CypherParserRANGE)
-@@ -16421,20 +16505,13 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
+@@ -16421,20 +16547,13 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
  				goto errorExit
  			}
  		}
@@ -337,7 +379,7 @@ index e6eb90d..3319e76 100644
  
  	}
  
-@@ -16648,7 +16725,18 @@ func (p *CypherParser) NumLit() (localctx INumLitContext) {
+@@ -16648,7 +16767,18 @@ func (p *CypherParser) NumLit() (localctx INumLitContext) {
  	localctx = NewNumLitContext(p, p.GetParserRuleContext(), p.GetState())
  	p.EnterRule(localctx, 166, CypherParserRULE_numLit)
  	p.EnterOuterAlt(localctx, 1)
@@ -357,7 +399,7 @@ index e6eb90d..3319e76 100644
  		p.SetState(869)
  		p.Match(CypherParserDIGIT)
  		if p.HasError() {
-@@ -18070,6 +18158,70 @@ func (p *CypherParser) ReservedWord() (localctx IReservedWordContext) {
+@@ -18070,6 +18200,70 @@ func (p *CypherParser) ReservedWord() (localctx IReservedWordContext) {
  	return localctx
  }
  

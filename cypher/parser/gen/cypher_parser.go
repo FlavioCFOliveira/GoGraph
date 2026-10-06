@@ -3630,16 +3630,26 @@ func (s *MultiPartQContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
 // Top-level means: not nested inside parentheses or brackets — so EXISTS{},
 // COUNT{}, and CALL { … } subqueries that happen to contain a WITH do not
 // trigger a false positive.
+//
+// A WITH token that is the second word of the STARTS WITH or ENDS WITH string
+// operator is not a clause and is skipped (rmp #2981); see
+// [isStringOperatorWith]. The scan reads default-channel tokens, so string
+// literals, comments, escaped identifiers, letter case and the whitespace
+// between the two words are already resolved by the lexer.
 func (p *CypherParser) peekHasWithBeforeReturn() bool {
 	const maxLook = 4096
+	stream := p.GetTokenStream()
+	// prev1 and prev2 are the types of the one and two default-channel tokens
+	// before LT(i); they start at the tokens the current WITH clause consumed.
+	prev1, prev2 := tokenTypeOrInvalid(stream.LT(-1)), tokenTypeOrInvalid(stream.LT(-2))
 	depth := 0
 	for i := 1; i <= maxLook; i++ {
-		tok := p.GetTokenStream().LT(i).GetTokenType()
+		tok := stream.LT(i).GetTokenType()
 		switch tok {
 		case antlr.TokenEOF, CypherParserRETURN:
 			return false
 		case CypherParserWITH:
-			if depth == 0 {
+			if depth == 0 && !isStringOperatorWith(prev1, prev2) {
 				return true
 			}
 		case CypherParserLPAREN, CypherParserLBRACK, CypherParserLBRACE:
@@ -3649,8 +3659,40 @@ func (p *CypherParser) peekHasWithBeforeReturn() bool {
 				depth--
 			}
 		}
+		prev1, prev2 = tok, prev1
 	}
 	return false
+}
+
+// tokenTypeOrInvalid returns tok's type, or antlr.TokenInvalidType when tok is
+// nil (a look-behind past the start of the stream).
+func tokenTypeOrInvalid(tok antlr.Token) int {
+	if tok == nil {
+		return antlr.TokenInvalidType
+	}
+	return tok.GetTokenType()
+}
+
+// isStringOperatorWith reports whether a WITH token preceded by tokens of types
+// prev1 (immediately before) and prev2 (before prev1) is the second word of the
+// STARTS WITH or ENDS WITH operator rather than a WITH clause.
+//
+// STARTS and ENDS are reserved words, so outside the operator they occur only
+// where the grammar accepts a name: a property key after DOT, a label or
+// relationship type after COLON or STICK, or a map key, which COLON always
+// follows. A STARTS or ENDS directly after DOT, COLON or STICK is therefore a
+// name, and a WITH following it opens a clause (`ORDER BY n.ends WITH n`,
+// `WHERE n:STARTS WITH n`). Any other STARTS or ENDS before WITH follows an
+// operand and is the operator.
+func isStringOperatorWith(prev1, prev2 int) bool {
+	if prev1 != CypherParserSTARTS && prev1 != CypherParserENDS {
+		return false
+	}
+	switch prev2 {
+	case CypherParserDOT, CypherParserCOLON, CypherParserSTICK:
+		return false
+	}
+	return true
 }
 
 // MultiPartQ is patched to handle chained WITH clauses (e.g.
