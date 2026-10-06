@@ -20454,7 +20454,15 @@ func (e *Engine) runInTxSessionProfiled(ctx context.Context, sess *lpg.Session[s
 	// exclude another writer — that is the point — but it does exclude a DDL, whose
 	// backfill scan and registration must not have a write land between them. See
 	// [Engine.schemaMu] for the index-backfill race that measured.
-	schemaTok := e.schemaGate.WeakLockAuto()
+	//
+	// The wait is bounded by ctx (rmp #2984): a DDL holds the gate exclusively for
+	// its whole backfill, and a write arriving behind it used to wait past its own
+	// deadline. A refused acquisition returns here, before the store transaction is
+	// opened and before any mutator exists, so it applies nothing and holds nothing.
+	schemaTok, err := e.schemaGate.WeakLockCtxAuto(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cypher: acquire schema gate: %w", err)
+	}
 	defer e.schemaGate.WeakUnlock(schemaTok)
 
 	// touched tracks the node keys this statement creates, labels, or strips a
