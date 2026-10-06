@@ -405,8 +405,8 @@ type ExplicitTx struct {
 //
 // The error is returned within the deadline plus a small, bounded margin: the
 // margin is one scheduling hop, not the holder's remaining tenure. See
-// [mvcc.Gate.StrongLockCtx] and the acquireCtx helper beside it for why a queued
-// lock acquisition cannot simply be abandoned and what is done instead.
+// [mvcc.Gate.StrongLockCtx] for how the wait is bounded and how an abandoned
+// request is withdrawn.
 //
 // See exectx.go for the full transaction and concurrency contract, including the
 // isolation scope: concurrent readers do NOT block while this transaction is
