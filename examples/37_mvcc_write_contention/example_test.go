@@ -13,13 +13,13 @@ package main
 // would teach the next reader to ignore a red test.
 //
 // The workload is shrunk so the gate fits the short layer. That is a size change,
-// not a shape change: every phase still runs, with concurrent writers, readers
-// beside them, contention on the shared set, and a real restart.
+// not a shape change: phases 1 to 4 run with concurrent writers, readers beside
+// them, contention on the shared set, and a real restart. Phases 5, 6 and 7 are
+// held by their own tests (TestCatalogue, TestLadder, TestDurability).
 
 import (
 	"bytes"
 	"context"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -38,6 +38,11 @@ func testConfig() config {
 	c.ladder.levels = nil
 	// Phase 7 likewise (durability_test.go).
 	c.durability.levels = nil
+	// Phase 5 likewise (TestCatalogue): the same scenarios through the same
+	// runner, with each transcript diffed against its golden. Run here it cost
+	// about 29 s of this test and detected less: with rmp #2986's fix reverted,
+	// TestCatalogue failed (GG06) and this test passed (rmp #2993).
+	c.skipCatalogue = true
 	return c
 }
 
@@ -101,12 +106,7 @@ func TestRun(t *testing.T) {
 	mustLine(t, out, "restart.clock_not_rewound=true")
 	mustLine(t, out, "restart.post_restart_instant_is_new=true")
 
-	// Phase 5 — the catalogue ran in full, no step blocked, and no property check
-	// fired. The per-scenario transcripts are held to their goldens by
-	// TestCatalogue; these lines hold the example's own report to the same facts.
-	mustLine(t, out, "catalogue.scenarios="+strconv.Itoa(len(catalogue())))
-	mustLine(t, out, "catalogue.blocked_steps=0")
-	mustLine(t, out, "catalogue.violations=0")
+	// Phase 5 is TestCatalogue's (see testConfig).
 }
 
 // TestConservationCheckCanFail validates the INSTRUMENT rather than the engine.

@@ -27,7 +27,7 @@ var txKeys = []string{"commits_per_sec", "refused_attempts", "longest_retry_stre
 func requiredKeys(lc *ladderConfig) []string {
 	sampled := []string{"L01", "L04.sessionless", "L04.session", "L05", "L06", "L08",
 		"L10.sessionless", "L10.session", "L11.sessionless", "L11.session",
-		"L13", "L13.memory", "MG11", "L14", "L15", "L18", "L19"}
+		"L13", "MG11", "L14", "L15", "L18", "L19"}
 	writers := []string{"L01", "L04.sessionless", "L04.session", "L05", "L06", "L08",
 		"L10.sessionless", "L10.session", "L11.sessionless", "L11.session", "L15", "L18", "L19"}
 	var keys []string
@@ -48,8 +48,8 @@ func requiredKeys(lc *ladderConfig) []string {
 		"L01.forbidden", "L01.permitted_g2_item", "L02.write_skew_permitted", "L03.repeatable_reads",
 		"L05.large_longest_refused_streak", "L06.seek_scan_mismatches", "L06.seek_scan_first_mismatches", "L06.seek_equals_scan", "L06.btree_index_equals_scan", "L06.noop_set_over_peer_committed", "L06.btree_value_mismatches", "L07.own_seek_equals_scan",
 		"L08.versions_held", "L08.retention_shown", "L10.sessionless.store_bytes_after",
-		"L10.sessionless.commit_p99_during_checkpoint", "L13.duplicates", "L13.memory.failed_callers", "L14.duplicates",
-		"L15.dangling_arcs", "L16.traversal_repeatable", "L17.cancel_return_lag", "L18.dangling_arcs",
+		"L10.sessionless.commit_p99_during_checkpoint", "L13.duplicates", "L13.failed_callers", "L14.duplicates",
+		"L15.dangling_arcs", "L15.stale_detach_refused", "L16.traversal_repeatable", "L16.young_node_stays_invisible", "L17.cancel_return_lag", "L18.dangling_arcs",
 		"L19.ddl_max_latency", "mem.heap_alloc_bytes")
 	if lc.soak {
 		keys = append(keys, "L09.unregistered_snapshots", "L09.past_capacity_unregistered",

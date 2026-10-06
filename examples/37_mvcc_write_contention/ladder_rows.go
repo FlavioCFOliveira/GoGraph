@@ -1199,11 +1199,7 @@ func rowMergeStorm(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 		// pins F10 on). F10 says every caller succeeds: a loser of the creation
 		// race re-runs on a snapshot that sees the winner and matches it (rmp
 		// #2987, D5 in README.md "Defects found"). Gated, with one node per key.
-		// L13.memory ran the same arm on the in-memory engine until every arm
-		// moved to the durable store (rmp #2993); it keeps its id and is now a
-		// second, independent run of the L13 arm.
 		{"L13", true, false, true},
-		{"L13.memory", true, false, true},
 		// MG11: explicit MERGE under UNIQUE: one node per key, losers refused.
 		{"MG11", true, true, false},
 		// L14: autocommit MERGE, no constraint: no failure, duplicates counted.
@@ -1454,6 +1450,16 @@ func rowHubChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 	if p := readerErr.Load(); p != nil {
 		return *p
 	}
+	// rmp #3007: the two interleavings the churn and the readers only meet by
+	// chance, constructed once on nodes the churn never draws.
+	detachRefused, err := staleDetachOverAbortedAppend(ctx, m.eng, hubs, xs)
+	if err != nil {
+		return err
+	}
+	youngRead, err := rolledBackDeleteOfYoungNode(ctx, m.eng, hubs+1)
+	if err != nil {
+		return err
+	}
 	qs, err := quiesce(ctx, m.g)
 	if err != nil {
 		return err
@@ -1463,6 +1469,13 @@ func rowHubChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 	out.tele("L15", level, "live_arcs", arcs, "dangling_arcs", dead)
 	out.check("L15", level, "no_dangling_edge", dead == 0, "%d arcs touch a dead node", dead)
 	out.check("L15", level, "no_unexpected_errors", st.otherErrs.Load() == 0, "first: %s", st.errText())
+	out.tele("L15", level, "constructed_detach_error", fmt.Sprintf("%q", errText(detachRefused.err)))
+	out.check("L15", level, "stale_detach_refused", errors.Is(detachRefused.err, cypher.ErrSerializationConflict),
+		"a DETACH DELETE whose snapshot predates a committed arc returned %v after an aborted append, want a serialization conflict (rmp #2997)",
+		detachRefused.err)
+	out.tele("L16", level, "constructed_reads", fmt.Sprintf("%q", youngRead.String()))
+	out.check("L16", level, "young_node_stays_invisible", youngRead.repeatable(),
+		"a read transaction saw a node created after its snapshot once a DETACH DELETE of it rolled back: %s (rmp #3001)", youngRead.String())
 	bad := ""
 	if p := mismatch.Load(); p != nil {
 		bad = *p
@@ -1475,6 +1488,138 @@ func rowHubChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 	smp.report(out, "L15", level, level+readers)
 	reportQuiesce(out, "L15", level, &qs)
 	return nil
+}
+
+// staleDetachOverAbortedAppend CONSTRUCTS the interleaving of rmp #2997 once
+// (cypher/detach_delete_aborted_stamp_2997_test.go): a deleter's snapshot is
+// taken on a hub; a peer commits an arc into it; a third transaction appends onto
+// the hub, stamping over the peer's commit, and rolls back; the deleter then runs
+// DETACH DELETE on the hub. The deleter's snapshot does not list the peer's arc,
+// so only the peer's adjacency stamp can refuse it. The hub (id hub) and the two
+// sources (ids x and x+1) are outside the ranges the churn draws. It returns the
+// deleter's outcome as refusal: a serialization conflict when the stamp survived
+// the abort; nil when the delete committed beside the peer's arc, which
+// no_dangling_edge then counts. err is a harness failure.
+func staleDetachOverAbortedAppend(ctx context.Context, eng *cypher.Engine, hub, x int) (refusal detachRefusal, err error) {
+	ids := P("h", hub, "a", x, "b", x+1)
+	if err := mustRun(ctx, eng, "CREATE (:Hub {id:$h}), (:X {id:$a}), (:X {id:$b})", ids); err != nil {
+		return detachRefusal{}, err
+	}
+	del, err := eng.BeginTx(ctx)
+	if err != nil {
+		return detachRefusal{}, err
+	}
+	if _, err := drain(del.Exec("MATCH (h:Hub {id:$h}) RETURN h.id", ids)); err != nil {
+		_ = del.Rollback()
+		return detachRefusal{}, err
+	}
+	if err := mustRun(ctx, eng, "MATCH (x:X {id:$a}), (h:Hub {id:$h}) CREATE (x)-[:R]->(h)", ids); err != nil {
+		_ = del.Rollback()
+		return detachRefusal{}, err
+	}
+	ab, err := eng.BeginTx(ctx)
+	if err != nil {
+		_ = del.Rollback()
+		return detachRefusal{}, err
+	}
+	if _, err := drain(ab.Exec("MATCH (x:X {id:$b}), (h:Hub {id:$h}) CREATE (x)-[:R]->(h)", ids)); err != nil {
+		_ = ab.Rollback()
+		_ = del.Rollback()
+		return detachRefusal{}, err
+	}
+	if err := ab.Rollback(); err != nil {
+		_ = del.Rollback()
+		return detachRefusal{}, err
+	}
+	// The conflict may surface at the statement or at commit.
+	if _, err := drain(del.Exec("MATCH (h:Hub {id:$h}) DETACH DELETE h", ids)); err != nil {
+		_ = del.Rollback()
+		return detachRefusal{err}, workerErr(err)
+	}
+	if err := del.Commit(); err != nil {
+		return detachRefusal{err}, workerErr(err)
+	}
+	return detachRefusal{}, nil
+}
+
+// detachRefusal is how the constructed stale DETACH DELETE ended: nil when it
+// committed, else the error that refused it.
+type detachRefusal struct{ err error }
+
+// youngNodeReads are the readings of one read transaction taken before and
+// after the steps of rolledBackDeleteOfYoungNode.
+type youngNodeReads []string
+
+func (r youngNodeReads) repeatable() bool {
+	for _, x := range r {
+		if x != r[0] {
+			return false
+		}
+	}
+	return len(r) > 1
+}
+
+func (r youngNodeReads) String() string { return strings.Join(r, " | ") }
+
+// rolledBackDeleteOfYoungNode CONSTRUCTS the interleaving of rmp #3001 once
+// (cypher/phantom_node_aborted_delete_3001_test.go): a read transaction takes
+// its snapshot; a hub (id hub, outside the churn's range) is created and
+// committed after it; another transaction DETACH DELETEs that hub and rolls
+// back. The read transaction reads the node count and the hub ids before the
+// create, after it, while the delete is in flight, and after the rollback; every
+// reading must equal the first. Before the fix the rollback's undo overwrote the
+// committed birth record and the abort removed both, so the reader saw the young
+// hub.
+func rolledBackDeleteOfYoungNode(ctx context.Context, eng *cypher.Engine, hub int) (youngNodeReads, error) {
+	r, err := eng.BeginReadTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Rollback() }()
+	var reads youngNodeReads
+	read := func() error {
+		var b strings.Builder
+		for _, q := range []string{
+			"MATCH (n) RETURN count(n) AS c",
+			"MATCH (h:Hub) RETURN h.id AS id ORDER BY id",
+		} {
+			rows, err := drain(r.Exec(q, nil))
+			if err != nil {
+				return err
+			}
+			fmt.Fprint(&b, rows, ";")
+		}
+		reads = append(reads, b.String())
+		return nil
+	}
+	if err := read(); err != nil {
+		return nil, err
+	}
+	if err := mustRun(ctx, eng, "CREATE (:Hub {id:$h})", P("h", hub)); err != nil {
+		return nil, err
+	}
+	if err := read(); err != nil {
+		return nil, err
+	}
+	tx, err := eng.BeginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := drain(tx.Exec("MATCH (h:Hub {id:$h}) DETACH DELETE h", P("h", hub))); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if err := read(); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Rollback(); err != nil {
+		return nil, err
+	}
+	if err := read(); err != nil {
+		return nil, err
+	}
+	return reads, nil
 }
 
 // ---------------------------------------------------------------------------

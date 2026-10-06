@@ -55,6 +55,11 @@ type config struct {
 	// needed, which is why this is a fraction and not a flag.
 	hotPct int
 	seed   uint64
+	// skipCatalogue skips phase 5, the scenario catalogue (catalogue.go). The
+	// binary runs it; the short-layer TestRun skips it because TestCatalogue runs
+	// the same scenarios through the same runner and also diffs every transcript
+	// against its golden.
+	skipCatalogue bool
 	// ladder is phase 6, the concurrency ladder (ladder.go). Zero levels skip it.
 	ladder ladderConfig
 	// durability is phase 7, durability across a crash (durability.go). Zero
@@ -116,7 +121,7 @@ func main() {
 	durLevels := flag.String("durability-levels", "8,64",
 		"phase 7: comma-separated writer counts of the in-process crash arms; empty skips them")
 	flag.IntVar(&cfg.durability.totalTxns, "durability-txns", cfg.durability.totalTxns,
-		"phase 7: transactions per arm and level, shared among its writers; the crash lands at half")
+		"phase 7: transactions per arm and level, shared among its writers; the crash lands at half; set, it also replaces the smaller default total of the checkpoint arm")
 	flag.IntVar(&cfg.durability.killRuns, "durability-kill-runs", 0,
 		"phase 7: kill -9 runs of a child process (D02); 0 skips them")
 	flag.IntVar(&cfg.durability.killLevel, "durability-kill-level", cfg.durability.killLevel,
@@ -158,6 +163,9 @@ func main() {
 		if f.Name == "ladder-ops" || f.Name == "ladder-soak" {
 			cfg.ladder.rowOps = nil // an explicit size, or the soak shape, applies to every arm
 		}
+		if f.Name == "durability-txns" {
+			cfg.durability.checkpointTxns = 0 // an explicit size applies to every arm
+		}
 	})
 	if err := cfg.validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
@@ -196,8 +204,10 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 		return err
 	}
 	// PHASE 5 — the deterministic scenario catalogue (catalogue.go).
-	if err := phaseCatalogue(ctx, w); err != nil {
-		return err
+	if !cfg.skipCatalogue {
+		if err := phaseCatalogue(ctx, w); err != nil {
+			return err
+		}
 	}
 	// PHASE 6 — the concurrency ladder (ladder.go).
 	if len(cfg.ladder.levels) > 0 {

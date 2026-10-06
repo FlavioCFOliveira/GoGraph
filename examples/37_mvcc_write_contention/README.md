@@ -263,8 +263,9 @@ catalogue.WW02.cypher spec=ww02-stale-snapshot-write permutations=6 steps=30 ok=
 counts `<waiting ...>`, invalid-permutation and never-completed lines, and must be 0
 (GoGraph takes no DML locks, F7); `violations` counts property-check failures. The
 summary lines `catalogue.scenarios`, `catalogue.blocked_steps=0` and
-`catalogue.violations=0` are asserted by `TestRun`; every transcript is asserted
-against its golden by `TestCatalogue`.
+`catalogue.violations=0` are printed by the binary; `TestRun` does not run phase 5
+(rmp #2993): `TestCatalogue` runs the same scenarios through the same runner, checks
+every property, and asserts every transcript against its golden.
 
 ### Harness
 
@@ -593,7 +594,7 @@ open.
   (`cypher/exec/merge_unique_race.go`), and an autocommit statement so marked is re-run,
   after waiting for every allocated commit to become visible, on a snapshot that sees the
   winner (`cypher/merge_unique_retry.go`); the re-run is bounded and context-aware. A
-  statement of an explicit transaction is not re-run (MG11). L13 and L13.memory gate
+  statement of an explicit transaction is not re-run (MG11). L13 gates
   `every_caller_succeeds`.
 - **D6 — `DETACH DELETE` of a node with two parallel in-edges from one source leaves one
   arc behind (fixed, rmp #2988; found by phase 6, L15).** Reproduction: `CREATE (:Hub {id:1}), (:X
@@ -725,8 +726,8 @@ operations per arm and level, except L13 (32) and L15 (64); see "Sizes" below.
 | `L09` | L09 (soak) | 1 032 read transactions held while the graph churns | `UnregisteredSnapshots` > 0, every read correct, released after close |
 | `L10.<arm>`, `L20.<arm>` | L10, L20 | WAL-backed store (`store.Open`), disjoint writers, a checkpointer triggered back to back | Final = acknowledged; session arm 0 self-conflicts; checkpoints ran; commit tail during a checkpoint below `hangBudget`; storage size before and after |
 | `L11.<arm>` | L11, L12 | Disjoint writers, no checkpointer, session and sessionless | Session arm 0 self-conflicts (and so 0 conflicts) |
-| `L13`, `L13.memory`, `MG11`, `L14` | L13, MG11, L14 | `MERGE` storms on 4 keys: autocommit under UNIQUE (twice: `L13.memory` ran on the in-memory engine until rmp #2993 and is now a second run of the same arm on the durable store), explicit under UNIQUE, autocommit without a constraint | One node per key under UNIQUE; every failure typed; L13 and L14 every caller succeeds (D5), L14 duplicates counted |
-| `L15`, `L16` | L15, L16 | Edge `CREATE` (parallel edges)/delete on hubs and `DETACH DELETE` + recreate of hubs; read transactions repeat a one-hop and a `*1..3` traversal | No dangling arc at quiescence; repeated traversals identical |
+| `L13`, `MG11`, `L14` | L13, MG11, L14 | `MERGE` storms on 4 keys: autocommit under UNIQUE, explicit under UNIQUE, autocommit without a constraint | One node per key under UNIQUE; every failure typed; L13 and L14 every caller succeeds (D5), L14 duplicates counted |
+| `L15`, `L16` | L15, L16 | Edge `CREATE` (parallel edges)/delete on hubs and `DETACH DELETE` + recreate of hubs; read transactions repeat a one-hop and a `*1..3` traversal. After the churn, two interleavings are CONSTRUCTED once on nodes the churn never draws (rmp #3007): a `DETACH DELETE` whose snapshot predates a committed arc, run after a third transaction appended to the hub and rolled back (rmp #2997); and a read transaction that reads before and after a hub is created after its snapshot and a `DETACH DELETE` of it is rolled back (rmp #3001) | No dangling arc at quiescence; repeated traversals identical; the stale `DETACH DELETE` refused with a serialization conflict (`stale_detach_refused`); the read transaction never sees the young hub (`young_node_stays_invisible`) |
 | `L17` | L17 | 8 transactions hold 16 000 (soak: 150 000) uncommitted nodes; counts; a 9 M-row statement cancelled after 2 ms | Count = committed only; cancelled statement returns `context.Canceled` within 1 s |
 | `L18` | L18 | Property writes, edge creates and `DETACH DELETE`s, 50% rolled back | Total <= Bound after quiescence; 0 dangling arcs; every hub writable by a lone writer |
 | `L19` | L19, DD08, DD09 | `CREATE`/`DROP INDEX` cycles and an overlapping `CREATE INDEX` on the same object while writers churn and the vacuum is swept in a loop | Seek = scan; every DDL refusal classified (`already_exists`); DDL latency below `hangBudget`; no writer starved |
@@ -797,17 +798,26 @@ example with `go build -overlay` over a copy of the engine file with the fix rev
 
 | Gate | Target defect (fix reverted) | Total ops, old → new | Detection at the new size | Wall clock, 1+8+64, old → new |
 |---|---|---|---|---|
-| `L13`, `L13.memory` `every_caller_succeeds` | rmp #2987 (`fe8864b0`) | 256 → 32 | 6 of 6 runs at 8 and at 64 goroutines (10 of 10 at 256) | 0.47 s → 0.13 s |
+| `L13` `every_caller_succeeds` | rmp #2987 (`fe8864b0`) | 256 → 32 | 6 of 6 runs at 8 and at 64 goroutines (10 of 10 at 256) | 0.47 s → 0.13 s |
 | `L15` `no_dangling_edge` | rmp #2988 (`9d0d315e`) | 256 → 64 | 9 of 9 runs at every level (8 of 9 at 32, so 32 was rejected) | 0.71 s → 0.50 s |
 | `L06` `btree_index_equals_scan` | rmp #2989 (`8999e4b4`), the property-write and the whole fix | 256 (kept) | 15 of 15 at 1, 8 and 64 for both reverts, at 32, 64, 128 and 256: the interleaving is constructed | — |
 | `L06` `seek_equals_scan` | rmp #2989, the whole fix | 256 (kept) | at 64 goroutines only: 2 of 5 at 128, 1 of 5 at 64, 0 of 5 at 32, so not reduced | — |
+| `L15` `stale_detach_refused`, `no_dangling_edge` | rmp #2997 (`32efbe73`) | 64 | 9 of 9 at 1, 8 and 64 goroutines: the interleaving is constructed | — |
+| `L16` `young_node_stays_invisible` | rmp #2999/#3001 (`676a6b94`) | 64 | 9 of 9 at 1, 8 and 64 goroutines: the interleaving is constructed | — |
+| `TestRun` phase 5 (catalogue) | rmp #2986 (`8f933554`) | the whole catalogue → not run | with the fix reverted, `TestCatalogue` fails (`GG06/gg06-delete-same-edge-instance`) while `TestRun` with phase 5 passed: phase 5 added no detection | 28.7 s → 0 s |
+| `TestDurability` checkpoint arm (D09, D16) | rmp #2990 and #2991 (`828f1661`) | 384 → 24 transactions | 24 of 24 runs fail (seeds 1-3 at 192, 96, 48 and 24, writers 8 and 64): `D09.missing_segment refused_loudly`, `D09 capture_not_refused`; at 64 writers the 4-per-writer floor keeps 256 | 4.4 s + 8.7 s → 0.25 s + 2.3 s |
 
 Not reduced, because no defect was available to prove that a smaller size still detects:
-L01, L04, L05, L08, L10, L11, L17, L18, L19. **L16 `traversal_repeatable` and L15 detect
-neither rmp #2999 (`676a6b94`) nor rmp #2997 (`32efbe73`) reverted**: 0 of 15 runs at 1, 8
-and 64 goroutines and 0 of 4 at 256 and 1 024 (4 096 operations), on the durable store and
-on the in-memory engine the ladder used before; both reverts fail their own regression
-tests in `graph/lpg`. Their L15 size therefore rests on rmp #2988 alone.
+L01, L04, L05, L08, L10, L11, L17, L18, L19, and the abandon and fsync arms of phase 7
+(the D14 seam proves only `acked_present`). The churn of L15 and L16 — `no_dangling_edge`
+by chance and `traversal_repeatable` — detects neither rmp #2997 nor rmp #2999 reverted:
+0 of 15 runs at 1, 8 and 64 goroutines and 0 of 4 at 256 and 1 024 (4 096 operations).
+Both are detected only by the constructed interleavings above.
+
+Phases 1 to 3 and 5 run on the in-memory engine: they drive `lpg.Graph.ApplyVersioned`
+and `lpg.Session` directly (phase 5 also `cypher.NewEngineWithOptions`), which the
+durable store does not route through its WAL, so they cannot be moved to `store.Open`
+without changing what they measure. Phase 4 restarts a WAL-backed store under `TMPDIR`.
 
 ### Coverage
 

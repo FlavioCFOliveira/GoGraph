@@ -86,10 +86,15 @@ type durabilityConfig struct {
 	dropLastAcked bool
 	// seed fixes the random choices of the writers.
 	seed uint64
+	// checkpointTxns, when positive, replaces totalTxns for the checkpoint arm
+	// (D09, D16). The default is the smallest total measured to still fail with
+	// the fixes of rmp #2990 and #2991 reverted (README.md, "Sizes (rmp #2993)");
+	// an explicit -durability-txns clears it.
+	checkpointTxns int
 }
 
 func defaultDurabilityConfig() durabilityConfig {
-	return durabilityConfig{levels: []int{8, 64}, totalTxns: 384, killLevel: 32, seed: 1}
+	return durabilityConfig{levels: []int{8, 64}, totalTxns: 384, checkpointTxns: 24, killLevel: 32, seed: 1}
 }
 
 // hotKeys is the number of shared counter nodes every transaction increments: the
@@ -1370,6 +1375,11 @@ func seamCut(path string, log *ackLog, before int) (int64, error) {
 // snapshot is published and before the WAL prefix is truncated, and after the
 // truncation.
 func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, level int) error {
+	if dc.checkpointTxns > 0 {
+		sized := *dc
+		sized.totalTxns = dc.checkpointTxns
+		dc = &sized
+	}
 	ls, err := openLive(ctx, "D09", level)
 	if err != nil {
 		return err
