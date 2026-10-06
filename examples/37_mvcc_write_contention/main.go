@@ -57,6 +57,9 @@ type config struct {
 	seed   uint64
 	// ladder is phase 6, the concurrency ladder (ladder.go). Zero levels skip it.
 	ladder ladderConfig
+	// durability is phase 7, durability across a crash (durability.go). Zero
+	// levels and zero kill runs skip it.
+	durability durabilityConfig
 }
 
 func defaultConfig() config {
@@ -69,6 +72,7 @@ func defaultConfig() config {
 		hotPct:     25,
 		seed:       1,
 		ladder:     defaultLadderConfig(),
+		durability: defaultDurabilityConfig(),
 	}
 }
 
@@ -109,8 +113,34 @@ func main() {
 		"phase 6: comma-separated arm ids to run (L01,L04,L05,L06,L08,L09,L10,L11,L13,L15,L17,L18,L19); empty runs all")
 	flag.BoolVar(&cfg.ladder.soak, "ladder-soak", false,
 		"phase 6: also run the soak arms (horizon capacity cliff, full-size parallel count) and the self-conflict streak gate")
+	durLevels := flag.String("durability-levels", "8,64",
+		"phase 7: comma-separated writer counts of the in-process crash arms; empty skips them")
+	flag.IntVar(&cfg.durability.totalTxns, "durability-txns", cfg.durability.totalTxns,
+		"phase 7: transactions per arm and level, shared among its writers; the crash lands at half")
+	flag.IntVar(&cfg.durability.killRuns, "durability-kill-runs", 0,
+		"phase 7: kill -9 runs of a child process (D02); 0 skips them")
+	flag.IntVar(&cfg.durability.killLevel, "durability-kill-level", cfg.durability.killLevel,
+		"phase 7: writer count of the kill -9 child")
+	childDir := flag.String("durability-child-dir", "",
+		"INTERNAL: run as the phase-7 kill child against this store directory, until killed")
+	childLevel := flag.Int("durability-child-level", 8, "INTERNAL: writer count of the phase-7 kill child")
 	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
+
+	if *childDir != "" {
+		if err := runDurabilityChild(context.Background(), *childDir, *childLevel, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "durability child: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	dl, err := parseLevels(*durLevels)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.durability.levels = dl
+	cfg.durability.seed = cfg.seed
 
 	lv, err := parseLevels(*levels)
 	if err != nil {
@@ -172,6 +202,16 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 		}
 		if f := out.failed(); len(f) > 0 {
 			return fmt.Errorf("ladder: %d checks failed:\n%s", len(f), strings.Join(f, "\n"))
+		}
+	}
+	// PHASE 7 — durability under concurrent writers across a crash (durability.go).
+	if len(cfg.durability.levels) > 0 || cfg.durability.killRuns > 0 {
+		out, err := phaseDurability(ctx, w, &cfg.durability)
+		if err != nil {
+			return err
+		}
+		if f := out.failed(); len(f) > 0 {
+			return fmt.Errorf("durability: %d checks failed:\n%s", len(f), strings.Join(f, "\n"))
 		}
 	}
 

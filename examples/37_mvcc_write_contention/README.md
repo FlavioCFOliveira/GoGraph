@@ -768,6 +768,132 @@ tests (`graph/mvcc/publish_convoy_test.go`) cover its regression.
 `docs/benchmarks/ex37-mvcc-coverage-2026-10-06.md` gives the command and the per-package
 figures for `graph/mvcc`, `graph/lpg` and `cypher`.
 
+## Phase 7 — durability under concurrent writers across a crash (rmp #2935)
+
+Examples 17 and 25 crash a store that has one writer. `durability.go` and
+`durability_kill.go` crash a WAL-backed store (`store.Open`) while 8 to 64 writers commit,
+and hold the recovered directory to the durability contract. They implement the 16 rows
+of `docs/mvcc-scenario-catalogue.md` §3 (D01-D16). The short layer (`durability_test.go`,
+`TestDurability`) runs the in-process arms at 8 and 64 writers. `TestDurabilityNegativeControl`
+runs the D14 control. The soak layer (`durability_soak_test.go`, `-tags soak`,
+`TestDurabilityKill9`) runs five `kill -9` runs of a child process with 32 writers. The
+binary runs the phase after phase 6 with `-durability-levels` (default `8,64`),
+`-durability-txns`, `-durability-kill-runs` (default 0) and `-durability-kill-level`.
+
+Output follows the rest of the example: `durability.<row> level=<n> <check>=true` lines
+are verdicts, and `# durability.<row> level=<n> ...` lines are telemetry.
+
+### Harness
+
+- **Workload.** Each regular transaction is an explicit transaction with three
+  statements: `CREATE (:D {id, g, tag})`, `MATCH (d:D {id}) CREATE (d)-[:R {id}]->(:E {id})`
+  and `MATCH (h:H {k}) SET h.v = h.v + 1` on one of 4 shared counters. The counters
+  make writers collide, so attempts are refused and retried, and each attempt takes a
+  fresh id. One transaction in eight is rolled back on purpose. The schema has a UNIQUE
+  constraint on `:D(id)`, a hash index on `:E(id)` and a btree index on `:L(id)`.
+- **Acknowledged-commit log.** The log is kept outside the store. An id is recorded as
+  acknowledged only after its `Commit` returned nil. Refusals, rollbacks and other
+  failures are recorded with their outcome.
+- **Bracket.** Each observation is bracketed between two counts of acknowledged
+  commits, one read before the image and one read after it. Only the ids acknowledged
+  before the image are owed by the image. An id acknowledged later is *in doubt*.
+- **Crash image.** In the in-process arms, the crash is a copy of the store directory
+  taken while the writers run. There are two variants. The *durable* image cuts the WAL
+  at `wal.Writer.DurableOffset`, read after the "before" count; this models a power loss,
+  in which only fsynced bytes survive. The *written* image copies the WAL as written to
+  the OS; this models a process crash, in which the page cache survives. The live
+  process is then abandoned: its writers stop, the open transaction rolls back, and the
+  store closes. Nothing it does after the copy can reach the image. The checkpoint images
+  are copied inside the store's commit lock, so each one is an exact instant.
+- **Scoring.** Every acknowledged commit is present, whole. Every refused, rolled-back
+  or failed attempt and every transaction open at the crash is absent. An in-doubt
+  transaction is present or absent as a whole, never partially. The sum of the shared
+  counters equals the number of whole regular transactions. A new session after
+  recovery sees every acknowledged commit, and its state fingerprint equals the one
+  recovery produced. Seek equals scan on every index and on the count store, and UNIQUE
+  holds. The clock after recovery is not below the clock read with the "before" count,
+  and a post-recovery commit takes a higher instant.
+- **Telemetry per image.** The image line reports acknowledged (before and after),
+  recovered, missing, phantom, partial, in doubt (present and absent), the
+  seek/scan comparisons and mismatches, the clock before the crash, after recovery and
+  after a new write, the store size before the writers, at the crash and after
+  recovery, recovery wall time, WAL ops replayed, the tail error and whether a
+  snapshot was used.
+
+### Rows
+
+| Row | Arm (`durability.<arm>`) | What runs | Gates |
+|---|---|---|---|
+| D01 | `D01`, `D01.durable`, `D01.written` | In-process crash image at half of 384 transactions, 8 and 64 writers | `acked_present`, `refused_absent`, `writers_running_at_crash`, `no_unexpected_errors`, `acknowledged_seen` |
+| D02 | `D02.run0`..`run4` (soak) | `kill -9` of a child with 32 writers, an open transaction and a checkpointer triggered back to back; killed after 100 + 60 x run acknowledgements. Every `A` line the child wrote after its commit returned nil is owed | Same gates as D01 on the killed directory |
+| D03 | `D03`, `D01.durable`, `D01.written` | Crash points: after append and before fsync (bytes beyond the durable offset, durable image), after fsync and before acknowledgement (durable but unacknowledged), and bytes written but not yet fsynced (written image) | In-doubt transactions whole or absent (`whole_or_absent`); counts reported as `durable_but_unacknowledged` and `appended_not_durable_or_in_flight` |
+| D04 | `D04`, `D04.reopen` | WAL over `internal/testfs` with fsyncs failing after 12 successes, which discards the unsynced suffix | `failure_seen`, `post_poison_commit_refused`, `failed_not_visible` (live engine), `recovers_exactly_the_acknowledged`, and every image gate on the reopened directory |
+| D05 | every image | Three-statement transactions in flight at the crash | `whole_or_absent`, `counters_conserved` |
+| D06 | `D01.*`, `D02.*` | One transaction left open across the crash (the kill child reopens it every 5 ms) | `open_absent` |
+| D07 | every image | Clock read with the "before" count; new session; new commit | `clock_not_rewound`, `new_session_sees_acked`, `post_recovery_commit_is_new` |
+| D08 | `D08.reference`, `D08.torn`, `D08.garbled` | The durable image with its last frame cut by 3 bytes, or with its last byte inverted | `damaged_record_discarded_alone`: against the undamaged image, at most one transaction is lost, none is gained and none is partial. The garbled image must be opened for writing exactly when recovery reports it clean (`refused_unless_clean`) |
+| D09 | `D09`, `D09.pre_capture`, `D09.pre_truncate`, `D09.post_truncate` | The run's first successful checkpoint under load, imaged before the capture, after the snapshot is published and before the WAL prefix is truncated, and after the truncation | `checkpoint_ran` and every image gate at each phase. The kill runs add crashes at random checkpoint points |
+| D10 | every fully opened image | Seek = scan for every attempted id on `:D(id)` and `:E(id)`, on `:L(id)`, and on the `:D`/`:E` count store | `seek_equals_scan`, `unique_holds` |
+| D11 | `D11`, `D01.*` | `CREATE`/`DROP INDEX cyc_g` and `CREATE`/`DROP CONSTRAINT cyc_e` cycled during the abandon arm | `ddl_ran`; after recovery, seek = scan on `cyc_g` when it is present (`seek_equals_scan`); no duplicate `:E(id)` while `cyc_e` is present (`unique_holds`) |
+| D12 | `D01.*` | Four transactions, each with one 1 MiB string | `blobs_identical` |
+| D13 | `D13` | The torn image: recovery interrupted (context cancelled at 0 µs to 2 ms), then opened for writing (which repairs the torn tail) and closed, then recovered again | `recovery_interrupted`, `double_recovery_identical` |
+| D14 | `D14` | Negative control: the seam cuts the durable image at the last WAL frame carrying an acknowledged transaction's tag. Off by default (`durabilityConfig.dropLastAcked`) | `TestDurabilityNegativeControl`: `acked_present` must fail |
+| D15 | `D01.*`, `D02.*` | Transactions ordered by the WAL offset of their tag | `wal_tags_seen`, `no_hole`: no acknowledged transaction is absent below a recovered one |
+| D16 | `D16` | The pre-truncate image recovered with its snapshot, and without it (a full WAL replay) | `snapshot_used`, `checkpoint_plus_tail_equals_full_replay` (identical state fingerprints) |
+
+### Negative control (D14)
+
+With the seam on, the durable image at 8 writers was cut at offset 4 343 889. Recovery
+reported `missing=1` (id 1261), and `durability.D01.durable level=8 acked_present=false`
+and `new_session_sees_acked=false` were printed. `TestDurabilityNegativeControl` asserts
+that `acked_present` fails. The seam is off in every other run. D04 is the second negative
+control: 8 waiters of one failed fsync all failed, and none of them was visible to a new
+reader.
+
+### Defects found
+
+Both are reported as metrics, not gated.
+
+- **D09 — a lost snapshot directory is not detected after a WAL prefix truncation.**
+  After a checkpoint truncates the WAL prefix it folded, removing `snapshot/` leaves a
+  directory that recovery opens with a nil error and `IsClean() = true`. The commits in
+  the truncated prefix are missing: 130 acknowledged commits at both 8 and 64 writers.
+  PostgreSQL refuses to start when a needed WAL segment is missing
+  (`050_redo_segment_missing`). Reproduction: `store.Open`; commit; `checkpoint.New(...)`
+  wired with `WithCommitSerialiser(o.Store().RunUnderCommitLock)` and the codecs, then
+  `RunCheckpoint()`; close; `rm -r <dir>/snapshot`; `recovery.Open(dir)` returns a nil
+  error, the result is clean, and the folded commits are absent. Expected: an error, or
+  `IsClean() = false`. Reported as `# durability.D09.missing_segment ... refused_loudly`.
+- **D09 — a checkpoint capture is refused under explicit-transaction load.**
+  `RunCheckpoint`, wired with `RunUnderCommitLock` while writers run three-statement
+  explicit transactions, intermittently returns `snapshot.ErrCaptureNotQuiesced`. One
+  observed message was: "capture instant taken while a write transaction was open:
+  shard 98 drops node 2402 (interned, not visible at instant 132) but keeps node 2658
+  above it". It occurred on the first attempt at 8 writers in one run, and 3 times in 4
+  attempts at 64 writers under `-race`. `docs/isolation-design.md` states that the drain
+  leaves no interned-but-uncommitted id. The refusal publishes and truncates nothing, so
+  durability holds, but checkpoints can stall. The root cause has not been established.
+  The arm retries, and reports `checkpoint_attempts` and `checkpoint_refused_not_quiesced`.
+
+### Observed, by contract
+
+An explicit transaction registers as a writer from `BeginTx` until it commits or rolls
+back, and `RunUnderCommitLock` closes admission and waits for every registered writer.
+A transaction held open therefore holds back the checkpoint and, once admission is
+closed, every writer. The first kill child held one transaction open for its whole life,
+and the child deadlocked. The child now reopens its open transaction every 5 ms.
+
+### Running
+
+```
+go test -race -run 'TestDurability' ./examples/37_mvcc_write_contention/
+go test -tags soak -run TestDurabilityKill9 ./examples/37_mvcc_write_contention/
+go run ./examples/37_mvcc_write_contention -ladder-levels "" -durability-levels 8,64 -durability-kill-runs 5
+```
+
+Every image and every derived copy is created under `TMPDIR` and removed at the end of
+its arm.
+
 ## Status
 
 **IMPLEMENTED (rmp #2313).** `main.go` holds the configuration, the workload

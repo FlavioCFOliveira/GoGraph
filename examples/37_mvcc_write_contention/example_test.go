@@ -36,6 +36,8 @@ func testConfig() config {
 	c.readers = 2
 	// Phase 6 has its own gates (ladder_test.go); running it here would run it twice.
 	c.ladder.levels = nil
+	// Phase 7 likewise (durability_test.go).
+	c.durability.levels = nil
 	return c
 }
 

@@ -91,20 +91,26 @@ func (c *ladderConfig) opsPerWorker(n int) int {
 // ladderOut prints the facts of one ladder run and remembers every key it printed
 // and every check that failed.
 type ladderOut struct {
-	w     io.Writer
-	mu    sync.Mutex
-	fails []string
-	keys  map[string]struct{}
+	w io.Writer
+	// prefix names the phase on every line: "ladder" (phase 6) or "durability"
+	// (phase 7).
+	prefix string
+	mu     sync.Mutex
+	fails  []string
+	keys   map[string]struct{}
 }
 
-func newLadderOut(w io.Writer) *ladderOut {
-	return &ladderOut{w: w, keys: make(map[string]struct{}, 512)}
+func newLadderOut(w io.Writer) *ladderOut { return newPhaseOut(w, "ladder") }
+
+// newPhaseOut returns an output record whose lines are prefixed with prefix.
+func newPhaseOut(w io.Writer, prefix string) *ladderOut {
+	return &ladderOut{w: w, prefix: prefix, keys: make(map[string]struct{}, 512)}
 }
 
 // tele prints one volatile telemetry line: key/value pairs after the row and level.
 func (o *ladderOut) tele(row string, level int, kv ...any) {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# ladder.%s level=%d", row, level)
+	fmt.Fprintf(&b, "# %s.%s level=%d", o.prefix, row, level)
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for i := 0; i+1 < len(kv); i += 2 {
@@ -119,10 +125,10 @@ func (o *ladderOut) tele(row string, level int, kv ...any) {
 func (o *ladderOut) check(row string, level int, name string, ok bool, format string, args ...any) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	fmt.Fprintf(o.w, "ladder.%s level=%d %s=%v\n", row, level, name, ok)
+	fmt.Fprintf(o.w, "%s.%s level=%d %s=%v\n", o.prefix, row, level, name, ok)
 	o.keys[row+"."+name] = struct{}{}
 	if !ok {
-		o.fails = append(o.fails, fmt.Sprintf("ladder.%s level=%d %s: %s", row, level, name, fmt.Sprintf(format, args...)))
+		o.fails = append(o.fails, fmt.Sprintf("%s.%s level=%d %s: %s", o.prefix, row, level, name, fmt.Sprintf(format, args...)))
 	}
 }
 
