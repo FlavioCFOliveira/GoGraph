@@ -60,7 +60,9 @@ package lpg
 //
 // It carries no pre-image and takes part in no rollback: it answers the conflict
 // question and nothing else, exactly like [adjVersions], whose structure this
-// mirrors. Its undo is its removal, which is what clearAborted is for.
+// mirrors. Its undo is its removal, which is what clearAborted is for — except
+// that a commit an aborted stamp displaced survives as the entry's floor until the
+// watermark passes it ([constraintStamp.set], rmp #2998).
 
 import (
 	"sync"
@@ -91,6 +93,57 @@ const constraintVersionShards = 64
 type constraintStamp struct {
 	info *commitInfo
 	ts   uint64
+	// floorTS is the newest COMMIT timestamp this stamp displaced, or zero. Every
+	// check tests it beside the slot; see [constraintStamp.set].
+	floorTS uint64
+}
+
+// set records rec (tx's commit record, effective instant txID) in the slot, first
+// folding the value it displaces into floorTS when that value is a COMMITTED
+// write of another transaction.
+//
+// # Why a displaced commit must outlive its slot (rmp #2998)
+//
+// The slot is ONE value, so a write that stamps a node overwrites the stamp it
+// found. A commit is only overwritten by a transaction that can see it, so the
+// overwrite loses nothing while the overwriter lives: in flight it refuses every
+// other writer, and once committed its own instant is later than the one it
+// replaced. But when the overwriter ABORTS, [constraintVersions.clearAborted]
+// clears the slot, and with nothing else recording it the displaced commit was
+// gone: a transaction whose snapshot predates that commit then found the node
+// unstamped and was admitted to write the other half of the invariant — the
+// write skew this store exists to refuse. It is the defect rmp #2997 fixed in
+// [adjStamps.set], and the remedy is the same: the floor keeps the newest
+// displaced commit for as long as the entry lives, so a node conflicts for tx iff
+// the slot or any displaced commit is invisible to tx. It refuses nothing a kept
+// slot would not have refused, because a displaced commit is older than the
+// stamp that displaced it.
+//
+// A displaced write of the same transaction, an aborted one, and an in-flight one
+// of another transaction are not folded: the first is replaced by the same
+// record, the second protects nothing, and the third cannot be displaced at all,
+// because [constraintVersions.note] tests and records in one critical section
+// and an in-flight stamp of another transaction always conflicts.
+func (e *constraintStamp) set(rec *commitInfo, txID uint64) {
+	if e.info != rec {
+		if h := adjEffective(e.info, e.ts); h != 0 && h < mvcc.TxIDBase && h > e.floorTS {
+			e.floorTS = h
+		}
+	}
+	e.info, e.ts = rec, txID
+}
+
+// blocking returns the instant of the first write recorded in e that tx may not
+// write over — the slot, then the floor of displaced commits
+// ([constraintStamp.set]) — or false when there is none.
+func (e *constraintStamp) blocking(tx *writeCtx) (uint64, bool) {
+	if head := adjEffective(e.info, e.ts); tx.conflicts(head) {
+		return head, true
+	}
+	if e.floorTS != 0 && tx.conflicts(e.floorTS) {
+		return e.floorTS, true
+	}
+	return 0, false
 }
 
 // constraintVersionShard is one lock and the nodes it covers. The map is allocated
@@ -163,7 +216,7 @@ func (cv *constraintVersions) note(id graph.NodeID, tx *writeCtx) error {
 
 	e := sh.d[id]
 	if e != nil {
-		if head := adjEffective(e.info, e.ts); tx.conflicts(head) {
+		if head, ok := e.blocking(tx); ok {
 			return tx.conflictErr(mvcc.StoreNodeConstraint, head)
 		}
 	} else {
@@ -174,15 +227,15 @@ func (cv *constraintVersions) note(id graph.NodeID, tx *writeCtx) error {
 		sh.d[id] = e
 		cv.active.Add(1)
 	}
-	e.info, e.ts = tx.record(), tx.txID
+	e.set(tx.record(), tx.txID)
 	// An abort sweeps the constraint stamps only when it wrote one; see
 	// [Graph.withdrawAbortedNow].
 	tx.tx.Touch(touchedConstraint)
 	return nil
 }
 
-// truncate drops every stamp at or below watermark, and reports how many it
-// removed.
+// truncate drops every entry whose slot and floor are both at or below
+// watermark, and reports how many it removed.
 //
 // Such a stamp can no longer refuse anything — [mvcc.Conflicts] is false for a head
 // below every live transaction's start — so keeping it only costs memory. Without
@@ -198,7 +251,7 @@ func (cv *constraintVersions) truncate(watermark uint64) (freed int) {
 		sh := &cv.shards[i]
 		sh.mu.Lock()
 		for id, e := range sh.d {
-			if adjEffective(e.info, e.ts) <= watermark {
+			if adjEffective(e.info, e.ts) <= watermark && e.floorTS <= watermark {
 				delete(sh.d, id)
 				freed++
 			}
@@ -217,6 +270,11 @@ func (cv *constraintVersions) truncate(watermark uint64) (freed int) {
 // clearAborted drops every constraint stamp an aborted transaction set, and reports
 // how many entries it removed.
 //
+// A cleared slot does not take the commit it displaced with it: that commit was
+// folded into floorTS when the aborted write overwrote it ([constraintStamp.set]),
+// so the entry stays, floor alone, until [constraintVersions.truncate] finds the
+// floor at or below the watermark (rmp #2998).
+//
 // The stamps carry no pre-image and take no part in a reader's decision, so their
 // undo is their removal. [constraintVersions.truncate] cannot reach them: it
 // compares against the watermark and [mvcc.AbortedTS] is above every watermark
@@ -229,10 +287,15 @@ func (cv *constraintVersions) clearAborted() (freed int) {
 		sh := &cv.shards[i]
 		sh.mu.Lock()
 		for id, e := range sh.d {
-			if adjEffective(e.info, e.ts) == mvcc.AbortedTS {
-				delete(sh.d, id)
-				freed++
+			if adjEffective(e.info, e.ts) != mvcc.AbortedTS {
+				continue
 			}
+			if e.floorTS != 0 {
+				e.info, e.ts = nil, 0
+				continue
+			}
+			delete(sh.d, id)
+			freed++
 		}
 		if len(sh.d) == 0 {
 			sh.d = nil
