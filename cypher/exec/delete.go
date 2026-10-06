@@ -62,8 +62,10 @@ var ErrDeleteNodeHasRelationships = errors.New("exec: cannot delete node with ex
 // cypher.TestDeleteInEdgeIndex_DecidesFromTheTransactionSnapshot violated
 // snapshot isolation this way.
 type txVisibleAdjacencyReader interface {
-	// InNeighboursInTx is [GraphMutator.InNeighbours] in this transaction's
-	// view.
+	// InNeighboursInTx returns one source key per incoming arc of n in this
+	// transaction's view, self-loops excluded: a source holding k parallel arcs
+	// into n appears k times, because DETACH DELETE removes one slot per
+	// [GraphMutator.RemoveEdge] call (rmp #2988).
 	InNeighboursInTx(n string) []string
 	// HasInNeighbourInTx reports whether InNeighboursInTx would return anything.
 	HasInNeighbourInTx(n string) bool

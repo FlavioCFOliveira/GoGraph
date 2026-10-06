@@ -22185,12 +22185,13 @@ func (a *lpgMutatorAdapter) InNeighbours(n string) []string {
 	return storedInNeighbours(a.g, n)
 }
 
-// InNeighboursInTx returns n's incoming neighbour keys in THIS transaction's
-// view: its snapshot plus its own writes (rmp #2884). It satisfies the exec
-// package's optional transaction-visible adjacency reader, which the DELETE
-// guard and DETACH DELETE decide through; see [lpg.Graph.InNeighbourIDsAsOf].
+// InNeighboursInTx returns one source key per incoming arc of n in THIS
+// transaction's view: its snapshot plus its own writes (rmp #2884). A source
+// holding k parallel arcs into n appears k times (rmp #2988). It satisfies the
+// exec package's optional transaction-visible adjacency reader, which the
+// DELETE guard and DETACH DELETE decide through; see [inArcSourcesInTx].
 func (a *lpgMutatorAdapter) InNeighboursInTx(n string) []string {
-	return a.g.WriterViewOf(a.wtx).InNeighbours(n)
+	return inArcSourcesInTx(a.g, a.g.WriterViewOf(a.wtx), n)
 }
 
 // HasInNeighbourInTx reports whether n has an incoming neighbour in THIS
@@ -23656,7 +23657,7 @@ func (a *walMutatorAdapter) InNeighbours(n string) []string {
 // InNeighboursInTx is [lpgMutatorAdapter.InNeighboursInTx] for the durable
 // write path.
 func (a *walMutatorAdapter) InNeighboursInTx(n string) []string {
-	return a.g.WriterViewOf(a.wtx).InNeighbours(n)
+	return inArcSourcesInTx(a.g, a.g.WriterViewOf(a.wtx), n)
 }
 
 // HasInNeighbourInTx is [lpgMutatorAdapter.HasInNeighbourInTx] for the
@@ -24774,6 +24775,46 @@ func storedOutNeighbours(g *lpg.Graph[string, float64], n string) []string {
 	for _, nb := range nbs {
 		if k, ok := g.AdjList().Mapper().Resolve(nb); ok {
 			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// inArcSourcesInTx returns one source key per incoming arc of n in view v,
+// self-loops excluded: a source holding k parallel arcs into n appears k times.
+//
+// The in-edge index records DISTINCT sources ([lpg.ReadView.InNeighbours]), and
+// [exec.GraphMutator.RemoveEdge] takes out ONE src→n slot per call, so a DETACH
+// DELETE that removed once per distinct source left every parallel arc after the
+// first in place, pointing at the deleted node (rmp #2988). The multiplicity is
+// read from the source's own entry in the same view, so it counts exactly the
+// slots the transaction can see. The cost is one scan of each in-neighbour's
+// entry, the same order as the per-slot removal that follows it.
+//
+// A source the index names but whose entry holds no visible arc into n is
+// listed once, as before: its removal is the caller's presence-gated no-op.
+func inArcSourcesInTx(g *lpg.Graph[string, float64], v *lpg.ReadView[string, float64], n string) []string {
+	srcs := v.InNeighbours(n)
+	if len(srcs) == 0 {
+		return nil
+	}
+	m := g.AdjList().Mapper()
+	dstID, ok := m.Lookup(n)
+	if !ok {
+		return srcs
+	}
+	out := make([]string, 0, len(srcs))
+	for _, src := range srcs {
+		k := 0
+		if srcID, ok := m.Lookup(src); ok {
+			for _, nb := range v.EntryView(srcID).Neighbours {
+				if nb == dstID {
+					k++
+				}
+			}
+		}
+		for range max(k, 1) {
+			out = append(out, src)
 		}
 	}
 	return out

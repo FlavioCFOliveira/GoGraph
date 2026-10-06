@@ -1284,11 +1284,10 @@ func rowHubChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 				return inTx(ctx, m.eng, true, func(tx *cypher.ExplicitTx) error {
 					switch {
 					case r < 5:
-						// MERGE, not CREATE: no parallel edge is ever created. A DETACH
-						// DELETE of a node with two parallel in-edges from one source
-						// leaves one arc behind (README.md, "Defects found"), and this arm
-						// must keep measuring churn rather than fail on that one shape.
-						_, e := drain(tx.Exec("MATCH (x:X {id:$x}), (h:Hub {id:$h}) MERGE (x)-[:R]->(h)", P("x", x, "h", h)))
+						// CREATE, not MERGE: repeated draws of one (x, h) pair build
+						// parallel in-edges into the hub, the shape whose DETACH DELETE
+						// once left an arc behind (README.md, D6, rmp #2988).
+						_, e := drain(tx.Exec("MATCH (x:X {id:$x}), (h:Hub {id:$h}) CREATE (x)-[:R]->(h)", P("x", x, "h", h)))
 						return e
 					case r < 8:
 						_, e := drain(tx.Exec("MATCH (x:X {id:$x})-[r:R]->(:Hub {id:$h}) WITH r LIMIT 1 DELETE r", P("x", x, "h", h)))

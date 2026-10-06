@@ -596,14 +596,17 @@ open.
   statement of an explicit transaction is not re-run (MG11). L13 and L13.memory gate
   `every_caller_succeeds`.
 - **D6 — `DETACH DELETE` of a node with two parallel in-edges from one source leaves one
-  arc behind (open, rmp #2988; found by phase 6, L15).** Reproduction: `CREATE (:Hub {id:1}), (:X
+  arc behind (fixed, rmp #2988; found by phase 6, L15).** Reproduction: `CREATE (:Hub {id:1}), (:X
   {id:53})`; twice `MATCH (x:X {id:53}), (h:Hub {id:1}) CREATE (x)-[:R]->(h)`; `MATCH
   (h:Hub {id:1}) DETACH DELETE h`; `ReclaimNow`. Cypher counts 0 relationships, but at a
   fresh snapshot the live `x` still lists the dead hub in its out-neighbours and the dead
   hub lists `x` as an in-neighbour (the dangling probe counts 2). With one edge, or with
-  one of the two deleted first, the probe counts 0. L15 creates its edges with `MERGE`,
-  so it never builds this shape and keeps measuring hub churn; rmp #2988 adds the
-  parallel-edge shape back.
+  one of the two deleted first, the probe counts 0. The in-edge index names each source
+  once, and DETACH DELETE removed one slot per name. **Fixed (rmp #2988):** the
+  transaction-visible in-neighbour read lists a source once per incoming arc
+  (`inArcSourcesInTx`, `cypher/api.go`), so every parallel instance is removed. L15
+  creates its edges with `CREATE`, so repeated draws of one pair build parallel in-edges,
+  and gates `no_dangling_edge`.
 - **D7 — the hash and label indexes diverge from the graph under random churn (fixed,
   rmp #2989; found by phase 6, L06).** At quiescence, after the L06 workload (label add/remove,
   indexed writes, 30% rollbacks, a UNIQUE set), the equality seek on `(:L).s` misses
@@ -717,7 +720,7 @@ self-conflict streak gate. The binary runs the phase after phase 5 with
 | `L10.<arm>`, `L20.<arm>` | L10, L20 | WAL-backed store (`store.Open`), disjoint writers, a checkpointer triggered back to back | Final = acknowledged; session arm 0 self-conflicts; checkpoints ran; commit tail during a checkpoint below `hangBudget`; storage size before and after |
 | `L11.<arm>` | L11, L12 | In-memory disjoint writers, session and sessionless | Session arm 0 self-conflicts (and so 0 conflicts) |
 | `L13`, `L13.memory`, `MG11`, `L14` | L13, MG11, L14 | `MERGE` storms on 4 keys: autocommit under UNIQUE (WAL-backed and in-memory), explicit under UNIQUE, autocommit without a constraint | One node per key under UNIQUE; every failure typed; L13 and L14 every caller succeeds (D5), L14 duplicates counted |
-| `L15`, `L16` | L15, L16 | Edge `MERGE`/delete on hubs and `DETACH DELETE` + recreate of hubs; read transactions repeat a one-hop and a `*1..3` traversal | No dangling arc at quiescence; repeated traversals identical |
+| `L15`, `L16` | L15, L16 | Edge `CREATE` (parallel edges)/delete on hubs and `DETACH DELETE` + recreate of hubs; read transactions repeat a one-hop and a `*1..3` traversal | No dangling arc at quiescence; repeated traversals identical |
 | `L17` | L17 | 8 transactions hold 16 000 (soak: 150 000) uncommitted nodes; counts; a 9 M-row statement cancelled after 2 ms | Count = committed only; cancelled statement returns `context.Canceled` within 1 s |
 | `L18` | L18 | Property writes, edge creates and `DETACH DELETE`s, 50% rolled back | Total <= Bound after quiescence; 0 dangling arcs; every hub writable by a lone writer |
 | `L19` | L19, DD08, DD09 | `CREATE`/`DROP INDEX` cycles and an overlapping `CREATE INDEX` on the same object while writers churn and the vacuum is swept in a loop | Seek = scan; every DDL refusal classified (`already_exists`); DDL latency below `hangBudget`; no writer starved |
