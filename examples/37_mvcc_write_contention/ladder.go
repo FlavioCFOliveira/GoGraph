@@ -724,6 +724,9 @@ func reportTx(out *ladderOut, row string, level int, arm string, s *txStats, ela
 }
 
 // storeDirFor returns a fresh directory for a WAL-backed arm under TMPDIR.
-func storeDirFor(row string, level int, arm string) (string, error) {
-	return os.MkdirTemp("", fmt.Sprintf("ex37-%s-%d-%s-*", row, level, arm))
+// The row, level and arm identify the call site only: the directory takes the
+// literal "ex37-store-" prefix that internal/tmphygiene owns, so the temp-area
+// guard sees every store this example creates.
+func storeDirFor(_ string, _ int, _ string) (string, error) {
+	return os.MkdirTemp("", "ex37-store-*")
 }
