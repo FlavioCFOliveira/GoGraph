@@ -32,7 +32,7 @@ func TestDurabilityKill9(t *testing.T) {
 			cmd.Env = append(os.Environ(), envChildDir+"="+dir, envChildLevel+"="+strconv.Itoa(level))
 			return cmd
 		}}
-	keys := []string{}
+	keys := make([]string, 0, 50)
 	for _, r := range []string{"D02.run0", "D02.run1", "D02.run2", "D02.run3", "D02.run4"} {
 		for _, k := range []string{"acked_present", "refused_absent", "whole_or_absent", "counters_conserved",
 			"open_absent", "clock_not_rewound", "no_hole", "new_session_sees_acked", "seek_equals_scan",

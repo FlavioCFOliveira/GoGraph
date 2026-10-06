@@ -232,13 +232,17 @@ func armKill(ctx context.Context, dc *durabilityConfig, out *ladderOut, run int)
 	desc := "exited"
 	var ee *exec.ExitError
 	if errors.As(waitErr, &ee) {
-		desc = ee.ProcessState.String()
-		if ws, ok := ee.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL {
+		desc = ee.String()
+		if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL {
 			killed = true
 		}
 	}
 	if !reached || !killed || parseErr != nil {
-		return fmt.Errorf("%s: child reached %d of %d acknowledgements, termination %q, parse error %v; stderr:\n%s",
+		if parseErr == nil {
+			return fmt.Errorf("%s: child reached %d of %d acknowledgements, termination %q, parse error <nil>; stderr:\n%s",
+				row, beforeKill, target, desc, stderr.String())
+		}
+		return fmt.Errorf("%s: child reached %d of %d acknowledgements, termination %q, parse error %w; stderr:\n%s",
 			row, beforeKill, target, desc, parseErr, stderr.String())
 	}
 	select {

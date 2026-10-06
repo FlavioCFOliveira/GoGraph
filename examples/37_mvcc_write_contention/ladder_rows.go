@@ -339,7 +339,7 @@ func rowHistory(ctx context.Context, lc *ladderConfig, out *ladderOut, level int
 	if err != nil {
 		return err
 	}
-	reportQuiesce(out, "L01", level, qs)
+	reportQuiesce(out, "L01", level, &qs)
 	return nil
 }
 
@@ -393,7 +393,7 @@ func rowHotCounter(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 		if err != nil {
 			return err
 		}
-		reportQuiesce(out, row, level, qs)
+		reportQuiesce(out, row, level, &qs)
 	}
 	return nil
 }
@@ -493,7 +493,7 @@ func rowLargeTxn(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 	if err != nil {
 		return err
 	}
-	reportQuiesce(out, "L05", level, qs)
+	reportQuiesce(out, "L05", level, &qs)
 	return nil
 }
 
@@ -686,14 +686,14 @@ func rowIndexChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 	out.check("L07", level, "own_writes_seeked", ownChecks.Load() > 0, "no in-transaction seek ran")
 	out.check("L07", level, "own_seek_equals_scan", ownMismatch.Load() == 0, "%d mismatches, first %s", ownMismatch.Load(), bad)
 	smp.report(out, "L06", level, level)
-	reportQuiesce(out, "L06", level, qs)
+	reportQuiesce(out, "L06", level, &qs)
 	return nil
 }
 
 // ---------------------------------------------------------------------------
 // L08 — long-reader retention and release.
 
-func rowLongReader(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
+func rowLongReader(ctx context.Context, _ *ladderConfig, out *ladderOut, level int) error {
 	const nodes, residues = 256, 8
 	m := newMemEngine()
 	defer m.close()
@@ -770,7 +770,7 @@ func rowLongReader(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 	out.check("L08", level, "reclaimed_after_release", released.Total < held.Total, "Total %d -> %d", held.Total, released.Total)
 	out.check("L08", level, "no_unexpected_errors", st.otherErrs.Load() == 0, "first: %s", st.errText())
 	smp.report(out, "L08", level, level)
-	reportQuiesce(out, "L08", level, released)
+	reportQuiesce(out, "L08", level, &released)
 	return nil
 }
 
@@ -832,7 +832,7 @@ func rowHorizonCliff(ctx context.Context, _ *ladderConfig, out *ladderOut, level
 	out.check("L09", level, "reads_correct_past_capacity", wrong == 0, "%d readers saw a later state", wrong)
 	out.check("L09", level, "unregistered_released", settled.UnregisteredSnapshots == 0,
 		"UnregisteredSnapshots=%d after release", settled.UnregisteredSnapshots)
-	reportQuiesce(out, "L09", level, settled)
+	reportQuiesce(out, "L09", level, &settled)
 	return nil
 }
 
@@ -929,7 +929,7 @@ func rowDisjoint(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 		if err != nil {
 			return err
 		}
-		reportQuiesce(out, row, level, qs)
+		reportQuiesce(out, row, level, &qs)
 	}
 	return nil
 }
@@ -1039,7 +1039,7 @@ func walArm(ctx context.Context, lc *ladderConfig, out *ladderOut, level int, se
 	out.check("L20."+armName(session), level, "commit_tail_bounded_during_checkpoint", mx < hangBudget,
 		"a commit during a checkpoint took %s", mx)
 	smp.report(out, row, level, level)
-	reportQuiesce(out, row, level, qs)
+	reportQuiesce(out, row, level, &qs)
 	return nil
 }
 
@@ -1070,9 +1070,9 @@ func rowMergeStorm(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 		{"L14", false, false, false, true},
 	} {
 		var (
-			eng   *cypher.Engine
-			g     *lpg.Graph[string, float64]
-			close func()
+			eng      *cypher.Engine
+			g        *lpg.Graph[string, float64]
+			closeArm func()
 		)
 		if arm.wal {
 			dir, err := storeDirFor(arm.row, level, "wal")
@@ -1087,18 +1087,18 @@ func rowMergeStorm(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 				return err
 			}
 			eng, g = cypher.NewEngineWithOpened(o), o.Graph()
-			close = func() {
+			closeArm = func() {
 				_ = o.Close()
 				_ = eng.Close()
 				_ = os.RemoveAll(dir)
 			}
 		} else {
 			m := newMemEngine()
-			eng, g, close = m.eng, m.g, m.close
+			eng, g, closeArm = m.eng, m.g, m.close
 		}
 		if arm.constraint {
 			if err := mustRun(ctx, eng, "CREATE CONSTRAINT k_u FOR (n:K) REQUIRE n.k IS UNIQUE", nil); err != nil {
-				close()
+				closeArm()
 				return err
 			}
 		}
@@ -1138,12 +1138,12 @@ func rowMergeStorm(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 		elapsed := time.Since(t0)
 		smp.finish()
 		if err != nil {
-			close()
+			closeArm()
 			return err
 		}
 		rows, err := drain(eng.Run(ctx, "MATCH (n:K) RETURN n.k AS k, count(*) AS c ORDER BY k", nil))
 		if err != nil {
-			close()
+			closeArm()
 			return err
 		}
 		dups, perKeyMax := int64(0), int64(0)
@@ -1170,11 +1170,11 @@ func rowMergeStorm(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 		}
 		smp.report(out, arm.row, level, level)
 		qs, err := quiesce(ctx, g)
-		close()
+		closeArm()
 		if err != nil {
 			return err
 		}
-		reportQuiesce(out, arm.row, level, qs)
+		reportQuiesce(out, arm.row, level, &qs)
 	}
 	return nil
 }
@@ -1334,7 +1334,7 @@ func rowHubChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 	out.check("L16", level, "traversal_repeatable", readerMismatch.Load() == 0, "%d mismatches, first %s", readerMismatch.Load(), bad)
 	out.check("L16", level, "readers_ran", readerTx.Load() > 0, "no traversal reader completed")
 	smp.report(out, "L15", level, level+readers)
-	reportQuiesce(out, "L15", level, qs)
+	reportQuiesce(out, "L15", level, &qs)
 	return nil
 }
 
@@ -1422,7 +1422,7 @@ func rowParallelCount(ctx context.Context, lc *ladderConfig, out *ladderOut, lev
 		"counts %d / %d / %d, want %d", intAt(auto, 0, 0), intAt(inRead, 0, 0), intAt(after, 0, 0), base)
 	out.check("L17", level, "cancel_prompt", errors.Is(cerr, context.Canceled) && lag < cancelBudget,
 		"cancelled statement returned %v after %s (budget %s)", cerr, lag, cancelBudget)
-	reportQuiesce(out, "L17", level, qs)
+	reportQuiesce(out, "L17", level, &qs)
 	return nil
 }
 
@@ -1498,7 +1498,7 @@ func rowAbortHeavy(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 	out.check("L18", level, "no_unwritable_node", unwritable == 0, "%d nodes refused a lone writer", unwritable)
 	out.check("L18", level, "no_unexpected_errors", st.otherErrs.Load() == 0, "first: %s", st.errText())
 	smp.report(out, "L18", level, level)
-	reportQuiesce(out, "L18", level, qs)
+	reportQuiesce(out, "L18", level, &qs)
 	return nil
 }
 
@@ -1644,7 +1644,7 @@ func rowDDLCycles(ctx context.Context, lc *ladderConfig, out *ladderOut, level i
 	out.check("L19", level, "writers_not_starved", starved == 0, "%d writers completed no operation", starved)
 	out.check("L19", level, "no_unexpected_errors", st.otherErrs.Load() == 0, "first: %s", st.errText())
 	smp.report(out, "L19", level, level+3)
-	reportQuiesce(out, "L19", level, qs)
+	reportQuiesce(out, "L19", level, &qs)
 	return nil
 }
 

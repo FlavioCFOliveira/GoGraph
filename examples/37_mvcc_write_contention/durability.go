@@ -134,8 +134,6 @@ type ackLog struct {
 	// clockMax is the largest MVCC instant reported with an acknowledgement (the
 	// kill -9 arm, whose child prints the clock with each ACK line).
 	clockMax uint64
-	// ackedAtClock is how many acknowledgements clockMax covers.
-	ackedAtClock int
 }
 
 func newAckLog() *ackLog { return &ackLog{state: make(map[int64]attempt, 1024)} }
@@ -754,7 +752,7 @@ func holes(frames []frameInfo, sc *score) (holes, tagged int) {
 		id  int64
 		off int64
 	}
-	var order []ip
+	order := make([]ip, 0, len(pos))
 	for id, off := range pos {
 		order = append(order, ip{id, off})
 	}
@@ -1415,7 +1413,7 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 	// publishes and truncates nothing; the refusals are counted and reported.
 	var cpErr error
 	refused, attempts := 0, 0
-	running := false
+	var running bool
 	for {
 		captured = false
 		delete(imgs, "pre_truncate")

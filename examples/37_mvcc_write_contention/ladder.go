@@ -537,7 +537,8 @@ const samplerTick = 500 * time.Microsecond
 
 func startSampler(g *lpg.Graph[string, float64], ceiling bool) *sampler {
 	s := &sampler{g: g, stop: make(chan struct{}), done: make(chan struct{}), ceiling: ceiling}
-	s.observe(g.MVCCStats())
+	st0 := g.MVCCStats()
+	s.observe(&st0)
 	go s.loop()
 	return s
 }
@@ -553,16 +554,16 @@ func (s *sampler) loop() {
 		case <-t.C:
 		}
 		st := s.g.MVCCStats()
-		s.observe(st)
+		s.observe(&st)
 		if n%4 == 0 {
-			s.measureLag(st)
+			s.measureLag(&st)
 		}
 	}
 }
 
-func (s *sampler) observe(st lpg.MVCCStats) {
+func (s *sampler) observe(st *lpg.MVCCStats) {
 	s.samples++
-	inflight, _, _, waiting := frontierOf(&st)
+	inflight, _, _, waiting := frontierOf(st)
 	s.peakInFlight = max(s.peakInFlight, inflight)
 	s.peakWaiting = max(s.peakWaiting, waiting)
 	s.peakTotal = max(s.peakTotal, st.Total)
@@ -573,22 +574,19 @@ func (s *sampler) observe(st lpg.MVCCStats) {
 	if s.ceiling && st.ActiveReaders() == 0 && !st.WithinCeiling() {
 		s.ceilingBreaches++
 	}
-	s.last = st
+	s.last = *st
 }
 
 // measureLag times how long the frontier takes to pass every commit allocated
 // at the instant st was read.
-func (s *sampler) measureLag(st lpg.MVCCStats) {
-	inflight, _, _, _ := frontierOf(&st)
+func (s *sampler) measureLag(st *lpg.MVCCStats) {
+	inflight, _, _, _ := frontierOf(st)
 	if inflight == 0 {
 		return
 	}
 	target := st.Now + inflight
 	t0 := time.Now()
-	for {
-		if s.g.MVCCStats().Now >= target {
-			break
-		}
+	for s.g.MVCCStats().Now < target {
 		if time.Since(t0) > lagBudget {
 			s.lagTimeouts++
 			break
@@ -603,12 +601,14 @@ func (s *sampler) measureLag(st lpg.MVCCStats) {
 func (s *sampler) finish() {
 	close(s.stop)
 	<-s.done
-	s.observe(s.g.MVCCStats())
+	st := s.g.MVCCStats()
+	s.observe(&st)
 }
 
 // report prints the frontier and growth telemetry and the structural verdicts.
-// goroutines is the arm's goroutine count, the structural bound of SessionsWaiting.
-func (s *sampler) report(out *ladderOut, row string, level, goroutines int) {
+// The trailing int, the arm's goroutine count, is accepted for call-site
+// uniformity and is not used.
+func (s *sampler) report(out *ladderOut, row string, level, _ int) {
 	st := s.last
 	inflight, ooo, helped, waiting := frontierOf(&st)
 	out.tele(row, level,
@@ -694,8 +694,8 @@ func quiesce(ctx context.Context, g *lpg.Graph[string, float64]) (lpg.MVCCStats,
 
 // reportQuiesce prints the settled state and checks InFlightCommits = 0 and
 // Total <= Bound.
-func reportQuiesce(out *ladderOut, row string, level int, st lpg.MVCCStats) {
-	inflight, _, _, waiting := frontierOf(&st)
+func reportQuiesce(out *ladderOut, row string, level int, st *lpg.MVCCStats) {
+	inflight, _, _, waiting := frontierOf(st)
 	out.tele(row, level, "quiesced_versions_total", st.Total, "quiesced_active_snapshots", st.ActiveSnapshots,
 		"quiesced_unregistered", st.UnregisteredSnapshots)
 	out.check(row, level, "quiesced_in_flight_zero", inflight == 0 && waiting == 0,
