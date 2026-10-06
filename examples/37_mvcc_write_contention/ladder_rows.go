@@ -670,13 +670,14 @@ func rowIndexChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 	if len(mismatches) > 0 {
 		first = strings.Join(mismatches[:min(5, len(mismatches))], "; ")
 	}
-	// Reported, not gated, until rmp #2989 (D7) is fixed: under random churn the
-	// hash and label indexes drift from the graph (README.md, "Defects found").
-	// #2989 restores this as the gate `seek_equals_scan`.
 	if first == "" {
 		first = "none"
 	}
 	out.tele("L06", level, "seek_scan_first_mismatches", fmt.Sprintf("%q", first))
+	// Gated since rmp #2989 (D7, README.md "Defects found"), which fixed the
+	// index drift this used to report as a metric only.
+	out.check("L06", level, "seek_equals_scan", compared > 0 && len(mismatches) == 0,
+		"%d of %d seek/scan pairs differ, first: %s", len(mismatches), compared, first)
 	out.check("L06", level, "unique_holds", intAt(dupRows, 0, 0) == 0, "%d duplicated UNIQUE values", intAt(dupRows, 0, 0))
 	out.check("L06", level, "no_unexpected_errors", st.otherErrs.Load() == 0, "first: %s", st.errText())
 	bad := ""

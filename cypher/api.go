@@ -21143,6 +21143,34 @@ type lpgMutatorAdapter struct {
 // for the read-only adapter stubs that never open a bracket.
 func (a *lpgMutatorAdapter) w() lpg.WriteView[string, float64] { return a.g.Writer(a.wtx) }
 
+// effectMark samples the statement transaction's version count before an
+// in-memory write, so [lpgMutatorAdapter.tookEffect] can tell afterwards whether
+// the write changed anything.
+//
+// # The index fan-out records effects, not requests (rmp #2989)
+//
+// A write that changes nothing — a label already present, a property set to the
+// value it holds, a removal of something absent — writes no version and holds
+// no claim, so a concurrent transaction may change the same node and commit
+// first. Its index change, fanned out at this transaction's commit, then
+// described a state the node no longer had: a SET re-indexed the value a peer
+// had replaced, a REMOVE of an absent label deleted the entry a peer's label add
+// had made. Every node label and property change this adapter enqueues is
+// therefore gated on the write having written a version, exactly as
+// [walMutatorAdapter.effectMark] gates what the WAL records (rmp #2965).
+func (a *lpgMutatorAdapter) effectMark() (mark int64, counted bool) { return a.wtx.Versions() }
+
+// tookEffect reports whether the write since effectMark changed anything. A
+// transaction without version accounting (a disarmed graph) cannot tell, so it
+// reports true and the change is enqueued, as before.
+func (a *lpgMutatorAdapter) tookEffect(mark int64, counted bool) bool {
+	if !counted {
+		return true
+	}
+	n, _ := a.wtx.Versions()
+	return n != mark
+}
+
 // constraintReg returns the engine's constraint registry, or nil when the adapter
 // has no engine (a read-only test stub). A nil registry means nothing is declared,
 // so the enforcement entry points in [exec] treat it as "no constraints" rather than
@@ -21555,14 +21583,23 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 	// #2212: a label already present is a no-op and counts nothing. Probed
 	// independently of hadLabel, which is gated on the undo recorder being active.
 	labelIsNew := a.counters != nil && !a.g.HasNodeLabelAsOf(n, label, nil)
+	mark, counted := a.effectMark()
 	if err := a.w().SetNodeLabel(n, label); err != nil {
 		return err
 	}
 	if labelIsNew {
 		a.countLabelAdded()
 	}
+	// The undo follows the write's EFFECT, not the pre-call probe (rmp #2989):
+	// the probe runs outside the label shard's lock, so a peer can restore the
+	// label between the two, and the undo of an add that changed nothing then
+	// removed a label this transaction never added — the bag got it back when the
+	// abort was withdrawn, the label bitmap did not.
+	if counted {
+		hadLabel = !a.tookEffect(mark, counted)
+	}
 	r.recordSetNodeLabel(n, label, hadLabel)
-	if a.buf != nil {
+	if a.buf != nil && a.tookEffect(mark, counted) {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddNodeLabel,
 			Node:  a.resolveID(n),
@@ -21594,14 +21631,20 @@ func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) error {
 	}
 	// #2212: removing an absent label counts nothing.
 	labelWasPresent := a.counters != nil && a.g.HasNodeLabelAsOf(n, label, nil)
+	mark, counted := a.effectMark()
 	if err := a.w().RemoveNodeLabel(n, label); err != nil {
 		return err
 	}
 	if labelWasPresent {
 		a.countLabelRemoved()
 	}
+	// The undo follows the write's EFFECT, not the pre-call probe (rmp #2989);
+	// see SetNodeLabel.
+	if counted {
+		hadLabel = a.tookEffect(mark, counted)
+	}
 	r.recordRemoveNodeLabel(n, label, hadLabel)
-	if a.buf != nil {
+	if a.buf != nil && a.tookEffect(mark, counted) {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
 			Node:  a.resolveID(n),
@@ -21677,20 +21720,22 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
+	idxOld, idxHad := indexOldValue(a.g, a.wtx, a.buf, r.active() || fanout || statsActive, n, key)
+	mark, counted := a.effectMark()
 	if err := a.w().SetNodeProperty(n, key, value); err != nil {
 		return err
 	}
 	a.countPropertySet()
 	r.recordSetNodeProperty(n, key, prev, had)
-	if a.buf != nil {
+	if a.buf != nil && a.tookEffect(mark, counted) {
 		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
 			Node:     a.resolveID(n),
 			Property: checkedKeyID(a.g, key),
 			NewValue: value,
 		}
-		if had {
-			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
+		if idxHad {
+			ch.OldValue = idxOld // lets a bound index drop the stale entry (task #1340)
 		}
 		a.buf.Enqueue(ch)
 	}
@@ -21721,24 +21766,26 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) error {
 	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
+	idxOld, idxHad := indexOldValue(a.g, a.wtx, a.buf, r.active() || fanout || statsActive, n, key)
 	// #2212: removing an absent property is a no-op and counts nothing.
 	if a.counters != nil {
 		if _, present := a.g.GetNodePropertyAsOf(n, key, nil); present {
 			a.countPropertyRemoved()
 		}
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().DelNodeProperty(n, key); err != nil {
 		return err
 	}
 	r.recordDelNodeProperty(n, key, prev, had)
-	if a.buf != nil {
+	if a.buf != nil && a.tookEffect(mark, counted) {
 		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
 			Node:     a.resolveID(n),
 			Property: checkedKeyID(a.g, key),
 		}
-		if had {
-			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
+		if idxHad {
+			ch.OldValue = idxOld // lets a bound index drop the stale entry (task #1340)
 		}
 		a.buf.Enqueue(ch)
 	}
@@ -22925,6 +22972,14 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 	if labelIsNew {
 		a.countLabelAdded()
 	}
+	// The undo follows the write's EFFECT, not the pre-call probe (rmp #2989):
+	// the probe runs outside the label shard's lock, so a peer can restore the
+	// label between the two, and the undo of an add that changed nothing then
+	// removed a label this transaction never added — the bag got it back when the
+	// abort was withdrawn, the label bitmap did not.
+	if counted {
+		hadLabel = !a.tookEffect(mark, counted)
+	}
 	r.recordSetNodeLabel(n, label, hadLabel)
 	// rmp #2747: propagated, never discarded — held until the bookkeeping below
 	// has run, as in [walMutatorAdapter.AddNode]. [txn.Tx.SetNodeLabel] returns
@@ -22933,10 +22988,13 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 	// second, so nil is the only value reachable today. Buffered only when the
 	// label was not already present (see [walMutatorAdapter.effectMark]).
 	var txErr error
-	if a.tookEffect(mark, counted) {
+	took := a.tookEffect(mark, counted)
+	if took {
 		txErr = a.tx.SetNodeLabel(n, label)
 	}
-	if a.buf != nil {
+	// The index change is gated on the same effect (rmp #2989); see
+	// [lpgMutatorAdapter.effectMark].
+	if a.buf != nil && took {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddNodeLabel,
 			Node:  a.resolveID(n),
@@ -22972,16 +23030,24 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) error {
 	if labelWasPresent {
 		a.countLabelRemoved()
 	}
+	// The undo follows the write's EFFECT, not the pre-call probe (rmp #2989);
+	// see SetNodeLabel.
+	if counted {
+		hadLabel = a.tookEffect(mark, counted)
+	}
 	r.recordRemoveNodeLabel(n, label, hadLabel)
 	// rmp #2956: propagated, never discarded. The token gate at the top of this
 	// method refuses every name the WAL cannot carry before any write, so the
 	// in-memory write and this staged op succeed or fail together. Buffered only
 	// when the label was present (see [walMutatorAdapter.effectMark]).
 	var txErr error
-	if a.tookEffect(mark, counted) {
+	took := a.tookEffect(mark, counted)
+	if took {
 		txErr = a.tx.RemoveNodeLabel(n, label)
 	}
-	if a.buf != nil {
+	// The index change is gated on the same effect (rmp #2989); see
+	// [lpgMutatorAdapter.effectMark].
+	if a.buf != nil && took {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
 			Node:  a.resolveID(n),
@@ -23060,6 +23126,7 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
+	idxOld, idxHad := indexOldValue(a.g, a.wtx, a.buf, r.active() || fanout || statsActive, n, key)
 	mark, counted := a.effectMark()
 	if err := a.w().SetNodeProperty(n, key, value); err != nil {
 		return err
@@ -23073,18 +23140,21 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	// here) or ErrFieldTooLong, which the gate at the top has already refused.
 	// Buffered only when the value changed (see [walMutatorAdapter.effectMark]).
 	var txErr error
-	if a.tookEffect(mark, counted) {
+	took := a.tookEffect(mark, counted)
+	if took {
 		txErr = a.tx.SetNodePropertyPreValidated(n, key, value)
 	}
-	if a.buf != nil {
+	// The index change is gated on the same effect (rmp #2989); see
+	// [lpgMutatorAdapter.effectMark].
+	if a.buf != nil && took {
 		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
 			Node:     a.resolveID(n),
 			Property: checkedKeyID(a.g, key),
 			NewValue: value,
 		}
-		if had {
-			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
+		if idxHad {
+			ch.OldValue = idxOld // lets a bound index drop the stale entry (task #1340)
 		}
 		a.buf.Enqueue(ch)
 	}
@@ -23111,6 +23181,7 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) error {
 	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
+	idxOld, idxHad := indexOldValue(a.g, a.wtx, a.buf, r.active() || fanout || statsActive, n, key)
 	// #2212: removing an absent property is a no-op and counts nothing.
 	if a.counters != nil {
 		if _, present := a.g.GetNodePropertyAsOf(n, key, nil); present {
@@ -23127,17 +23198,20 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) error {
 	// in-memory write and this staged op succeed or fail together. Buffered only
 	// when the property was present (see [walMutatorAdapter.effectMark]).
 	var txErr error
-	if a.tookEffect(mark, counted) {
+	took := a.tookEffect(mark, counted)
+	if took {
 		txErr = a.tx.DelNodeProperty(n, key)
 	}
-	if a.buf != nil {
+	// The index change is gated on the same effect (rmp #2989); see
+	// [lpgMutatorAdapter.effectMark].
+	if a.buf != nil && took {
 		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
 			Node:     a.resolveID(n),
 			Property: checkedKeyID(a.g, key),
 		}
-		if had {
-			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
+		if idxHad {
+			ch.OldValue = idxOld // lets a bound index drop the stale entry (task #1340)
 		}
 		a.buf.Enqueue(ch)
 	}

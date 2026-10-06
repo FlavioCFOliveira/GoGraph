@@ -599,7 +599,7 @@ open.
   one of the two deleted first, the probe counts 0. L15 creates its edges with `MERGE`,
   so it never builds this shape and keeps measuring hub churn; rmp #2988 adds the
   parallel-edge shape back.
-- **D7 — the hash and label indexes diverge from the graph under random churn (open,
+- **D7 — the hash and label indexes diverge from the graph under random churn (fixed,
   rmp #2989; found by phase 6, L06).** At quiescence, after the L06 workload (label add/remove,
   indexed writes, 30% rollbacks, a UNIQUE set), the equality seek on `(:L).s` misses
   nodes a scan finds — `hash "s3" seek=40 scan=41`, `hash "own-920-0-1" seek=0 scan=1`,
@@ -608,9 +608,20 @@ open.
   coverage-build runs at 64. In-transaction seeks of own writes (L07) never diverged
   (0 of 1 457 at 1024). Reproduction: `go test -tags soak -run TestLadderSoak
   ./examples/37_mvcc_write_contention/` (or `-race -run TestLadder`), or the binary with
-  `-ladder-levels 1024 -ladder-rows L06 -ladder-ops 4096`. L06 reports
-  `seek_scan_mismatches` and `seek_scan_first_mismatches` as metrics; rmp #2989 restores
-  the gate `seek_equals_scan`.
+  `-ladder-levels 1024 -ladder-rows L06 -ladder-ops 4096`. Four causes. A write that
+  changes nothing — a `SET` to the stored value, a `REMOVE` of an absent label — conflicts
+  with no concurrent writer, yet its commit applied its own index payload after a peer's
+  commit had changed the node: the `SET` re-indexed the value the node had given up, the
+  `REMOVE` deleted the peer's entry. The old value of an indexed write was read from the
+  graph's present, which can still hold a rolled-back peer's value, so the committed value
+  was never deleted. And a `REMOVE` of an absent label re-stamped the deferred label-bitmap
+  removal of a committed one; two such transactions aborting dropped it, and the node stayed
+  in the label scan. Last, the undo of a `SET n:L` was decided by a probe taken outside the
+  label store's lock: when a peer restored the label in between, the add changed nothing, yet
+  its rollback removed the label and its bitmap entry, and only the bag got the label back
+  when the abort was withdrawn. The engine now enqueues an index change, and records a label
+  undo, only for a write that wrote a version; reads the old value through the writing
+  transaction's view; and an absent label defers no removal. L06 gates `seek_equals_scan`.
 - **D4 — a Cypher `DELETE` of a relationship another transaction removed is a silent
   no-op (fixed, rmp #2986).** Reproduction: `CREATE (a:N {name:'a'})-[:R {id:1}]->(b:N {name:'b'}),
   (a)-[:R {id:2}]->(b), (a)-[:R {id:3}]->(a)`; T1 and T2 `BeginTx`; T1
@@ -695,7 +706,7 @@ self-conflict streak gate. The binary runs the phase after phase 5 with
 | `L01` | L01, L02, L03 | Bank transfers (`BeginTx`, two reads, two writes, a `Log` insert; 10% rolled back) and read transactions (`BeginReadTx` or read-only `BeginTx`) that read every account and the `Log` count twice; one doctors write-skew round per goroutine, two transactions interleaved by the goroutine itself. Every attempt is recorded with `internal/anomaly` (aborts as aborted) and the history checked at `SnapshotIsolation` | `history_clean` (0 forbidden, not truncated), `write_skew_permitted` (G2-item in `Report.Permitted`), `repeatable_reads`, `no_phantoms`, `conservation` |
 | `L04.<arm>` | L04 | Hot counter, `SET c.n = c.n + 1` with retries, session and sessionless arms | Final value = acknowledged increments |
 | `L05` | L05 | One transaction over 16 hot nodes against single-node writers | Sum = acknowledged; the large transaction's success rate and refused streak are reported (G3: no fairness mechanism) |
-| `L06` | L06, L07 | Label add/remove, hash- and btree-indexed writes, UNIQUE writes, 30% rollbacks; 1 in 5 statements writes a fresh value and seeks it inside its transaction | No duplicate UNIQUE value; in-transaction seek = scan = 1. Seek = scan at quiescence (hash index, btree range and prefix, label scan, count store, UNIQUE backing index) is a reported metric until rmp #2989 (D7) |
+| `L06` | L06, L07 | Label add/remove, hash- and btree-indexed writes, UNIQUE writes, 30% rollbacks; 1 in 5 statements writes a fresh value and seeks it inside its transaction | No duplicate UNIQUE value; in-transaction seek = scan = 1. Seek = scan at quiescence for the hash index, btree range and prefix, label scan, count store and UNIQUE backing index (`seek_equals_scan`, gated since rmp #2989, D7) |
 | `L08` | L08 | A read transaction held while writers leave 3 x `Bound` versions | `retention_shown` (Total > Bound while held), repeatable read, reclaimed after release |
 | `L09` | L09 (soak) | 1 032 read transactions held while the graph churns | `UnregisteredSnapshots` > 0, every read correct, released after close |
 | `L10.<arm>`, `L20.<arm>` | L10, L20 | WAL-backed store (`store.Open`), disjoint writers, a checkpointer triggered back to back | Final = acknowledged; session arm 0 self-conflicts; checkpoints ran; commit tail during a checkpoint below `hangBudget`; storage size before and after |

@@ -5617,12 +5617,22 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, tx *writeCtx) {
 			return
 		}
 	}
-	if bag, ok2 := sh.m[id]; ok2 {
-		// Record the undo only when the label is actually present, for the same
-		// reason as the add path: removing a label the node does not carry changes
-		// nothing, so a delta for it would be a version that never existed. Only the
-		// DELTA is guarded; the conflict test above is not (rmp #2354).
-		if g.labelDeltasEnabled() && bag.has(lid) {
+	if bag, ok2 := sh.m[id]; ok2 && bag.has(lid) {
+		// Everything below — the undo, the bag write and the index removal — runs
+		// only when the label is actually present. Removing a label the node does
+		// not carry changes nothing, so a delta for it would be a version that never
+		// existed. Only the conflict test above is unconditional (rmp #2354).
+		//
+		// THE INDEX REMOVAL IS GUARDED TOO (rmp #2989). A no-op removal claims
+		// nothing in this store, so two of them by two transactions do not
+		// conflict, and neither conflicts with the committed removal whose deferred
+		// entry is still pending. Each used to re-stamp that entry, and
+		// [deferredIdx.shadow] keeps only ONE replaced stamp: the second no-op
+		// overwrote the committed removal's stamp, both no-ops then aborted, and the
+		// withdrawal dropped the key — leaving a node that no longer carries the
+		// label in its bitmap for good. Measured by L06 of
+		// examples/37_mvcc_write_contention as a label count one above the scan.
+		if g.labelDeltasEnabled() {
 			ci, ts := g.deltaStamp(tx.record())
 			sh.pushLabelDelta(id, undoAddLabel, lid, ci, ts, &g.labelDeltaActive, &g.labelChurn)
 			tx.noteSide(sideNodeLabels, uint64(id), 0, 0)
