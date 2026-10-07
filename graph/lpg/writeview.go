@@ -148,14 +148,15 @@ func (wv WriteView[N, W]) Read() *ReadView[N, W] { return wv.g.WriterViewOf(wv.T
 // (rmp #2353). This is the seam that makes such a pair collide: both halves stamp
 // the same per-node slot, so the second one to arrive is refused.
 //
-// CALL IT ONLY FOR NODES AN EXISTENCE CONSTRAINT ACTUALLY COVERS. The stamp is
+// CALL IT ONLY FOR WRITES A DECLARED CONSTRAINT ACTUALLY COVERS. The stamp is
 // node-granular — every reference engine's granularity for this, because
 // PostgreSQL and InnoDB version the whole row and Memgraph the whole vertex — and
 // node granularity conflicts more than substore granularity does. Applying it to
 // every write would raise the conflict rate for the majority of workloads, which
-// declare no existence constraint and cannot suffer the anomaly at all. cypher
-// gates it on the same [exec.ConstraintRegistry.HasAnyNotNull] test that decides
-// whether to record touched nodes, so an unconstrained schema never calls in.
+// declare no constraint and cannot suffer the anomaly at all. cypher calls it
+// only under a schema declaring an existence or uniqueness constraint, and there
+// only for a node creation or for an effective write of a label or property key
+// some constraint names (rmp #3008).
 //
 // The conflict is RECORDED on the transaction as well as returned, so a caller that
 // cannot report one still dooms the transaction and commit refuses to publish it;

@@ -558,6 +558,80 @@ type ConstraintRegistry struct {
 	// reservation mark as an insertion — the R5-1 defect — so the straddler
 	// enumeration can prove it detects that defect. Read under mu.
 	straddleAnyMarkForTest bool
+
+	// scope is the immutable set of labels and property keys at least one live
+	// UNIQUE or NOT NULL constraint names, rebuilt under mu by every registration
+	// and unregistration and read without any lock by
+	// [ConstraintRegistry.ConstrainsLabel] and
+	// [ConstraintRegistry.ConstrainsProperty]. Nil until the first registration,
+	// which reads as "nothing constrained". The lock-free read is sound for the
+	// reason given on uniqueActive.
+	scope atomic.Pointer[constraintScope]
+}
+
+// constraintScope is one immutable snapshot of what the registered constraints
+// name; see [ConstraintRegistry.scope].
+type constraintScope struct {
+	labels map[string]struct{}
+	props  map[string]struct{}
+}
+
+// rebuildScopeLocked republishes [ConstraintRegistry.scope] from the live
+// constraint maps. Callers hold r.mu exclusively. The maps are rebuilt whole —
+// a catalogue holds a handful of constraints and changes only on DDL — so a
+// reader holding the previous scope is never affected.
+func (r *ConstraintRegistry) rebuildScopeLocked() {
+	n := len(r.unique) + len(r.notNull)
+	sc := &constraintScope{
+		labels: make(map[string]struct{}, n),
+		props:  make(map[string]struct{}, n),
+	}
+	for key := range r.unique {
+		sc.labels[key.label] = struct{}{}
+		sc.props[key.prop] = struct{}{}
+	}
+	for key := range r.notNull {
+		sc.labels[key.label] = struct{}{}
+		sc.props[key.prop] = struct{}{}
+	}
+	r.scope.Store(sc)
+}
+
+// ConstrainsLabel reports whether label is the label of at least one registered
+// UNIQUE or NOT NULL constraint, under any property key.
+//
+// It is the gate of the per-node constraint stamp on a label write (rmp #3008):
+// a label no constraint names cannot take part in a constraint violation, so a
+// write of it needs no node-granular conflict. It takes no lock and allocates
+// nothing; see [ConstraintRegistry.scope].
+//
+// ConstrainsLabel is safe for concurrent use.
+func (r *ConstraintRegistry) ConstrainsLabel(label string) bool {
+	sc := r.scope.Load()
+	if sc == nil {
+		return false
+	}
+	_, ok := sc.labels[label]
+	return ok
+}
+
+// ConstrainsProperty reports whether prop is the property key of at least one
+// registered UNIQUE or NOT NULL constraint, under any label.
+//
+// It is the gate of the per-node constraint stamp on a property write (rmp
+// #3008). It deliberately ignores the written node's labels: a concurrent
+// transaction may be giving the node a constrained label, and only both writes
+// stamping makes that pair collide. It takes no lock and allocates nothing; see
+// [ConstraintRegistry.scope].
+//
+// ConstrainsProperty is safe for concurrent use.
+func (r *ConstraintRegistry) ConstrainsProperty(prop string) bool {
+	sc := r.scope.Load()
+	if sc == nil {
+		return false
+	}
+	_, ok := sc.props[prop]
+	return ok
 }
 
 // NewConstraintRegistry creates an empty ConstraintRegistry.
@@ -617,6 +691,7 @@ func (r *ConstraintRegistry) RegisterUnique(label, prop, indexName string) {
 		r.uniqueActive.Add(1)
 		r.uniqueSince[key] = r.gen.Add(1)
 	}
+	r.rebuildScopeLocked()
 	r.mu.Unlock()
 }
 
@@ -780,6 +855,7 @@ func (r *ConstraintRegistry) RegisterNotNull(label, prop string) {
 	}
 	r.notNull[key] = true
 	addLabelProp(r.notNullByLabel, label, prop)
+	r.rebuildScopeLocked()
 	r.mu.Unlock()
 }
 
@@ -842,6 +918,7 @@ func (r *ConstraintRegistry) UnregisterUnique(label, prop string) {
 	delete(r.uniqueNames, key)
 	delete(r.uniqueSince, key)
 	removeLabelProp(r.uniqueByLabel, label, prop)
+	r.rebuildScopeLocked()
 	r.mu.Unlock()
 }
 
@@ -866,6 +943,7 @@ func (r *ConstraintRegistry) UnregisterNotNull(label, prop string) {
 	delete(r.notNullNames, key)
 	delete(r.notNullSince, key)
 	removeLabelProp(r.notNullByLabel, label, prop)
+	r.rebuildScopeLocked()
 	r.mu.Unlock()
 }
 

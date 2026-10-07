@@ -42,8 +42,10 @@ const (
 	// one store here whose granularity is the NODE rather than one of the node's
 	// substores, and it exists precisely because the others are narrower: a
 	// declared invariant spanning two substores cannot be enforced by conflict
-	// detection that never compares them. It is stamped only for nodes under an
-	// active existence constraint, so a schema declaring none never reaches it.
+	// detection that never compares them. It is stamped only by a write that
+	// takes effect on a label or property key an active existence or uniqueness
+	// constraint names, or by a node creation under such a schema (rmp #3008), so
+	// a schema declaring none never reaches it.
 	StoreNodeConstraint = "node constraint"
 	// StoreOther is where a name that is not one of the above is counted. It is
 	// not a store; it is the bucket that keeps the cardinality bounded without

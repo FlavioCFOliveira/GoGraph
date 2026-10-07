@@ -21352,7 +21352,7 @@ func (a *lpgMutatorAdapter) countIsFresh(n string) bool {
 // rec returns the inverse-recording helper bound to this adapter's graph and
 // undo log.
 func (a *lpgMutatorAdapter) rec() mutationUndo {
-	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon}
+	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon, conReg: a.constraintReg()}
 }
 
 // resolveID translates n to its stable NodeID, returning graph.NodeID(0)
@@ -21745,8 +21745,12 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 		return err
 	}
 	a.countPropertySet()
-	r.recordSetNodeProperty(n, key, prev, had)
-	if a.buf != nil && a.tookEffect(mark, counted) {
+	// The effect is read BEFORE the inverse is recorded: recording may stamp the
+	// node's constraint slot, and that stamp is itself a version, which made a
+	// no-op SET read as effective (rmp #3008).
+	took := a.tookEffect(mark, counted)
+	r.recordSetNodeProperty(n, key, prev, had, took)
+	if a.buf != nil && took {
 		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
 			Node:     a.resolveID(n),
@@ -21983,10 +21987,10 @@ func (a *lpgMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) (took
 	r.recordDelEdgeProperty(src, dst, key, prev, had && took)
 	// The index change is gated on the same effect as the inverse (rmp #3005): a
 	// removal of an absent property, or a refused one, changed nothing to index.
-	// took alone cannot say so here: the removal CLAIMS the adjacency entry before
-	// it looks for the key, and that claim is a version, so an absent key still
-	// counts. had closes it; it is exact whenever took is true, because a claimed
-	// entry carries no other transaction's uncommitted write.
+	// A removal of an absent key takes no claim and writes no version (rmp
+	// #3006), so took is already false for it; had is kept beside it as the
+	// presence half of the gate, and it is exact whenever took is true, because a
+	// claimed entry carries no other transaction's uncommitted write.
 	if a.buf != nil && had && took {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,
@@ -22671,7 +22675,7 @@ func (a *walMutatorAdapter) tookEffect(mark int64, counted bool) bool {
 }
 
 func (a *walMutatorAdapter) rec() mutationUndo {
-	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon}
+	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon, conReg: a.constraintReg()}
 }
 
 func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
@@ -23194,7 +23198,11 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 		return err
 	}
 	a.countPropertySet()
-	r.recordSetNodeProperty(n, key, prev, had)
+	// The effect is read BEFORE the inverse is recorded: recording may stamp the
+	// node's constraint slot, and that stamp is itself a version, which made a
+	// no-op SET read as effective (rmp #3008).
+	took := a.tookEffect(mark, counted)
+	r.recordSetNodeProperty(n, key, prev, had, took)
 	// PreValidated: a.w().SetNodeProperty above already ran the schema validator
 	// on this value, and a stateful validator must not see it twice (rmp #2602).
 	// rmp #2747: propagated, never discarded.
@@ -23202,7 +23210,6 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	// here) or ErrFieldTooLong, which the gate at the top has already refused.
 	// Buffered only when the value changed (see [walMutatorAdapter.effectMark]).
 	var txErr error
-	took := a.tookEffect(mark, counted)
 	if took {
 		txErr = a.tx.SetNodePropertyPreValidated(n, key, value)
 	}
@@ -23460,10 +23467,10 @@ func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) (took
 	}
 	// The index change is gated on the same effect as the inverse (rmp #3005): a
 	// removal of an absent property, or a refused one, changed nothing to index.
-	// took alone cannot say so here: the removal CLAIMS the adjacency entry before
-	// it looks for the key, and that claim is a version, so an absent key still
-	// counts. had closes it; it is exact whenever took is true, because a claimed
-	// entry carries no other transaction's uncommitted write.
+	// A removal of an absent key takes no claim and writes no version (rmp
+	// #3006), so took is already false for it; had is kept beside it as the
+	// presence half of the gate, and it is exact whenever took is true, because a
+	// claimed entry carries no other transaction's uncommitted write.
 	if a.buf != nil && had && took {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,

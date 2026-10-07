@@ -21,6 +21,7 @@ package cypher
 // always safe to call.
 
 import (
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -60,6 +61,10 @@ type mutationUndo struct {
 	// commit for nothing. The stamp is needed for BOTH kinds, so it carries its own
 	// flag rather than riding on the set.
 	stampCon bool
+	// conReg is the engine's constraint registry, consulted to scope the stamp to
+	// the labels and property keys a constraint names (rmp #3008). Nil only on an
+	// adapter without an engine, where every gated stamp is taken.
+	conReg *exec.ConstraintRegistry
 }
 
 // active reports whether undo recording is enabled. The helpers short-circuit
@@ -98,10 +103,16 @@ func (m mutationUndo) active() bool { return m.undo != nil }
 // the set is nil unless the registry holds a NOT NULL constraint. An unconstrained
 // schema therefore reaches neither the map nor the stamp shard.
 func (m mutationUndo) touch(n string) {
+	m.touchOnly(n)
+	m.noteCon(n)
+}
+
+// touchOnly records n in the touched-node set without stamping; the caller stamps
+// through the scoped [mutationUndo.noteConLabel] or [mutationUndo.noteConProp].
+func (m mutationUndo) touchOnly(n string) {
 	if m.touched != nil {
 		m.touched.touch(n)
 	}
-	m.noteCon(n)
 }
 
 // noteCon stamps n's per-node CONSTRAINT slot, so a transaction writing one half of
@@ -124,6 +135,36 @@ func (m mutationUndo) touch(n string) {
 // reference engine uses and the scoping rule rmp #2353 established.
 func (m mutationUndo) noteCon(n string) {
 	if !m.stampCon {
+		return
+	}
+	_ = m.wv.NoteConstraintTouch(n)
+}
+
+// noteConLabel is [mutationUndo.noteCon] for a write of label: it stamps only when
+// some constraint names label (rmp #3008).
+//
+// # Why the stamp is scoped by the WRITTEN label or key
+//
+// A violation of a single-property constraint on (L, p) needs a write of L or of
+// p: a write of anything else leaves every (L, p) pair of the node as it was. So
+// two transactions can only produce one together when each wrote L or p, and
+// stamping exactly those writes is what makes such a pair collide. Stamping every
+// write of a constrained schema instead refused a peer over a label or key no
+// constraint names — measured as `SET n.b` refused with a conflict in node
+// constraint beside a UNIQUE constraint on (:U, u).
+//
+// The scope is the label or KEY, not the node's current labels: a property write
+// on a node that does not yet carry L must still collide with a peer giving it L.
+func (m mutationUndo) noteConLabel(n, label string) {
+	if !m.stampCon || (m.conReg != nil && !m.conReg.ConstrainsLabel(label)) {
+		return
+	}
+	_ = m.wv.NoteConstraintTouch(n)
+}
+
+// noteConProp is [mutationUndo.noteConLabel] for a write of property key key.
+func (m mutationUndo) noteConProp(n, key string) {
+	if !m.stampCon || (m.conReg != nil && !m.conReg.ConstrainsProperty(key)) {
 		return
 	}
 	_ = m.wv.NoteConstraintTouch(n)
@@ -218,7 +259,8 @@ func (m mutationUndo) recordSetNodeLabel(n, label string, hadLabel bool) {
 	// Adding a label can bring an existence constraint into play on a node that
 	// lacks the required property, so record the node for the commit-time check
 	// (#1754). Only a label the statement actually added matters (hadLabel=false).
-	m.touch(n)
+	m.touchOnly(n)
+	m.noteConLabel(n, label)
 	if !m.active() {
 		return
 	}
@@ -236,7 +278,7 @@ func (m mutationUndo) recordRemoveNodeLabel(n, label string, hadLabel bool) {
 	// Losing a label RELEASES any UNIQUE reservation the node held under it, so it
 	// is a write to one half of a declared invariant (rmp #2355). Stamped before the
 	// undo guard, because the stamp is gated on the schema and not on undo activity.
-	m.noteCon(n)
+	m.noteConLabel(n, label)
 	if !m.active() {
 		return
 	}
@@ -276,12 +318,17 @@ func (m mutationUndo) recordRemoveNode(n string, wasLive bool) {
 // recordSetNodeProperty records the inverse of SetNodeProperty(n, key, …). It
 // captures the prior value (prev, had) the adapter read BEFORE the write: when
 // the property existed, the inverse restores the old value; otherwise it
-// deletes the key the statement added.
-func (m mutationUndo) recordSetNodeProperty(n, key string, prev lpg.PropertyValue, had bool) {
+// deletes the key the statement added. took is whether the write wrote a
+// version, read before this call.
+func (m mutationUndo) recordSetNodeProperty(n, key string, prev lpg.PropertyValue, had, took bool) {
 	// Setting a property MOVES any UNIQUE reservation the node held for that key, so
 	// it is a write to the other half of a declared invariant (rmp #2355). Stamped
-	// before the undo guard, for the same reason as the label loss above.
-	m.noteCon(n)
+	// before the undo guard, for the same reason as the label loss above — and only
+	// when the write took effect: a SET to the value already there moves nothing
+	// (rmp #3008).
+	if took {
+		m.noteConProp(n, key)
+	}
 	if !m.active() {
 		return
 	}
@@ -305,7 +352,8 @@ func (m mutationUndo) recordDelNodeProperty(n, key string, prev lpg.PropertyValu
 	// data model) can violate an existence constraint if the node still carries
 	// the constrained label in its final state, so record it for the commit-time
 	// check (#1754). Only a real removal (had=true) matters.
-	m.touch(n)
+	m.touchOnly(n)
+	m.noteConProp(n, key)
 	if !m.active() {
 		return
 	}

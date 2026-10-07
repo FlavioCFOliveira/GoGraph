@@ -406,7 +406,7 @@ GoGraph permits write skew and refuses a write-write conflict.
 | IX02 | `ix02-own-write-btree-seek` | Cypher | GoGraph #2814 | Range and prefix seek = scan after own writes | As expected. Negative control below. |
 | IX03 | `ix03-own-write-autocommit` | Cypher | GoGraph #2814 | One autocommit statement counts its own `CREATE` and `SET` | As expected. Negative control below. |
 | IX04 | `ix04-peer-rollback-label-add-hash`, `-btree` | Cypher | GoGraph #2931; MY `index-create-dml-rollback`, `innodb-index-online`; PG `partial-index` | Node indexed under its committed value; seek = scan | As expected. Negative control below. Without a UNIQUE constraint the label add does not conflict with the open property write on the same node, in either order. |
-| IX05 | `ix05-rollback-leaves-no-trace` | Cypher | MY `innodb-index-online`, `index-create-dml-rollback`, `lob_rollback_update`, `innodb_mysql_rbk`; PG `partial-index` | Every seek = scan = pre-state plus the peer's commits | As expected. With a UNIQUE constraint registered (on any label), a label add and a property write on one node conflict ("node constraint"), so the peer route by which #2931 let a rolled-back value into an index cannot occur here; the row does not fail at `43c69dbe` (see the negative control). |
+| IX05 | `ix05-rollback-leaves-no-trace` | Cypher | MY `innodb-index-online`, `index-create-dml-rollback`, `lob_rollback_update`, `innodb_mysql_rbk`; PG `partial-index` | Every seek = scan = pre-state plus the peer's commits | As expected. Since #3008 the per-node constraint stamp is taken only for a write of a label or property key that a constraint names. This row's UNIQUE constraint names `(:K).k` alone, so adding `L` to `m` and writing `m.s` no longer conflict, and the peer's `SET m.s` commits beside s1's open label add (see the golden). The negative control at `43c69dbe` predates #3008, so whether this row now catches #2931 is not measured. |
 | IX06 | `ix06-moved-out-of-index-domain` | Cypher | PG `partial-index`, `partition-key-update-4`; MY `multi_value_index_merge_mvcc` | Pinned reader finds the old values; a new reader the new ones | As expected. |
 | IX07 | `ix07-two-index-predicate-pinned` | Cypher | MY `multi_value_index_merge_mvcc`, `bug32554667` | Pinned reader gains no row | As expected. |
 | IX08 | `ix08-index-created-after-snapshot` | Cypher | PG `drop-index-concurrently-1`, `reindex-concurrently`; MY `innodb-read-view` | Only snapshot rows | As expected; `CREATE INDEX` does not wait for the open read-only transaction. |
@@ -484,10 +484,13 @@ revision and run there. The worktree needed one change to compile:
 - **#2931 at `43c69dbe`.** Both IX04 specs fail, 18 property violations and a diff at
   line 59 of permutation `s1w s2l s1rb s1dr s2v s2p` (hash: `want: 1 |1`,
   `got: 0 |1`; btree: `want: 11 |11`, `got: 10 |11`). **IX05 passes there.** A
-  rolled-back transaction writes no index entry of its own, and the peer route #2931
-  took is closed in IX05 by the "node constraint" conflict that any registered UNIQUE
-  constraint brings. The catalogue's §6 named IX05 as a row that catches #2931; it
-  does not, and §6 now names IX04 and says why IX05 does not.
+  rolled-back transaction writes no index entry of its own, and at that revision the
+  peer route #2931 took was closed in IX05 by the "node constraint" conflict that any
+  registered UNIQUE constraint then brought. Since #3008 that conflict is taken only
+  for a label or property key a constraint names, which IX05's `L` and `s` are not,
+  so IX05's peer write now commits. This control has not been re-run since #3008, so
+  whether IX05 now catches #2931 is not measured. The catalogue's §6 named IX05 as a
+  row that catches #2931; it did not at `43c69dbe`, and §6 names IX04 instead.
 
 ### Negative control for G9 (DD01)
 
