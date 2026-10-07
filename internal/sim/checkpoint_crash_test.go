@@ -68,7 +68,7 @@ func openLiveCkptStack(t *testing.T, disk *SimDisk) *liveCkptStack {
 		t.Fatalf("recovery found corruption: %v", res.TailErr)
 	}
 	if disk.Exists(simWALPath) {
-		if err := truncateSimWALAt(disk, simWALPath, res.WALTailOffset); err != nil {
+		if err := truncateSimWALAt(disk, simWALPath, res.WALEnd); err != nil {
 			t.Fatalf("truncate torn WAL tail: %v", err)
 		}
 	}

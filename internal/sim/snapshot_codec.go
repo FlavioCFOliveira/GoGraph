@@ -39,9 +39,10 @@ type snapshotBoundary struct {
 	// label names the crossing in a violation message, so a report identifies
 	// which scenario's boundary failed.
 	label string
-	// walBefore / walAfter are the byte lengths of the durable WAL image
-	// (<dir>/wal on the SimDisk) immediately before and immediately after the
-	// forced checkpoint.
+	// walBefore / walAfter are the WAL frame bytes a recovery would replay
+	// ([simWALReplayable]) immediately before and immediately after the forced
+	// checkpoint: after it, the bytes at or above the redo position the control
+	// file records for the published snapshot.
 	walBefore int64
 	walAfter  int64
 	// walOpsReplayed is what the post-crash reopen replayed out of the WAL. Zero
@@ -58,7 +59,7 @@ type snapshotBoundary struct {
 	crossed bool
 }
 
-// reclaimed is how many WAL bytes the checkpoint's prefix truncation gave back.
+// reclaimed is how many WAL bytes the checkpoint took out of recovery's reach.
 func (b snapshotBoundary) reclaimed() int64 { return b.walBefore - b.walAfter }
 
 // summary renders the measured numbers for a test log or a failure message.
@@ -67,18 +68,27 @@ func (b snapshotBoundary) summary() string {
 		b.walBefore, b.walAfter, b.reclaimed(), b.walOpsReplayed, b.snapshotPublished)
 }
 
-// simWALSize returns the byte length of the durable WAL image inside disk for a
-// store opened with dir. An absent WAL is 0 bytes, not an error: a store whose
-// checkpoint reclaimed everything may legitimately hold none.
+// simWALSize returns how many WAL frame bytes a recovery of the store under dir
+// would replay ([simWALReplayable]): for a segmented log, the bytes at or above
+// the redo position the control file records for the published snapshot. An
+// absent WAL is 0 bytes, not an error.
 func simWALSize(disk *SimDisk, dir string) (int64, error) {
-	b, err := disk.ReadFile(walPathFor(dir))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return 0, nil
-		}
-		return 0, err
+	n, err := simWALReplayable(disk, dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
 	}
-	return int64(len(b)), nil
+	return n, err
+}
+
+// simWALImageSize returns the length of the WAL's frame image
+// ([simWALFrameImage]): every retained frame byte, in the offset space
+// [simWALCommitMarkers] reports.
+func simWALImageSize(disk *SimDisk, dir string) (int64, error) {
+	b, err := simWALFrameImage(disk, walPathFor(dir), disk.ReadFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	return int64(len(b)), err
 }
 
 // crossSnapshotBoundary forces the run across the snapshot boundary and records
@@ -205,7 +215,7 @@ func checkSnapshotSourcedRecovery(tick int64, b snapshotBoundary) []Violation {
 			" so the truncation proves nothing about where the recovered state came from")
 	}
 	if b.walAfter != 0 {
-		return fail("the checkpoint left %d of %d WAL bytes on disk (reclaimed %d): recovery could still"+
+		return fail("the checkpoint left %d of %d WAL bytes for recovery to replay (reclaimed %d): recovery could still"+
 			" replay them, so a surviving value is not evidence the snapshot codec round-tripped it",
 			b.walAfter, b.walBefore, b.reclaimed())
 	}

@@ -410,49 +410,28 @@ func walCorruptionDecl() ScenarioCounterDecl {
 	}
 }
 
-// checkpointDirFsyncDecl declares the ST6 post-rename dir-fsync poison arm.
+// checkpointDirFsyncDecl declares the ST6 control-file dir-fsync arm.
 //
-// The fault lands on the parent-directory fsync the WAL prefix truncation issues
-// after its rename, which poisons the writer. The declaration reads BOTH halves
-// of that: the truncate that failed, and the poison it left behind.
+// The fault lands on the parent-directory fsync the checkpoint's control-file
+// write issues after its rename. The control write fails, the checkpoint
+// reports it, and the WAL writer stays healthy (no log byte was touched).
 func checkpointDirFsyncDecl() ScenarioCounterDecl {
 	return ScenarioCounterDecl{
 		Scenario: ScenarioCheckpointDirFsyncFault,
 		Required: []RequiredCounter{
 			{
-				Name:       "store.wal.TruncatePrefix.errors",
+				Name:       "store.wal.MarkCheckpoint.errors",
 				Min:        1,
-				Why:        "the injected post-rename parent-dir fsync fault fails the prefix truncation itself",
+				Why:        "the injected post-rename parent-dir fsync fault fails the checkpoint's control-file write itself",
 				Uniqueness: CounterUniqueToPath,
 			},
 			{
 				Name:       "store.checkpoint.RunCheckpoint.errors",
 				Min:        1,
-				Why:        "the failed truncation propagates out of the checkpoint that requested it",
+				Why:        "the failed control write propagates out of the checkpoint that requested it",
 				Uniqueness: CounterSharedWithOtherPaths,
-				Discriminator: "any checkpoint failure moves it; store.wal.TruncatePrefix.errors above is unique to the truncate " +
-					"and pins WHICH step of the checkpoint failed",
-			},
-			{
-				Name:       "store.wal.Append.errors",
-				Min:        1,
-				Why:        "after the failed truncate the writer is POISONED and refuses a subsequent append",
-				Uniqueness: CounterSharedWithOtherPaths,
-				Discriminator: "an append can fail for other reasons; it is required alongside store.wal.Sync.errors and " +
-					"store.wal.Close.errors as the three-way poison signature, all downstream of the unique truncate failure",
-			},
-			{
-				Name:          "store.wal.Sync.errors",
-				Min:           1,
-				Why:           "the poisoned writer refuses a subsequent sync rather than acknowledging a commit it cannot make durable",
-				Uniqueness:    CounterSharedWithOtherPaths,
-				Discriminator: "see store.wal.Append.errors — the poison is declared as a signature, not as one counter",
-			},
-			{
-				Name:       "store.wal.Close.errors",
-				Min:        1,
-				Why:        "the poisoned writer surfaces the poison on close rather than swallowing it",
-				Uniqueness: CounterUniqueToPath,
+				Discriminator: "any checkpoint failure moves it; store.wal.MarkCheckpoint.errors above is unique to the control " +
+					"write and pins WHICH step of the checkpoint failed",
 			},
 		},
 	}

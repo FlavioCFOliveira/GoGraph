@@ -1675,7 +1675,7 @@ func (r *boltDrainRunner) postCloseCommit(ctx context.Context) error {
 func (r *boltDrainRunner) readRecovered(ctx context.Context) error {
 	walPath := walPathFor(r.scfg.dir)
 	if r.disk.Exists(walPath) {
-		image, rerr := r.disk.ReadFile(walPath)
+		image, rerr := simWALFrameImage(r.disk, walPath, r.disk.ReadFile)
 		if rerr != nil {
 			return fmt.Errorf("sim: bolt-drain[%s] read WAL image: %w", r.cfg.Arm, rerr)
 		}

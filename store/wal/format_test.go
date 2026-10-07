@@ -91,8 +91,8 @@ func TestEncodeDecode_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if out.Version != CurrentVersion {
-		t.Fatalf("Version = %d, want %d", out.Version, CurrentVersion)
+	if out.Version != LegacyVersion {
+		t.Fatalf("Version = %d, want %d", out.Version, LegacyVersion)
 	}
 	if !bytes.Equal(out.Payload, in.Payload) {
 		t.Fatalf("Payload mismatch: %q vs %q", out.Payload, in.Payload)
@@ -146,10 +146,12 @@ func TestDecode_BadMagic(t *testing.T) {
 func TestDecode_UnsupportedVersion(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if _, err := Encode(&buf, Frame{Version: CurrentVersion + 99, Payload: nil}); err != nil {
-		t.Fatalf("Encode: %v", err)
+	if _, err := Encode(&buf, Frame{Version: CurrentVersion + 99, Payload: nil}); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Encode of an unknown version = %v, want ErrUnsupportedVersion", err)
 	}
-	if _, err := Decode(&buf); !errors.Is(err, ErrUnsupportedVersion) {
+	// A header naming a version this build does not know.
+	head := append(append([]byte(nil), Magic[:]...), byte(CurrentVersion+99), 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	if _, err := Decode(bytes.NewReader(head)); !errors.Is(err, ErrUnsupportedVersion) {
 		t.Fatalf("expected ErrUnsupportedVersion, got %v", err)
 	}
 }

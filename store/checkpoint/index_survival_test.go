@@ -28,6 +28,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -85,6 +86,9 @@ func TestCheckpointer_StoreDirectIndex_Unwired_SkipsTruncation(t *testing.T) {
 	// is the reason the snapshot is not self-sufficient).
 	if got := cp.Stats().WALTruncBytes; got != 0 {
 		t.Fatalf("WAL was truncated (WALTruncBytes = %d) despite an un-persisted store-direct index — #1755 fail-safe did not engage; the index would be lost on reopen", got)
+	}
+	if _, ok, _ := waltest.CheckpointRecorded(dir); ok {
+		t.Fatal("the control file records the snapshot as the start of recovery despite an un-persisted store-direct index — #1755")
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal.Close: %v", err)

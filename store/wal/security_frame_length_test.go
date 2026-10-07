@@ -37,7 +37,7 @@ func secStoreWALFrameBytes(t *testing.T, payload []byte) []byte {
 func secStoreWALHostileFrameHeader() []byte {
 	head := make([]byte, HeaderSize)
 	copy(head[0:4], Magic[:])
-	binary.LittleEndian.PutUint16(head[4:6], CurrentVersion)
+	binary.LittleEndian.PutUint16(head[4:6], LegacyVersion)
 	binary.LittleEndian.PutUint32(head[6:10], maxFrameSize+1)
 	return head
 }
@@ -97,7 +97,7 @@ func TestSec_Store_WALReplayRejectsHostileLengthWithoutAllocation(t *testing.T) 
 
 	head := make([]byte, HeaderSize)
 	copy(head[0:4], Magic[:])
-	binary.LittleEndian.PutUint16(head[4:6], CurrentVersion)
+	binary.LittleEndian.PutUint16(head[4:6], LegacyVersion)
 	binary.LittleEndian.PutUint32(head[6:10], 0xFFFFFFFF) // ~4 GiB declared payload
 
 	r := NewReader(bytes.NewReader(head), nil)

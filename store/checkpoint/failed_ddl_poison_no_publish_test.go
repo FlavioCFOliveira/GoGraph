@@ -98,6 +98,20 @@ func (fs *faultWALFS) Rename(oldPath, newPath string) error { return os.Rename(o
 
 func (fs *faultWALFS) Remove(path string) error { return os.Remove(path) }
 
+func (fs *faultWALFS) MkdirAll(dir string) error { return os.MkdirAll(dir, 0o700) }
+
+func (fs *faultWALFS) ReadDir(dir string) ([]string, error) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(ents))
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
 func (fs *faultWALFS) ParentDirSync(childPath string) error {
 	d, err := os.Open(filepath.Dir(childPath))
 	if err != nil {

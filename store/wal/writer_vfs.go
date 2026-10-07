@@ -1,11 +1,9 @@
 package wal
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
-	"sync"
 )
 
 // WALFile is the minimal open-handle interface that [Writer] requires of its
@@ -18,17 +16,15 @@ import (
 // [walFS].OpenFile method and thereby satisfy the unexported walFS interface,
 // exactly as [github.com/FlavioCFOliveira/GoGraph/store/snapshot.File] is
 // exported for the snapshot seam. Production callers open WAL files via [Open]
-// (which wraps *os.File) and never reference this type directly; tests and the
-// simulator reach for [OpenWith] / [OpenFS].
+// and never reference this type directly; tests and the simulator reach for
+// [OpenWith] / [OpenFS].
 //
 // Concurrency: a WALFile is used by a single [Writer] whose own mutex
 // serialises every access; any implementation's further guarantees are its own.
 type WALFile interface {
 	io.Writer
-	// Reader is required by [Writer.TruncatePrefix], which reads the
-	// surviving suffix of the file (the frames committed after the
-	// captured watermark) before atomically replacing the file with a
-	// suffix-only copy. *os.File and *testfs.FaultFile both satisfy it.
+	// Reader lets the writer scan the files it reopens (the legacy log it
+	// seals, the tail segment whose torn tail it discards).
 	io.Reader
 	io.Seeker
 	// Sync flushes OS write buffers to durable storage.
@@ -39,88 +35,43 @@ type WALFile interface {
 	Close() error
 }
 
-// OpenWith builds a [Writer] over an already-open file handle. The
-// caller transfers ownership: [Writer.Close] will call f.Close().
-//
-// This constructor exists primarily for tests that inject a
-// *testfs.FaultFile; production code should use [Open].
-func OpenWith(f WALFile) (*Writer, error) {
-	if f == nil {
-		return nil, fmt.Errorf("wal: OpenWith: nil file")
-	}
-	// Seek to the end so Append is truly append-only even when the
-	// caller opened the file without O_APPEND. The resulting position
-	// doubles as the durable baseline: bytes already in the file at
-	// open time are presumed durable, so a later sync failure rolls
-	// the file back exactly here.
-	pos, err := f.Seek(0, io.SeekEnd)
-	if err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("wal: OpenWith: seek to end: %w", err)
-	}
-	w := &Writer{
-		f:            f,
-		dirFsync:     parentDirFsync,
-		bw:           bufio.NewWriterSize(f, 64*1024),
-		durableSize:  pos,
-		appendedSize: pos,
-	}
-	w.fsys = osWALFS{}
-	w.groupCond = sync.NewCond(&w.mu)
-	return w, nil
-}
-
-// walFS is the minimal path-based filesystem surface that
-// [Writer.TruncatePrefix] requires to perform its crash-safe prefix
-// truncation: it writes the surviving WAL suffix to a sibling temp file,
-// atomically renames it over the WAL path, fsyncs the parent directory, and
-// reopens the new inode. Those four operations (open-by-path, rename, remove,
-// parent-dir fsync) are the only filesystem touches in the truncation that are
-// not already expressed through the open-handle [WALFile] interface.
+// walFS is the path-based filesystem surface a segmented [Writer] works
+// through: opening files by path (with os.O_EXCL for a new segment), renaming
+// and removing them, listing and creating the segment directory, and fsyncing
+// a parent directory.
 //
 // The interface is intentionally unexported, mirroring the snapshot/recovery
-// seams: production callers use [Open] (which installs [osWALFS], so the
-// truncation is byte-identical to the pre-seam code), while the
-// deterministic-simulation harness (internal/sim) supplies an in-memory
-// backend over its [SimDisk] via [OpenFS] so a Checkpointer-driven WAL
-// truncation runs entirely against the simulated disk and can be crashed
-// across the truncate boundary.
-//
-// ParentDirSync mirrors the [Writer.dirFsync] field's contract (fsync the
-// parent directory of childPath); [OpenFS] wires dirFsync to fsys.ParentDirSync
-// so the post-rename directory fsync also routes through the injected backend.
+// seams: production callers use [Open] (which installs [osWALFS]), while the
+// deterministic-simulation harness (internal/sim) supplies an in-memory backend
+// over its SimDisk via [OpenFS], so every segment creation, control-file write
+// and segment unlink runs against the simulated disk and can be crashed.
 type walFS interface {
-	// OpenFile opens (or creates, per flag) the file at path and returns a
-	// handle satisfying [WALFile]. The temp-file write and the post-rename
-	// reopen both go through this call.
+	// OpenFile opens (or creates, per flag) the file at path. With os.O_EXCL
+	// it fails with an error satisfying errors.Is(err, os.ErrExist) when the
+	// file exists; a missing file yields os.ErrNotExist.
 	OpenFile(path string, flag int) (WALFile, error)
-	// Rename atomically moves oldPath onto newPath (the suffix-temp publish).
+	// Rename atomically moves oldPath onto newPath.
 	Rename(oldPath, newPath string) error
-	// Remove deletes path (best-effort cleanup of a partial temp file).
+	// Remove deletes path.
 	Remove(path string) error
-	// ParentDirSync fsyncs the parent directory of childPath, making the
-	// suffix-temp rename durable.
+	// ParentDirSync fsyncs the parent directory of childPath.
 	ParentDirSync(childPath string) error
+	// ReadDir lists the entry names of dir; os.ErrNotExist when it is absent.
+	ReadDir(dir string) ([]string, error)
+	// MkdirAll creates dir and any missing parent.
+	MkdirAll(dir string) error
 }
 
-// osWALFS is the production WAL filesystem backend: every method delegates
-// verbatim to the os.* call (with the exact same flags and 0o600 mode) or the
-// build-tagged parentDirFsync that [Writer.TruncatePrefix] used before the seam
-// was introduced, so the published bytes and the truncation sequence are
-// byte-identical to the pre-seam path.
+// osWALFS is the production WAL filesystem backend over the os package.
 type osWALFS struct{}
 
 var _ walFS = osWALFS{}
 
-// OpenFile opens path with the os flags the caller passes, at mode 0o600 — the
-// same restrictive mode [Open] and the pre-seam writeSuffixTmp/reopen used, so
-// the WAL temp and the reopened inode are never world-readable.
+// OpenFile opens path with the os flags the caller passes, at mode 0o600, so a
+// WAL file is never world-readable.
 func (osWALFS) OpenFile(path string, flag int) (WALFile, error) {
-	// walNoFollow makes the suffix-temp (O_TRUNC) and post-rename reopen refuse
-	// a symlinked final component (ELOOP) instead of truncating/overwriting an
-	// arbitrary process-writable file (CWE-59). It is applied only in this
-	// production OS backend; the injected walFS backends (sim/testfs) are not
-	// symlink-exposed and their flags are left untouched.
+	// walNoFollow refuses a symlinked final component (ELOOP) instead of
+	// truncating or overwriting an arbitrary process-writable file (CWE-59).
 	return os.OpenFile(path, flag|walNoFollow, 0o600) //nolint:gosec // caller-supplied WAL path is by-design
 }
 
@@ -130,69 +81,50 @@ func (osWALFS) Remove(path string) error { return os.Remove(path) }
 
 func (osWALFS) ParentDirSync(childPath string) error { return parentDirFsync(childPath) }
 
-// OpenFS builds a path-backed [Writer] over a caller-supplied filesystem
-// backend. Unlike [OpenWith] (which produces a path-less Writer that rejects
-// [Writer.TruncatePrefix] with [ErrPrefixTruncateUnsupported]), OpenFS records
-// the path and routes the truncation's temp-write/rename/remove/parent-dir-fsync
-// through fsys, so a Checkpointer can reclaim the WAL prefix over the injected
-// filesystem. The caller transfers ownership of the opened handle: [Writer.Close]
-// will close it.
+func (osWALFS) ReadDir(dir string) ([]string, error) { return readDirNames(dir) }
+
+// MkdirAll creates dir with mode 0o700: the segments carry the graph mutation
+// stream.
+func (osWALFS) MkdirAll(dir string) error { return os.MkdirAll(dir, 0o700) }
+
+// OpenFS opens or creates the segmented write-ahead log at walPath over a
+// caller-supplied filesystem backend; see [OpenFSWithOptions].
+func OpenFS(fsys walFS, walPath string) (*Writer, error) {
+	return OpenFSWithOptions(fsys, walPath, Options{})
+}
+
+// OpenFSWithOptions is [OpenWithOptions] over a caller-supplied filesystem
+// backend. It is the seam the deterministic-simulation harness (internal/sim)
+// uses to run the full snapshot + WAL + checkpoint stack against its in-memory
+// disk; production code uses [Open].
 //
-// OpenFS is the seam the deterministic-simulation harness (internal/sim) uses to
-// run the full snapshot + WAL + checkpoint stack against its in-memory
-// [SimDisk]; production code uses [Open].
-//
-// Unlike [Open], OpenFS does NOT acquire the OS-level WAL directory lock
-// (flock(2)/O_EXCL has no analogue on an injected backend, and OpenFS callers
-// are single-writer by contract) and does NOT scan for or discard a benign
-// torn tail. The caller MUST therefore pre-truncate any benign torn tail to the
-// last durable frame boundary (recovery reports it as
-// [github.com/FlavioCFOliveira/GoGraph/store/recovery.ReplayResult.WALTailOffset])
-// BEFORE calling OpenFS, exactly as the production [Open] does internally via
-// discardTornTail; appending after un-discarded torn junk would strand every
-// new frame behind bytes that every reader stops at — a Durability violation.
-func OpenFS(fsys walFS, path string) (*Writer, error) {
+// It differs from [OpenWithOptions] in two ways. It takes no OS lock (flock has
+// no analogue on an injected backend, and callers are single-writer by
+// contract), and it prepares the next segment synchronously at rollover rather
+// than in a background goroutine, so the backend sees a deterministic sequence
+// of operations. Directory fsyncs go through fsys.ParentDirSync, delayed by
+// opts.SyncLatency when set.
+func OpenFSWithOptions(fsys walFS, walPath string, opts Options) (*Writer, error) {
 	if fsys == nil {
 		return nil, fmt.Errorf("wal: OpenFS: nil filesystem")
 	}
-	if path == "" {
+	if walPath == "" {
 		return nil, fmt.Errorf("wal: OpenFS: empty path")
 	}
-	f, err := fsys.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND)
+	segSize, err := opts.segmentSize()
 	if err != nil {
-		return nil, fmt.Errorf("wal: OpenFS: open %q: %w", path, err)
+		return nil, err
 	}
-	// fsync the parent directory so the WAL file's directory entry is durable.
-	// [Open] does this only on create (an append mutates the inode, not the
-	// dirent, so a per-Sync dir fsync would be wasted on the hot path); OpenFS is
-	// called once at open and cannot cheaply tell create from reopen through the
-	// minimal walFS surface, so it fsyncs unconditionally. This is the
-	// load-bearing fix for a WAL that lives below the filesystem root (dir/wal in
-	// the full-stack layout): without it a crash before the first directory fsync
-	// could drop the newly-linked WAL dirent and lose every committed frame — a
-	// Durability violation that does not arise for a root-level WAL.
-	if err := fsys.ParentDirSync(path); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("wal: OpenFS: fsync parent dir of %q: %w", path, err)
+	dirFsync := fsys.ParentDirSync
+	if lat := opts.SyncLatency; lat != nil {
+		dirFsync = func(p string) error {
+			lat.wait()
+			return fsys.ParentDirSync(p)
+		}
 	}
-	// Seek to the end so Append is append-only and the durable baseline is the
-	// current (already torn-tail-free, per the contract above) file size: bytes
-	// present at open time are presumed durable, so a later sync failure rolls
-	// the file back exactly here. Mirrors [OpenWith] and [Open].
-	pos, err := f.Seek(0, io.SeekEnd)
+	w, err := openSegmented(walPath, fsys, dirFsync, opts.SyncLatency, segSize, false)
 	if err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("wal: OpenFS: seek to end: %w", err)
+		return nil, fmt.Errorf("wal: OpenFS %q: %w", walPath, err)
 	}
-	w := &Writer{
-		f:            f,
-		path:         path,
-		fsys:         fsys,
-		dirFsync:     fsys.ParentDirSync,
-		bw:           bufio.NewWriterSize(f, 64*1024),
-		durableSize:  pos,
-		appendedSize: pos,
-	}
-	w.groupCond = sync.NewCond(&w.mu)
 	return w, nil
 }

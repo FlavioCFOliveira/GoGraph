@@ -41,6 +41,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -58,6 +59,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/internal/testfs"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
@@ -412,8 +414,8 @@ func copyTree(src, dst string, walLimit int64) (int64, error) {
 			return nil
 		}
 		limit := int64(-1)
-		if rel == walFile {
-			limit = walLimit
+		if walLimit >= 0 && filepath.Dir(rel) == filepath.Base(wal.SegmentDir(walFile)) {
+			limit = segmentCopyLimit(path, walLimit)
 		}
 		n, cerr := copyFile(path, target, limit)
 		total += n
@@ -426,6 +428,28 @@ func copyTree(src, dst string, walLimit int64) (int64, error) {
 		return 0, fmt.Errorf("copy %s: %w", src, err)
 	}
 	return total, nil
+}
+
+// segmentCopyLimit returns how many bytes of the WAL segment at path hold frames
+// below the log position walLimit: the segment header plus the frames from the
+// segment's first position up to walLimit, or -1 (all of it) for a segment
+// with no frame.
+func segmentCopyLimit(path string, walLimit int64) int64 {
+	const segHeader = 32
+	b := make([]byte, segHeader+wal.HeaderSizeV2)
+	f, err := os.Open(path) // #nosec G304 -- a segment of this example's own store directory
+	if err != nil {
+		return -1
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := io.ReadFull(f, b); err != nil {
+		return -1
+	}
+	first := int64(binary.LittleEndian.Uint64(b[segHeader+12 : segHeader+20])) // #nosec G115 -- a log position
+	if walLimit <= first {
+		return segHeader
+	}
+	return segHeader + (walLimit - first)
 }
 
 func copyFile(src, dst string, limit int64) (int64, error) {
@@ -453,25 +477,26 @@ func copyFile(src, dst string, limit int64) (int64, error) {
 	return n, err
 }
 
-// frameInfo is one WAL frame: its offset, its size, and the transaction ids whose
-// tag it carries.
+// frameInfo is one WAL frame: its log position, its size, the segment file and
+// file offset it lies at, and the transaction ids whose tag it carries.
 type frameInfo struct {
 	off, size int64
+	path      string
+	fileOff   int64
 	ids       []int64
 }
 
-// walFrames reads every frame of the WAL at path.
+// walFrames reads every frame of every segment of the WAL at path.
 func walFrames(path string) ([]frameInfo, error) {
-	r, err := wal.OpenReader(path)
+	locs, err := waltest.LocateFrames(path)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = r.Close() }()
 	var out []frameInfo
-	var off int64
 	marker := []byte("dtag-")
-	for f := range r.Frames() {
-		fi := frameInfo{off: off, size: int64(wal.HeaderSize + len(f.Payload))}
+	for _, l := range locs {
+		f := l.Frame
+		fi := frameInfo{off: int64(f.Pos), size: l.Size, path: l.Path, fileOff: l.Offset} // #nosec G115 -- a log position
 		p := f.Payload
 		for {
 			i := bytes.Index(p, marker)
@@ -484,7 +509,6 @@ func walFrames(path string) ([]frameInfo, error) {
 			p = p[i+len(marker):]
 		}
 		out = append(out, fi)
-		off += fi.size
 	}
 	return out, nil
 }
@@ -1216,14 +1240,18 @@ func tornArms(ctx context.Context, out *ladderOut, level int, base string, br br
 		row string
 		mut func(path string) error
 	}{
-		{"D08.torn", func(p string) error { return truncateFile(p, end-3) }},
-		{"D08.garbled", func(p string) error { return flipByte(p, end-1) }},
+		{"D08.torn", func(p string) error { return truncateFile(p, last.fileOff+last.size-3) }},
+		{"D08.garbled", func(p string) error { return flipByte(p, last.fileOff+last.size-1) }},
 	} {
 		img := base + "-" + strings.TrimPrefix(v.row, "D08.")
 		if _, err := copyTree(ref, img, end); err != nil {
 			return err
 		}
-		if err := v.mut(filepath.Join(img, walFile)); err != nil {
+		rel, rerr := filepath.Rel(ref, last.path)
+		if rerr != nil {
+			return rerr
+		}
+		if err := v.mut(filepath.Join(img, rel)); err != nil {
 			return err
 		}
 		vt, err := verifyImage(ctx, out, v.row, level, img, br, log, verifyOpts{damaged: true})
@@ -1360,25 +1388,24 @@ func seamCut(path string, log *ackLog, before int) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	cut := int64(-1)
-	for _, f := range frames {
+	cut := -1
+	for i, f := range frames {
 		for _, id := range f.ids {
 			if acked[id] {
-				cut = f.off
+				cut = i
 			}
 		}
 	}
 	if cut < 0 {
 		return 0, errors.New("D14 seam: no acknowledged transaction tag in the WAL")
 	}
-	return cut, truncateFile(path, cut)
+	return frames[cut].off, truncateFile(frames[cut].path, frames[cut].fileOff)
 }
 
 // armCheckpoint is D09, D16 and D10 at checkpoint boundaries: the first checkpoint
-// of a run under load is imaged at three instants, each copied under the store's
-// commit lock (writers drained and blocked): before the capture, after the
-// snapshot is published and before the WAL prefix is truncated, and after the
-// truncation.
+// of a run under load is imaged at two instants, each copied under the store's
+// commit lock (writers drained and blocked): before the capture, and after the
+// checkpoint has returned.
 func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, level int) error {
 	if dc.checkpointTxns > 0 {
 		sized := *dc
@@ -1393,7 +1420,7 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 	log := newAckLog()
 	ws := &writerSet{eng: ls.eng, sink: log}
 	base := filepath.Join(filepath.Dir(ls.dir), filepath.Base(ls.dir)+"-img")
-	phases := []string{"pre_capture", "pre_truncate", "post_truncate"}
+	phases := []string{"pre_capture", "post_checkpoint"}
 	imgs := map[string]string{}
 	brs := map[string]bracket{}
 	defer func() {
@@ -1420,23 +1447,14 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 		br.after = log.acked()
 		imgs[phase], brs[phase] = dst, br
 	}
-	// A checkpoint calls the serialiser twice: the capture, then the truncation. A
-	// refused capture makes no second call, so the phase is tracked by whether the
-	// capture succeeded.
-	var captured bool
+	// A checkpoint calls the serialiser once, for the capture: its phase 3
+	// unlinks whole WAL segments without the commit lock (docs/design-wal-v2.md
+	// §2.4). The post-checkpoint image is taken under the lock after it returns.
 	serialise := func(fn func() error) error {
 		return ls.o.Store().RunUnderCommitLock(func() error {
 			calls.Add(1)
-			if !captured {
-				image("pre_capture")
-				err := fn()
-				captured = err == nil
-				return err
-			}
-			image("pre_truncate")
-			err := fn()
-			image("post_truncate")
-			return err
+			image("pre_capture")
+			return fn()
 		})
 	}
 	var unused sync.Mutex
@@ -1464,6 +1482,12 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 		running = true
 	}
 	cpErr := cp.RunCheckpoint()
+	if cpErr == nil {
+		_ = ls.o.Store().RunUnderCommitLock(func() error {
+			image("post_checkpoint")
+			return nil
+		})
+	}
 	<-writersDone
 	if wErr != nil {
 		return wErr
@@ -1486,22 +1510,32 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 		}
 	}
 	// D16: snapshot plus tail replay equals a full replay of the same WAL. The
-	// pre-truncate image of the run's first checkpoint holds the whole WAL and the
-	// published snapshot; without the snapshot directory recovery replays the WAL
-	// from its first frame. The checkpoint has already written the WAL prefix
-	// marker by then (rmp #3002), and recovery refuses a marker without a snapshot
-	// even over a complete WAL, so the reference clone drops the marker too: it
-	// is the directory as it stood before any checkpoint.
-	pre := base + "-pre_truncate-nosnap"
-	if err := cloneWithoutSnapshot(base+"-pre_truncate", pre, brs["pre_truncate"].walLimit); err != nil {
+	// post-checkpoint image holds the published snapshot and, while the log fits
+	// in its first segment, every frame (a checkpoint unlinks whole segments
+	// only). The full-replay reference is that image without the snapshot and
+	// with the WAL control file it had before the checkpoint, from the
+	// pre-capture image: the directory as it stood before any checkpoint.
+	post := base + "-post_checkpoint"
+	pre := post + "-fullreplay"
+	defer func() { _ = os.RemoveAll(pre) }()
+	if err := cloneWithoutSnapshot(post, pre, brs["post_checkpoint"].walLimit); err != nil {
 		return err
 	}
-	if err := os.Remove(wal.PrefixTruncatedMarkerPath(filepath.Join(pre, walFile))); err != nil {
-		return fmt.Errorf("D16: remove prefix marker: %w", err)
+	preCtl, err := os.ReadFile(wal.ControlPath(filepath.Join(base+"-pre_capture", walFile))) // #nosec G304 -- this example's own image directory
+	if err != nil {
+		return fmt.Errorf("D16: read pre-checkpoint control file: %w", err)
 	}
-	withSnap := base + "-pre_truncate-ref"
+	if err := os.WriteFile(wal.ControlPath(filepath.Join(pre, walFile)), preCtl, 0o600); err != nil { // #nosec G703 -- this example's own image directory
+		return fmt.Errorf("D16: restore pre-checkpoint control file: %w", err)
+	}
+	firstSeg := wal.SegmentPath(filepath.Join(pre, walFile), 1)
+	if _, err := os.Stat(firstSeg); err != nil {
+		out.check("D16", level, "full_wal_retained", false, "the checkpoint unlinked the first segment, so no full replay is possible: %v", err)
+		return nil
+	}
+	withSnap := post + "-ref"
 	defer func() { _ = os.RemoveAll(withSnap) }()
-	if _, err := copyTree(base+"-pre_truncate", withSnap, brs["pre_truncate"].walLimit); err != nil {
+	if _, err := copyTree(post, withSnap, brs["post_checkpoint"].walLimit); err != nil {
 		return err
 	}
 	sSnap, rSnap, _, err := recoverState(ctx, withSnap)
@@ -1519,17 +1553,18 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 	out.check("D16", level, "checkpoint_plus_tail_equals_full_replay", sSnap.fingerpr == sFull.fingerpr,
 		"snapshot+tail %s, full replay %s", sSnap.fingerpr, sFull.fingerpr)
 
-	// D09: a missing segment is refused loudly. After the truncation the WAL no
-	// longer holds the folded prefix; without the snapshot, the directory is
-	// missing data, and recovery must say so rather than open a shorter history.
-	post := base + "-post_truncate-nosnap"
-	if err := cloneWithoutSnapshot(base+"-post_truncate", post, brs["post_truncate"].walLimit); err != nil {
+	// D09: a missing snapshot is refused loudly. After the checkpoint the WAL
+	// control file records that the log's history requires the snapshot;
+	// without it the directory is missing data, and recovery must say so rather
+	// than open a shorter history.
+	noSnap := post + "-nosnap"
+	if err := cloneWithoutSnapshot(post, noSnap, brs["post_checkpoint"].walLimit); err != nil {
 		return err
 	}
-	sMiss, rMiss, _, merr := recoverState(ctx, post)
+	sMiss, rMiss, _, merr := recoverState(ctx, noSnap)
 	missingAcked := -1
 	if sMiss != nil {
-		acks, attempts := log.snapshot(brs["post_truncate"].before)
+		acks, attempts := log.snapshot(brs["post_checkpoint"].before)
 		missingAcked = scoreState(sMiss, acks, attempts).missing
 	}
 	out.tele("D09.missing_segment", level, "recovery_error", fmt.Sprintf("%q", errText(merr)),
@@ -1550,12 +1585,65 @@ func cloneWithoutSnapshot(src, dst string, walLimit int64) error {
 	return os.RemoveAll(filepath.Join(dst, "snapshot"))
 }
 
+// faultWALFS is the D04 WAL filesystem: the os package, except that every
+// segment file is opened behind a [testfs.FaultFile] carrying faults. The
+// control file, the seal stub and directory fsyncs are unaffected. Each segment
+// counts its own fsyncs; the D04 workload stays inside one segment, so its
+// commit fsyncs all reach the tail segment's counter.
+//
+// Concurrency: the wal.Writer that owns it serialises every call.
+type faultWALFS struct {
+	segDir string
+	faults testfs.Faults
+}
+
+func (fs faultWALFS) OpenFile(path string, flag int) (wal.WALFile, error) {
+	f, err := os.OpenFile(path, flag, 0o600) //nolint:gosec // G304: the path is the example's own store directory
+	if err != nil {
+		return nil, err
+	}
+	if filepath.Dir(path) != fs.segDir {
+		return f, nil
+	}
+	return testfs.Wrap(f, fs.faults), nil
+}
+
+func (faultWALFS) Rename(oldPath, newPath string) error { return os.Rename(oldPath, newPath) }
+
+func (faultWALFS) Remove(path string) error { return os.Remove(path) }
+
+func (faultWALFS) ParentDirSync(childPath string) error {
+	d, err := os.Open(filepath.Dir(childPath))
+	if err != nil {
+		return err
+	}
+	serr := d.Sync()
+	if cerr := d.Close(); serr == nil {
+		serr = cerr
+	}
+	return serr
+}
+
+func (faultWALFS) ReadDir(dir string) ([]string, error) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(ents))
+	for i, e := range ents {
+		names[i] = e.Name()
+	}
+	return names, nil
+}
+
+func (faultWALFS) MkdirAll(dir string) error { return os.MkdirAll(dir, 0o700) }
+
 // fsyncFailAfter is how many WAL fsyncs the D04 arm lets succeed before every
 // later one fails.
 const fsyncFailAfter = 12
 
-// armFsync is D04: a group-commit fsync failure. The WAL runs over a fault file
-// whose fsyncs fail after fsyncFailAfter successes (discarding the unsynced
+// armFsync is D04: a group-commit fsync failure. The WAL's tail segment runs over
+// a fault file whose fsyncs fail after fsyncFailAfter successes (discarding the unsynced
 // suffix, as a kernel that drops dirty pages does). No commit of the failed group
 // may be acknowledged or become visible, the store must be poisoned, and a reopen
 // recovers exactly the acknowledged commits.
@@ -1587,12 +1675,8 @@ func armFsync(ctx context.Context, dc *durabilityConfig, out *ladderOut, level i
 	if err != nil {
 		return err
 	}
-	ff, err := testfs.New(filepath.Join(dir, walFile), testfs.Faults{FailSyncAfter: fsyncFailAfter})
-	if err != nil {
-		_ = res.Graph.Close()
-		return err
-	}
-	wlog, err := wal.OpenWith(ff)
+	walPath := filepath.Join(dir, walFile)
+	wlog, err := wal.OpenFS(faultWALFS{segDir: wal.SegmentDir(walPath), faults: testfs.Faults{FailSyncAfter: fsyncFailAfter}}, walPath)
 	if err != nil {
 		_ = res.Graph.Close()
 		return err

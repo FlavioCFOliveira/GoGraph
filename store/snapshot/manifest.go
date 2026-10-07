@@ -274,6 +274,10 @@ type GraphConfig struct {
 	Weightless bool `json:"weightless,omitempty"`
 }
 
+// WALFormatSegmented is the [Manifest.WALFormat] value of a snapshot paired
+// with a segmented write-ahead log.
+const WALFormatSegmented = 2
+
 // Manifest is the JSON-encoded index of a snapshot directory.
 //
 // # Integrity, and why it does not fight forward compatibility
@@ -495,11 +499,14 @@ type Manifest struct {
 	// a hydration, and fails the manifest checksum on top of that.
 	IndexBuilderEpoch uint64 `json:"index_builder_epoch,omitempty"`
 
-	// StoreID, WALRedoPos and WALFormat are reserved for WAL v2
-	// (docs/design-wal-v2.md §3.3): the store identity, the WAL position
-	// this snapshot covers, and the WAL format it pairs with. Manifest
-	// version 4 defines them; this build writes them empty and zero, so
-	// omitempty keeps them out of the file.
+	// StoreID, WALRedoPos and WALFormat pair the snapshot with a segmented
+	// write-ahead log (docs/design-wal-v2.md §3.3): the store identity as 16
+	// hex digits, the WAL position this snapshot covers (every frame below it
+	// is folded into the image), and [WALFormatSegmented]. Manifest version 4
+	// defines them; the checkpointer writes them whenever the capture carries a
+	// mapper and was given a position ([Capture.SetWALPosition]). Absent, the
+	// snapshot records no position, and recovery accepts it beside a segmented
+	// log only when that log still begins at position 0.
 	StoreID    string `json:"store_id,omitempty"`
 	WALRedoPos uint64 `json:"wal_redo_pos,omitempty"`
 	WALFormat  int    `json:"wal_format,omitempty"`

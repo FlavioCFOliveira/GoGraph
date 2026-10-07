@@ -6,16 +6,15 @@ package store_test
 // Layer: short.
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -203,18 +202,8 @@ func TestAnnex_CreateThenDeleteInOneTx(t *testing.T) {
 func rewriteCommitAnnex(t *testing.T, dir string, n int, annex []byte) {
 	t.Helper()
 	walPath := filepath.Join(dir, "wal")
-	raw, err := os.ReadFile(walPath) //nolint:gosec // path under t.TempDir
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	r := bytes.NewReader(raw)
 	seen, done := 0, false
-	for {
-		f, derr := wal.Decode(r)
-		if derr != nil {
-			break
-		}
+	err := waltest.RewriteFrames(walPath, func(_ int, f *wal.Frame) bool {
 		if op, oerr := recovery.Decode(f.Payload); oerr == nil && op.Kind == txn.OpCommit {
 			seen++
 			if seen == n {
@@ -225,15 +214,13 @@ func rewriteCommitAnnex(t *testing.T, dir string, n int, annex []byte) {
 				done = true
 			}
 		}
-		if _, err := wal.Encode(&out, f); err != nil {
-			t.Fatal(err)
-		}
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if !done {
 		t.Fatalf("no commit marker %d in %s", n, walPath)
-	}
-	if err := os.WriteFile(walPath, out.Bytes(), 0o600); err != nil {
-		t.Fatal(err)
 	}
 }
 

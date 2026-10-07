@@ -8,7 +8,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
-	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestRecovery_MultiOpTransactionAtomic_TornAtEveryBoundary is the F1
@@ -36,10 +35,8 @@ func TestRecovery_MultiOpTransactionAtomic_TornAtEveryBoundary(t *testing.T) {
 	// Build a WAL holding exactly one 6-op transaction; capture its bytes.
 	src := t.TempDir()
 	srcWAL := filepath.Join(src, "wal")
-	w, err := wal.Open(srcWAL)
-	if err != nil {
-		t.Fatalf("wal.Open: %v", err)
-	}
+	// A single-file log: this test damages or erases it as one file.
+	w := openSingleFileWAL(t, srcWAL)
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	s := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),

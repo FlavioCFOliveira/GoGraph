@@ -907,12 +907,12 @@ are verdicts, and `# durability.<row> level=<n> ...` lines are telemetry.
 | D01 | `D01`, `D01.durable`, `D01.written` | In-process crash image at half of 384 transactions, 8 and 64 writers | `acked_present`, `refused_absent`, `writers_running_at_crash`, `no_unexpected_errors`, `acknowledged_seen` |
 | D02 | `D02.run0`..`run4` (soak) | `kill -9` of a child with 32 writers, an open transaction and a checkpointer triggered back to back; killed after 100 + 60 x run acknowledgements. Every `A` line the child wrote after its commit returned nil is owed | Same gates as D01 on the killed directory |
 | D03 | `D03`, `D01.durable`, `D01.written` | Crash points: after append and before fsync (bytes beyond the durable offset, durable image), after fsync and before acknowledgement (durable but unacknowledged), and bytes written but not yet fsynced (written image) | In-doubt transactions whole or absent (`whole_or_absent`); counts reported as `durable_but_unacknowledged` and `appended_not_durable_or_in_flight` |
-| D04 | `D04`, `D04.reopen` | WAL over `internal/testfs` with fsyncs failing after 12 successes, which discards the unsynced suffix | `failure_seen`, `post_poison_commit_refused`, `failed_not_visible` (live engine), `recovers_exactly_the_acknowledged`, and every image gate on the reopened directory |
+| D04 | `D04`, `D04.reopen` | Tail WAL segment over `internal/testfs` with fsyncs failing after 12 successes, which discards the unsynced suffix | `failure_seen`, `post_poison_commit_refused`, `failed_not_visible` (live engine), `recovers_exactly_the_acknowledged`, and every image gate on the reopened directory |
 | D05 | every image | Three-statement transactions in flight at the crash | `whole_or_absent`, `counters_conserved` |
 | D06 | `D01.*`, `D02.*` | One transaction left open across the crash (the kill child reopens it every 5 ms) | `open_absent` |
 | D07 | every image | Clock read with the "before" count; new session; new commit | `clock_not_rewound`, `new_session_sees_acked`, `post_recovery_commit_is_new` |
 | D08 | `D08.reference`, `D08.torn`, `D08.garbled` | The durable image with its last frame cut by 3 bytes, or with its last byte inverted | `damaged_record_discarded_alone`: against the undamaged image, at most one transaction is lost, none is gained and none is partial. The garbled image must be opened for writing exactly when recovery reports it clean (`refused_unless_clean`) |
-| D09 | `D09`, `D09.pre_capture`, `D09.pre_truncate`, `D09.post_truncate`, `D09.missing_segment` | One checkpoint under load, with no retry, imaged before the capture, after the snapshot is published and before the WAL prefix is truncated, and after the truncation; the post-truncate image is then recovered without its snapshot directory | `checkpoint_ran` (the single attempt succeeds), every image gate at each phase, and `missing_segment.refused_loudly` (recovery returns `recovery.ErrMissingSnapshot` and is not clean). The kill runs add crashes at random checkpoint points |
+| D09 | `D09`, `D09.pre_capture`, `D09.post_checkpoint`, `D09.missing_segment` | One checkpoint under load, with no retry, imaged under the commit lock before the capture and after the checkpoint returns (its segment unlink takes no commit lock, so there is no image between the control-file write and the unlink); the post-checkpoint image is then recovered without its snapshot directory | `checkpoint_ran` (the single attempt succeeds), every image gate at each phase, and `missing_segment.refused_loudly` (recovery returns `recovery.ErrMissingSnapshot` and is not clean). The kill runs add crashes at random checkpoint points |
 | D10 | every fully opened image | Seek = scan for every attempted id on `:D(id)` and `:E(id)`, on `:L(id)`, and on the `:D`/`:E` count store | `seek_equals_scan`, `unique_holds` |
 | D11 | `D11`, `D01.*` | `CREATE`/`DROP INDEX cyc_g` and `CREATE`/`DROP CONSTRAINT cyc_e` cycled during the abandon arm | `ddl_ran`; after recovery, seek = scan on `cyc_g` when it is present (`seek_equals_scan`); no duplicate `:E(id)` while `cyc_e` is present (`unique_holds`) |
 | D12 | `D01.*` | Four transactions, each with one 1 MiB string | `blobs_identical` |
@@ -942,11 +942,12 @@ Both were found by this phase, are fixed, and are now gated.
   needed WAL segment is missing (`050_redo_segment_missing`). Reproduction:
   `store.Open`; commit; `checkpoint.New(...)` wired with
   `WithCommitSerialiser(o.Store().RunUnderCommitLock)` and the codecs, then
-  `RunCheckpoint()`; close; `rm -r <dir>/snapshot`; `recovery.Open(dir)`. The WAL writer
-  now makes a marker file (`wal.PrefixTruncatedMarkerPath`) durable before it first
-  discards history (`TruncatePrefix`, or `Truncate` on a non-empty log), and recovery
-  refuses a directory that holds the marker but no snapshot with
-  `recovery.ErrMissingSnapshot`; `store.Open` refuses it with `store.ErrUncleanRecovery`.
+  `RunCheckpoint()`; close; `rm -r <dir>/snapshot`; `recovery.Open(dir)`. The fix made
+  a marker file (`wal.PrefixTruncatedMarkerPath`) durable before the first discard of
+  history; since the segmented WAL (docs/design-wal-v2.md) the same record is the WAL
+  control file's prefix-truncated flag, written before any segment is unlinked.
+  Recovery refuses a directory that records a truncated prefix but holds no snapshot
+  with `recovery.ErrMissingSnapshot`; `store.Open` refuses it with `store.ErrUncleanRecovery`.
   Gated as `durability.D09.missing_segment ... refused_loudly`.
 - **D09 — a checkpoint capture was refused under explicit-transaction load
   (rmp #2991, fixed).** `RunCheckpoint`, wired with `RunUnderCommitLock` while writers

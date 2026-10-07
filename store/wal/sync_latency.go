@@ -80,21 +80,11 @@ func (l *SyncLatency) next() time.Duration {
 func (l *SyncLatency) wait() { time.Sleep(l.next()) }
 
 // OpenWithSyncLatency is [Open] with lat installed on the returned Writer: every
-// data fsync of the WAL and every directory fsync it performs first waits a delay
-// drawn from lat. A nil lat makes it exactly [Open]. It is a testing entry point;
-// see [SyncLatency].
+// data fsync of the WAL and every directory fsync it performs, including those
+// of the open itself, first waits a delay drawn from lat. A nil lat makes it
+// exactly [Open]. It is a testing entry point; see [SyncLatency].
 func OpenWithSyncLatency(path string, lat *SyncLatency) (*Writer, error) {
-	w, err := Open(path)
-	if err != nil || lat == nil {
-		return w, err
-	}
-	w.syncLatency = lat
-	inner := w.dirFsync
-	w.dirFsync = func(p string) error {
-		lat.wait()
-		return inner(p)
-	}
-	return w, nil
+	return OpenWithOptions(path, Options{SyncLatency: lat})
 }
 
 // dataSyncFile is the commit-path data fsync: [dataSync] on the Writer's file,

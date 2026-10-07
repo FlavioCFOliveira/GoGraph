@@ -1,6 +1,6 @@
 # Design: WAL v2 — one on-disk format revision for #3021, #3020, #2195 and #3014
 
-Status: **approved; steps 1 and 3 implemented** (steps 2 and 4 not yet implemented).
+Status: **approved; steps 1, 2 and 3 implemented** (step 4 not yet implemented).
 
 This document records a design, not the current behaviour of the code. Each implementation
 step (§9) updates it to match what was built.
@@ -124,8 +124,8 @@ bytes only. It never resets and is independent of the segment. A frame never spa
 - `prevLen` replaces an 8-byte `prevPos`: same information; the maximum, 36 B + 1 GiB, fits
   `uint32`; saves 4 B.
 - Payload-first CRC lets the payload CRC be computed before `w.mu`. The PostgreSQL ordering
-  (`XLogRecordAssemble`, then the header after `xl_prev` in `XLogInsertRecord`) is recalled,
-  not re-checked.
+  (`XLogRecordAssemble`, then the header after `xl_prev` in `XLogInsertRecord`) is verified
+  at PostgreSQL `10cc5aa9`: `xloginsert.c:979-1007` and `xlog.c:1001-1007`.
 
 Bytes per frame:
 
@@ -650,6 +650,54 @@ Tests:
 - Persisted-store round trip.
 - WAL bytes per transaction measurement (header gate).
 
+#### Step 2 — as implemented
+
+Built as designed: the control file, store id, segments with a background preparer and
+rollover at a run boundary, L36 frames, reader validation with the §2 sentinels, recovery
+streaming with the §4 checks, manifest v4 `store_id`/`wal_redo_pos`/`wal_format`, checkpoint
+phase 2 control write and phase 3 unlink outside the commit lock, the v1 seal migration, and
+`0xFC` decode of `LegacySeal`. `TruncatePrefix`, `MarkPrefixTruncated` and
+`ErrPrefixTruncateUnsupported` are removed; the legacy prefix marker is still read for
+unmigrated stores.
+
+Deviations, each with its reason:
+
+- **A fresh store writes the seal stub at creation**, so a build that predates segments
+  refuses the directory instead of reading an empty legacy log.
+- **Migration runs in `wal.Open`**; a legacy file with a corrupt frame is refused rather than
+  sealed, so no history is sealed away unread.
+- **Schema DDL below the redo position is replayed** when the control file's
+  `checkpointRedoPos` differs from the snapshot's, so constraints survive a checkpoint whose
+  snapshot is not self-sufficient. `MaxTxnSeq` and `MaxCommitTS` include frames below the redo
+  position.
+- **Streaming starts at the first frame of the segment holding OR**, and OR is the start of
+  the last segment at or below the redo position: whole-segment granularity.
+- **`OpenFS` prepares spares synchronously**, so the simulator stays deterministic.
+- **`Truncate` on a poisoned writer returns the sticky error** (previously it emptied the file regardless of the poison);
+  a control-write failure does not poison the writer, because the old control file stays valid.
+- **`OpenReader` iterates the whole store log** (legacy file minus its seal, then segments).
+- **`Encode` with `Version` 0 writes a version-1 frame**, for the legacy fixtures and tests.
+- **The frame header buffer is owned by the writer**: 0 allocations per frame.
+- Test oracles that compared WAL byte counts now compare the control file's recorded
+  checkpoint; example 37 D09 observes `pre_capture` and `post_checkpoint`, and D04 injects its
+  fsync failures into the tail segment.
+- The `ErrRedoPointNotFrameBoundary`, `ErrRedoPointMidTransaction` and `ErrLegacyNotSealed`
+  paths have no dedicated test.
+
+Measurements (header gate, §11 risk 1). Bytes per frame +22. Bytes per transaction, step 2
+against its parent commit: Cypher 4-op create 517.3 → 737.3 (+42.5 %, 10 frames per
+transaction); `SET` of one property 80 → 124 (+55 %); 1M-node bulk create 143.5 → 209.5 B per
+node (+46 %). The TCK runs in memory and writes no WAL. The projected cost of L28 is +27–35 %
+and of L40 +50–65 %. The layout stays L36 pending the user's decision.
+
+Timings below are relative A/B runs on a RAM drive with fsync latency off, interleaved,
+n = 6, compared with `benchstat`; they are not production latencies. WAL append (encode
+only) −9.5 % to −28.8 %; 4096-byte frames with fsync +7.9 % (p = 0.004); allocations per frame
+1 → 0. `txn` commit: 1 op +2.07 %, 16 ops +8.28 %, 8 and 64 concurrent committers +3.96 % and
++8.02 %, 1 and 256 no significant difference; allocations 13 → 11 per commit. Checkpoint
+phase 3 over a 56.5 MB suffix: 14.30 ms under the commit lock → 0.39 ms without it; a commit
+issued while phase 3 is parked completes (`TestCheckpoint_Phase3HoldsNoCommitLock_LargeSuffix`).
+
 ### Step 3 — id annex and exact replay (#3021 A)
 
 Scope: `lpg.WriteTx.CreatedNodes`, `Tx.AttachWriteTx`, Cypher wiring, `OpCommit` annex,
@@ -766,10 +814,10 @@ a pinned commit. "Repo-cited" means the reference is already cited in this repos
 
 | Decision | Source | Status |
 |---|---|---|
-| Position, prev-link and store id per frame; typed refusals | PostgreSQL `XLogRecord.xl_prev` (`xlogrecord.h`), `XLogPageHeaderData.xlp_pageaddr`, long-header `xlp_sysid` at segment start (`xlog_internal.h`); `xlogreader.c` "record with incorrect prev-link", "unexpected pageaddr", "WAL file is from different database system" | Recalled from source, verify at a pinned commit. PostgreSQL keeps the sysid per segment; the per-frame store id is the user's decision. |
-| Data CRC first, header CRC after the position | PostgreSQL `XLogRecordAssemble`/`XLogInsertRecord`; position reserved inside the insertion lock (`ReserveXLogInsertLocation`, cited at `txn.go:2349-2353`, commit `50d6e533`) | Lock part repo-cited; CRC ordering recalled, verify. |
+| Position, prev-link and store id per frame; typed refusals | PostgreSQL `XLogRecord.xl_prev` (`xlogrecord.h`), `XLogPageHeaderData.xlp_pageaddr`, long-header `xlp_sysid` at segment start (`xlog_internal.h`); `xlogreader.c` "record with incorrect prev-link", "unexpected pageaddr", "WAL file is from different database system" | Verified at pinned commit (PostgreSQL `10cc5aa96a6df7cb1d7c47e978cc94f01f785cb7`). PostgreSQL keeps the sysid per segment; the per-frame store id is the user's decision. |
+| Data CRC first, header CRC after the position | PostgreSQL `XLogRecordAssemble`/`XLogInsertRecord`; position reserved inside the insertion lock (`ReserveXLogInsertLocation`, cited at `txn.go:2349-2353`, commit `50d6e533`) | Verified at pinned commit (PostgreSQL `10cc5aa96a6df7cb1d7c47e978cc94f01f785cb7`, `xloginsert.c:979-1007`, `xlog.c:1001-1007`). |
 | Control file before old WAL removal | PostgreSQL `UpdateControlFile` in `CreateCheckPoint` before `RemoveOldXlogFiles` (cited at `writer.go:1406-1409`, `checkpoint.go:1135-1137`) | Repo-cited. |
-| Segments, 16 MiB, remove below redo | PostgreSQL `wal_segment_size`, `KeepLogSeg`/`RemoveOldXlogFiles`; RocksDB numbered `NNNNNN.log` deleted past `min_log_number_to_keep` (`PurgeObsoleteFiles`); its recyclable record type adds a log number | Recalled, verify. GoGraph does not recycle segments, so `pos` alone defeats stale data. |
+| Segments, 16 MiB, remove below redo | PostgreSQL `wal_segment_size`, `KeepLogSeg`/`RemoveOldXlogFiles`; RocksDB numbered `NNNNNN.log` deleted below `min_log_number_to_keep` (`PurgeObsoleteFiles`); its recyclable record type adds a log number, stored as a 4-byte value truncated from the 64-bit log number | Verified at pinned commit (PostgreSQL `10cc5aa96a6df7cb1d7c47e978cc94f01f785cb7`, RocksDB `0561153b73fb0a24387a8808215b076424546f7e`). GoGraph does not recycle segments, so `pos` alone defeats stale data. |
 | Reservation without fsync; checkpoint stores the counter | PostgreSQL `GetNewObjectId`/`XLogPutNextOid`, `VAR_OID_PREFETCH = 8192`, `CheckPoint.nextOid` | Recalled, verify. |
 | Explicit id in the WAL; next = max + 1 | Memgraph vertex-create deltas carry the Gid; recovery derives `next_vertex_id`; the snapshot stores next ids | Recalled, verify (BSL; ideas only). |
 | Id high-water persisted; Neo4j reuses freed ids | Neo4j `IndexedIdGenerator` (highId + free-id tree), `neostore.transaction.db.N` with a store-id header, `db.tx_log.rotation.size` | Recalled, verify (GPLv3; ideas only). Reuse rejected per `docs/design-space-reclamation.md:85-93`. |

@@ -22,10 +22,9 @@ import (
 // than a single fat transaction whose torn batch is merely discarded.
 func writeNCommittedNodes(t *testing.T, dir string, n int) []string {
 	t.Helper()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatalf("wal.Open: %v", err)
-	}
+	// The tests over this fixture damage the log by byte offset: a single-file
+	// log (see frameBoundaries).
+	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	s := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),

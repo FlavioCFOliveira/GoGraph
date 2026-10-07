@@ -35,15 +35,16 @@ func TestOpen_TruncatesBenignTornTail(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	info, err := os.Stat(path)
+	seg := tailSegment(t, path)
+	info, err := os.Stat(seg)
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
 	durableSize := info.Size()
 
-	// Tear the tail: 10 bytes is less than HeaderSize (14), so the
-	// trailing bytes are an unfinished frame header.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0) //nolint:gosec // path under t.TempDir
+	// Tear the tail of the segment: 10 bytes is less than HeaderSizeV2, so
+	// the trailing bytes are an unfinished frame header.
+	f, err := os.OpenFile(seg, os.O_WRONLY|os.O_APPEND, 0) //nolint:gosec // path under t.TempDir
 	if err != nil {
 		t.Fatalf("OpenFile: %v", err)
 	}
@@ -59,7 +60,7 @@ func TestOpen_TruncatesBenignTornTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open (reopen): %v", err)
 	}
-	info, err = os.Stat(path)
+	info, err = os.Stat(seg)
 	if err != nil {
 		t.Fatalf("Stat (after reopen): %v", err)
 	}
@@ -128,14 +129,15 @@ func TestOpen_PreservesGenuineCorruption(t *testing.T) {
 	}
 
 	// Corrupt one payload byte of the middle frame; the frame layout is
-	// HeaderSize + 7 payload bytes per frame.
-	raw, err := os.ReadFile(path) //nolint:gosec // path under t.TempDir
+	// HeaderSizeV2 + 7 payload bytes per frame, after the segment header.
+	seg := tailSegment(t, path)
+	raw, err := os.ReadFile(seg) //nolint:gosec // path under t.TempDir
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	frameSize := HeaderSize + len("frame-0")
-	raw[frameSize+HeaderSize] ^= 0xFF                      // first payload byte of frame-1
-	if err := os.WriteFile(path, raw, 0o600); err != nil { //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
+	frameSize := HeaderSizeV2 + len("frame-0")
+	raw[segHeaderSize+frameSize+HeaderSizeV2] ^= 0xFF     // first payload byte of frame-1
+	if err := os.WriteFile(seg, raw, 0o600); err != nil { //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
 		t.Fatalf("WriteFile: %v", err)
 	}
 	originalSize := int64(len(raw))
@@ -145,7 +147,7 @@ func TestOpen_PreservesGenuineCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open (corrupt reopen): %v", err)
 	}
-	info, err := os.Stat(path)
+	info, err := os.Stat(seg)
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}

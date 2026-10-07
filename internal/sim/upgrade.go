@@ -316,8 +316,14 @@ func checkCorruptImageRejected(ctx context.Context, seed uint64, reopen reopenFu
 // inside the file (past the header and first frame) so the corruption lands in
 // an already-durable frame rather than a benign torn tail.
 func corruptSimWAL(disk *SimDisk) error {
+	// The frames live in the tail segment of a segmented log; a legacy store's
+	// frames live in the single file.
+	path := simWALPath
+	if seg, ok := simWALTailSegment(disk, simWALPath); ok {
+		path = seg
+	}
 	img := disk.Snapshot()
-	data, ok := img[simWALPath]
+	data, ok := img[path]
 	if !ok || len(data) < 64 {
 		return fmt.Errorf("WAL image too small to corrupt (%d bytes)", len(data))
 	}
@@ -327,7 +333,7 @@ func corruptSimWAL(disk *SimDisk) error {
 	for i := mid; i < mid+16 && i < len(data); i++ {
 		data[i] ^= 0xFF
 	}
-	h, err := disk.OpenFile(simWALPath, os.O_RDWR)
+	h, err := disk.OpenFile(path, os.O_RDWR)
 	if err != nil {
 		return err
 	}

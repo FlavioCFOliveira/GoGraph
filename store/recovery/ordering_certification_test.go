@@ -108,10 +108,8 @@ var edgeHandleField = regexp.MustCompile(`h=\d+ `)
 // insertion trajectory.
 func buildHighDegreeGraph(t *testing.T, dir string) (*lpg.Graph[string, int64], *wal.Writer) {
 	t.Helper()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A single-file log: this test damages or erases it as one file.
+	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
 	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
 	store := txn.NewStoreWithOptions(g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),

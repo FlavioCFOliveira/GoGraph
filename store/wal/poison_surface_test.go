@@ -11,8 +11,8 @@ package wal_test
 // documentation drifts silently the first time a check order changes.
 //
 // The claim under test is the ASYMMETRY, not any single member: eight methods
-// return the sticky error, two can return nil while poisoned, and one never
-// consults it at all. A test that only asserted "appends are refused after a
+// return the sticky error, two can return nil while poisoned, and the two
+// checkpoint-side methods never consult it at all. A test that only asserted "appends are refused after a
 // failed fsync" would keep passing straight through the change the
 // documentation exists to warn about.
 //
@@ -39,7 +39,7 @@ package wal_test
 // This complements internal/sim's checkWALLifecycle (rmp #2472), which pins the
 // same two surprises from the simulator side under a ONE-SHOT disk fault — so
 // it observes only the transient regime — and does not reach AppendCtx, Sync,
-// SyncCtx, TruncatePrefix or DurableOffset.
+// SyncCtx, Truncate or DurableOffset.
 
 import (
 	"context"
@@ -53,12 +53,12 @@ import (
 )
 
 // poisonSurfacePayload is the frame payload size, so one frame costs
-// wal.HeaderSize + poisonSurfacePayload bytes and every watermark below is
+// wal.HeaderSizeV2 + poisonSurfacePayload bytes and every watermark below is
 // exactly derivable rather than read back from the writer under test.
 const poisonSurfacePayload = 16
 
 // poisonSurfaceFrameBytes is the byte cost of one frame here.
-const poisonSurfaceFrameBytes = wal.HeaderSize + poisonSurfacePayload
+const poisonSurfaceFrameBytes = wal.HeaderSizeV2 + poisonSurfacePayload
 
 // errInjectedSync is the fsync failure this file injects. It is a distinct
 // value so an assertion can tell "the writer handed back the sticky error"
@@ -199,8 +199,8 @@ func TestWriter_PoisonedStateSurface(t *testing.T) {
 			{"SyncGroup_watermark_beyond_the_log", func(p poisonedWriter) error {
 				return p.w.SyncGroup(p.lost + int64(poisonSurfaceFrameBytes))
 			}},
-			{"TruncatePrefix", func(p poisonedWriter) error {
-				_, err := p.w.TruncatePrefix(p.durable)
+			{"Truncate", func(p poisonedWriter) error {
+				_, err := p.w.Truncate()
 				return err
 			}},
 			{"Close", func(p poisonedWriter) error { return p.w.Close() }},
@@ -258,68 +258,21 @@ func TestWriter_PoisonedStateSurface(t *testing.T) {
 		}
 	})
 
-	// --- Group 3: Truncate never consults the sticky error. Both fault regimes,
-	// because what it RETURNS differs between them while everything that
-	// matters for durability does not. ---
-	for _, regime := range []struct {
-		name       string
-		persistent bool
-	}{
-		{"transient_fault_returns_nil", false},
-		{"persistent_fault_returns_the_raw_fsync_error", true},
-	} {
-		t.Run("Truncate_on_poisoned_"+regime.name, func(t *testing.T) {
-			t.Parallel()
-			p := newPoisonedWriter(t, regime.persistent)
-			statsBefore := p.w.Stats()
-			sizeBefore := imageSize(t, p.path)
-			freed, err := p.w.Truncate()
-			sizeAfter := imageSize(t, p.path)
-
-			// What differs between the regimes: only the returned error.
-			if regime.persistent {
-				if !errors.Is(err, errInjectedSync) {
-					t.Errorf("under a PERSISTENT fsync fault Truncate returned %v; documented behaviour is the raw error from its own fsync", err)
-				}
-				//nolint:errorlint // identity is the contract under test; see the file header
-				if err == p.sticky {
-					t.Error("Truncate returned the identical STICKY error: the documentation says it does not consult the poison and reports its own fsync failure instead")
-				}
-				if errors.Is(err, wal.ErrDurabilityFailed) {
-					t.Errorf("Truncate's error %v carries wal.ErrDurabilityFailed; the documentation warns callers that errors.Is against that class is FALSE here, "+
-						"so a caller cannot use it to detect the poison", err)
-				}
-			} else if err != nil {
-				t.Errorf("under a TRANSIENT fsync fault Truncate returned %v; documented behaviour is nil — a success on a writer that is still dead", err)
-			}
-
-			// What holds in BOTH regimes, and is what the safety argument rests on.
-			if freed != p.durable {
-				t.Errorf("Truncate reported freeing %d byte(s); the poisoned writer's file held the %d durable byte(s) — the un-synced suffix was already discarded",
-					freed, p.durable)
-			}
-			if sizeBefore != p.durable || sizeAfter != 0 {
-				t.Errorf("the file went from %d byte(s) to %d across Truncate; documented behaviour is the %d durable byte(s) emptied to 0",
-					sizeBefore, sizeAfter, p.durable)
-			}
-			if off := p.w.DurableOffset(); off != 0 {
-				t.Errorf("the durable offset after Truncate is %d; the file was emptied, so it must be 0 or a later rollback truncates to a stale size", off)
-			}
-			if statsBefore != p.w.Stats() {
-				t.Errorf("Truncate changed the LIFETIME counters, %+v -> %+v; they are documented as not reset", statsBefore, p.w.Stats())
-			}
-			//nolint:errorlint // identity is the contract under test; see the file header
-			if got := p.w.Poisoned(); got != p.sticky {
-				t.Errorf("Poisoned() returns %v after Truncate, not the identical sticky %v: emptying the file cleared or replaced the fail-stop, "+
-					"so appends onto a WAL whose durability failed could resume", got, p.sticky)
-			}
-			//nolint:errorlint // identity is the contract under test; see the file header
-			if err := p.w.Append(make([]byte, poisonSurfacePayload)); err != p.sticky {
-				t.Errorf("an append after Truncate returned %v, not the sticky %v: the emptied file is accepting frames, which is the durability hole "+
-					"Truncate-on-poisoned is only safe in the absence of", err, p.sticky)
-			}
-		})
-	}
+	// --- Group 3: the checkpoint-side methods never consult the sticky error;
+	// on a single-file writer they report that it has no segments. ---
+	t.Run("checkpoint_side_ignores_the_poison", func(t *testing.T) {
+		t.Parallel()
+		p := newPoisonedWriter(t, false)
+		if err := p.w.MarkCheckpoint(p.durable); !errors.Is(err, wal.ErrSegmentsUnsupported) {
+			t.Errorf("MarkCheckpoint on a poisoned single-file writer returned %v; expected wal.ErrSegmentsUnsupported", err)
+		}
+		if _, err := p.w.ReclaimSegments(); !errors.Is(err, wal.ErrSegmentsUnsupported) {
+			t.Errorf("ReclaimSegments on a poisoned single-file writer returned %v; expected wal.ErrSegmentsUnsupported", err)
+		}
+		if got := imageSize(t, p.path); got != p.durable {
+			t.Errorf("the file holds %d byte(s); the checkpoint-side calls must touch nothing", got)
+		}
+	})
 
 	// --- Stats and DurableOffset have no error channel; SyncFailed is what
 	// surfaces the failure there. ---
@@ -350,7 +303,6 @@ func TestWriter_PoisonedStateSurface(t *testing.T) {
 		frame := make([]byte, poisonSurfacePayload)
 		_, arErr := p.w.AppendRun(func(emit func([]byte) error) error { return emit(frame) })
 		_, tErr := p.w.Truncate()
-		_, tpErr := p.w.TruncatePrefix(p.durable)
 		closedCases := []struct {
 			name string
 			err  error
@@ -362,10 +314,7 @@ func TestWriter_PoisonedStateSurface(t *testing.T) {
 			{"SyncCtx", p.w.SyncCtx(context.Background())},
 			{"SyncGroup", p.w.SyncGroup(p.lost)},
 			{"SyncBuffered", p.w.SyncBuffered()},
-			// Truncate is in this list precisely because it is the method that
-			// ignores the poison: only the CLOSED check stops it.
 			{"Truncate", tErr},
-			{"TruncatePrefix", tpErr},
 			{"Close", p.w.Close()},
 		}
 		for _, c := range closedCases {
@@ -380,66 +329,4 @@ func TestWriter_PoisonedStateSurface(t *testing.T) {
 				got, p.sticky)
 		}
 	})
-}
-
-// TestWriter_TruncatePrefix_PoisonPrecedesUnsupported pins the check ORDER the
-// [wal.Writer.TruncatePrefix] documentation now states: the sticky-poison check
-// runs before the path-less rejection and before the range and upTo == 0 checks.
-//
-// The discriminator is that the SAME path-less writer returns two different
-// errors depending only on its health, so the test cannot pass on a writer that
-// was never poisoned, nor on one whose path check happens to fire first.
-func TestWriter_TruncatePrefix_PoisonPrecedesUnsupported(t *testing.T) {
-	t.Parallel()
-	// A path-less writer (OpenWith): TruncatePrefix is unsupported on it.
-	p := newPoisonedWriter(t, false)
-
-	// The HEALTHY leg has to be taken on a separate writer, since the poison is
-	// terminal — without it the poisoned leg below proves nothing about ordering.
-	healthyPath := filepath.Join(t.TempDir(), "healthy_pathless.wal")
-	hf, err := os.OpenFile(healthyPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // G304: as above — this test's own t.TempDir() plus a literal leaf
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	hw, err := wal.OpenWith(&flakySyncFile{f: hf})
-	if err != nil {
-		t.Fatalf("wal.OpenWith: %v", err)
-	}
-	t.Cleanup(func() { _ = hw.Close() })
-	mark, err := hw.AppendRun(func(emit func([]byte) error) error {
-		return emit(make([]byte, poisonSurfacePayload))
-	})
-	if err != nil {
-		t.Fatalf("append: %v", err)
-	}
-	if err := hw.SyncGroup(mark); err != nil {
-		t.Fatalf("sync: %v", err)
-	}
-	if _, err := hw.TruncatePrefix(mark); !errors.Is(err, wal.ErrPrefixTruncateUnsupported) {
-		t.Fatalf("on a HEALTHY path-less writer TruncatePrefix returned %v; expected wal.ErrPrefixTruncateUnsupported", err)
-	}
-
-	// POISONED and path-less: the poison check decides, because it runs first.
-	got, err := p.w.TruncatePrefix(p.durable)
-	//nolint:errorlint // identity is the contract under test; see the file header
-	if err != p.sticky {
-		t.Errorf("on a POISONED path-less writer TruncatePrefix returned %v; the documented order puts the sticky-poison check first, so it must return "+
-			"the identical sticky error %v rather than wal.ErrPrefixTruncateUnsupported", err, p.sticky)
-	}
-	if got != 0 {
-		t.Errorf("TruncatePrefix reported reclaiming %d byte(s) while returning an error; it must touch nothing and report 0", got)
-	}
-	// upTo == 0 is documented as a no-op on a usable writer; the poison check
-	// pre-empts that too.
-	//nolint:errorlint // identity is the contract under test; see the file header
-	if _, err := p.w.TruncatePrefix(0); err != p.sticky {
-		t.Errorf("TruncatePrefix(0) on a poisoned writer returned %v; the documented order puts the sticky-poison check before the upTo == 0 no-op, "+
-			"so it must return the identical sticky error %v", err, p.sticky)
-	}
-	// An out-of-range upTo likewise never reaches its own rejection.
-	//nolint:errorlint // identity is the contract under test; see the file header
-	if _, err := p.w.TruncatePrefix(p.lost * 1000); err != p.sticky {
-		t.Errorf("TruncatePrefix with an out-of-range upTo returned %v on a poisoned writer; the sticky-poison check precedes the range check, "+
-			"so it must return the identical sticky error %v", err, p.sticky)
-	}
 }

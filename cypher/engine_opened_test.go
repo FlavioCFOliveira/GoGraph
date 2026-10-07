@@ -6,19 +6,19 @@ package cypher_test
 // Layer: short.
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
+
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/store"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
-	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // openedOptions is the codec pair the test opens with.
@@ -114,29 +114,28 @@ func TestNewEngineWithOpened_ReRegistersRecoveredSchema(t *testing.T) {
 // every earlier transaction.
 func flipCRCOfTxn(t *testing.T, dir string, txnSeq uint64) {
 	t.Helper()
-	walPath := filepath.Join(dir, "wal")
-	raw, err := os.ReadFile(walPath) //nolint:gosec // path under t.TempDir
+	locs, err := waltest.LocateFrames(filepath.Join(dir, "wal"))
 	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+		t.Fatalf("locate WAL frames: %v", err)
 	}
-	r := bytes.NewReader(raw)
-	for {
-		f, derr := wal.Decode(r)
-		if derr != nil {
-			t.Fatalf("no data frame of transaction %d", txnSeq)
-		}
-		op, oerr := recovery.Decode(f.Payload)
+	for _, l := range locs {
+		op, oerr := recovery.Decode(l.Frame.Payload)
 		if oerr != nil {
 			t.Fatalf("recovery.Decode: %v", oerr)
 		}
 		if op.Version == txn.OpRecordV3 && op.TxnSeq == txnSeq && op.Kind != txn.OpCommit {
-			raw[len(raw)-r.Len()-1] ^= 0xFF
-			break
+			raw, err := os.ReadFile(l.Path)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			raw[l.Offset+l.Size-1] ^= 0xFF
+			if err := os.WriteFile(l.Path, raw, 0o600); err != nil { //nolint:gosec // G703: path under t.TempDir
+				t.Fatalf("WriteFile: %v", err)
+			}
+			return
 		}
 	}
-	if err := os.WriteFile(walPath, raw, 0o600); err != nil { //nolint:gosec // G703: path under t.TempDir
-		t.Fatalf("WriteFile: %v", err)
-	}
+	t.Fatalf("no data frame of transaction %d", txnSeq)
 }
 
 // countPeople returns the number of :Person nodes eng sees.

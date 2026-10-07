@@ -2,10 +2,12 @@ package checkpoint
 
 // phase2_ddl_retention_test.go — hardening gate for the 2026-06-25 round-2 audit
 // (#1774). A CREATE INDEX committed DURING the lock-free checkpoint phase-2
-// window (after the watermark/CSR capture, so it is NOT in the snapshot) must be
-// caught by the phase-3 self-sufficiency re-check (which consults
-// Graph.HasIndexes), so the WAL prefix holding that OpCreateIndex frame is
-// RETAINED — never truncated — preserving the index across a restart (#1755).
+// window (after the watermark/CSR capture, so it is NOT in the snapshot) must
+// survive a restart (#1755). With the segmented WAL (docs/design-wal-v2.md §2.4)
+// its OpCreateIndex frame lies at or above the checkpoint's redo position, which
+// no checkpoint discards and recovery always replays, so the snapshot may be
+// recorded as the start of recovery without a phase-3 re-check under the commit
+// lock.
 // This complements indexdefs_survival_test.go, which covers the index created
 // BEFORE the checkpoint; this covers the racing case.
 
@@ -18,6 +20,8 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
+	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -89,12 +93,29 @@ func TestCheckpoint_Phase2IndexDDL_RetainsWAL(t *testing.T) {
 		t.Fatalf("checkpoint Trigger: %v", err)
 	}
 
-	// The store-direct index count makes HasIndexes true, so the phase-3 re-check
-	// judged the snapshot NOT self-sufficient and SKIPPED truncation.
 	if !g.HasIndexes() {
 		t.Fatal("HasIndexes() = false after a committed CREATE INDEX (#1774)")
 	}
-	if got := cp.Stats().WALTruncBytes; got != 0 {
-		t.Fatalf("WALTruncBytes = %d, want 0: a CREATE INDEX committed during phase 2 must keep the WAL retained, not truncated (#1755/#1774)", got)
+	// The snapshot (captured before the DDL) stands alone for every frame below
+	// its redo position, so the checkpoint records it as the start of recovery.
+	redo, ok, err := waltest.CheckpointRecorded(dir)
+	if err != nil || !ok {
+		t.Fatalf("the checkpoint did not record its snapshot (err %v)", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("wal.Close: %v", err)
+	}
+	// The DDL frame lies at or above the redo position, so recovery replays it
+	// and the index survives the restart.
+	res, err := recovery.Open[string, int64](dir, recovery.OptionsFromTxn(opts))
+	if err != nil {
+		t.Fatalf("recovery.Open: %v", err)
+	}
+	found := false
+	for _, ix := range res.Indexes {
+		found = found || ix.Name == "ix_person_email"
+	}
+	if !found {
+		t.Fatalf("index ix_person_email lost across the restart (redo position %d, recovered %+v) — #1755/#1774", redo, res.Indexes)
 	}
 }

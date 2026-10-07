@@ -9,7 +9,7 @@ import (
 
 // TestFrame_RoundTrip_TableDriven encodes a Frame and immediately decodes it,
 // asserting payload equality and that the decoded version matches
-// CurrentVersion. The CRC is validated implicitly by Decode.
+// LegacyVersion. The CRC is validated implicitly by Decode.
 func TestFrame_RoundTrip_TableDriven(t *testing.T) {
 	t.Parallel()
 
@@ -51,8 +51,8 @@ func TestFrame_RoundTrip_TableDriven(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Decode: %v", err)
 			}
-			if got.Version != CurrentVersion {
-				t.Fatalf("Version = %d, want %d", got.Version, CurrentVersion)
+			if got.Version != LegacyVersion {
+				t.Fatalf("Version = %d, want %d", got.Version, LegacyVersion)
 			}
 			if !bytes.Equal(got.Payload, tc.payload) {
 				t.Fatalf("Payload mismatch: got %d bytes, want %d bytes",

@@ -85,9 +85,9 @@ var seedShape = expectedShape{
 	PropValue: 42,
 }
 
-// seedPlusPostShape is the shape committed by runCheckpointPrefixCrash: the
-// seed ring plus one further committed edge 3->4 (weight 400). Four nodes,
-// four arcs; node 3 now has out-degree two and node 4 out-degree zero.
+// seedPlusPostShape is the seed ring plus one further committed edge 3->4
+// (weight 400). Four nodes, four arcs; node 3 now has out-degree two and node 4
+// out-degree zero.
 var seedPlusPostShape = expectedShape{
 	Nodes:    4,
 	ArcCount: 4,
@@ -118,22 +118,32 @@ func TestCrashRecovery_GraphShape_CheckpointPreTruncate(t *testing.T) {
 	assertShape(t, recoverGraph(t, dir), &seedShape, scenario)
 }
 
-// TestCrashRecovery_GraphShape_CheckpointPrefixTruncate crashes the child at
-// each of the three breakpoints inside wal.Writer.TruncatePrefix's atomic
-// copy-then-rename, then asserts the recovered graph's exact shape. At every
-// interleaving the full committed state — the seed ring plus the post edge —
-// must be reconstructed from the snapshot plus whichever WAL survives.
-func TestCrashRecovery_GraphShape_CheckpointPrefixTruncate(t *testing.T) {
+// segmentedCheckpointShape is the shape committed by
+// runSegmentedCheckpointCrash: the seed ring, the post edge 3->4, and the 40
+// isolated filler nodes 100..139 whose 64 KiB properties fill three 1 MiB
+// segments. 44 live nodes, four arcs.
+var segmentedCheckpointShape = func() expectedShape {
+	s := seedPlusPostShape
+	s.Nodes = 4 + 40
+	return s
+}()
+
+// TestCrashRecovery_GraphShape_CheckpointSegmentReclaim crashes the child at
+// each breakpoint of a checkpoint's control-file write and segment unlink
+// (docs/design-wal-v2.md §8), then asserts the recovered graph's exact shape.
+// At every interleaving the full committed state must be reconstructed from
+// the snapshot plus whichever segments and control file survive.
+func TestCrashRecovery_GraphShape_CheckpointSegmentReclaim(t *testing.T) {
 	scenarios := []string{
-		"checkpoint.truncprefix.tmp-written-pre-rename",
-		"checkpoint.truncprefix.post-rename-pre-dirfsync",
-		"checkpoint.truncprefix.post-rename-pre-bookkeeping",
+		"checkpoint.control-tmp-pre-rename",
+		"checkpoint.control-renamed-pre-dirfsync",
+		"checkpoint.unlink-partial",
+		"checkpoint.unlink-done-pre-dirfsync",
 	}
 	for _, scenario := range scenarios {
-		scenario := scenario
 		t.Run(scenario, func(t *testing.T) {
 			dir := runAndAssertKilled(t, scenario)
-			assertShape(t, recoverGraph(t, dir), &seedPlusPostShape, scenario)
+			assertShape(t, recoverGraph(t, dir), &segmentedCheckpointShape, scenario)
 		})
 	}
 }

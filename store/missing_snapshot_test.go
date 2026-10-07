@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
@@ -52,9 +53,9 @@ func checkpointedDir(t *testing.T) (string, []string) {
 	if err := cp.RunCheckpoint(); err != nil {
 		t.Fatalf("RunCheckpoint: %v", err)
 	}
-	if cp.Stats().WALTruncBytes == 0 {
-		t.Fatal("the checkpoint truncated no WAL bytes: the fixture does not model a " +
-			"truncated prefix and cannot detect the defect")
+	if _, ok, err := waltest.CheckpointRecorded(dir); err != nil || !ok {
+		t.Fatalf("the checkpoint did not record a truncated prefix in the WAL control file "+
+			"(err %v): the fixture does not model a truncated prefix and cannot detect the defect", err)
 	}
 	if err := o.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -72,12 +73,9 @@ func TestRecovery_RefusesTruncatedWALWithoutSnapshot(t *testing.T) {
 	t.Parallel()
 	dir, keys := checkpointedDir(t)
 
-	// The marker is what makes the state detectable; it must exist after a
-	// truncation.
-	marker := wal.PrefixTruncatedMarkerPath(filepath.Join(dir, "wal"))
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("prefix marker %s after a truncating checkpoint: %v", marker, err)
-	}
+	// The control file's prefix-truncated flag is what makes the state
+	// detectable; it must be set after a truncating checkpoint.
+	requirePrefixTruncated(t, dir)
 
 	// Control: with the snapshot in place the directory recovers clean and
 	// holds every folded commit, so the refusal below is about the missing
@@ -164,10 +162,10 @@ func TestRecovery_UntruncatedWALWithoutSnapshotStillOpens(t *testing.T) {
 func TestRecovery_PreMarkerStoreGainsRecordOnFirstSnapshotRecovery(t *testing.T) {
 	t.Parallel()
 	dir, keys := checkpointedDir(t)
+	// A pre-marker store is a legacy single-file store: rewrite the log in that
+	// format, with no control file and no marker.
+	convertToLegacyLog(t, dir, nil)
 	marker := wal.PrefixTruncatedMarkerPath(filepath.Join(dir, "wal"))
-	if err := os.Remove(marker); err != nil {
-		t.Fatalf("remove marker to simulate a pre-marker store: %v", err)
-	}
 
 	res, err := recovery.Open[string, float64](dir, recovery.Options[string, float64]{
 		Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec(),
@@ -195,11 +193,11 @@ func TestRecovery_PreMarkerStoreGainsRecordOnFirstSnapshotRecovery(t *testing.T)
 	}
 }
 
-// TestCheckpoint_RewritesPrefixMarkerAtEveryCheckpoint pins rmp #3002's other
-// half: the control record is rewritten at every checkpoint, not only at a
-// Writer's first truncation, so a marker lost while the store runs is restored by
-// its next checkpoint.
-func TestCheckpoint_RewritesPrefixMarkerAtEveryCheckpoint(t *testing.T) {
+// TestCheckpoint_RecordsEveryCheckpointInControl pins rmp #3002's other half
+// for a segmented store: the control record is rewritten at every checkpoint
+// whose snapshot stands alone, each time naming that snapshot's redo position,
+// so the record never lags the snapshot recovery will start from.
+func TestCheckpoint_RecordsEveryCheckpointInControl(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	o, err := store.Open[string, float64](dir, openOptions())
@@ -212,20 +210,20 @@ func TestCheckpoint_RewritesPrefixMarkerAtEveryCheckpoint(t *testing.T) {
 		checkpoint.WithCommitSerialiser[string, float64](o.Store().RunUnderCommitLock),
 		checkpoint.WithMapperCodec[string, float64](txn.NewStringCodec()),
 		checkpoint.WithWeightCodec[string, float64](txn.NewFloat64WeightCodec()))
-	marker := wal.PrefixTruncatedMarkerPath(filepath.Join(dir, "wal"))
+	var last uint64
 	for i, k := range []string{"first", "second"} {
 		commitNodes(t, o.Store(), k)
 		if err := cp.RunCheckpoint(); err != nil {
 			t.Fatalf("checkpoint %d: %v", i+1, err)
 		}
-		if _, err := os.Stat(marker); err != nil {
-			t.Fatalf("marker after checkpoint %d: %v", i+1, err)
+		redo, ok, err := waltest.CheckpointRecorded(dir)
+		if err != nil || !ok {
+			t.Fatalf("checkpoint %d is not recorded in the control file (err %v)", i+1, err)
 		}
-		if i == 0 {
-			if err := os.Remove(marker); err != nil {
-				t.Fatalf("remove marker: %v", err)
-			}
+		if redo <= last {
+			t.Fatalf("checkpoint %d recorded redo position %d, not past the previous %d", i+1, redo, last)
 		}
+		last = redo
 	}
 }
 
@@ -246,15 +244,26 @@ func TestOpen_UncleanRecoveryWritesNoPrefixMarker(t *testing.T) {
 	if err := o.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	marker := wal.PrefixTruncatedMarkerPath(filepath.Join(dir, "wal"))
-	if err := os.Remove(marker); err != nil {
-		t.Fatalf("remove marker to simulate a pre-marker store: %v", err)
-	}
 	seqs := walCommitSeqs(t, dir)
 	if len(seqs) == 0 {
 		t.Fatal("no committed transaction in the WAL suffix to corrupt")
 	}
-	injectUndecodableBodyInCommittedTxn(t, dir, seqs[len(seqs)-1])
+	// A pre-marker store is a legacy single-file store: rewrite the log in that
+	// format, with no marker, and an undecodable op in its last transaction.
+	last := seqs[len(seqs)-1]
+	injected := false
+	convertToLegacyLog(t, dir, func(p []byte) []byte {
+		op, err := recovery.Decode(p)
+		if err == nil && !injected && op.Version == txn.OpRecordV3 && op.TxnSeq == last && op.Kind != txn.OpCommit {
+			injected = true
+			return p[:10]
+		}
+		return p
+	})
+	if !injected {
+		t.Fatalf("no data frame of transaction %d", last)
+	}
+	marker := wal.PrefixTruncatedMarkerPath(filepath.Join(dir, "wal"))
 
 	noMarker := func(stage string) {
 		t.Helper()
@@ -281,4 +290,49 @@ func TestOpen_UncleanRecoveryWritesNoPrefixMarker(t *testing.T) {
 		t.Fatalf("TailErr = %v, want %v", ro.Recovery().TailErr, recovery.ErrCommittedTxnCorruptOp)
 	}
 	noMarker("the AllowUnclean open")
+}
+
+// requirePrefixTruncated asserts the WAL control file of dir records a
+// truncated prefix.
+func requirePrefixTruncated(t *testing.T, dir string) {
+	t.Helper()
+	log, err := wal.OpenLog(filepath.Join(dir, "wal"))
+	if err != nil {
+		t.Fatalf("wal.OpenLog: %v", err)
+	}
+	if ctl, ok := log.Control(); !ok || ctl.Flags&wal.ControlPrefixTruncated == 0 {
+		t.Fatalf("the WAL control file does not record a truncated prefix (present %t, %+v)", ok, ctl)
+	}
+}
+
+// convertToLegacyLog rewrites the store log of dir as a legacy single-file log
+// — no control file, no segments, no marker — holding every frame payload
+// recovery would replay, each passed through mutate when it is non-nil. It
+// models a store written before the segmented format.
+func convertToLegacyLog(t *testing.T, dir string, mutate func([]byte) []byte) {
+	t.Helper()
+	walPath := filepath.Join(dir, "wal")
+	r, err := wal.OpenReader(walPath)
+	if err != nil {
+		t.Fatalf("wal.OpenReader: %v", err)
+	}
+	var buf bytes.Buffer
+	for f := range r.Frames() {
+		p := f.Payload
+		if mutate != nil {
+			p = mutate(p)
+		}
+		if _, err := wal.Encode(&buf, wal.Frame{Payload: p}); err != nil {
+			t.Fatalf("wal.Encode: %v", err)
+		}
+	}
+	_ = r.Close()
+	for _, p := range []string{wal.SegmentDir(walPath), wal.ControlPath(walPath), wal.PrefixTruncatedMarkerPath(walPath)} {
+		if err := os.RemoveAll(p); err != nil {
+			t.Fatalf("remove %s: %v", p, err)
+		}
+	}
+	if err := os.WriteFile(walPath, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write legacy log: %v", err)
+	}
 }

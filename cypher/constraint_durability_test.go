@@ -27,10 +27,8 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
-	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
-	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -76,21 +74,12 @@ func cdCycle(t *testing.T, dir string, snap bool, queries ...string) error {
 	}
 
 	if snap {
-		cs := csr.BuildFromAdjList(res.Graph.AdjList())
-		if werr := snapshot.WriteSnapshotFullWithMapperCodecAndConstraints(
-			filepath.Join(dir, "snapshot"), cs, res.Graph, txn.NewStringCodec(),
-			eng.ConstraintSpecsForSnapshot(),
-		); werr != nil {
-			t.Fatalf("WriteSnapshotFullWithMapperCodecAndConstraints: %v", werr)
+		if werr := checkpointTestStore(dir, res.Graph, w, eng.ConstraintSpecsForSnapshot); werr != nil {
+			t.Fatalf("checkpoint: %v", werr)
 		}
 	}
 	if serr := w.Sync(); serr != nil {
 		t.Fatalf("wal.Sync: %v", serr)
-	}
-	if snap {
-		if _, terr := w.Truncate(); terr != nil {
-			t.Fatalf("wal.Truncate: %v", terr)
-		}
 	}
 	return lastErr
 }

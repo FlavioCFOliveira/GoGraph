@@ -515,8 +515,8 @@ func TestSnapshotCorruption_FixturePublishesEveryComponent(t *testing.T) {
 	// The checkpoint must have folded the whole WAL, so the snapshot is the ONLY
 	// durable source of the committed graph and a refusal is a genuine fail-stop
 	// rather than a fallback onto a stale WAL.
-	if len(fx.walBytes) != 0 {
-		t.Errorf("db/wal holds %d bytes after the checkpoint, want 0: a refusal could fall back onto it", len(fx.walBytes))
+	if n, err := simWALSize(fx.disk, fx.dir); err != nil || n != 0 {
+		t.Errorf("db/wal leaves %d frame bytes for recovery to replay after the checkpoint (err %v), want 0: a refusal could fall back onto it", n, err)
 	}
 	if len(fx.committed) != snapshotCorruptionNodes-1 {
 		t.Errorf("committed model holds %d keys, want %d", len(fx.committed), snapshotCorruptionNodes-1)

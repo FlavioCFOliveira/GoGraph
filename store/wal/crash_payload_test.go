@@ -39,10 +39,7 @@ func TestWAL_CrashMidPayload(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	good, err := os.ReadFile(src) //nolint:gosec // t.TempDir-rooted
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
+	good := segmentFrameBytes(t, src)
 
 	// Construct a valid-looking header claiming plen=100, but only supply 10
 	// payload bytes. Decode will attempt io.ReadFull(r, make([]byte,100)) and
@@ -73,7 +70,7 @@ func TestWAL_CrashMidPayload(t *testing.T) {
 	copy(augmented[len(good)+HeaderSize:], fullPayload[:10])
 
 	dst := filepath.Join(dir, "torn_payload.wal")
-	if err := os.WriteFile(dst, augmented, 0o600); err != nil { //nolint:gosec // testdata
+	if err := os.WriteFile(dst, augmented, 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 

@@ -139,6 +139,25 @@ type Capture[W any] struct {
 	// [Capture.IndexesCommitTS] for the accessor the writer reads.
 	indexesCommitTS uint64
 	indexesQuiesced bool
+	// walStoreID and walRedoPos are the WAL store id and the WAL position this
+	// image covers (WAL v2, docs/design-wal-v2.md §3.3), set by the
+	// checkpointer through [Capture.SetWALPosition]; walStoreID 0 means unset.
+	walStoreID uint64
+	walRedoPos uint64
+}
+
+// SetWALPosition records the store id of the write-ahead log this image pairs
+// with and the log position it covers — every frame below redoPos is folded
+// into the image. A capture that publishes a mapper (manifest version 4) then
+// writes them as the manifest's store_id, wal_redo_pos and wal_format = 2,
+// which recovery checks against the log (rmp #3014). A storeID of 0 records
+// nothing. Call it before the capture is published; a Capture is not safe for
+// concurrent mutation.
+func (c *Capture[W]) SetWALPosition(storeID uint64, redoPos int64) {
+	if storeID == 0 || redoPos < 0 {
+		return
+	}
+	c.walStoreID, c.walRedoPos = storeID, uint64(redoPos)
 }
 
 // Order reports how many NODES this image carries.

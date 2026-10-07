@@ -838,6 +838,13 @@ func writeCaptureCore[W any](
 			Weightless: cfg.Weightless,
 		},
 	}
+	// The WAL position the image covers, written only into a version-4
+	// manifest (one that carries mapper.bin), the only version that defines it.
+	if manifestVersion == ManifestVersion && capt.walStoreID != 0 {
+		m.StoreID = fmt.Sprintf("%016x", capt.walStoreID)
+		m.WALRedoPos = capt.walRedoPos
+		m.WALFormat = WALFormatSegmented
+	}
 
 	manifestPath := filepath.Join(tmp, "manifest.json")
 	mf, err := fsys.Create(manifestPath)

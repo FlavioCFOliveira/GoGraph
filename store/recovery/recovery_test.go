@@ -10,7 +10,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
-	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // committedOp is a record of what we know to be durable so we can
@@ -25,10 +24,8 @@ type committedOp struct {
 
 func writeWorkload(t *testing.T, dir string, ops []committedOp, syncEvery int) {
 	t.Helper()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A single-file log: this test damages or erases it as one file.
+	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
 	defer func() { _ = w.Close() }()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())

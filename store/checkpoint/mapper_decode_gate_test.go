@@ -52,6 +52,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -359,6 +360,9 @@ func TestCheckpoint_CodecMapperKeyUndecodable_DoesNotTruncateWAL(t *testing.T) {
 				t.Errorf("WALTruncBytes = %d, want 0: the checkpointer discarded the WAL prefix "+
 					"behind a snapshot recovery cannot apply — committed data is unrecoverable", got)
 			}
+			if _, ok, _ := waltest.CheckpointRecorded(dir); ok {
+				t.Error("the control file records the refused snapshot as the start of recovery")
+			}
 			if got := fileSize(t, walPath); got != walBefore {
 				t.Errorf("WAL size = %d, want %d (unchanged): the WAL was truncated behind a "+
 					"snapshot whose mapper does not decode", got, walBefore)
@@ -445,10 +449,10 @@ func TestCheckpoint_CodecMapperDecodes_PermittedTruncation_RecoversFromSnapshotA
 			"published, so the decode pass was a no-op here", len(loaded.Mapper.Pairs))
 	}
 
-	if got := cp.Stats().WALTruncBytes; got == 0 {
-		t.Fatalf("WALTruncBytes = 0 (LastError=%q): the gate refused a perfectly good "+
+	if _, ok, err := waltest.CheckpointRecorded(dir); err != nil || !ok {
+		t.Fatalf("the checkpoint did not record its snapshot (LastError=%q, err %v): the gate refused a perfectly good "+
 			"version-2 snapshot, so the decode pass rejects images it must accept",
-			cp.Stats().LastError)
+			cp.Stats().LastError, err)
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal.Close: %v", err)

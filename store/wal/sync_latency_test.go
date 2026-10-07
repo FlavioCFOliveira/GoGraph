@@ -35,7 +35,7 @@ func TestSyncLatency_SeedReproducesSequenceWithinBounds(t *testing.T) {
 
 // TestOpenWithSyncLatency_DelaysCommitAndDirectoryFsync pins that the latency
 // reaches both seams: the commit-path data fsync and the directory fsync (here
-// the prefix marker's), and that a nil latency installs nothing.
+// the control file's), and that a nil latency installs nothing.
 func TestOpenWithSyncLatency_DelaysCommitAndDirectoryFsync(t *testing.T) {
 	t.Parallel()
 	const d = 20 * time.Millisecond
@@ -55,11 +55,11 @@ func TestOpenWithSyncLatency_DelaysCommitAndDirectoryFsync(t *testing.T) {
 		t.Errorf("Sync took %v, want at least the injected %v", got, d)
 	}
 	start = time.Now()
-	if err := w.MarkPrefixTruncated(); err != nil {
-		t.Fatalf("MarkPrefixTruncated: %v", err)
+	if err := w.MarkCheckpoint(w.DurableOffset()); err != nil {
+		t.Fatalf("MarkCheckpoint: %v", err)
 	}
 	if got := time.Since(start); got < d {
-		t.Errorf("the marker's directory fsync took %v, want at least the injected %v", got, d)
+		t.Errorf("the control file's directory fsync took %v, want at least the injected %v", got, d)
 	}
 
 	plain, err := OpenWithSyncLatency(filepath.Join(t.TempDir(), "wal"), nil)

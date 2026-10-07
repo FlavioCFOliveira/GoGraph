@@ -23,6 +23,7 @@ package checkpoint
 // before the real capture, so it happens on every run.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,6 +34,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -224,9 +226,9 @@ func TestCheckpoint_CaptureTombstonesKeyOfTxnOpenAtInstant(t *testing.T) {
 	if !hookRan {
 		t.Fatal("the interleaving hook never ran: the capture was not reached")
 	}
-	if cp.Stats().WALTruncBytes == 0 {
-		t.Fatal("the checkpoint truncated no WAL bytes: Y and the seed were not folded " +
-			"into the snapshot, so the test cannot show the snapshot carries them")
+	if _, ok, err := waltest.CheckpointRecorded(dir); err != nil || !ok {
+		t.Fatalf("the checkpoint did not record its snapshot as the start of recovery (err %v): Y and the seed were not folded "+
+			"into the snapshot, so the test cannot show the snapshot carries them", err)
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal.Close: %v", err)
@@ -294,12 +296,18 @@ func TestCheckpoint_PrefixMarkerOnlyForSelfSufficientSnapshot(t *testing.T) {
 			if err := cp.RunCheckpoint(); err != nil {
 				t.Fatalf("RunCheckpoint: %v", err)
 			}
-			if got, want := cp.Stats().WALTruncBytes > 0, tc.wantMarker; got != want {
-				t.Fatalf("WAL truncated = %v, want %v: the arm does not model its case", got, want)
+			// The control record of a segmented log is its prefix-truncated
+			// flag: set only by a checkpoint whose snapshot stands alone.
+			log, err := wal.OpenLog(filepath.Join(dir, "wal"))
+			if err != nil {
+				t.Fatalf("wal.OpenLog: %v", err)
 			}
-			_, serr := os.Stat(wal.PrefixTruncatedMarkerPath(filepath.Join(dir, "wal")))
-			if got := serr == nil; got != tc.wantMarker {
-				t.Fatalf("prefix marker present = %v, want %v (stat: %v)", got, tc.wantMarker, serr)
+			ctl, _ := log.Control()
+			if got := ctl.Flags&wal.ControlPrefixTruncated != 0; got != tc.wantMarker {
+				t.Fatalf("control file prefix-truncated = %v, want %v", got, tc.wantMarker)
+			}
+			if _, err := os.Stat(wal.PrefixTruncatedMarkerPath(filepath.Join(dir, "wal"))); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("a segmented store wrote the legacy prefix marker (stat: %v)", err)
 			}
 		})
 	}
@@ -362,8 +370,8 @@ func TestCheckpoint_KeyInternedAtInstantRevivedByAddEdgeOnly(t *testing.T) {
 	if err := cp.RunCheckpoint(); err != nil {
 		t.Fatalf("RunCheckpoint: %v", err)
 	}
-	if cp.Stats().WALTruncBytes == 0 {
-		t.Fatal("the checkpoint truncated no WAL bytes: the snapshot is not what recovery starts from")
+	if _, ok, err := waltest.CheckpointRecorded(dir); err != nil || !ok {
+		t.Fatalf("the checkpoint did not record its snapshot (err %v): the snapshot is not what recovery starts from", err)
 	}
 	alive := func(gr *lpg.Graph[string, int64]) bool {
 		id, ok := gr.AdjList().Mapper().Lookup(keyK)

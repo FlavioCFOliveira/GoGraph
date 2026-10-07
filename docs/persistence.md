@@ -1514,17 +1514,18 @@ the concurrent suffix. Reopening the directory recovered `WALOps=45` and the
 identical graph (40 091 live nodes, 40 045 edges), `IsClean()` true.
 
 Crash safety at any interleaving follows from the ordering: the snapshot is
-self-sufficient, and recovery replays the **whole** surviving WAL idempotently
-on top of it, so the folded prefix is re-applied harmlessly and the suffix lands
-on top. Four crashpoints exercise the window, all no-ops in production
-(`GOGRAPH_CRASH_AT` unset) and driven by
-`store/recovery/checkpoint_crashinject_test.go`:
-`checkpoint.p2-snapshot-published-pre-truncate` (snapshot durable, full WAL
-intact, nothing truncated) in `store/checkpoint.writeAndTruncate`, and
-`checkpoint.truncprefix.tmp-written-pre-rename`,
-`checkpoint.truncprefix.post-rename-pre-dirfsync` and
-`checkpoint.truncprefix.post-rename-pre-bookkeeping` inside
-`wal.Writer.TruncatePrefix`.
+self-sufficient and records the WAL position it covers, the control file records
+the snapshot before any segment is unlinked, and recovery replays only the
+frames at or above the snapshot's redo position, refusing a snapshot that does
+not reach the retained log (`docs/design-wal-v2.md` §4). The crashpoints of the
+window, all no-ops in production (`GOGRAPH_CRASH_AT` unset), are driven by
+`store/recovery/checkpoint_crashinject_test.go` and
+`store/recovery/walv2_crashinject_test.go`:
+`checkpoint.p2-snapshot-published-pre-truncate` (snapshot durable and recorded,
+nothing unlinked) in `store/checkpoint.writeAndTruncate`, and
+`checkpoint.control-tmp-pre-rename`, `checkpoint.control-renamed-pre-dirfsync`,
+`checkpoint.unlink-partial` and `checkpoint.unlink-done-pre-dirfsync` inside
+`wal.Writer.MarkCheckpoint` and `wal.Writer.ReclaimSegments`.
 
 Why this matters (audit gaps F2/F3, see `docs/acid-audit.md`): an
 earlier checkpoint wrote a *CSR-only* snapshot and then truncated the

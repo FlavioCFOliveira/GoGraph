@@ -108,6 +108,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // The arm names, carried into the evidence so the non-vacuity gate can apply
@@ -477,8 +478,10 @@ type CheckpointCadenceEvidence struct {
 	// lifetime counter was ever observed to DECREASE across the run's samples.
 	CheckpointsNonMonotonic bool
 	WALTruncNonMonotonic    bool
-	// WALTruncTotal is the reclaimed-bytes counter at the end, and
-	// WALTruncAdvances how many samples it strictly increased at.
+	// WALTruncTotal is the reclaimed prefix at the end — the checkpoint redo
+	// position the WAL control file records (see cpCadenceEnv.walTrunc) — and
+	// WALTruncAdvances how many samples it strictly increased at. The
+	// WALTrunc* fields above read the same measure.
 	WALTruncTotal    uint64
 	WALTruncAdvances int
 
@@ -575,8 +578,8 @@ type cpCadenceEnv struct {
 	simulated time.Duration
 	// tick is the ordinal of the last advance.
 	tick int
-	// truncSamples records every WALTruncBytes reading in order, so monotonicity
-	// is adjudicated over the series rather than over its endpoints.
+	// truncSamples records every walTrunc reading in order, so monotonicity is
+	// adjudicated over the series rather than over its endpoints.
 	truncSamples []uint64
 	cpSamples    []uint64
 }
@@ -659,7 +662,7 @@ func (e *cpCadenceEnv) stop() {
 func (e *cpCadenceEnv) sample() checkpoint.Stats {
 	st := e.cp.Stats()
 	e.cpSamples = append(e.cpSamples, st.Checkpoints)
-	e.truncSamples = append(e.truncSamples, st.WALTruncBytes)
+	e.truncSamples = append(e.truncSamples, e.walTrunc())
 	return st
 }
 
@@ -689,11 +692,26 @@ func (e *cpCadenceEnv) walBytes() (int, error) {
 	if !e.disk.Exists(path) {
 		return 0, nil
 	}
-	image, err := e.disk.ReadFile(path)
+	image, err := simWALFrameImage(e.disk, path, e.disk.ReadFile)
 	if err != nil {
 		return 0, fmt.Errorf("sim: checkpoint-cadence read WAL image: %w", err)
 	}
 	return len(image), nil
+}
+
+// walTrunc is the WAL prefix the checkpoints have taken out of recovery's reach:
+// the checkpoint redo position the control file records (0 before the first
+// truncating checkpoint). A segmented log discards whole segments only, so the
+// checkpointer's byte counter ([checkpoint.Stats.WALTruncBytes]) does not move
+// for a log that fits in one segment; the recorded redo position does, at
+// every checkpoint whose snapshot stands alone.
+func (e *cpCadenceEnv) walTrunc() uint64 {
+	log, err := wal.OpenLogFS(simLogFS{disk: e.disk}, walPathFor(e.cfg.dir))
+	if err != nil {
+		return 0
+	}
+	ctl, _ := log.Control()
+	return ctl.CheckpointRedoPos
 }
 
 // advance moves the fake clock forward by exactly one interval and reports
@@ -936,7 +954,7 @@ func RunCheckpointCadence(ctx context.Context, cfg CheckpointCadenceConfig) (Che
 	ev.Checkpoints = final.Checkpoints
 	ev.CadenceFires = int(final.Checkpoints) - ev.TriggeredFires
 	ev.LastErrorAfterRetry = final.LastError
-	ev.WALTruncTotal = final.WALTruncBytes
+	ev.WALTruncTotal = env.walTrunc()
 	ev.TickersRegistered = env.clk.Tickers()
 	ev.ClockNowCalls = env.clk.Nows()
 	ev.ClockSinceCalls = env.clk.Sinces()
@@ -997,7 +1015,7 @@ func runCadenceFaultPhase(
 
 	before := env.cp.Stats()
 	ev.CheckpointsBeforeFailure = before.Checkpoints
-	ev.WALTruncBeforeFailure = before.WALTruncBytes
+	ev.WALTruncBeforeFailure = env.walTrunc()
 	bytesBefore, err := env.walBytes()
 	if err != nil {
 		return err
@@ -1024,7 +1042,7 @@ func runCadenceFaultPhase(
 		faultedTick := ev.FireTicks[len(ev.FireTicks)-1]
 		after := env.cp.Stats()
 		ev.CheckpointsAfterFailure = after.Checkpoints
-		ev.WALTruncAfterFailure = after.WALTruncBytes
+		ev.WALTruncAfterFailure = env.walTrunc()
 		if cfg.FaultOnCadenceFire {
 			ev.FailedFireTick = faultedTick
 			ev.FailedFireErr = after.LastError
@@ -1059,7 +1077,7 @@ func runCadenceFaultPhase(
 		ev.RetryFireTick = ev.FireTicks[len(ev.FireTicks)-1]
 		ev.TicksFromFailureToRetry = ev.RetryFireTick - ev.FailedFireTick
 	}
-	ev.WALTruncAfterRetry = env.cp.Stats().WALTruncBytes
+	ev.WALTruncAfterRetry = env.walTrunc()
 	return nil
 }
 

@@ -28,11 +28,13 @@
 // therefore NOT the storeMu an external checkpointer is constructed with (see
 // docs/acid-audit.md F3.5); RunUnderCommitLock also drains in-flight group
 // commits, so the captured watermark is a true transaction boundary. The
-// snapshot is a consistent transaction-boundary image and the prefix-truncate
-// never drops a frame committed after the watermark; a crash at any
-// interleaving recovers the exact committed state (recovery loads the
-// self-sufficient snapshot and idempotently replays the surviving WAL) — see
-// [wal.Writer.TruncatePrefix] and the checkpoint crashpoints.
+// snapshot is a consistent transaction-boundary image and records the WAL
+// position it covers; the checkpoint then records it in the WAL control file and
+// unlinks only whole segments below that position, never a frame committed
+// after the watermark. A crash at any interleaving recovers the exact committed
+// state (recovery loads the snapshot and replays the frames from its redo
+// position) — see [wal.Writer.MarkCheckpoint], [wal.Writer.ReclaimSegments] and
+// the checkpoint crashpoints.
 package checkpoint
 
 import (
@@ -145,6 +147,12 @@ type Checkpointer[N comparable, W any] struct {
 	// watermark authorises truncating would contain a transaction the image, read
 	// at the instant, does not carry. It is nil in production.
 	afterWatermarkHook func()
+
+	// beforePhase3Hook, when non-nil, is invoked after the control file is
+	// written and immediately before phase 3 unlinks segments. It is a
+	// test-only seam used to prove phase 3 holds no commit lock. It is nil in
+	// production.
+	beforePhase3Hook func()
 
 	triggerCh chan chan error
 	storeMu   *sync.Mutex
@@ -757,30 +765,29 @@ func (c *Checkpointer[N, W]) awaitCommitQuiescence() error {
 //
 //	Phase 1 (under the commit lock — the quiesce boundary): take TWO O(1)
 //	  readings, and nothing else that scales with the graph. The WAL durable
-//	  offset W, which equals the byte length of every frame committed so far (on a
-//	  frame boundary); and an MVCC instant, which is the moment the image
-//	  describes. The drain the commit lock performs is what makes those two
-//	  readings name the same transaction boundary.
-//	  The constraint and index-definition sets are read here too. Then the lock
-//	  is released.
+//	  position W, the end of every frame committed so far (on a frame boundary);
+//	  and an MVCC instant, which is the moment the image describes. The drain the
+//	  commit lock performs is what makes those two readings name the same
+//	  transaction boundary. The constraint and index-definition sets, and the
+//	  graph's schema counts that decide self-sufficiency, are read here too. Then
+//	  the lock is released.
 //	Phase 1b (lock-free): serialise the ENTIRE graph image — adjacency plus
 //	  mapper, labels, properties, tombstones, edge handles and index payloads —
 //	  at that instant, so every component reflects the same transaction boundary
 //	  (rmp #2269) while transactions commit throughout (rmp #2310). The instant is
 //	  released as soon as the bytes exist, before any disk I/O.
-//	Phase 2 (lock-free): write and publish the self-sufficient snapshot from the
-//	  captured bytes — touching no graph — while concurrent transactions commit
-//	  and append frames PAST W. fsync the WAL so the suffix [W,end) is durable.
-//	Phase 3 (under the commit lock again, briefly): re-verify self-sufficiency
-//	  (a constraint DDL may have committed in phase 2) and prefix-truncate the
-//	  WAL up to W — discarding ONLY the frames the snapshot folded and
-//	  preserving every frame committed during phase 2.
+//	Phase 2 (lock-free): write and publish the snapshot from the captured bytes
+//	  — touching no graph, recording W as its redo position — while concurrent
+//	  transactions commit and append frames PAST W; read it back; and, when it
+//	  stands alone, write the WAL control file that records it.
+//	Phase 3 (lock-free): unlink the WAL segments wholly below the oldest retained
+//	  position — discarding ONLY frames the snapshot folded.
 //
-// Crash safety (certified by storage-engine-auditor, #1508): the snapshot is
-// self-sufficient and recovery replays the WHOLE surviving WAL idempotently on
-// top of it, so a crash at any interleaving reconstructs the exact committed
-// state — see [wal.Writer.TruncatePrefix] for the atomic-rename argument and
-// the per-interleaving crashpoints.
+// Crash safety: recovery loads the snapshot and replays the frames at or above
+// its redo position, refusing a snapshot that does not reach the retained log
+// (docs/design-wal-v2.md §4), so a crash at any interleaving reconstructs the
+// exact committed state. The lock-free phase 3 changes the argument the
+// storage-engine auditor certified for #1508 and awaits its re-certification.
 func (c *Checkpointer[N, W]) runNonBlocking() error {
 	// One sequence number per attempt (rmp #1873), minted before any work
 	// starts so it orders attempts by START time; threaded through every
@@ -798,6 +805,12 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 	)
 	var constraints []snapshot.ConstraintSpec
 	var indexDefs []snapshot.IndexDefSpec
+	// needConstraints / needIndexes are the graph's schema counts at the
+	// watermark, read under the same lock (docs/design-wal-v2.md §2.4): they
+	// decide whether the snapshot can stand alone for every frame below W. A DDL
+	// that commits after the lock is released lands at or above W, which the
+	// checkpoint never discards.
+	var needConstraints, needIndexes bool
 	if err := c.runUnderCommitLock(func() error {
 		// WAIT OUT THE DURABLE-BUT-UNPUBLISHED WINDOW (rmp #2349). This must happen
 		// before either reading below, and the "Why the two agree" note on the instant
@@ -852,12 +865,13 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		if perr := c.wlog.Poisoned(); perr != nil {
 			return perr
 		}
-		// W is the durable WAL offset at a transaction boundary. Captured under
+		// W is the durable WAL position at a transaction boundary. Captured under
 		// the quiesce boundary (RunUnderCommitLock drains in-flight commits), so
 		// every committed frame is durable and none is mid-flight: W is exactly
-		// the prefix a self-sufficient snapshot of this state folds, and the only
-		// safe WAL cut point (see wal.Writer.DurableOffset / TruncatePrefix).
+		// the prefix a self-sufficient snapshot of this state folds (see
+		// wal.Writer.DurableOffset / MarkCheckpoint).
 		watermark = c.wlog.DurableOffset()
+		needConstraints, needIndexes = c.g.HasConstraints(), c.g.HasIndexes()
 		// The ENTIRE graph image — adjacency AND the mapper, labels, properties,
 		// tombstones, edge handles and index payloads — is captured at ONE instant, so
 		// every component reflects the same transaction boundary (rmp #2269). Until
@@ -1008,6 +1022,11 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 			at.StartTS(), at.TxID())
 		var capErr error
 		capt, capErr = c.snap.CaptureGraph(cs, c.g, c.codec, c.wcodec, at)
+		if capErr == nil {
+			// The image covers every frame below W: the manifest records W and
+			// the store id, which recovery checks against the log (rmp #3014).
+			capt.SetWALPosition(c.wlog.StoreID(), watermark)
+		}
 
 		// Released as soon as the bytes exist, and BEFORE phase 2's disk I/O: holding
 		// it longer would pin the reclamation horizon for the whole snapshot write.
@@ -1026,221 +1045,106 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 	}
 
 	// --- Phase 2: write + publish the snapshot LOCK-FREE, then prefix-truncate. ---
-	return c.writeAndTruncate(seq, capt, constraints, indexDefs, watermark)
+	return c.writeAndTruncate(seq, capt, constraints, indexDefs, watermark, needConstraints, needIndexes)
 }
 
 // writeAndTruncate is phases 2 and 3 of the non-blocking checkpoint: it writes
 // the self-sufficient snapshot from the captured image (lock-free, so writers
-// commit concurrently), then re-acquires the commit lock to prefix-truncate the
-// WAL up to the captured watermark. capt, constraints, and indexDefs are the
-// phase-1 capture; watermark is the durable WAL offset W those reflect. seq is
-// this attempt's setErr sequence number (rmp #1873), minted once by the
-// calling runNonBlocking and threaded through unchanged.
+// commit concurrently), records in the WAL control file that the log may begin
+// at the segment holding the captured watermark, and unlinks the segments
+// wholly below it — WITHOUT re-acquiring the commit lock. capt, constraints,
+// and indexDefs are the phase-1 capture; watermark is the durable WAL position W
+// those reflect; needConstraints and needIndexes are the schema counts read
+// under the phase-1 lock. seq is this attempt's setErr sequence number
+// (rmp #1873).
 //
 // It writes ONLY captured bytes — it never reads the graph — so nothing it
 // publishes can reflect a later state than the phase-1 boundary (rmp #2269).
-func (c *Checkpointer[N, W]) writeAndTruncate(seq uint64, capt *snapshot.Capture[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec, watermark int64) error {
+//
+// # Why phase 3 needs no commit lock (docs/design-wal-v2.md §2.4)
+//
+// The WAL writer never touches a segment other than the active one, and the
+// only frames phase 3 removes lie below the oldest retained position, which is
+// at or below W: every one of them is folded into the published, read-back
+// snapshot. The self-sufficiency test protects exactly those frames and is
+// decided by the schema counts read under the phase-1 lock; a DDL committed
+// during phase 2 lands at or above W and is retained. This replaces the
+// copy-the-suffix-under-the-commit-lock truncation (rmp #2195) and changes the
+// argument the storage-engine auditor certified for #1508.
+func (c *Checkpointer[N, W]) writeAndTruncate(seq uint64, capt *snapshot.Capture[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec, watermark int64, needConstraints, needIndexes bool) error {
 	snapDir := filepath.Join(c.cfg.Dir, "snapshot")
 	// Durability invariant (audit gaps F2/F3): the snapshot MUST be a
 	// self-sufficient image of the committed state — CSR adjacency PLUS
-	// labels, properties, indexes, and the NodeID->key mapper — before
-	// the WAL is truncated. The legacy WriteSnapshotCSR captured
-	// adjacency only, so truncating the WAL afterwards destroyed every
-	// committed label/property and, because v1 snapshots carry no mapper,
-	// the NodeID->key mapping too: recovery then yielded an empty graph.
-	//
-	// When a mapper codec is wired in (WithMapperCodec, F3) the snapshot
-	// is self-sufficient for EVERY key type, so the WAL can always be
-	// truncated. Without a codec the mapper is persisted for string keys
-	// only; non-string snapshots are then not self-sufficient and
-	// runCheckpoint guards against data loss below by refusing to
-	// truncate when the snapshot cannot stand alone. See
-	// docs/acid-audit.md (F2/F3).
-	//
-	// The same self-sufficiency rule covers schema constraints: when the
-	// engine has constraints declared (WithConstraintSpecs), the snapshot
-	// must carry them in constraints.bin BEFORE the WAL prefix that first
-	// declared them is truncated, or every constraint silently vanishes
-	// on the next restart (#1334). Identically for secondary indexes: when the
-	// engine has indexes declared (WithIndexSpecs), the snapshot must carry
-	// their definitions in indexdefs.bin BEFORE the WAL prefix that first
-	// declared them is truncated, or every index silently vanishes on the next
-	// restart (#1755).
-	// Phase 2 disk I/O runs WITHOUT the commit lock: writers commit
-	// concurrently and append frames past the captured watermark, paying no
-	// stall for this (potentially multi-second) write. The snapshot is a
-	// self-sufficient image of the phase-1 boundary state.
+	// labels, properties, indexes, and the NodeID->key mapper — before any WAL
+	// frame below W is discarded. Without a mapper codec the mapper is persisted
+	// for string keys only; non-string snapshots are then not self-sufficient
+	// and nothing is discarded. The same rule covers schema constraints (#1334)
+	// and secondary-index definitions (#1755). See docs/acid-audit.md (F2/F3).
 	if err := c.writeSnapshot(snapDir, capt, constraints, indexDefs); err != nil {
 		c.setErr(seq, err)
 		return err
 	}
-	// READ THE PUBLISHED SNAPSHOT BACK BEFORE ANY WAL BYTE IS DISCARDED.
-	//
-	// Everything above proves the snapshot was WRITTEN. Nothing above proves it
-	// can be READ. The phase-3 gate ([snapshotIsSelfSufficient]) matches manifest
-	// file NAMES, so it answers "the components are present", never "the
-	// components parse" — and the WAL prefix it releases is the only other copy
-	// of the data (rmp #2749). A snapshot that is byte-for-byte what the writer
-	// intended and still unreadable by the reader — a component format version
-	// the reader does not accept, a reader bound tightened without the writer, a
-	// codec the two sides disagree on — passed that gate, the WAL was truncated
-	// behind it, and the store never opened again.
-	//
-	// So the image is parsed here by the SAME reader recovery uses
-	// (snapshot.LoadSnapshotFull, via recovery.osBackend.LoadSnapshot), and a
-	// failure aborts the checkpoint before the truncation is even attempted. The
-	// guarantee the gate's name asserts — "this snapshot alone can restore the
-	// store" — is then established rather than assumed.
-	//
-	// PARSING IS NOT APPLYING, so the readback does both (rmp #2780). Recovery
-	// does not stop at LoadSnapshotFull: it hands the mapper readback straight
-	// to snapshot.ApplyMapperToGraphWithCodec, which decodes every key THROUGH
-	// THE CODEC. The snapshot reader holds no codec — snapshot.ReadMapperBytes
-	// validates magic, format version, record framing and the per-key length cap
-	// and then returns the version-2 key bytes verbatim, by design — so key
-	// bytes the parse accepts can still be bytes the codec refuses: an encoding
-	// it cannot decode, or one it does not consume in full. That is the same
-	// outcome by a different door, and c.codec (the codec that WROTE the mapper)
-	// is right here, so VerifySnapshotReadable runs recovery's decode step too,
-	// over the bytes the parse already brought into memory — no second read.
-	//
-	// It runs HERE, in the lock-free phase 2, and not inside the phase-3 gate:
-	// the readback is disk I/O proportional to the snapshot, and phase 3 holds
-	// the commit lock that every writer serialises on. Placing it here costs the
-	// guarantee nothing — the snapshot directory is published and immutable, and
-	// [Checkpointer.RunCheckpoint]'s concurrency contract forbids a second
-	// checkpoint republishing it underneath — while keeping the writer stall at
-	// the brief truncate it already was.
-	//
-	// This is deliberately stricter than the "not self-sufficient" outcome below,
-	// which retains the WAL and returns nil: that is a SUPPORTED degraded mode
-	// (no mapper codec for this key type, a DDL that raced phase 2). An
-	// unreadable published snapshot is not a mode, it is corruption or a defect,
-	// and the module fails stop rather than fail silent.
+	// READ THE PUBLISHED SNAPSHOT BACK BEFORE ANY WAL BYTE IS DISCARDED
+	// (rmp #2749, rmp #2780). The self-sufficiency test below matches manifest
+	// file NAMES; only this readback, by the reader and codec recovery uses,
+	// proves the image parses and applies. It is disk I/O proportional to the
+	// snapshot and runs lock-free. An unreadable published snapshot is
+	// corruption or a defect, not a mode, so the checkpoint fails stop.
 	if err := c.snap.VerifySnapshotReadable(snapDir, c.codec); err != nil {
 		metrics.IncCounter("store.checkpoint.snapshot_unreadable", 1)
 		err = fmt.Errorf("checkpoint: published snapshot is not readable, WAL retained: %w", err)
 		c.setErr(seq, err)
 		return err
 	}
-	// THE CONTROL RECORD, AT EVERY CHECKPOINT THAT MAY TRUNCATE (rmp #3002). The
-	// snapshot is now published and proven readable. When it is self-sufficient —
-	// the condition phase 3 requires before it discards any WAL byte — the store's
-	// history may from here on depend on it, so the prefix marker is made durable
-	// before any truncation. It is rewritten at every such checkpoint, not only at
-	// a Writer's first truncation, so a store whose marker predates the marker's
-	// existence or was removed regains it — PostgreSQL's arrangement, which
-	// rewrites pg_control (UpdateControlFile in CreateCheckPoint) before
-	// RemoveOldXlogFiles. A checkpoint whose snapshot is not self-sufficient never
-	// truncates and writes no record, so the record always means "history requires
-	// a snapshot".
-	//
-	// The check is the same manifest-composition test phase 3 repeats under the
-	// commit lock. A DDL that commits between the two can turn this "yes" into
-	// phase 3's "no"; the record is then written for a self-sufficient, readable
-	// snapshot whose WAL is retained, which is the accepted fail-stop direction.
-	// It runs lock-free, in phase 2, and does not take the WAL's append lock, so it
-	// adds no stall to any commit.
-	selfSufficient, err := c.snapshotIsSelfSufficient(snapDir, c.g.HasConstraints(), c.g.HasIndexes())
-	if err != nil {
-		c.setErr(seq, err)
-		return err
-	}
-	if selfSufficient {
-		if err := c.wlog.MarkPrefixTruncated(); err != nil {
-			err = fmt.Errorf("checkpoint: prefix marker, WAL retained: %w", err)
-			c.setErr(seq, err)
-			return err
-		}
-	}
-	// fsync the WAL so the suffix [watermark, end) — the frames committed
-	// concurrently during the snapshot write — is durable before we touch the
-	// prefix. Snapshot durable (writeSnapshot publishes with its own fsync +
-	// parent-dir fsync) THEN suffix durable THEN truncate the prefix: the
-	// ordering the auditor required (#1508 Q5).
-	if err := c.wlog.Sync(); err != nil {
-		c.setErr(seq, err)
-		return err
-	}
-	// Crash-injection point: the new self-sufficient snapshot is published and
-	// durable, the FULL WAL (folded prefix [0,W) + concurrently-committed
-	// suffix [W,end)) is intact, and NO truncation has happened. A crash here
-	// must recover the exact committed state — recovery loads the new snapshot
-	// and idempotently replays the WHOLE WAL (prefix re-folded harmlessly,
-	// suffix applied on top). This is the non-blocking analogue of
-	// "post-snapshot-pre-truncate", now with a non-empty concurrent suffix.
-	// No-op in production (GOGRAPH_CRASH_AT unset).
-	crashpoint.Breakpoint("checkpoint.p2-snapshot-published-pre-truncate")
-
-	// --- Phase 3: prefix-truncate the WAL under the commit lock, briefly. ---
-	return c.runUnderCommitLock(func() error {
-		return c.truncatePrefixLocked(seq, snapDir, watermark)
-	})
-}
-
-// truncatePrefixLocked is phase 3 of the non-blocking checkpoint: it runs
-// under the store's commit lock (the quiesce boundary) so no concurrent commit
-// races the WAL prefix truncation. It re-verifies snapshot self-sufficiency —
-// a constraint or index DDL may have committed during the lock-free phase-2
-// write, in which case the snapshot (captured at the watermark, before the DDL)
-// cannot stand alone and the WAL must be retained — then discards only the WAL
-// bytes in [0, watermark), preserving every frame committed during phase 2.
-// seq is this attempt's setErr sequence number (rmp #1873), threaded
-// unchanged from runNonBlocking via writeAndTruncate.
-//
-// PRECONDITION: the caller has already proved the published snapshot READS BACK
-// AND its mapper keys DECODE (phase 2's
-// [snapshotBackend.VerifySnapshotReadable]; see rmp #2749 and rmp #2780). This
-// function re-checks composition only, and must never be reached on a snapshot
-// whose readability is unestablished — the manifest-name check it performs
-// cannot detect an unparseable image, nor one whose codec-encoded mapper keys
-// recovery will refuse, and truncating behind either destroys the only
-// surviving copy of the data.
-func (c *Checkpointer[N, W]) truncatePrefixLocked(seq uint64, snapDir string, watermark int64) error {
-	// Re-source needConstraints / needIndexes from the graph's own counts, NOT
-	// from the phase-1 captured slices: a constraint or index DDL committed
-	// during the lock-free phase-2 write makes HasConstraints / HasIndexes true
-	// while the snapshot (captured before the DDL) carries no constraints.bin /
-	// indexdefs.bin for it, so the snapshot is correctly judged not
-	// self-sufficient and the WAL prefix holding that DDL is retained (#1334 /
-	// #1464 / #1755 fail-safe, re-checked under the phase-3 lock per the #1508
-	// audit condition C2).
-	selfSufficient, err := c.snapshotIsSelfSufficient(snapDir, c.g.HasConstraints(), c.g.HasIndexes())
+	selfSufficient, err := c.snapshotIsSelfSufficient(snapDir, needConstraints, needIndexes)
 	if err != nil {
 		c.setErr(seq, err)
 		return err
 	}
 	if !selfSufficient {
 		// The snapshot cannot reconstruct the graph on its own (no mapper.bin
-		// for this key type, a constraint set that did not land in
-		// constraints.bin, or an index set that did not land in indexdefs.bin),
-		// so truncating the WAL would lose committed data.
-		// Skip truncation: the WAL is retained and replayed on top of the
-		// snapshot at recovery, preserving Durability at the cost of unbounded
-		// WAL growth. Surfaced via a metric so operators can detect the mode.
+		// for this key type, or a constraint or index set that did not land in
+		// constraints.bin / indexdefs.bin), so discarding any WAL frame would
+		// lose committed data. The WAL is retained and replayed on top of the
+		// snapshot at recovery, at the cost of unbounded WAL growth. Surfaced
+		// via a metric so operators can detect the mode.
 		metrics.IncCounter("store.checkpoint.truncate_skipped_not_self_sufficient", 1)
 		c.checkpoints.Add(1)
 		c.setErr(seq, nil)
 		return nil
 	}
-	// Discard ONLY the folded prefix [0, watermark); the suffix [watermark,
-	// end) holds transactions committed during phase 2 and is preserved (a
-	// truncate-to-zero would lose them — the exact bug WithCommitSerialiser
-	// was created to prevent). TruncatePrefix is itself crash-safe via an
-	// atomic copy-suffix-then-rename.
-	truncated, err := c.wlog.TruncatePrefix(watermark)
+	// THE CONTROL RECORD, BEFORE ANY SEGMENT IS UNLINKED (rmp #3002). PostgreSQL
+	// rewrites pg_control (UpdateControlFile in CreateCheckPoint) before
+	// RemoveOldXlogFiles; the control file here records that the store's history
+	// now requires the snapshot and where the retained log begins. The segments
+	// are still on disk, so a crash at any point leaves a consistent directory:
+	// the old control with every segment, or the new one with a superset of the
+	// segments it needs.
+	if err := c.wlog.MarkCheckpoint(watermark); err != nil {
+		err = fmt.Errorf("checkpoint: WAL control file, WAL retained: %w", err)
+		c.setErr(seq, err)
+		return err
+	}
+	// Crash-injection point: the self-sufficient snapshot is published and
+	// durable and the control file records it; NO segment has been unlinked.
+	// Recovery loads the snapshot and replays from its redo position. No-op in
+	// production (GOGRAPH_CRASH_AT unset).
+	crashpoint.Breakpoint("checkpoint.p2-snapshot-published-pre-truncate")
+
+	// --- Phase 3: unlink the folded segments, WITHOUT the commit lock. ---
+	if c.beforePhase3Hook != nil {
+		c.beforePhase3Hook()
+	}
+	reclaimed, err := c.wlog.ReclaimSegments()
 	if err != nil {
 		c.setErr(seq, err)
 		return err
 	}
-	if truncated > 0 {
-		c.walTrunc.Add(uint64(truncated))
+	if reclaimed > 0 {
+		c.walTrunc.Add(uint64(reclaimed))
 		// Surface the bytes reclaimed through the metrics backend so operators
-		// monitoring long-running stores can plot WAL-prefix reclamation cadence
-		// without polling Stats(). The atomic lifetime counter [c.walTrunc]
-		// remains the test-friendly in-process aggregate; this is the
-		// observability surface.
-		metrics.IncCounter("store.checkpoint.wal_truncated_bytes", uint64(truncated))
+		// can plot WAL reclamation cadence without polling Stats().
+		metrics.IncCounter("store.checkpoint.wal_truncated_bytes", uint64(reclaimed))
 	}
 	c.checkpoints.Add(1)
 	c.setErr(seq, nil)

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -274,20 +274,8 @@ func TestRecovery_CorruptOpInsideCommittedTxn_ReplayWALAgrees(t *testing.T) {
 // genuinely damaged body fails.
 func injectUndecodableBodyInCommittedTxn(t *testing.T, walPath string, txnSeq uint64) {
 	t.Helper()
-
-	raw, err := os.ReadFile(walPath) //nolint:gosec // path under t.TempDir
-	if err != nil {
-		t.Fatalf("ReadFile(%s): %v", walPath, err)
-	}
-
-	frames := make([]wal.Frame, 0, 8)
 	injected := false
-	r := bytes.NewReader(raw)
-	for {
-		f, derr := wal.Decode(r)
-		if derr != nil {
-			break // clean EOF surfaces as a torn-frame error; the walk is done
-		}
+	err := waltest.RewriteFrames(walPath, func(_ int, f *wal.Frame) bool {
 		op, oerr := Decode(f.Payload)
 		if oerr != nil {
 			t.Fatalf("Decode: %v", oerr)
@@ -295,22 +283,15 @@ func injectUndecodableBodyInCommittedTxn(t *testing.T, walPath string, txnSeq ui
 		if !injected && op.Version == txn.OpRecordV3 && op.TxnSeq == txnSeq && op.Kind != txn.OpCommit {
 			// Keep the v3 header, drop the codec body. len(payload) >= 10 is
 			// guaranteed by decodeV3 having accepted it.
-			f.Payload = append([]byte(nil), f.Payload[:10]...)
+			f.Payload = f.Payload[:10]
 			injected = true
 		}
-		frames = append(frames, f)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("rewrite %s: %v", walPath, err)
 	}
 	if !injected {
 		t.Fatalf("no non-marker v3 frame with TxnSeq == %d found in %s", txnSeq, walPath)
-	}
-
-	var out bytes.Buffer
-	for i := range frames {
-		if _, err := wal.Encode(&out, frames[i]); err != nil {
-			t.Fatalf("wal.Encode(frame %d): %v", i, err)
-		}
-	}
-	if err := os.WriteFile(walPath, out.Bytes(), 0o600); err != nil {
-		t.Fatalf("WriteFile(%s): %v", walPath, err)
 	}
 }

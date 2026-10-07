@@ -25,24 +25,24 @@ import (
 //
 // Frame geometry with 40-byte payloads:
 //
-//	HeaderSize (14) + 40 = 54 bytes per frame
+//	HeaderSizeV2 (36) + 40 = 76 bytes per frame
 //
 // Cut-off cases:
 //
-//	offset=10  → frame 1's own flush is cut (10 < 54): Sync #1 fails
+//	offset=10  → frame 1's own flush is cut (10 < 76): Sync #1 fails
 //	             and rolls the file back to 0 bytes; 0 complete frames
-//	offset=54  → frame 1 synced; frame 2's flush is refused at byte 0
+//	offset=76  → frame 1 synced; frame 2's flush is refused at byte 0
 //	             (budget exactly exhausted): Sync #2 fails, file stays
-//	             at the 54-byte boundary; 1 complete frame
-//	offset=81  → frame 1 synced; frame 2's flush is cut after 27
+//	             at the 76-byte boundary; 1 complete frame
+//	offset=103 → frame 1 synced; frame 2's flush is cut after 27
 //	             bytes: Sync #2 fails and rolls the file back to byte
-//	             54; 1 complete frame
+//	             76; 1 complete frame
 func TestWALFault_PartialWrite_MultipleOffsets(t *testing.T) {
 	t.Parallel()
 
 	const payloadSize = 40
-	// frame size = HeaderSize (14) + payloadSize (40) = 54
-	const frameSize = 14 + payloadSize
+	// frame size = HeaderSizeV2 (36) + payloadSize (40) = 76
+	const frameSize = wal.HeaderSizeV2 + payloadSize
 
 	cases := []struct {
 		name       string
@@ -55,13 +55,13 @@ func TestWALFault_PartialWrite_MultipleOffsets(t *testing.T) {
 			wantFrames: 0,
 		},
 		{
-			name:       "offset=54 (exact frame boundary)",
-			budget:     frameSize, // 54
+			name:       "offset=76 (exact frame boundary)",
+			budget:     frameSize, // 76
 			wantFrames: 1,
 		},
 		{
-			name:       "offset=81 (mid-second-frame)",
-			budget:     81,
+			name:       "offset=103 (mid-second-frame)",
+			budget:     frameSize + 27,
 			wantFrames: 1,
 		},
 	}
