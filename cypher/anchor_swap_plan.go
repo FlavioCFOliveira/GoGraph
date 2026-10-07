@@ -66,10 +66,14 @@ package cypher
 //
 // # The admissibility gate (design §1, §2)
 //
-// A swap is admitted only when ALL hold, with the count-store read from ONE
-// snapshot (the read-path build runs under lpg.Graph.View's visibility barrier,
-// which is exclusive against a committing writer, so every count and its dirty
-// flag are consistent):
+// A swap is admitted only when ALL hold. The node counts come from the query's
+// label resolver, read at the snapshot the build pinned
+// ([lpgLabelResolver.ResolveLabelCountPlan]); the degree cells and their dirty
+// flags come from the engine's live [count.Store], whose lock-free cell reads
+// are safe for concurrent use. No barrier is taken (a read takes none since rmp
+// #2344), so a commit can move a cell between two of these reads. That affects
+// the plan choice only, never the answer: the swap is result-identical
+// ([mirrorAnchorSite]).
 //
 //   - Directed: the written expand is DirIn (Incoming) or DirOut (Outgoing).
 //     Undirected (Both) is vetoed.
@@ -389,9 +393,11 @@ func spineHasNamedPath(spine []ir.LogicalPlan) bool {
 //
 // The gate (design §1, §2, §5.1): OUT-ward only (written direction Incoming),
 // every cost input EstExact ∧ ¬dirty (else the trustworthiness veto keeps the
-// written order), and a strict cost win under [anchorSwapMargin]. All counts are
-// read from the query's single snapshot via labelSrc, which the caller holds
-// under View's visibility barrier.
+// written order), and a strict cost win under [anchorSwapMargin]. Node counts are
+// read through labelSrc at the snapshot the caller pinned; degree cells and their
+// dirty flags are read from the live count store with no barrier, so they need
+// not share that instant. A stale input can only change which result-identical
+// plan is chosen.
 func computeAnchorSwaps(sites []anchorSite, labelSrc labelResolverIface) map[*ir.Expand]bool {
 	if len(sites) == 0 {
 		return nil

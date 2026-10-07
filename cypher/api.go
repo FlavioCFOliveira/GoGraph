@@ -4379,10 +4379,15 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	}
 
 	// Registration, backfill, and value-set seed run inside the visibility
-	// barrier (ApplyAtomically) so concurrent Graph.View readers never observe
-	// the constraint or its backing index in a partially-constructed state.
-	// The visibility barrier is not re-entrant, so nothing inside the closure may
-	// call Graph.View or Graph.ApplyAtomically. The validation scan above is
+	// barrier (ApplyAtomically), held EXCLUSIVELY. Every write bracket holds the
+	// same gate SHARED — a statement (lpg.Graph.applyVersionedInstant), an
+	// explicit transaction's finalisation (lpg.Graph.ApplyInVersionedTx) and its
+	// publication with the commit-time index fan-out
+	// (lpg.Graph.endVersionedTxInstant) — so no write and no index delivery
+	// lands while the constraint and its backing index are built and registered.
+	// A read takes no barrier (rmp #2344). The barrier is not re-entrant, so
+	// nothing inside the closure may open another write bracket
+	// (Graph.ApplyAtomically panics on re-entry). The validation scan above is
 	// outside it for the ORDERING reason rather than that one — it must complete
 	// before the registration it validates — and takes no barrier itself, so it is
 	// not constrained to sit outside; commitConstraintTx only appends a WAL frame

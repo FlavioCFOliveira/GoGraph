@@ -456,12 +456,10 @@ in the pre-existing bug the audit found.
   - A subscriber that does not implement `index.Serializer` is omitted from a
     snapshot and rebuilt on restart (`store/snapshot/capture.go:567-596`).
 
-  **F3.4 against the corrected premise.** The live-maintenance wiring F3.4
-  planned has no remaining scope. Its second half, folding each index into the
-  same atomic flip, is met by a different mechanism: the index is written inside
-  the publishing bracket before the commit record publishes, and a reader either
-  proves its snapshot is described (`index.Manager.DescribesSnapshot`) or answers
-  from the snapshot; see "Index reads describe the reader's snapshot" below.
+  **F3.4 is DONE** (2026-10-07 at `1dd13429`, rmp #3023): live maintenance is
+  the path above, and "Index reads describe the reader's snapshot" below covers
+  the read side. See the F3.4 entry in the staging list for the file:line of
+  each mechanism.
 
 **Invariant:** every read-servable structure is reachable *only* through the
 `Snapshot` root. Any structure left directly mutable-and-read is a hole through
@@ -602,7 +600,7 @@ This closes audit findings E6, E7, E8 and E9 of
 |-------|-------------|-----------------------|
 | F3.2 | `Snapshot` root + `atomic.Pointer` + pin API; adjacency reads via pinned snapshot | adjacency reads are transaction-atomic; no regression |
 | F3.3 | labels, properties, tombstones move into the snapshot (drop RWMutex reads) | those reads lock-free + consistent with adjacency |
-| F3.4 | label bitmaps immutable; live hash/B-tree index maintenance wired into the flip | indexes correct and isolation-consistent |
+| F3.4 | **DONE, by a different mechanism (see the F3.4 entry below).** Planned: label bitmaps immutable; live hash/B-tree index maintenance wired into the flip | indexes correct and isolation-consistent |
 | F3.5 | commit builds one next-Snapshot for the whole batch and swaps once; checkpoint/recovery read a pinned snapshot | **full SI: no reader ever observes a partial transaction** |
 | F3.6 | invariant + property + soak tests; benchmark/TCK regression gate | proven and non-regressing |
 
@@ -987,23 +985,29 @@ Delivered:
   lock-free CSR path); the lock-free per-shard snapshot below restores
   streaming and is the tracked optimisation.
 
-- **F3.4 (done).** The `index.Manager` hash/B-tree buffer is now committed by
-  `commitIndexUnderBarrier` inside the write's `ApplyAtomically` window (right
-  after materialize), so the graph and its secondary indexes flip atomically —
-  an IndexSeek read can no longer observe a transaction whose graph change is
-  visible but whose index change is not. The live roaring label bitmaps already
-  update inside the same window (`SetNodeLabel`/`SetEdgeLabel` run there). Lock
-  order `visMu → index` matches the read side (`View → index`), so no deadlock.
-
-  > **Correction (2026-09-08 at `efd32fb9`): the mechanism is right, the name is
-  > gone.** There is no `commitIndexUnderBarrier` anywhere in the module. The buffer
-  > is drained by `exec.IndexBuffer.Commit` → `index.Manager.ApplyBatch`, called from
-  > `cypher/exectx.go:808`, `cypher/api.go:6732` and `cypher/api.go:6911`, in each case
-  > inside the write bracket and AFTER the WAL fsync, so the ordering is
-  > durable-then-visible. `Graph.View` no longer exists either (rmp #2344; see the
-  > reading note at the top of this document), so the read side of the stated lock
-  > order is now "a read takes no barrier at all" and the surviving order is
-  > `schemaGate → writer admission → visMu`.
+- **F3.4 (DONE; mechanisms verified 2026-10-07 at `1dd13429`, rmp #3023).** An
+  IndexSeek cannot observe a transaction whose graph change is visible but whose
+  index change is not, and it never answers from an index that does not describe
+  its snapshot. Two mechanisms deliver this; the design planned at F3.4 (a
+  `commitIndexUnderBarrier` call inside an exclusive `ApplyAtomically` window,
+  with `Graph.View` as the read side) was replaced and none of it exists.
+  - **Write side — live maintenance at publication.** A commit installs its index
+    batch as the transaction's `lpg.CommitApplier` (`armIndexCommit`,
+    `cypher/index_commit_apply.go:313`); lpg runs it inside the publishing
+    bracket (`graph/lpg/mvcc_write.go:1092`) and it reaches the indexes through
+    `index.Manager.ApplyBatchInState` (`graph/index/manager.go:651`), after the
+    WAL fsync and before the commit record is published, so the ordering is
+    durable-then-visible.
+  - **Read side — the snapshot proof or the snapshot.** An index access path
+    asks `index.Manager.DescribesSnapshot` (`graph/index/manager.go:412`) for the
+    reader's start instant through `snapshotGuard.declines`
+    (`cypher/exec/index_snapshot.go:89-90`); when the proof fails it answers from
+    the reader's snapshot instead. The access paths covered are listed in "Index
+    reads describe the reader's snapshot" (rmp #2937).
+  - **Label bitmaps.** They did not become immutable per-label snapshots. A
+    label read at a reader's instant goes through the versioned accessor
+    (`ReadView.HasNodeLabel` → `Graph.HasNodeLabelAsOf`,
+    `graph/lpg/readview.go:89-91`), not the bitmap.
 
 - **F3.5 (fixed by routing the checkpoint through the commit mutex).** The
   checkpointer now runs its whole snapshot+truncate window under
