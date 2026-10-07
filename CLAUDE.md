@@ -450,12 +450,20 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
     `dev=$(hdiutil attach -nomount ram://<sectors>)`, then
     `diskutil erasevolume APFS <Name> $dev`, which formats it and mounts it at
     `/Volumes/<Name>`. `newfs_apfs` followed by `mount -t apfs` fails (exit 66) and
-    leaves images that cannot be detached until a reboot. Point **`TMPDIR`** at the
-    subdirectory so the graph directories that `t.TempDir()` and `os.MkdirTemp`
-    create land there. Point **`GOTMPDIR`** at a directory **on disk** — never at
-    the RAM drive — because Go builds and test binaries go there; `GOCACHE` stays on
-    disk; write `go test -c -o` binaries, logs, profiles and benchmark files to
-    disk. At the end, delete the subdirectory, and eject the drive
+    leaves images that cannot be detached until a reboot. The build and the test
+    process need different directories, and **under Go 1.27 `t.TempDir()` follows
+    `GOTMPDIR`, not `TMPDIR`** (measured: with `TMPDIR` on the RAM drive and
+    `GOTMPDIR` on disk, `t.TempDir()` writes to disk). So:
+    - **`go`'s own environment** keeps `GOTMPDIR` and `GOCACHE` **on disk**: the
+      build temporaries and the test binaries stay there.
+    - **The test process** gets the RAM drive for both variables through `-exec`:
+      `GOTMPDIR=<disk> go test -exec "env TMPDIR=<ram>/<sub> GOTMPDIR=<ram>/<sub>" ./pkg/...`.
+      `t.TempDir()` and `os.MkdirTemp` then create the graph directories on the
+      RAM drive while the binary itself stays on disk. A binary built with
+      `go test -c -o <disk>` is run the same way, with both variables on the RAM
+      drive in its own environment only.
+    - Logs, profiles and benchmark files are written to disk.
+    At the end, delete the subdirectory, and eject the drive
     (`diskutil eject $dev`) only if this run created it.
   - Tests whose workload is sized by elapsed time grow with the medium's speed and
     can exhaust the drive or time out. They are tracked and fixed as defects, not
