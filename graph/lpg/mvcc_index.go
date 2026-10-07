@@ -623,6 +623,12 @@ func dedupSuspects(ids []graph.NodeID) []graph.NodeID {
 	return slices.Compact(ids)
 }
 
+// correctInlineEdits is how many removals, and separately how many additions,
+// [Graph.correctBitmapOver] applies to the bitmap in place before it gathers the
+// rest for one bulk set operation. Below it a correction allocates nothing; above
+// it the per-edit container re-sizing would dominate (rmp #2996).
+const correctInlineEdits = 64
+
 // correctBitmapOver adjusts bm in place so it describes s rather than the present,
 // against a suspect set the CALLER sampled — so that the sample can span the clone
 // rather than follow it. See [Graph.suspectNodes] for why that matters.
@@ -649,6 +655,23 @@ func dedupSuspects(ids []graph.NodeID) []graph.NodeID {
 // ([label.Index.BitmapShared]), and it clones it before calling this precisely
 // because this mutates. Calling this with a shared bitmap corrupts the index's
 // published image for every concurrent reader, silently.
+//
+// # The decisions are COLLECTED, then applied as two set operations (rmp #2996)
+//
+// Each per-member bm.Remove re-sizes the container it lands in — a run
+// container recounts every run to choose its cheapest form — so k removals
+// cost O(k × runs). With 150 000 uncommitted nodes of eight open transactions
+// in the label, a correction measured 61-67 ms, paid twice by the planner's
+// cardinality estimate and again by every scan's Init. The first
+// [correctInlineEdits] edits of each kind are still applied in place, which
+// keeps the common handful of edits allocation-free; every edit after them is
+// gathered into a bitmap, which an ascending suspect list fills by appending,
+// and applied with one AndNot or one Or.
+//
+// Deferring an edit changes no decision: each decision reads bm.Contains for
+// its own id only, the suspects are deduplicated by the caller, and a member
+// that leaves fails exactly the test that would add it back, so no id is both
+// removed and added.
 func (g *Graph[N, W]) correctBitmapOver(bm *roaring64.Bitmap, s *Snapshot, want func(labelBag) bool, suspects []graph.NodeID) {
 	// Every shard lock is RELEASED before the first check runs; see
 	// [Graph.suspectNodes].
@@ -661,6 +684,8 @@ func (g *Graph[N, W]) correctBitmapOver(bm *roaring64.Bitmap, s *Snapshot, want 
 	// `should` is the same predicate on both arms; only the order in which its
 	// two halves are evaluated differs, and && makes the cheaper refutation the
 	// one that runs first.
+	var drop, add *roaring64.Bitmap
+	var drops, adds int
 	for _, id := range suspects {
 		if bm.Contains(uint64(id)) {
 			// A member LEAVES when the node is dead as of s, or when it has lost
@@ -669,7 +694,16 @@ func (g *Graph[N, W]) correctBitmapOver(bm *roaring64.Bitmap, s *Snapshot, want 
 			// half is the life record, and a dead node needs no bag resolution
 			// at all.
 			if !g.NodeExistsAsOf(id, s) || !g.labelBagTest(id, s, want) {
-				bm.Remove(uint64(id))
+				switch {
+				case drops < correctInlineEdits:
+					bm.Remove(uint64(id))
+				case drop == nil:
+					drop = roaring64.New()
+					fallthrough
+				default:
+					drop.Add(uint64(id))
+				}
+				drops++
 			}
 			continue
 		}
@@ -680,8 +714,23 @@ func (g *Graph[N, W]) correctBitmapOver(bm *roaring64.Bitmap, s *Snapshot, want 
 		// touched for it at all. Adding it back is the safe direction when it
 		// does pass: a missing member is a silently lost row.
 		if g.labelBagTest(id, s, want) && g.NodeExistsAsOf(id, s) {
-			bm.Add(uint64(id))
+			switch {
+			case adds < correctInlineEdits:
+				bm.Add(uint64(id))
+			case add == nil:
+				add = roaring64.New()
+				fallthrough
+			default:
+				add.Add(uint64(id))
+			}
+			adds++
 		}
+	}
+	if drop != nil {
+		bm.AndNot(drop)
+	}
+	if add != nil {
+		bm.Or(add)
 	}
 }
 
