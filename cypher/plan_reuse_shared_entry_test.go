@@ -623,9 +623,15 @@ const readPathAllocMarker = "READPATH_ALLOCS="
 // live arm is the one that used to differ: see the test's godoc.
 const readPathAllocLiveMarker = "READPATH_LIVE_ALLOCS="
 
+// readPathAllocSameLabelMarker is how the child reports its THIRD measurement:
+// the same query with live history ON THE COUNTED LABEL (rmp #2776), where a
+// correction is genuinely owed and the count must be corrected.
+const readPathAllocSameLabelMarker = "READPATH_SAMELABEL_ALLOCS="
+
 var (
-	readPathAllocRE     = regexp.MustCompile(readPathAllocMarker + `([0-9.]+)`)
-	readPathAllocLiveRE = regexp.MustCompile(readPathAllocLiveMarker + `([0-9.]+)`)
+	readPathAllocRE          = regexp.MustCompile(readPathAllocMarker + `([0-9.]+)`)
+	readPathAllocLiveRE      = regexp.MustCompile(readPathAllocLiveMarker + `([0-9.]+)`)
+	readPathAllocSameLabelRE = regexp.MustCompile(readPathAllocSameLabelMarker + `([0-9.]+)`)
 )
 
 // TestReadPathAllocationCeiling is the regression gate for rmp #2693.
@@ -724,6 +730,19 @@ func TestReadPathAllocationCeiling(t *testing.T) {
 	}
 	allocs := parse(readPathAllocRE, readPathAllocMarker)
 	live := parse(readPathAllocLiveRE, readPathAllocLiveMarker)
+	sameLabel := parse(readPathAllocSameLabelRE, readPathAllocSameLabelMarker)
+	// The third arm has its own ceiling: a correction IS owed there, so it cannot
+	// equal the drained arm, but it must not copy the label to count it (rmp #2776).
+	if sameLabel > float64(readPathSameLabelAllocCeiling) {
+		t.Errorf("one cache-hit execution of %q with live history on the counted label "+
+			"allocated %.1f objects, ceiling %d (rmp #2776): the corrected count is "+
+			"materialising again", readPathAllocQuery, sameLabel, readPathSameLabelAllocCeiling)
+	}
+	if sameLabel <= allocs {
+		t.Errorf("with live history on the counted label the read allocated %.1f objects, "+
+			"no more than the drained arm's %.1f: the arm no longer reaches the correction "+
+			"path, so its ceiling measures nothing", sameLabel, allocs)
+	}
 
 	for _, arm := range []struct {
 		name   string
@@ -761,8 +780,9 @@ func TestReadPathAllocationCeiling(t *testing.T) {
 			readPathAllocQuery, allocs, live)
 	}
 	t.Logf("cache-hit read of %q: %.2f allocs/op drained, %.2f with MVCC history live "+
-		"(ceiling %d), both measured in an isolated child",
-		readPathAllocQuery, allocs, live, readPathAllocCeiling)
+		"(ceiling %d), %.2f with live history on the counted label (ceiling %d), all "+
+		"measured in an isolated child",
+		readPathAllocQuery, allocs, live, readPathAllocCeiling, sameLabel, readPathSameLabelAllocCeiling)
 }
 
 // runReadPathAllocChild performs the measurement and prints it. It deliberately
@@ -811,6 +831,20 @@ func runReadPathAllocChild(t *testing.T) {
 			"live MVCC history", records)
 	}
 	fmt.Printf("%s%.2f\n", readPathAllocLiveMarker, measureReadPathAllocs(ctx, t, eng))
+
+	// The THIRD arm (rmp #2776): live history on the counted label itself. A
+	// reader registered first keeps a :N node's birth and label records
+	// unreclaimable, so every count is corrected — and the statement's snapshot,
+	// taken after the commit, sees one more node than the drained arms.
+	held := eng.g.BeginRead()
+	defer eng.g.EndRead(held)
+	mustNode(t, eng.g, "readpath-alloc-samelabel", "N", "v", -1)
+	if eng.g.LabelDeltaCount() == 0 {
+		t.Fatal("no label record survived the write, so the third arm would measure the " +
+			"drained path")
+	}
+	fmt.Printf("%s%.2f\n", readPathAllocSameLabelMarker,
+		measureReadPathAllocsWant(ctx, t, eng, sharedEntryNodes+1))
 }
 
 // measureReadPathAllocs is the child's instrument: the minimum of several
@@ -822,6 +856,13 @@ func runReadPathAllocChild(t *testing.T) {
 // depth, not as the fix, because on its own it was measured NOT to be enough
 // (rmp #2753).
 func measureReadPathAllocs(ctx context.Context, t *testing.T, eng *Engine) float64 {
+	t.Helper()
+	return measureReadPathAllocsWant(ctx, t, eng, sharedEntryNodes)
+}
+
+// measureReadPathAllocsWant is [measureReadPathAllocs] against an explicit
+// expected count, for the arm whose graph holds one more :N node.
+func measureReadPathAllocsWant(ctx context.Context, t *testing.T, eng *Engine, want int64) float64 {
 	t.Helper()
 	var (
 		observed int64
@@ -847,9 +888,9 @@ func measureReadPathAllocs(ctx context.Context, t *testing.T, eng *Engine) float
 		t.Fatalf("%d of the measured runs failed, so the allocation count describes an "+
 			"error path", failures)
 	}
-	if observed != sharedEntryNodes {
+	if observed != want {
 		t.Fatalf("the measured runs returned count = %d, want %d — the allocation count "+
-			"describes the wrong query", observed, sharedEntryNodes)
+			"describes the wrong query", observed, want)
 	}
 	return allocs
 }

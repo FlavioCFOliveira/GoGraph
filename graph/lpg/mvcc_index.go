@@ -510,12 +510,43 @@ func (g *Graph[N, W]) LabelBitmapAsOfContext(ctx context.Context, lid LabelID, s
 // its private copy; nothing it touched is shared, so abandoning it leaves no
 // trace. The quiet path never reads ctx.
 func (g *Graph[N, W]) labelBitmapAsOfFiltered(ctx context.Context, s *Snapshot, ls labelSet, acquire func() (*roaring64.Bitmap, bool), want func(labelBag) bool) (*roaring64.Bitmap, error) {
+	bm, owned, sus, correct, err := g.labelAsOfSample(ctx, s, ls, acquire)
+	if err != nil || !correct {
+		return bm, err
+	}
+	if !owned {
+		// The correction mutates, so it needs a private copy — and only here.
+		// This reproduces the image acquire() fixed, NOT the index's present
+		// state: see the note above on why deferring the copy leaves the instant
+		// where it was.
+		bm = bm.Clone()
+	}
+	if err := g.correctBitmapOver(ctx, bm, s, want, sus); err != nil {
+		// bm is private and half-corrected: drop it, never return it.
+		return nil, err
+	}
+	return bm, nil
+}
+
+// labelAsOfSample is the gate-acquire-sample half of
+// [Graph.labelBitmapAsOfFiltered], shared with [Graph.labelCountAsOfFiltered] so
+// the two answers rest on ONE sampling protocol rather than two copies of it.
+//
+// It returns the acquired image bm and whether it is private (owned), and, when a
+// correction is owed (correct), the deduplicated suspect set it must run over.
+// When correct is false, bm is already the answer for s. On cancellation it
+// returns ctx.Err() and nothing else is meaningful.
+//
+// Every ordering claim [Graph.labelBitmapAsOfFiltered] documents is a claim about
+// THIS function: the pre-sample before acquire, the post-sample and the departed
+// comparison after it. bm is never written here.
+func (g *Graph[N, W]) labelAsOfSample(ctx context.Context, s *Snapshot, ls labelSet, acquire func() (*roaring64.Bitmap, bool)) (bm *roaring64.Bitmap, owned bool, sus []graph.NodeID, correct bool, err error) {
 	preLive := g.churnLive(ls)
 	var pre []graph.NodeID
 	if preLive {
 		pre = g.appendSuspects(nil)
-		if err := ctx.Err(); err != nil {
-			return nil, err
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, false, nil, false, cerr
 		}
 	}
 	// The image identities are taken BEFORE the acquire for a conjunction, whose
@@ -525,7 +556,7 @@ func (g *Graph[N, W]) labelBitmapAsOfFiltered(ctx context.Context, s *Snapshot, 
 	if ls.conj {
 		imgs = g.labelImages(ls)
 	}
-	bm, owned := acquire()
+	bm, owned = acquire()
 	if !ls.conj {
 		imgs.one = bm
 		if owned {
@@ -539,7 +570,7 @@ func (g *Graph[N, W]) labelBitmapAsOfFiltered(ctx context.Context, s *Snapshot, 
 	// taken, exactly as before.
 	quiet := !preLive && !postLive
 	unfiltered := !quiet && !g.labelBitmapNeedsFilter(s) && len(pre) == 0
-	sus := pre
+	sus = pre
 	if postLive && !unfiltered {
 		sus = g.appendSuspects(sus)
 	}
@@ -562,25 +593,14 @@ func (g *Graph[N, W]) labelBitmapAsOfFiltered(ctx context.Context, s *Snapshot, 
 	// before the post-sample, it missed a rollback that completed in between.
 	departed := g.departedSince(ls, imgs, bm)
 	if (quiet || unfiltered) && len(departed) == 0 {
-		return bm, nil
+		return bm, owned, nil, false, nil
 	}
 	sus = append(sus, departed...)
 	sus = dedupSuspects(sus)
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, false, nil, false, cerr
 	}
-	if !owned {
-		// The correction mutates, so it needs a private copy — and only here.
-		// This reproduces the image acquire() fixed, NOT the index's present
-		// state: see the note above on why deferring the copy leaves the instant
-		// where it was.
-		bm = bm.Clone()
-	}
-	if err := g.correctBitmapOver(ctx, bm, s, want, sus); err != nil {
-		// bm is private and half-corrected: drop it, never return it.
-		return nil, err
-	}
-	return bm, nil
+	return bm, owned, sus, true, nil
 }
 
 // labelImageIDs is the identity of every label image a read of ls depends on:
@@ -785,14 +805,8 @@ func (g *Graph[N, W]) correctBitmapOver(ctx context.Context, bm *roaring64.Bitma
 	// Every shard lock is RELEASED before the first check runs; see
 	// [Graph.suspectNodes].
 	//
-	// The MEMBERSHIP TEST IS FIRST, and it decides which of the two probes is
-	// worth taking first after it. bm.Contains is a lock-free read of a bitmap
-	// this goroutine owns; NodeExistsAsOf takes the LIFE shard lock and
-	// labelBagTest takes the LABEL shard lock, in that order and never nested —
-	// the two are different locks, and the bag is consumed inside its own.
-	// `should` is the same predicate on both arms; only the order in which its
-	// two halves are evaluated differs, and && makes the cheaper refutation the
-	// one that runs first.
+	// The MEMBERSHIP TEST IS FIRST: bm.Contains is a lock-free read of a bitmap
+	// this goroutine owns, and it selects the arm of [Graph.suspectFlips].
 	var drop, add *roaring64.Bitmap
 	var drops, adds int
 	for i, id := range suspects {
@@ -802,12 +816,7 @@ func (g *Graph[N, W]) correctBitmapOver(ctx context.Context, bm *roaring64.Bitma
 			}
 		}
 		if bm.Contains(uint64(id)) {
-			// A member LEAVES when the node is dead as of s, or when it has lost
-			// the label. Existence first: a suspect that is in this bitmap is
-			// normally there because it carries the label, so the discriminating
-			// half is the life record, and a dead node needs no bag resolution
-			// at all.
-			if !g.NodeExistsAsOf(id, s) || !g.labelBagTest(id, s, want) {
+			if g.suspectFlips(id, true, s, want) {
 				switch {
 				case drops < correctInlineEdits:
 					bm.Remove(uint64(id))
@@ -821,13 +830,7 @@ func (g *Graph[N, W]) correctBitmapOver(ctx context.Context, bm *roaring64.Bitma
 			}
 			continue
 		}
-		// A non-member is ADDED back only when the versioned bag actually wants
-		// the label — the hoisted add window of rmp #2681, or an index entry
-		// dropped despite the deferral. Label first: a suspect that is churning
-		// some OTHER label fails this test, and then the life shard is never
-		// touched for it at all. Adding it back is the safe direction when it
-		// does pass: a missing member is a silently lost row.
-		if g.labelBagTest(id, s, want) && g.NodeExistsAsOf(id, s) {
+		if g.suspectFlips(id, false, s, want) {
 			switch {
 			case adds < correctInlineEdits:
 				bm.Add(uint64(id))
@@ -847,6 +850,38 @@ func (g *Graph[N, W]) correctBitmapOver(ctx context.Context, bm *roaring64.Bitma
 		bm.Or(add)
 	}
 	return nil
+}
+
+// suspectFlips reports whether suspect id's membership in an image acquired by
+// [Graph.labelAsOfSample] is WRONG for s: a member that s sees dead or without
+// the wanted labels, or a non-member that s sees alive and carrying them.
+//
+// It is the one decision [Graph.correctBitmapOver] applies to a private copy and
+// [Graph.labelCountAsOfFiltered] applies to a count, so the bitmap and the number
+// cannot disagree about any suspect.
+//
+// The MEMBERSHIP TEST is the caller's, and it decides which of the two probes is
+// worth taking first. NodeExistsAsOf takes the LIFE shard lock and labelBagTest
+// takes the LABEL shard lock, in that order and never nested — the two are
+// different locks, and the bag is consumed inside its own. The predicate is the
+// same on both arms; only the order in which its halves are evaluated differs,
+// and && makes the cheaper refutation the one that runs first.
+func (g *Graph[N, W]) suspectFlips(id graph.NodeID, member bool, s *Snapshot, want func(labelBag) bool) bool {
+	if member {
+		// A member LEAVES when the node is dead as of s, or when it has lost
+		// the label. Existence first: a suspect that is in this bitmap is
+		// normally there because it carries the label, so the discriminating
+		// half is the life record, and a dead node needs no bag resolution
+		// at all.
+		return !g.NodeExistsAsOf(id, s) || !g.labelBagTest(id, s, want)
+	}
+	// A non-member is ADDED back only when the versioned bag actually wants
+	// the label — the hoisted add window of rmp #2681, or an index entry
+	// dropped despite the deferral. Label first: a suspect that is churning
+	// some OTHER label fails this test, and then the life shard is never
+	// touched for it at all. Adding it back is the safe direction when it
+	// does pass: a missing member is a silently lost row.
+	return g.labelBagTest(id, s, want) && g.NodeExistsAsOf(id, s)
 }
 
 // suspectNodes returns every node a reader might disagree with the present
@@ -1200,7 +1235,7 @@ func (g *Graph[N, W]) LabelCountAsOf(lid LabelID, s *Snapshot) int64 {
 // LabelCountAsOfContext is [Graph.LabelCountAsOf] under a context. When a
 // correction is owed it runs under ctx with the contract of
 // [Graph.LabelBitmapAsOfContext], and a cancelled count returns (0, ctx.Err())
-// rather than the cardinality of a partially corrected bitmap.
+// rather than a partially corrected count.
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) LabelCountAsOfContext(ctx context.Context, lid LabelID, s *Snapshot) (int64, error) {
@@ -1212,14 +1247,103 @@ func (g *Graph[N, W]) LabelCountAsOfContext(ctx context.Context, lid LabelID, s 
 	if !g.labelBitmapNeedsFilter(s) || !g.churnLive(oneLabel(lid)) {
 		return n, nil
 	}
-	// A correction is genuinely owed, so the filtered bitmap is the only source
-	// of the number and its clone is not waste. This is the same cost the scan on
-	// this label pays anyway.
-	bm, err := g.LabelBitmapAsOfContext(ctx, lid, s)
+	// A correction is genuinely owed. It is COUNTED, not materialised (rmp #2776):
+	// see [Graph.labelCountAsOfFiltered].
+	return g.labelCountAsOfFiltered(ctx, s, lid)
+}
+
+// labelCountAsOfFiltered is [Graph.LabelBitmapAsOfContext]'s answer for one label,
+// reduced to its cardinality WITHOUT building the corrected bitmap (rmp #2776).
+//
+// # What it replaced
+//
+// With churn live on the counted label, [Graph.LabelCountAsOfContext] used to call
+// [Graph.LabelBitmapAsOfContext], which clones the label's shared image so that
+// [Graph.correctBitmapOver] can edit it, and then read GetCardinality off the
+// edited copy. The copy existed only to be counted: rmp #2776 recorded the
+// labelled count at 38 allocations with churn on the label against 20 drained.
+// Re-measured on cypher's TestReadPathAllocationCeiling third arm, Apple M4: 35
+// before this function and 23 after it in the plain build, 37 and 25 under -race;
+// the drained arms stay at 20.
+//
+// # Why counting gives the bitmap's number, exactly
+//
+// The sampling is not re-implemented: it is [Graph.labelAsOfSample], the very
+// function the bitmap path runs, with the same acquire the single-label bitmap
+// uses ([label.Index.BitmapShared]). Its suspects are deduplicated, and
+// [Graph.correctBitmapOver] decides each of them from that suspect's OWN
+// membership in the image and from [Graph.suspectFlips] alone, so no decision
+// depends on another edit. Its effect on the cardinality is therefore exactly
+// −1 for every member that flips and +1 for every non-member that flips, and
+// that sum is what this returns on top of the image's cardinality.
+//
+// # The cardinality and the membership are ONE observation
+//
+// Both are read from the same image, and the image is one instant of the label's
+// set: [label.Index.BitmapShared] publishes an object that is written once and
+// never again, because a write to the label replaces it rather than editing it.
+// So the raw count and every membership test describe the set at the acquire —
+// the instant [Graph.labelAsOfSample] brackets between its two suspect samples —
+// however long the walk takes and whatever writes land meanwhile.
+//
+// That is stronger than reading them under one entry lock, which rmp #2776 named
+// as the means: a lock bounds one critical section, and the post-acquire suspect
+// sample is gathered AFTER the instant it must be judged against, so its
+// memberships could not be read inside the same section. The image keeps the
+// instant available after the lock is gone. What must NOT happen is the
+// cardinality and the membership coming from two separate reads of the live
+// index — nodeIdx.Count and nodeIdx.Has — because a write landing between them
+// changes one and not the other, which is the race [Graph.LabelCountAsOf]'s
+// ordering defeats. [TestLabelCountAsOf_CountedCorrectionReadsOneInstant] lands
+// that write and fails on both inversions.
+//
+// # Cost
+//
+// No copy of the label: the image is shared with every other reader and is built
+// only on the first read after a write to the label, exactly as the bitmap path
+// builds it. What remains is the suspect sample, which the bitmap path pays too.
+//
+// On cancellation it returns (0, ctx.Err()), never a partial count.
+func (g *Graph[N, W]) labelCountAsOfFiltered(ctx context.Context, s *Snapshot, lid LabelID) (int64, error) {
+	want := func(bag labelBag) bool { return bag.has(lid) }
+	img, _, sus, correct, err := g.labelAsOfSample(ctx, s, oneLabel(lid),
+		func() (*roaring64.Bitmap, bool) {
+			g.fireLabelCountCorrectWindowProbe()
+			return g.nodeIdx.BitmapShared(uint32(lid)), false
+		})
 	if err != nil {
 		return 0, err
 	}
-	return int64(bm.GetCardinality()), nil
+	n := int64(img.GetCardinality())
+	if !correct {
+		return n, nil
+	}
+	for i, id := range sus {
+		if i&(correctCtxStride-1) == correctCtxStride-1 {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+		}
+		// img is shared and immutable: Contains is a lock-free read, and the image
+		// is never written here or anywhere else.
+		member := img.Contains(uint64(id))
+		if g.suspectFlips(id, member, s, want) {
+			if member {
+				n--
+			} else {
+				n++
+			}
+		}
+	}
+	return n, nil
+}
+
+// fireLabelCountCorrectWindowProbe runs the test-only seam described on
+// [Graph.labelCountCorrectWindowProbe]. It is a nil check in production.
+func (g *Graph[N, W]) fireLabelCountCorrectWindowProbe() {
+	if p := g.labelCountCorrectWindowProbe; p != nil {
+		p()
+	}
 }
 
 // fireLabelCountGateProbe runs the test-only seam described on

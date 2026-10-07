@@ -595,6 +595,24 @@ type Graph[N comparable, W any] struct {
 	// The cost in production is one nil load and a predictable branch, on a path
 	// that has just taken the label index's read lock.
 	labelCountAsOfWindowProbe func()
+	// labelCountCorrectWindowProbe is a TEST-ONLY seam, nil in production and with
+	// no exported setter, called by [Graph.labelCountAsOfFiltered] immediately
+	// BEFORE it acquires the label image, after [Graph.labelAsOfSample] has taken
+	// its pre-acquire suspect sample (rmp #2776).
+	//
+	// A write driven from here lands after the pre-sample and before the image,
+	// so the image holds it and only the POST-acquire sample can name it. That is
+	// the one interleaving that separates the sound implementation from both
+	// inversions: sampling every suspect before the acquire leaves the write
+	// uncorrected (an over-count), and reading the cardinality from the live index
+	// separately from the image's membership counts it on one side and corrects it
+	// on the other (an under-count). Kept separate from
+	// [Graph.labelCountAsOfWindowProbe] so a test driving one window cannot
+	// re-enter the other.
+	//
+	// The cost in production is one nil load and a predictable branch on the
+	// correction path, which has just walked every suspect shard.
+	labelCountCorrectWindowProbe func()
 	// mvccClock mints commit timestamps and transaction ids from the two
 	// disjoint ranges either side of mvcc.TxIDBase, so one uint64 on a
 	// version's commit record distinguishes in-flight from committed. Shared
