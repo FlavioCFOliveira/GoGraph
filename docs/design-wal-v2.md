@@ -1,6 +1,6 @@
 # Design: WAL v2 — one on-disk format revision for #3021, #3020, #2195 and #3014
 
-Status: **approved; step 1 implemented** (steps 2–4 not yet implemented).
+Status: **approved; steps 1 and 3 implemented** (steps 2 and 4 not yet implemented).
 
 This document records a design, not the current behaviour of the code. Each implementation
 step (§9) updates it to match what was built.
@@ -548,7 +548,9 @@ No global lock is added. Contiguity and the mint inside the run are unchanged
 
 Common to every step: all persistence suites create and persist their graphs (store directories,
 WAL segments, snapshots, control files) on the RAM drive — and nothing else: binaries, build
-temporaries (`GOTMPDIR`), logs, profiles and benchmark output stay on disk; race-sensitive tests use
+temporaries (`go`'s own `GOTMPDIR`), logs, profiles and benchmark output stay on disk, while the test
+process gets `TMPDIR` and `GOTMPDIR` on the RAM drive through `go test -exec` (CLAUDE.md, Tests and
+validation: under Go 1.27 `t.TempDir()` follows `GOTMPDIR`); race-sensitive tests use
 `internal/synclatency.ForTest` (from `8cb0aafb`); each step ends with its targeted validation;
 `make ci` runs at sprint close.
 
@@ -666,6 +668,78 @@ Tests:
 - Annex-mismatch and unbound-key tamper tests.
 - DST oracle "NodeID stability" in `internal/sim`.
 - Allocations and `benchstat` on the commit path.
+
+#### Step 3 — as implemented
+
+Built as designed:
+
+- `lpg.WriteTx.CreatedNodes(dst)` lists ids first interned by the transaction and unborn
+  ids it revived (`noteNodeBorn`, and `noteNodeRevived` with `wasUnborn`); the list lives
+  on the recycled `writeCtx` and is reset on reuse.
+- `txn.Tx.Commit` attaches the final `ApplyDurable` attempt's transaction;
+  `txn.Tx.AttachWriteTx` is called by the Cypher engine before both of its in-barrier
+  `CommitWALOnly` calls (`cypher/api.go`, `cypher/exectx.go`). The post-bracket
+  `CommitWALOnly(0)` path and DDL commits attach nothing and take the fallback annex.
+- The annex (`store/txn/annex.go`) is resolved and encoded before `AppendRun` and appended
+  to the `OpCommit` body after the commit timestamp: `uvarint n`, then per entry
+  `uvarint ref`, the codec key when `ref = 0`, `uvarint id`. Every marker this build writes
+  carries one, `n = 0` included; a body that ends after the timestamp is a pre-step-3
+  marker and replays as before (`TestAnnex_LegacyMarkerReplaysAsBefore`).
+- `graph.Mapper.PlaceUnborn` with `graph.ErrNodeIDMismatch`; replay places every annexed
+  key, then applies the ops, under the strict rule (`recovery.ErrUnboundNodeKey`).
+  `ErrUnboundNodeKey`, `ErrNodeIDMismatch` and the new `recovery.ErrCommitAnnexCorrupt`
+  (an undecodable annex) are open-fatal.
+- The DST oracle "NodeID stability" (`internal/sim/nodeid_stability.go`) runs at every
+  crash recovery of the simulator and of the multi-session mode: every node alive on both
+  sides keeps its id.
+
+Deviations, with reasons:
+
+- **A placed key is bound alive, not "interned, tombstoned, unborn".** The replayed op that
+  created it then finds it bound and alive. An annexed id that no intern-capable op names
+  — a creation the transaction withdrew before it committed — is settled afterwards
+  (`lpg.Graph.SettleNeverBorn`) as tombstoned and NOT unborn, because the live graph holds
+  such a node as a committed death inside the transaction, not as an aborted creation
+  (`TestAnnex_UndoneCreationInCommittedTxn`). Placing tombstoned would also clone the
+  tombstone bitmap twice per created node during replay.
+- **A transaction whose replay stops at an op it cannot apply withdraws its placements**
+  (`graph.Mapper.Unplace`), keeping only the keys an op that did apply names — what the
+  pre-step-3 replay would have interned. Without it a discarded transaction's keys stayed
+  bound in a recovered graph that still opens (`ErrCommittedTxnCorruptOp`;
+  `TestRecovery_NilWeightCodecDiscardsWeightedTxn_2808`). An annex entry that refers to an
+  op whose own body is undecodable makes replay skip the annex, so that op's apply
+  classifies the corruption exactly as before.
+- **The fallback annex reserves ids.** A `CommitWALOnly` caller that attaches nothing and
+  never applied its ops to the graph (`TestApplyGate_NoLostWakeup_MixedCommitPaths` does)
+  has keys the graph has not interned; `lpg.Graph.ReserveNodeID` interns each as a
+  never-born node (tombstoned and unborn, marked inside the mapper's interning critical
+  section) so the annex can name an id no other key will get. Writing no annex instead
+  let replay intern such keys at ids later placements needed, and recovery refused with
+  `ErrNodeIDMismatch`.
+- **An abort in progress is a conflict.** Withdrawing an aborted first creation marks the
+  id unborn and deletes its birth record under the life-shard lock, and flips the
+  tombstone only afterwards; a write that reached the key in between built on a node about
+  to vanish without creating it, so its marker did not annex it and the strict rule
+  refused the recovery (found by `store/txn.TestDifferential_MemoryEqualsRecovery`, 1 run
+  in 1 to 1 in 3). `lpg.Graph.existenceNoOpAdmits` now refuses that state as a retryable
+  conflict (6 of 6 runs clean after).
+- **Step 1 deviation 5 stays.** An image with no mapper pair still does not restore its
+  `nodeids.bin` marks: every id a later transaction created is placed by its annex, and
+  `PlaceUnborn` raises the shard's high-water mark past it, so the marks are not needed
+  for the ids to be exact.
+
+Measured:
+
+- Commit path, RAM drive, latency off, interleaved HEAD/new binaries, 10 × 2000 ops:
+  `Tx.Commit` of one created node 75.20 → 76.47 µs (p = 0.28), one property update
+  75.54 → 75.63 µs (p = 0.91), one Cypher `CREATE` 80.80 → 79.64 µs (p = 0.09); allocations
+  unchanged (8, 10, 43 per op); bytes +17, +16, +19 per op (the `Tx` carries the attached
+  transaction).
+- Red without the annex (an overlay that writes none): the commit-order, rollback and
+  undone-creation store tests fail; the Cypher `id()` tests move 26–102 of 300 ids (restart test) and 89 of 200 (statement-undo
+  test); the
+  multi-session DST oracle reports moved ids on seed 1; GG07 `ids_reused_across_processes`
+  fails in 6 of 20 runs. With the annex: all green, GG07 0 of 13 runs failing.
 
 ### Step 4 — reservations and high-water marks (#3021 B)
 

@@ -2533,7 +2533,21 @@ func (g *Graph[N, W]) internEndpoint(n N, tx *writeCtx) graph.NodeID {
 // One atomic load when no life record exists anywhere, which is the steady state
 // of a graph nobody is creating or removing nodes in.
 func (g *Graph[N, W]) existenceNoOpAdmits(id graph.NodeID, tx *writeCtx) bool {
-	if tx == nil || g.nodeLifeActive.Load() == 0 {
+	if tx == nil {
+		return true
+	}
+	// AN ABORT IN PROGRESS (WAL v2 step 3). Withdrawing an aborted first creation
+	// marks the id unborn and deletes its birth record under the life-shard lock,
+	// and flips the tombstone only afterwards. In between the node has no record
+	// and looks alive in the stored state, so a write here would build on a node
+	// that is about to vanish — without creating it, and so without naming it in
+	// the commit marker's id annex. Refused as a conflict: the bounded commit
+	// waits and reruns, and by then the key reads unborn and the write creates it.
+	if g.unbornN.Load() != 0 && g.inUnborn(id) && !g.IsTombstonedStored(id) {
+		_ = tx.conflictErr(mvcc.StoreNodeExistence, mvcc.AbortedTS)
+		return false
+	}
+	if g.nodeLifeActive.Load() == 0 {
 		return true
 	}
 	if head := g.nodeLifeHeadFor(id); tx.conflicts(head) {

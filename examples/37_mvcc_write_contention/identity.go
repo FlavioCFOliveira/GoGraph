@@ -33,9 +33,9 @@ package main
 // The in-memory arm is held to the same checks inside its child, whose graphs
 // die with it.
 //
-// id() and elementId() are compared ACROSS processes too, but reported as
-// telemetry, not gated: they are not stable across a reopen (README, phase 8),
-// a defect with its own cause, outside GG07's.
+// id() and elementId() are compared ACROSS processes too, and gated since WAL v2
+// step 3 (rmp #3021 A): every commit marker names the exact ids its transaction
+// created, so a reopen reproduces them (README, phase 8).
 //
 // Each arm makes the collision it tests DETERMINISTIC rather than likely: a
 // seeding child CREATEs four committed anchors before its concurrent sessions,
@@ -427,8 +427,9 @@ type idCheck struct {
 
 // idCheckNames are the gated checks [verifyIdentity] reports, in order.
 var idCheckNames = []string{
-	"exercised", "keys_distinct", "acked_ids_distinct_in_process", "acked_present_once",
-	"nothing_else_present", "no_merged_identity", "ids_distinct",
+	"exercised", "keys_distinct", "acked_ids_distinct_in_process", "ids_reused_across_processes",
+	"acked_present_once", "nothing_else_present", "no_merged_identity", "ids_distinct",
+	"ids_moved_across_processes",
 }
 
 // verifyIdentity holds eng's graph to l: every committed CREATE a distinct node.
@@ -436,9 +437,6 @@ func verifyIdentity(ctx context.Context, eng *cypher.Engine, l *idLedger) []idCh
 	var out []idCheck
 	add := func(name string, ok bool, format string, args ...any) {
 		out = append(out, idCheck{name: name, ok: ok, detail: fmt.Sprintf(format, args...)})
-	}
-	tele := func(name string, n int, format string, args ...any) {
-		out = append(out, idCheck{name: name, ok: n == 0, tele: true, detail: fmt.Sprintf(format, args...)})
 	}
 	add("exercised", len(l.acks) > 0 && len(l.deleted) > 0 && l.rolledBack > 0,
 		"acked=%d deleted=%d rolled_back=%d", len(l.acks), len(l.deleted), l.rolledBack)
@@ -454,7 +452,7 @@ func verifyIdentity(ctx context.Context, eng *cypher.Engine, l *idLedger) []idCh
 	}
 	inProc := make(map[procID]idKey, 2*len(l.acks))
 	var procDup []string
-	// The same across processes: telemetry (see the file comment).
+	// The same across processes (see the file comment).
 	acrossID, acrossEID := make(map[int64]idKey, len(l.acks)), make(map[string]idKey, len(l.acks))
 	var crossDup []string
 	want := make(map[idKey]idAck, len(l.acks))
@@ -486,12 +484,12 @@ func verifyIdentity(ctx context.Context, eng *cypher.Engine, l *idLedger) []idCh
 	add("keys_distinct", len(keyDup) == 0, "%d reused: %s", len(keyDup), strings.Join(first(keyDup, 4), "; "))
 	add("acked_ids_distinct_in_process", len(procDup) == 0, "%d reused: %s",
 		len(procDup), strings.Join(first(procDup, 4), "; "))
-	tele("ids_reused_across_processes", len(crossDup), "%d %s", len(crossDup), strings.Join(first(crossDup, 4), "; "))
+	add("ids_reused_across_processes", len(crossDup) == 0, "%d %s", len(crossDup), strings.Join(first(crossDup, 4), "; "))
 
 	rows, err := drain(eng.Run(ctx, "MATCH (n) RETURN n.tag, n.s, n.i, id(n), elementId(n), "+
 		"size(labels(n)) = 2 AND 'P' IN labels(n) AND ('T_' + n.tag) IN labels(n) AND size(keys(n)) = 3", nil))
 	if err != nil {
-		for _, n := range idCheckNames[3:] {
+		for _, n := range idCheckNames[4:] {
 			add(n, false, "read: %v", err)
 		}
 		return out
@@ -531,7 +529,7 @@ func verifyIdentity(ctx context.Context, eng *cypher.Engine, l *idLedger) []idCh
 		len(merged), strings.Join(first(merged, 4), "; "))
 	add("ids_distinct", len(ids) == len(rows) && len(eids) == len(rows),
 		"nodes=%d distinct_id=%d distinct_elementId=%d", len(rows), len(ids), len(eids))
-	tele("ids_moved_across_processes", len(moved), "%d %s", len(moved), strings.Join(first(moved, 4), "; "))
+	add("ids_moved_across_processes", len(moved) == 0, "%d %s", len(moved), strings.Join(first(moved, 4), "; "))
 	return out
 }
 

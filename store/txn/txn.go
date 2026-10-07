@@ -1124,6 +1124,11 @@ type Tx[N comparable, W any] struct {
 	// per Tx no matter which of the three terminal paths gets there first.
 	writerReleased bool
 	finished       bool
+	// wtx is the lpg write transaction that applied the ops, when known: set by
+	// [Tx.Commit] from its final apply attempt, or by [Tx.AttachWriteTx]. Its
+	// created ids become the commit marker's id annex (WAL v2 step 3).
+	wtx         lpg.WriteTx
+	wtxAttached bool
 }
 
 // takeApplyTurn blocks until this transaction's minted sequence is next in the
@@ -1926,6 +1931,9 @@ func (t *Tx[N, W]) CommitCtx(ctx context.Context) error {
 	// step leaves it out of the WAL. The mark is rewritten by every attempt, because
 	// a rerun applies the ops to a newer state, where a no-op may take effect.
 	err := t.store.g.ApplyDurable(ctx, func(wtx lpg.WriteTx) error {
+		// The FINAL attempt's transaction is the one commitDurable sees; its
+		// created ids are the commit marker's id annex (WAL v2 step 3).
+		t.AttachWriteTx(wtx)
 		wv := t.store.g.Writer(wtx)
 		for i := range t.ops {
 			op := &t.ops[i]
@@ -2330,6 +2338,17 @@ func (t *Tx[N, W]) appendChecked(commitTS uint64) (hasSeq bool, watermark int64,
 	// the pool on every exit path, including encode/append failures.
 	scratch := getEncodeScratch()
 	defer putEncodeScratch(scratch)
+	// The id annex (WAL v2 step 3) is resolved and encoded BEFORE the run, so the
+	// WAL writer's critical section does no mapper lookups. A failure here writes
+	// nothing and mints nothing.
+	annexBuf := getEncodeScratch()
+	defer putEncodeScratch(annexBuf)
+	annex, anErr := t.buildAnnex((*annexBuf)[:0])
+	if anErr != nil {
+		t.markFinished()
+		return false, 0, anErr
+	}
+	*annexBuf = annex
 	// ONE contiguous run, not a loop of independent appends (rmp #2302, audit
 	// finding E5). Recovery commits the ops carrying a marker's own TxnSeq and
 	// discards the buffered prefix as orphaned, which is correct only while a
@@ -2372,6 +2391,7 @@ func (t *Tx[N, W]) appendChecked(commitTS uint64) (hasSeq bool, watermark int64,
 			}
 		}
 		marker := encodeCommitV3Into((*scratch)[:0], seq, commitTS)
+		marker = append(marker, annex...)
 		*scratch = marker
 		return emit(marker)
 	})
@@ -2545,6 +2565,11 @@ func encodeOpTypedV3Into[N comparable, W any](buf []byte, op Op[N, W], seq uint6
 // The compatibility policy is therefore "absent body means no timestamp", which is
 // a test obligation rather than a version negotiation. Neither [CurrentVersion] nor
 // [OpRecordV3] changes.
+//
+// Since WAL v2 step 3 the caller appends the id annex after the timestamp (see
+// annex.go): the exact node ids the transaction created. The same policy applies —
+// a body that ends after the timestamp is a marker written before the annex
+// existed, and recovery replays it as it always did.
 func encodeCommitV3Into(buf []byte, seq, commitTS uint64) []byte {
 	buf = append(buf, OpRecordV3, byte(OpCommit))
 	buf = binary.LittleEndian.AppendUint64(buf, seq)

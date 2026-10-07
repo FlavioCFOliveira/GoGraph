@@ -6984,6 +6984,9 @@ func (r *Result) commitUnderBarrier() {
 	// index commit so the transaction is durable the instant its writes are
 	// allowed to remain observable past the barrier.
 	if r.tx != nil {
+		// The commit marker names the exact ids this statement created (WAL v2
+		// step 3); r.wtx is still open inside the barrier.
+		r.tx.AttachWriteTx(r.wtx)
 		if werr := r.tx.CommitWALOnly(r.allocCommitTS()); werr != nil {
 			cmetrics.IncCounter("cypher.RunInTx.wal.commitErrors", 1)
 			// The fsync failed: roll the not-durable write back so it never

@@ -929,6 +929,9 @@ func (tx *ExplicitTx) Commit() (err error) {
 			// clock from the WAL (rmp #2309). release() publishes it afterwards, so
 			// the allocate → encode → fsync → publish order holds and
 			// durable-then-visible is preserved.
+			// The commit marker names the exact ids this transaction created (WAL
+			// v2 step 3); tx.wtx is still open here.
+			tx.walTx.AttachWriteTx(tx.wtx)
 			if werr := tx.walTx.CommitWALOnly(tx.eng.g.AllocateCommitTS(tx.wtx)); werr != nil {
 				cmetrics.IncCounter("cypher.ExplicitTx.wal.commitErrors", 1)
 				walErr = werr

@@ -322,7 +322,9 @@ func (g *Graph[N, W]) noteNodeBorn(id graph.NodeID, tx *writeCtx) bool {
 	// no bitmap membership for the birth to disturb. Any label it goes on to
 	// acquire arrives through [Graph.setNodeLabelInfo], which pushes a delta
 	// carrying that lid and raises the gate itself.
-	return g.noteNodeLife(id, tx, true, true, nil)
+	ok := g.noteNodeLife(id, tx, true, true, nil)
+	tx.noteCreated(id) // the commit marker's id annex (WAL v2 step 3)
+	return ok
 }
 
 // noteNodeBornAutocommit is [Graph.noteNodeBorn] outside any transaction, in the
@@ -358,7 +360,13 @@ func (g *Graph[N, W]) noteNodeRevived(id graph.NodeID, tx *writeCtx, wasUnborn b
 	// into every bitmap the bag names — with no delta and no deferred removal to
 	// hold the gate up. A reader older than the revival must still be told the
 	// node is gone, so this is the only birth that has to raise the gate itself.
-	return g.noteNodeLife(id, tx, true, wasUnborn, g.nodeLabelBagLids(id))
+	ok := g.noteNodeLife(id, tx, true, wasUnborn, g.nodeLabelBagLids(id))
+	if ok && wasUnborn {
+		// Reviving a key whose only creation aborted creates the node, so the
+		// commit marker's id annex names it (WAL v2 step 3).
+		tx.noteCreated(id)
+	}
+	return ok
 }
 
 // noteNodeLife records a birth (alive) or a death, and reports whether the

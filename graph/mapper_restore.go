@@ -225,3 +225,73 @@ func addressDependentPath(v reflect.Value, path string) string {
 		return ""
 	}
 }
+
+// ErrNodeIDMismatch is returned by [Mapper.PlaceUnborn] when the binding it is
+// asked to establish contradicts the mapper: the key is already bound to a
+// different id, or the id's slot already holds a different key. During recovery
+// it means the durable record names an id the replay cannot reproduce, which is
+// corruption (WAL v2 step 3, docs/design-wal-v2.md §3.1).
+var ErrNodeIDMismatch = errors.New("graph: node id does not match the mapper")
+
+// PlaceUnborn binds key k to the exact id named by a durable record (a commit
+// marker's id annex), for recovery only (WAL v2 step 3). It reports whether it
+// established a new binding:
+//
+//   - k already bound to id: no-op, placed false;
+//   - k bound to another id, or id's slot holding another key: [ErrNodeIDMismatch];
+//   - otherwise: k takes id's slot, every free index below it in the shard becomes
+//     a hole, the shard's high-water mark rises past it, and placed is true.
+//
+// An id whose shard is not k's hash shard is [ErrNodeIDMismatch] as well: no
+// process could have assigned it.
+//
+// Safe for concurrent use; recovery calls it from one goroutine.
+func (m *Mapper[N]) PlaceUnborn(k N, id NodeID) (placed bool, err error) {
+	shardIdx, idx := unpackNodeID(id)
+	if want := m.shardFor(k); want != shardIdx {
+		return false, fmt.Errorf("%w: id %d is in shard %d, key hashes to shard %d", ErrNodeIDMismatch, uint64(id), shardIdx, want)
+	}
+	s := &m.shards[shardIdx]
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.forward[k]; ok {
+		if cur == id {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: key already bound to id %d, record names %d", ErrNodeIDMismatch, uint64(cur), uint64(id))
+	}
+	if idx < uint64(len(s.reverse)) {
+		if !s.isHoleLocked(idx) {
+			return false, fmt.Errorf("%w: id %d already holds another key", ErrNodeIDMismatch, uint64(id))
+		}
+		s.reverse[idx] = k
+		w := idx >> 6
+		s.holes[w] &^= 1 << (idx & 63)
+		s.holeCount--
+	} else {
+		s.growToLocked(idx)
+		s.reverse = append(s.reverse, k)
+	}
+	s.forward[k] = id
+	s.next = max(s.next, idx+1)
+	return true, nil
+}
+
+// Unplace removes a binding [Mapper.PlaceUnborn] established, leaving id's slot a
+// hole; recovery uses it to withdraw the placements of a transaction it then
+// discards. It reports whether k was bound to id. The shard's high-water mark is
+// not lowered. Safe for concurrent use; recovery calls it from one goroutine.
+func (m *Mapper[N]) Unplace(k N, id NodeID) bool {
+	shardIdx, idx := unpackNodeID(id)
+	s := &m.shards[shardIdx]
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.forward[k]; !ok || cur != id || idx >= uint64(len(s.reverse)) {
+		return false
+	}
+	delete(s.forward, k)
+	var zero N
+	s.reverse[idx] = zero
+	s.setHoleLocked(idx)
+	return true
+}

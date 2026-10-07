@@ -174,8 +174,12 @@ type Simulator struct {
 	seed     *Seed
 	cfg      Config
 	// crashCount and replayedOps accumulate run statistics for reports and tests.
-	crashCount  int
-	replayedOps int
+	crashCount int
+	// nodeIDsCompared counts the nodes the NodeID stability oracle compared
+	// across every recovery of the run (nodeid_stability.go); its non-vacuity
+	// witness.
+	nodeIDsCompared int
+	replayedOps     int
 	// rejectedWrites counts write-shaped operations the engine did NOT commit
 	// (committed == false). Under the disk-full scenario this is the non-vacuity
 	// guard that ENOSPC actually fired: an honest write fails only when the
@@ -603,6 +607,7 @@ func (s *Simulator) maybeCrash(_ context.Context, tick int64) (*SimReport, error
 	// INTEGRATED crash-storm / full-stack loop, so a future async-checkpoint or
 	// mid-publish window cannot silently promote a snapshot a real crash would
 	// have lost. Harmless under the current synchronous-checkpoint ordering.
+	idsBefore := liveNodeIDs(s.store.Graph())
 	s.disk.Crash()
 	// Reopen with the SAME store configuration the crashed store used — crucially
 	// the same durable layout. In full-stack mode (cfg.dir set) this reopens the
@@ -629,6 +634,11 @@ func (s *Simulator) maybeCrash(_ context.Context, tick int64) (*SimReport, error
 	// uncommitted may have leaked in (see [InvariantChecker.CheckDurability]).
 	if violations := s.checker.CheckDurability(tick, s.oracle, s.engine); len(violations) > 0 {
 		return s.report(tick, Op{Kind: OpMatch, Cypher: "<crash recovery>"}, violations), nil
+	}
+	n, idViolations := checkNodeIDStability(tick, idsBefore, store.Graph())
+	s.nodeIDsCompared += n
+	if len(idViolations) > 0 {
+		return s.report(tick, Op{Kind: OpMatch, Cypher: "<crash recovery: NodeID stability>"}, idViolations), nil
 	}
 
 	// When the search battery is enabled, run it on the recovered graph too: this
@@ -698,6 +708,7 @@ func (s *Simulator) forceCrash(tick int64, opLabel string) (*SimReport, error) {
 		return nil, nil
 	}
 	storeCfg := s.store.Config()
+	idsBefore := liveNodeIDs(s.store.Graph())
 	s.store.Crash()
 	store, err := OpenSimStore(s.disk, storeCfg)
 	if err != nil {
@@ -709,6 +720,11 @@ func (s *Simulator) forceCrash(tick int64, opLabel string) (*SimReport, error) {
 	s.replayedOps += store.WALOps()
 	if v := s.checker.CheckDurability(tick, s.oracle, s.engine); len(v) > 0 {
 		return s.report(tick, Op{Kind: OpMatch, Cypher: opLabel}, v), nil
+	}
+	n, idViolations := checkNodeIDStability(tick, idsBefore, store.Graph())
+	s.nodeIDsCompared += n
+	if len(idViolations) > 0 {
+		return s.report(tick, Op{Kind: OpMatch, Cypher: opLabel}, idViolations), nil
 	}
 	return nil, nil
 }
@@ -847,6 +863,10 @@ func (s *Simulator) Oracle() *GraphOracle { return s.oracle }
 // CrashCount returns how many crash+recovery cycles the run performed (always 0
 // when crashes are disabled).
 func (s *Simulator) CrashCount() int { return s.crashCount }
+
+// NodeIDsCompared returns how many surviving nodes the NodeID stability oracle
+// compared across the run's recoveries (WAL v2 step 3).
+func (s *Simulator) NodeIDsCompared() int { return s.nodeIDsCompared }
 
 // ReplayedOps returns the cumulative number of WAL ops recovery replayed across
 // every crash cycle in the run.

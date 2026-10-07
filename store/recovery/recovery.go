@@ -32,6 +32,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
@@ -503,6 +504,9 @@ func tailErrIsCorruption(err error) bool {
 		errors.Is(err, ErrUnsupportedRecordVersion),
 		errors.Is(err, ErrTransactionTooLarge),
 		errors.Is(err, ErrMissingSnapshot),
+		errors.Is(err, ErrUnboundNodeKey),
+		errors.Is(err, ErrCommitAnnexCorrupt),
+		errors.Is(err, graph.ErrNodeIDMismatch),
 		errors.Is(err, ErrCommittedTxnCorruptOp):
 		// ErrCommittedTxnCorruptOp is not-clean but not fail-stop; see the
 		// recorded-departure section above and [tailErrIsOpenFatal].
@@ -2107,6 +2111,15 @@ func replayWALInto[N comparable, W any](
 				metrics.IncCounter("store.recovery.openCodec.orphanedOps", uint64(start))
 			}
 			committed := pending[start:]
+			// WAL v2 step 3: a marker that carries an id annex binds every created
+			// key to its exact id before the ops replay, under the strict rule.
+			annexed, annexErr := replayCommitAnnex(g, committed, op.Body, codec)
+			if annexErr != nil {
+				metrics.IncCounter("store.recovery.openCodec.commitAnnex", 1)
+				res.TailErr = fmt.Errorf("%w (txn seq %d, WAL frame %d)", annexErr, commitSeq, frameIdx)
+				pending = pending[:0]
+				break
+			}
 			failedIdx := -1
 			for i := range committed {
 				if !applyOrAccumulate(g, &committed[i], codec, wcodec, cAcc, iAcc, touched) {
@@ -2123,6 +2136,11 @@ func replayWALInto[N comparable, W any](
 			var failedKind txn.OpKind
 			if failedIdx >= 0 {
 				failedKind = committed[failedIdx].Kind
+			}
+			if failedIdx < 0 {
+				annexed.settle(g)
+			} else {
+				withdrawAnnex(g, annexed, committed[:failedIdx], codec)
 			}
 			pending = pending[:0]
 			if failedIdx >= 0 {

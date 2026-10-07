@@ -1043,17 +1043,17 @@ and `merge_pattern.go`), `keys_distinct` failed in every arm, and `acked_present
 of 5 runs. With the fix, the gate passed in 30 of 30 runs. The defect is D8 under
 phase 5's "Defects found".
 
-### Reported, not gated
+### Gated since WAL v2 step 3
 
-`ids_reused_across_processes` and `ids_moved_across_processes` (`# ` lines) compare
-`id()` and `elementId()` across processes: an id given to `CREATE`s in two different
-processes, and a live node whose id differs from the one its `CREATE` returned. They
-are not gated: `id()` is not stable across a reopen when rolled-back `CREATE`s preceded
-committed ones in a mapper shard. A node id is the key's shard and its append position
-in that shard; a rolled-back `CREATE` keeps its position in the process that ran it,
-while recovery appends only committed keys. In one probe, 62 of 200 committed nodes
-came back with a different `id()`, and phase 8 reported a non-zero count in 5 of 10
-runs. This is a separate defect, not fixed here.
+`ids_reused_across_processes` and `ids_moved_across_processes` compare `id()` and
+`elementId()` across processes: an id given to `CREATE`s in two different processes,
+and a live node whose id differs from the one its `CREATE` returned. Before WAL v2 step 3
+(rmp #3021 A) they were reported, not gated: `id()` was not stable across a reopen when
+rolled-back `CREATE`s preceded committed ones in a mapper shard, because a rolled-back
+`CREATE` kept its position in the process that ran it while recovery appended only
+committed keys. In one probe, 62 of 200 committed nodes came back with a different
+`id()`. Every commit marker now names the exact id of each node its transaction created,
+recovery places each key at that id, and both are gates at 0.
 
 ### Running
 
