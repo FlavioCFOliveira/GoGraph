@@ -681,8 +681,44 @@ Deviations, each with its reason:
 - Test oracles that compared WAL byte counts now compare the control file's recorded
   checkpoint; example 37 D09 observes `pre_capture` and `post_checkpoint`, and D04 injects its
   fsync failures into the tail segment.
-- The `ErrRedoPointNotFrameBoundary`, `ErrRedoPointMidTransaction` and `ErrLegacyNotSealed`
-  paths have no dedicated test.
+- `ErrMissingControl`, `ErrControlCorrupt` (wrong length, bad magic, bad CRC, store id 0),
+  `ErrLegacyNotSealed`, `ErrRedoPointNotFrameBoundary` and `ErrRedoPointMidTransaction` each
+  have a dedicated test over the minimal on-disk state (`store/wal/walv2_audit_fixes_test.go`,
+  `store/walv2_audit_fixes_test.go`).
+
+Storage-engine audit fixes, each with a regression test that fails on `7ba2c36b`:
+
+- **No frame read seeds the prev-link from the control file.** `Log.Frames` sets the last
+  frame position to `PrevFramePosAtOR` on every exit that read no frame, including a stream
+  that stops at a torn first frame of the empty active segment after a truncation. The
+  frame the writer then appends at OR links to it; before, it carried prevLen 0 and the
+  next open refused the log with `ErrPrevLink`
+  (`TestLog_TornFirstFrameOfEmptyActiveSegmentKeepsPrevLink`).
+- **A torn legacy tail followed by segment frames is `ErrLegacyNotSealed`.** The legacy file
+  then does not end in its seal, which is that sentinel's meaning; `ErrTornSegment` names a
+  tear inside a segment, which this is not. Before, the torn legacy tail ended the replay as
+  a benign tail and every segment frame was dropped from a clean recovery. A torn legacy
+  tail with no segment frame after it stays benign
+  (`TestWALv2_TornLegacyTailBeforeSegmentFramesIsRefused`).
+- **A legacy file beside segments holding no frame is sealed at open.** A crash between the
+  control-file write and the seal stub of a fresh store leaves no legacy file, and an older
+  build may then start a v1 log there. When the store is not migrating and the open-time
+  scan finds no segment frame, `settleLegacy` seals a legacy file that does not end in a
+  seal, discarding a torn tail, exactly as a migration does. A corrupt legacy file is left
+  as found, and a seal naming another store is not checked there; recovery reports both
+  (`TestOpen_SealsLegacyLogWrittenAfterInterruptedCreate`). Both paths read the legacy file
+  through a read-only handle and open it for append only to write the seal: the simulator's
+  `O_APPEND` handle starts reading at the end of the file, where a read sees no frame.
+- **A gap below OR is not missing data.** The segment listing skips the consecutive-number
+  check before a segment whose first frame is at or below OR: every earlier segment lies
+  wholly below OR, so a filesystem that persisted a checkpoint's oldest-first unlinks out of
+  order leaves leftovers, which readers ignore and a writable open deletes. A gap before an
+  empty segment, or above OR, is still `ErrSegmentGap`
+  (`TestListSegments_OutOfOrderUnlinkIsNotAGap`).
+- `TestRecovery_PropertyBased_SnapshotWAL` and `internal/sim`
+  `TestST5_BenignTornTailIsNotCorruption` truncated `dir/wal`, which is the seal stub of a
+  segmented store, and passed only because of the dropped-segment-frames defect above; both
+  now tear the last frame of the tail segment.
 
 Measurements (header gate, §11 risk 1). Bytes per frame +22. Bytes per transaction, step 2
 against its parent commit: Cypher 4-op create 517.3 → 737.3 (+42.5 %, 10 frames per

@@ -662,8 +662,8 @@ func (c *Checkpointer[N, W]) runCheckpoint() error {
 //
 // Concurrency contract (rmp #1873): do NOT call RunCheckpoint concurrently
 // with itself, nor combine it with a running [Start]ed loop — only phase 1
-// (the capture) and phase 3 (the prefix-truncate) hold the commit lock; phase
-// 2, the dominant-duration snapshot write, is DELIBERATELY lock-free (see the
+// (the capture) holds the commit lock; phase 2, the dominant-duration snapshot
+// write, and phase 3, the segment unlink, are DELIBERATELY lock-free (see the
 // package doc), so two checkpoints in flight at once — via two concurrent
 // RunCheckpoint calls, or one RunCheckpoint racing the loop's own
 // Trigger-driven run — can both be writing to the same snapshot directory
@@ -699,9 +699,8 @@ func (c *Checkpointer[N, W]) RunCheckpoint() error {
 // (WithCommitSerialiser, the engine path — it also drains in-flight group
 // commits so the call is a true quiesce boundary), or the raw storeMu
 // otherwise (correct only when the caller serialises its own writes under
-// that same mutex). It is invoked TWICE per non-blocking checkpoint — once to
-// take the watermark + the MVCC instant, once to truncate the WAL prefix — so the
-// two brief locked windows bracket the lock-free snapshot write.
+// that same mutex). It is invoked once per non-blocking checkpoint, in phase 1,
+// to take the watermark + the MVCC instant; phases 2 and 3 run without it.
 //
 // # The drain is load-bearing, not an implementation detail (rmp #2310)
 //
@@ -836,9 +835,8 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		// visible to the drain, doneInflight fires only after SyncGroup
 		// returns), so a writer poisoned HERE is precisely that transient
 		// window. Abort before capturing the registry or publishing anything.
-		// Detecting the poison now — not at the phase-2 wlog.Sync(), which
-		// fires only AFTER writeSnapshot has already published the transient
-		// component — is what closes the window for BOTH the constraint and the
+		// Detecting the poison now, before writeSnapshot publishes any
+		// component, is what closes the window for BOTH the constraint and the
 		// index DDL paths.
 		//
 		// # Re-justified without the exclusion premise (rmp #2310)
@@ -854,8 +852,7 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		// not yet run. Both of those reads happen HERE, inside this same locked window,
 		// so what the gate must cover is this window and not the capture. A DDL that
 		// poisons the writer AFTER this point cannot have been folded into the
-		// constraint or index sets already read, and it is caught before anything is
-		// published by the pre-truncate wlog.Sync() in phase 3.
+		// constraint or index sets already read.
 		//
 		// The GRAPH image is a separate question and needs no health gate at all: it is
 		// read at an MVCC instant, and a transaction whose commit failed never publishes
@@ -1245,15 +1242,12 @@ func (c *Checkpointer[N, W]) setErr(seq uint64, err error) {
 // the store's own codec exactly as recovery's next call does, and aborts the
 // checkpoint if either refuses. Truncation therefore requires BOTH: the image
 // parses and applies (phase 2) AND it carries what recovery needs (this
-// function, re-checked under the phase-3 lock so a DDL committed during phase 2
-// cannot slip past). Neither check subsumes the other, and removing either one
-// restores a Durability defect.
+// function). Neither check subsumes the other, and removing either one restores
+// a Durability defect.
 //
-// The split exists because the two checks have opposite cost profiles. This one
-// is a single small JSON read and belongs under the commit lock, where it must
-// be to see a phase-2 DDL. The readback is I/O proportional to the whole
-// snapshot and must NOT be under that lock, which is why it is not folded in
-// here despite the name.
+// The split exists because the two checks have opposite cost profiles: this one
+// is a single small JSON read, the readback is I/O proportional to the whole
+// snapshot.
 func (c *Checkpointer[N, W]) snapshotIsSelfSufficient(dir string, needConstraints, needIndexes bool) (bool, error) {
 	m, err := c.snap.ReadManifest(manifestPath(dir))
 	if err != nil {

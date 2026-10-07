@@ -105,9 +105,9 @@ func checkSnapshotReachesWAL(ctl wal.Control, haveManifest bool, m *snapshot.Man
 // chainSource is the frame source of a segmented store: the legacy single-file
 // log (when its history is replayed) and then the segment frames.
 //
-// The legacy file ends with its seal; a legacy file that does not, followed by
-// segment frames, is [wal.ErrLegacyNotSealed]. A seal naming another store is
-// [wal.ErrForeignStore].
+// The legacy file ends with its seal; a legacy file that does not — no seal, or
+// a torn tail — followed by segment frames, is [wal.ErrLegacyNotSealed]. A seal
+// naming another store is [wal.ErrForeignStore].
 type chainSource struct {
 	log     *wal.Log
 	legacy  *wal.Reader
@@ -133,6 +133,21 @@ func (c *chainSource) Frames() iter.Seq[wal.Frame] {
 				}
 			}
 			if err := c.legacy.TailError(); err != nil {
+				if errors.Is(err, wal.ErrTornFrame) {
+					// A torn legacy tail is benign only when nothing follows
+					// it. Segment frames after it mean the file does not end
+					// in its seal, so the boundary between the two histories
+					// is unknown: stopping here would drop every segment
+					// frame from a clean-looking recovery.
+					next, stop := iter.Pull(c.log.Frames())
+					_, segFrames := next()
+					stop()
+					if segFrames {
+						c.tailErr = fmt.Errorf("%w: the legacy log ends in a torn frame at offset %d and segment frames follow",
+							wal.ErrLegacyNotSealed, c.legacy.TailOffset())
+						return
+					}
+				}
 				c.tailErr, c.tail = err, c.legacy.TailOffset()
 				return
 			}

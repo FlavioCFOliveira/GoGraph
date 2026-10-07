@@ -128,7 +128,12 @@ func listSegments(fsys LogFS, walPath string, c Control) (segListing, error) {
 			// not trailing, so it is corruption, not an interrupted spare.
 			return out, fmt.Errorf("%w: %s", ErrSegmentHeader, out.unfinished[0])
 		}
-		if n := len(out.segs); n > 0 && out.segs[n-1].no+1 != no {
+		// A gap before a segment whose first frame lies at or below OR is not
+		// missing data: every segment before it lies wholly below OR, and a
+		// filesystem may persist a checkpoint's oldest-first unlinks out of
+		// order. Those segments become leftovers below.
+		if n := len(out.segs); n > 0 && out.segs[n-1].no+1 != no &&
+			(e.firstPos < 0 || e.firstPos > int64(c.OldestRetainedPos)) { //nolint:gosec // G115: positions are bounded by int64 file arithmetic
 			return out, fmt.Errorf("%w: segment %d follows segment %d", ErrSegmentGap, no, out.segs[n-1].no)
 		}
 		out.segs = append(out.segs, e)
@@ -310,40 +315,50 @@ func (l *Log) Frames() iter.Seq[Frame] {
 			return
 		}
 		l.iterated = true
-		segs := l.list.segs
-		// lastFramed is the index of the last segment holding any frame byte.
-		lastFramed := -1
-		for i, s := range segs {
-			if s.firstPos >= 0 || s.partial {
-				lastFramed = i
-			}
+		l.streamSegments(yield)
+		// With no frame read — none retained, or the stream stopped at its first
+		// frame (a torn first frame of an empty active segment) — the frame
+		// preceding OR is the one the control file records, so the next frame
+		// appended at OR links to it.
+		if l.lastFramePos < 0 && l.ctl.PrevFramePosAtOR != NoFramePos {
+			l.lastFramePos = int64(l.ctl.PrevFramePosAtOR) //nolint:gosec // G115: positions are bounded
 		}
-		or := int64(l.ctl.OldestRetainedPos) //nolint:gosec // G115: positions are bounded by int64 file arithmetic
-		expected := int64(-1)
-		passedOR := false
-		for i := l.list.start; i < len(segs); i++ {
-			s := segs[i]
-			if s.firstPos < 0 && !s.partial {
-				if i < lastFramed {
-					l.tailErr = fmt.Errorf("%w: empty segment %d precedes segment frames", ErrSegmentGap, s.no)
-					return
-				}
-				continue
-			}
-			if !l.streamSegment(s, i == lastFramed, or, &expected, &passedOR, yield) {
+	}
+}
+
+// streamSegments is the body of [Log.Frames]: it streams the retained segments
+// and records the tail.
+func (l *Log) streamSegments(yield func(Frame) bool) {
+	segs := l.list.segs
+	// lastFramed is the index of the last segment holding any frame byte.
+	lastFramed := -1
+	for i, s := range segs {
+		if s.firstPos >= 0 || s.partial {
+			lastFramed = i
+		}
+	}
+	or := int64(l.ctl.OldestRetainedPos) //nolint:gosec // G115: positions are bounded by int64 file arithmetic
+	expected := int64(-1)
+	passedOR := false
+	for i := l.list.start; i < len(segs); i++ {
+		s := segs[i]
+		if s.firstPos < 0 && !s.partial {
+			if i < lastFramed {
+				l.tailErr = fmt.Errorf("%w: empty segment %d precedes segment frames", ErrSegmentGap, s.no)
 				return
 			}
+			continue
 		}
-		if expected < 0 {
-			l.end = or
-			if l.lastFramePos < 0 && l.ctl.PrevFramePosAtOR != NoFramePos {
-				l.lastFramePos = int64(l.ctl.PrevFramePosAtOR) //nolint:gosec // G115: positions are bounded
-			}
+		if !l.streamSegment(s, i == lastFramed, or, &expected, &passedOR, yield) {
 			return
 		}
-		if !passedOR && expected != or && l.tailErr == nil {
-			l.tailErr = fmt.Errorf("%w: frames end at %d below the oldest retained position %d", ErrFramePosition, expected, or)
-		}
+	}
+	if expected < 0 {
+		l.end = or
+		return
+	}
+	if !passedOR && expected != or && l.tailErr == nil {
+		l.tailErr = fmt.Errorf("%w: frames end at %d below the oldest retained position %d", ErrFramePosition, expected, or)
 	}
 }
 

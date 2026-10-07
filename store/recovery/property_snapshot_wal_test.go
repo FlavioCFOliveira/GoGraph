@@ -8,6 +8,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -115,22 +116,18 @@ func TestRecovery_PropertyBased_SnapshotWAL(t *testing.T) {
 			rt.Fatalf("wal Close: %v", err)
 		}
 
-		// Optionally truncate the WAL inside the last frame.
+		// Optionally truncate the WAL inside the last frame. The log's frames
+		// live in its segments; walPath itself holds only the seal stub.
 		if doTruncate {
-			bounds := frameBoundaries(t, walPath)
-			if len(bounds) >= 2 {
-				lastEnd := bounds[len(bounds)-1]
-				secondLast := bounds[len(bounds)-2]
-				if lastEnd > secondLast+1 {
-					// Truncate to midpoint inside the last frame.
-					mid := secondLast + (lastEnd-secondLast)/2
-					rawWAL, err := os.ReadFile(walPath) //nolint:gosec // path under t.TempDir
-					if err != nil {
-						rt.Fatalf("ReadFile(wal): %v", err)
-					}
-					if err := os.WriteFile(walPath, rawWAL[:mid], 0o600); err != nil { //nolint:gosec // path under t.TempDir
-						rt.Fatalf("WriteFile(truncated wal): %v", err)
-					}
+			locs, err := waltest.LocateFrames(walPath)
+			if err != nil {
+				rt.Fatalf("LocateFrames: %v", err)
+			}
+			if len(locs) > 0 {
+				last := locs[len(locs)-1]
+				// Truncate to the midpoint inside the last frame.
+				if err := os.Truncate(last.Path, last.Offset+last.Size/2); err != nil {
+					rt.Fatalf("Truncate(tail segment): %v", err)
 				}
 			}
 		}

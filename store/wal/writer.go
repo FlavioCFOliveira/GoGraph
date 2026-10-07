@@ -245,6 +245,10 @@ type Writer struct {
 	// durableLastFramePos the same for the durable prefix. Guarded by mu.
 	lastFramePos        int64
 	durableLastFramePos int64
+	// segFramesAtOpen reports that the open-time scan found segment frame
+	// bytes (a frame, or corruption); set by attachSegments, read by
+	// settleLegacy, never written afterwards.
+	segFramesAtOpen bool
 
 	frames     atomic.Uint64
 	bytes      atomic.Uint64
@@ -473,6 +477,7 @@ func (w *Writer) attachSegments(lfs LogFS) error {
 	w.appendedPos, w.durablePos = end, end
 	w.lastFramePos = log.LastFramePos()
 	w.durableLastFramePos = w.lastFramePos
+	w.segFramesAtOpen = log.frames > 0 || (tailErr != nil && !errors.Is(tailErr, ErrTornFrame))
 
 	// The active segment is the last one holding a frame byte; with none, the
 	// first retained segment (a fresh store, or one whose retained segments are
@@ -587,34 +592,64 @@ func truncateDurably(fsys walFS, path string, size int64) error {
 // settleLegacy completes the legacy single-file log's part of the layout: a
 // pending migration seals it, and a store with no legacy history gets the seal
 // stub that makes an older build refuse the directory.
+//
+// A store that is not migrating but whose legacy file has bytes while the
+// segments hold no frame has its legacy file sealed too, unless it already
+// ends in a seal: a crash between initControl and the stub write leaves no
+// legacy file, an older build may then start a v1 log there, and segment
+// frames appended after it would make recovery refuse with
+// [ErrLegacyNotSealed].
 func (w *Writer) settleLegacy() error {
 	seal := LegacySeal{StoreID: w.storeID}
-	if w.ctl.Flags&ControlLegacyV1Pending == 0 {
+	migrating := w.ctl.Flags&ControlLegacyV1Pending != 0
+	if !migrating {
 		has, err := legacyHasBytes(walLogFS{fsys: w.fsys}, w.path)
-		if err != nil || has {
+		if err != nil {
 			return err
 		}
-		return writeFileDurably(w.fsys, w.dirFsync, w.path, sealFrameBytes(seal), "", "")
+		if !has {
+			return writeFileDurably(w.fsys, w.dirFsync, w.path, sealFrameBytes(seal), "", "")
+		}
+		if w.segFramesAtOpen {
+			return nil
+		}
+	}
+	// Read through a read-only handle: the position of an O_APPEND handle is
+	// not guaranteed to start at 0 on every walFS (the simulator's starts at
+	// the end), and the frames must be read from the first byte.
+	// An absent file reads as empty and is created by the seal below.
+	r := NewReader(eofReader{}, nil)
+	switch rc, err := (walLogFS{fsys: w.fsys}).Open(w.path); {
+	case err == nil:
+		r = NewReader(rc, rc)
+	case !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("wal: open legacy log: %w", err)
+	}
+	sealed := false
+	for fr := range r.Frames() {
+		_, sealed = DecodeLegacySeal(fr.Payload)
+		if migrating && sealed && fr.StoreID != w.storeID {
+			_ = r.Close()
+			return fmt.Errorf("%w: legacy seal names store %016x", ErrForeignStore, fr.StoreID)
+		}
+	}
+	_ = r.Close()
+	if tErr := r.TailError(); tErr != nil && !errors.Is(tErr, ErrTornFrame) {
+		if !migrating {
+			// Not a migration: the file is left as found, and recovery
+			// reports the corruption whenever it reads the legacy history.
+			return nil
+		}
+		return fmt.Errorf("wal: legacy log is corrupt, refusing to migrate: %w", tErr)
+	}
+	if sealed {
+		return nil
 	}
 	f, err := w.fsys.OpenFile(w.path, os.O_RDWR|os.O_CREATE|os.O_APPEND)
 	if err != nil {
 		return fmt.Errorf("wal: open legacy log: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	r := NewReader(f, nil)
-	sealed := false
-	for fr := range r.Frames() {
-		_, sealed = DecodeLegacySeal(fr.Payload)
-		if sealed && fr.StoreID != w.storeID {
-			return fmt.Errorf("%w: legacy seal names store %016x", ErrForeignStore, fr.StoreID)
-		}
-	}
-	if tErr := r.TailError(); tErr != nil && !errors.Is(tErr, ErrTornFrame) {
-		return fmt.Errorf("wal: legacy log is corrupt, refusing to migrate: %w", tErr)
-	}
-	if sealed {
-		return nil
-	}
 	size, err := f.Seek(0, io.SeekEnd)
 	if err != nil {
 		return err
@@ -635,6 +670,11 @@ func (w *Writer) settleLegacy() error {
 	crashpoint.Breakpoint("wal.migrate.sealed-pre-first-v2-frame")
 	return nil
 }
+
+// eofReader is an empty input.
+type eofReader struct{}
+
+func (eofReader) Read([]byte) (int, error) { return 0, io.EOF }
 
 // createSegment creates segment no durably: exclusive create, header, fsync,
 // directory fsync. A crash part-way leaves a short or invalid trailing
