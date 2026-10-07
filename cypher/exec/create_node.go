@@ -173,16 +173,17 @@ const mergeKeyInfix = "merge_"
 // serialises writers — concurrency control is MVCC alone — so the atomic is no
 // longer a safety net but the actual mechanism keeping generated keys distinct.
 //
-// The counter is process-local and resets to zero in every new process. Across
-// process restarts this would produce keys that collide with previously
-// persisted ones from the same graph (Mapper.Intern of an existing key returns
-// the existing NodeID, silently overwriting the original node's properties on
-// the follow-up SetNodeProperty calls). To defend against that, every
-// [CreateNode] operator seeds the counter from the keys already interned in
-// its mutator on first [CreateNode.Init], advancing the counter past the
-// largest existing __cx_<hex> suffix via a CAS loop. The seed runs once per
-// process (gated by [globalNodeCounterSeededOnce]); subsequent CreateNode
-// operators observe the [sync.Once] as already-fired and skip the scan.
+// The counter is process-local and resets to zero in every new process, while
+// a graph can hold synthetic keys this process's counter never minted: keys
+// persisted by an earlier process and recovered when a store is opened, in
+// particular a store opened AFTER the one-shot seed below has already run
+// (rmp #3015). Interning such a key returns the existing NodeID, so the
+// follow-up SetNodeProperty calls would silently overwrite that node and two
+// committed CREATEs would name one node. The counter is therefore never
+// trusted alone: every key is minted through [mintNodeKey], which rejects a
+// key the target graph already holds. The one-shot seed (see
+// [globalNodeCounterSeededOnce]) is only a cost measure that starts the
+// counter past the first graph's keys, so that graph pays no probe misses.
 //
 // Process-wide monotonic counter for unique key generation.
 var globalNodeCounter atomic.Uint64
@@ -333,8 +334,9 @@ func (op *CreateNode) WithPropsEvalFn(fn PropsEvalFn) *CreateNode {
 //
 // The first CreateNode.Init in the process also seeds [globalNodeCounter]
 // past the largest synthetic key currently interned in op.mutator, so that
-// node keys generated in this process cannot collide with keys persisted by
-// an earlier process and replayed during WAL / snapshot recovery. The seed
+// minting keys for that graph rarely probes an occupied key. Uniqueness
+// against keys persisted by an earlier process does not rest on the seed —
+// it covers only the first graph — but on [mintNodeKey] (rmp #3015). The seed
 // is gated by [globalNodeCounterSeededOnce] so the scan runs at most once
 // per process regardless of how many CreateNode operators are created.
 func (op *CreateNode) Init(ctx context.Context) error {
@@ -438,12 +440,53 @@ func mergeProps(static []propLiteral, fn PropsEvalFn, row Row) ([]propLiteral, e
 	return merged, nil
 }
 
-// freshNodeKey returns a string key that is guaranteed to be unique within the
-// current process by drawing from a global monotonic counter. The key is never
-// visible to Cypher callers; only the NodeID is emitted into the row.
+// freshNodeKey returns a "__cx_<hex>" key that op.mutator's graph does not
+// hold (see [mintNodeKey]). The key is never visible to Cypher callers; only
+// the NodeID is emitted into the row.
 func (op *CreateNode) freshNodeKey() string {
-	n := globalNodeCounter.Add(1)
-	return synthKeyPrefix + strconv.FormatUint(n, 16)
+	return mintNodeKey(op.mutator, "")
+}
+
+// maxMintStep caps the stride [mintNodeKey] grows to while skipping keys the
+// graph already holds.
+const maxMintStep = 1 << 20
+
+// mintNodeKey returns synthKeyPrefix + infix + hex(n) for a value n drawn from
+// [globalNodeCounter] such that the key is not interned in m's graph, live or
+// tombstoned (rmp #3015).
+//
+// The counter alone keeps keys distinct only among the keys THIS process mints.
+// A graph may also hold synthetic keys minted by another process — a store
+// recovered from disk after the one-shot seed ran, or a second store opened in
+// the same process — and interning one of those returns the existing node, so
+// a CREATE would silently take over a committed node. mintNodeKey therefore
+// asks the graph, through [GraphMutator.ResolveNodeID] (one read-locked shard
+// lookup, no allocation), whether the candidate is taken. On a hit the stride
+// doubles, so a run of k occupied keys is crossed in O(log k) probes rather
+// than k, and every candidate is still a distinct counter value: two
+// concurrent statements can never be handed the same key.
+//
+// The guarantee is against keys interned before the probe. A key from outside
+// the counter interned between the probe and the caller's AddNode — a caller
+// of the lpg API writing a "__cx_" key concurrently — is not excluded; no
+// generated key can race another generated key.
+//
+// A nil m (unit tests that build an operator without a mutator) skips the
+// probe.
+func mintNodeKey(m GraphMutator, infix string) string {
+	step := uint64(1)
+	for {
+		key := synthKeyPrefix + infix + strconv.FormatUint(globalNodeCounter.Add(step), 16)
+		if m == nil {
+			return key
+		}
+		if _, taken := m.ResolveNodeID(key); !taken {
+			return key
+		}
+		if step < maxMintStep {
+			step <<= 1
+		}
+	}
 }
 
 // seedGlobalNodeCounter walks every node key already interned in m and

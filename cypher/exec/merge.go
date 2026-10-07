@@ -430,13 +430,13 @@ func (op *Merge) WithIndexProber(prober MergeIndexProber) *Merge {
 //
 // The first Merge.Init (or [CreateNode.Init]) in the process also seeds
 // [globalNodeCounter] past the largest synthetic key already interned in
-// op.mutator, so that the keys minted by [Merge.freshNodeKey] in this
-// process cannot collide with __cx_merge_<hex> keys persisted by an earlier
-// process and replayed during WAL / snapshot recovery. Without this a
-// one-process-per-command consumer mints __cx_merge_1 on every command and
-// the second MERGE silently overwrites the first node. The seed is gated by
-// [globalNodeCounterSeededOnce] so the O(N) scan runs at most once per
-// process regardless of how many CreateNode / Merge operators are built.
+// op.mutator, so that minting keys for that graph rarely probes an occupied
+// key. Uniqueness against __cx_merge_<hex> keys persisted by an earlier
+// process does not rest on the seed — it covers only the first graph — but
+// on [mintNodeKey] (rmp #3015), which rejects every key the graph holds. The
+// seed is gated by [globalNodeCounterSeededOnce] so the O(N) scan runs at
+// most once per process regardless of how many CreateNode / Merge operators
+// are built.
 func (op *Merge) Init(ctx context.Context) error {
 	op.resetRunState(ctx)
 	globalNodeCounterSeededOnce.Do(func() {
@@ -647,14 +647,13 @@ func (op *Merge) Close() error {
 	return op.child.Close()
 }
 
-// freshNodeKey returns a unique node key drawn from the process-global
-// counter. The key is never visible to Cypher callers; only the NodeID is
-// emitted into the row. The "__cx_merge_<hex>" form (synthKeyPrefix +
+// freshNodeKey returns a "__cx_merge_<hex>" key that op.mutator's graph does
+// not hold (see [mintNodeKey]). The key is never visible to Cypher callers;
+// only the NodeID is emitted into the row. The form (synthKeyPrefix +
 // mergeKeyInfix + hex) is parsed by [parseSynthKeySuffix] so [Merge.Init] /
 // [CreateNode.Init] seed the shared counter past it on recovery.
 func (op *Merge) freshNodeKey() string {
-	n := globalNodeCounter.Add(1)
-	return synthKeyPrefix + mergeKeyInfix + fmt.Sprintf("%x", n)
+	return mintNodeKey(op.mutator, mergeKeyInfix)
 }
 
 // applyAction applies one mergeAction to a row. The row is expected to

@@ -565,9 +565,9 @@ func (op *MergePattern) WithLeadingClause(leading bool) *MergePattern {
 
 // Init initialises the operator and its child. The first MergePattern.Init
 // (or [CreateNode.Init] / [Merge.Init]) in the process also seeds
-// [globalNodeCounter], exactly as those operators do, so fresh-node keys
-// minted here cannot collide with __cx_merge_<hex> keys replayed from an
-// earlier process during WAL / snapshot recovery.
+// [globalNodeCounter], exactly as those operators do. Fresh-node keys minted
+// here are kept clear of __cx_merge_<hex> keys replayed from an earlier
+// process by [mintNodeKey] (rmp #3015), not by the seed.
 func (op *MergePattern) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.matched = nil
@@ -1097,10 +1097,10 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 // freshNodeKey mints a synthetic node key from the same process-wide counter
 // [CreateNode]/[Merge] use, with the same "merge_" infix so the
 // [parseSynthKeySuffix] recovery re-seed scan recognises it without any
-// changes there.
+// changes there, and that op.mutator's graph does not hold (see
+// [mintNodeKey]).
 func (op *MergePattern) freshNodeKey() string {
-	n := globalNodeCounter.Add(1)
-	return synthKeyPrefix + mergeKeyInfix + fmt.Sprintf("%x", n)
+	return mintNodeKey(op.mutator, mergeKeyInfix)
 }
 
 // emitRow extends childRow with every chain position's binding (fresh

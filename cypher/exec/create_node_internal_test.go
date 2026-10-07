@@ -130,9 +130,18 @@ func (m *seedStubMutator) OutNeighbours(string) []string                     { p
 func (m *seedStubMutator) InNeighbours(string) []string                      { panic("unused") }
 func (m *seedStubMutator) RemoveAllEdgesFrom(string)                         { panic("unused") }
 func (m *seedStubMutator) OutDegree(string) int                              { panic("unused") }
-func (m *seedStubMutator) ResolveNodeID(string) (graph.NodeID, bool)         { panic("unused") }
-func (m *seedStubMutator) RemoveNode(string)                                 { panic("unused") }
-func (m *seedStubMutator) IsTombstoned(graph.NodeID) bool                    { return false }
+
+// ResolveNodeID answers mintNodeKey's probe (rmp #3015) from the stub's keys.
+func (m *seedStubMutator) ResolveNodeID(k string) (graph.NodeID, bool) {
+	for id, v := range m.keys {
+		if v == k {
+			return id, true
+		}
+	}
+	return 0, false
+}
+func (m *seedStubMutator) RemoveNode(string)              { panic("unused") }
+func (m *seedStubMutator) IsTombstoned(graph.NodeID) bool { return false }
 
 // Compile-time check: seedStubMutator must satisfy GraphMutator so the
 // production seedGlobalNodeCounter accepts it directly. If a future change

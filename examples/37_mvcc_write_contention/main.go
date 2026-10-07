@@ -26,6 +26,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"runtime"
 	"sort"
 	"strconv"
@@ -65,6 +66,9 @@ type config struct {
 	// durability is phase 7, durability across a crash (durability.go). Zero
 	// levels and zero kill runs skip it.
 	durability durabilityConfig
+	// identity is phase 8, GG07: node identity across processes (identity.go).
+	// A nil childCmd skips it.
+	identity identityConfig
 }
 
 func defaultConfig() config {
@@ -129,8 +133,25 @@ func main() {
 	childDir := flag.String("durability-child-dir", "",
 		"INTERNAL: run as the phase-7 kill child against this store directory, until killed")
 	childLevel := flag.Int("durability-child-level", 8, "INTERNAL: writer count of the phase-7 kill child")
+	idChild := flag.String("identity-child", "",
+		"INTERNAL: run as a phase-8 (GG07) child with this spec")
+	skipIdentity := flag.Bool("skip-identity", false, "skip phase 8, node identity across processes (GG07)")
 	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
+
+	if *idChild != "" {
+		if err := runIdentityChild(context.Background(), *idChild, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "identity child: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if !*skipIdentity {
+		cfg.identity.childCmd = func(ctx context.Context, spec string) *exec.Cmd {
+			// os.Args[0] is this example's own binary; the arguments are fixed flags.
+			return exec.CommandContext(ctx, os.Args[0], "-identity-child", spec) //nolint:gosec // G204: the example's own binary, fixed flags
+		}
+	}
 
 	if *childDir != "" {
 		if err := runDurabilityChild(context.Background(), *childDir, *childLevel, os.Stdout); err != nil {
@@ -227,6 +248,17 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 		}
 		if f := out.failed(); len(f) > 0 {
 			return fmt.Errorf("durability: %d checks failed:\n%s", len(f), strings.Join(f, "\n"))
+		}
+	}
+
+	// PHASE 8 — node identity across processes, GG07 (identity.go).
+	if cfg.identity.childCmd != nil {
+		out, err := phaseIdentity(ctx, w, &cfg.identity)
+		if err != nil {
+			return err
+		}
+		if f := out.failed(); len(f) > 0 {
+			return fmt.Errorf("identity: %d checks failed:\n%s", len(f), strings.Join(f, "\n"))
 		}
 	}
 

@@ -653,6 +653,22 @@ open.
   so a peer's removal records the conflict, while a removal this transaction already
   made finds the claim held and removes nothing. `cypher/rel_delete_peer_conflict_test.go`
   pins it on both engines, and `gg06-delete-same-edge-instance` is now in the catalogue.
+- **D8 — two committed `CREATE`s could name one node (rmp #3015, fixed; catalogue
+  GG07, gated by phase 8).** A `CREATE` or `MERGE` gives each new node a hidden key
+  drawn from a process-wide counter that was seeded once per process, from the first
+  graph a write operator ran against. A graph whose keys another process minted — a
+  second store opened in the same process, or a store recovered from disk and loaded
+  into memory — holds keys at and above the counter, and interning one returned the
+  existing node, so the `CREATE` overwrote it. Reproduction: one process writes store B
+  with 20 `CREATE`s and exits; a fresh process runs one `CREATE` in an empty store A,
+  opens B and runs 3 `CREATE`s. B still holds 20 nodes, and three of the first ones carry
+  the new nodes' properties. The same counter re-minted, after a reopen, the key of a
+  deleted node whose key was the largest in the store, so its `id()` named a new node.
+  **Fixed:** every key is minted by `mintNodeKey` (`cypher/exec/create_node.go`), which
+  rejects a key the target graph already holds, live or deleted
+  (`GraphMutator.ResolveNodeID`), and doubles its stride over a run of held keys.
+  `cypher/node_key_mint_3015_test.go` pins it for `CREATE`, `MERGE` and a `MERGE`
+  pattern, in memory and over a reopened store.
 
 ### Gaps pinned
 
@@ -963,6 +979,79 @@ go run ./examples/37_mvcc_write_contention -ladder-levels "" -durability-levels 
 
 Every image and every derived copy is created under `TMPDIR` and removed at the end of
 its arm.
+
+## Phase 8 — node identity across processes (GG07, rmp #3015)
+
+Catalogue row GG07: node identity under concurrent `CREATE`, rollback and store reopen
+(`identity.go`). A `CREATE` gets a hidden node key from a counter that is process-wide,
+so the scenario needs fresh processes: every workload runs in a child — this binary
+with `-identity-child`, or the test binary re-executed — whose counter starts at zero,
+as a restarted application's would. The stores are persisted (`store.Open`) under
+`TMPDIR`.
+
+### Workload
+
+8 concurrent sessions, 6 explicit transactions each; each transaction runs one
+`CREATE (n:P:T_<tag> {tag, s, i})`, and the odd ones are rolled back. The committed
+`CREATE`s whose transaction number is a multiple of four are then deleted.
+
+### Arms
+
+- **reopen** — child 1 writes store R; child 2 reopens R and runs the workload again.
+- **two_stores** — child 1 writes store B; child 2 runs one `CREATE` in a fresh store A,
+  then opens B and runs the workload on A and B at the same time.
+- **memory** — child 2 runs one `CREATE` in a fresh in-memory graph, then recovers B
+  into a second in-memory graph (`recovery.Open`, read-only) and runs the workload on
+  both at the same time. It checks both graphs itself, because they end with it.
+
+Each arm makes its collision certain rather than likely. A seeding child runs four
+committed anchor `CREATE`s before its sessions, so keys 1 to 4 of its store are live,
+and the first `CREATE` on the second graph after the one-shot seed draws key 2. The
+seeding child also commits and then deletes one last `CREATE`, so the largest key of
+its store belongs to a deleted node.
+
+### Gates
+
+Every acknowledged `CREATE` reports the hidden key, `id()` and `elementId()` it was
+given, read in the process that committed it. The parent reopens each persisted store
+and gates, for every arm:
+
+| Check | Holds when |
+|---|---|
+| `exercised` | the store has commits, rollbacks and deletes |
+| `keys_distinct` | no hidden key was given to two acknowledged `CREATE`s over the store's history, deleted nodes included |
+| `acked_ids_distinct_in_process` | no `id()` or `elementId()` was given to two acknowledged `CREATE`s of one process |
+| `acked_present_once` | every acknowledged, undeleted `CREATE` is present exactly once |
+| `nothing_else_present` | no other node is present (rolled-back and deleted nodes absent) |
+| `no_merged_identity` | every node has only its own two labels and three properties |
+| `ids_distinct` | the live nodes' `id()` and `elementId()` values are all distinct |
+
+With the fix reverted (`go test -overlay` over `cypher/exec/create_node.go`, `merge.go`
+and `merge_pattern.go`), `keys_distinct` failed in every arm, and `acked_present_once`,
+`nothing_else_present` and `no_merged_identity` failed in two_stores and memory, in 5
+of 5 runs. With the fix, the gate passed in 30 of 30 runs. The defect is D8 under
+phase 5's "Defects found".
+
+### Reported, not gated
+
+`ids_reused_across_processes` and `ids_moved_across_processes` (`# ` lines) compare
+`id()` and `elementId()` across processes: an id given to `CREATE`s in two different
+processes, and a live node whose id differs from the one its `CREATE` returned. They
+are not gated: `id()` is not stable across a reopen when rolled-back `CREATE`s preceded
+committed ones in a mapper shard. A node id is the key's shard and its append position
+in that shard; a rolled-back `CREATE` keeps its position in the process that ran it,
+while recovery appends only committed keys. In one probe, 62 of 200 committed nodes
+came back with a different `id()`, and phase 8 reported a non-zero count in 5 of 10
+runs. This is a separate defect, not fixed here.
+
+### Running
+
+```
+go test -race -run '^TestIdentity$' ./examples/37_mvcc_write_contention/
+go run ./examples/37_mvcc_write_contention -ladder-levels "" -durability-levels ""
+```
+
+The binary runs phase 8 unless `-skip-identity` is set.
 
 ## Status
 
