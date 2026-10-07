@@ -1,6 +1,6 @@
 # Design: WAL v2 — one on-disk format revision for #3021, #3020, #2195 and #3014
 
-Status: **approved, not yet implemented.**
+Status: **approved; step 1 implemented** (steps 2–4 not yet implemented).
 
 This document records a design, not the current behaviour of the code. Each implementation
 step (§9) updates it to match what was built.
@@ -546,7 +546,9 @@ No global lock is added. Contiguity and the mint inside the run are unchanged
 
 ## 9. Implementation steps
 
-Common to every step: all persistence suites run on the RAM drive; race-sensitive tests use
+Common to every step: all persistence suites create and persist their graphs (store directories,
+WAL segments, snapshots, control files) on the RAM drive — and nothing else: binaries, build
+temporaries (`GOTMPDIR`), logs, profiles and benchmark output stay on disk; race-sensitive tests use
 `internal/synclatency.ForTest` (from `8cb0aafb`); each step ends with its targeted validation;
 `make ci` runs at sprint close.
 
@@ -570,6 +572,57 @@ Tests:
 - v1/v2/v3 fixtures load (`store/snapshot/testdata/v1`).
 - Concurrent capture with interning and aborts at 1, 8, 64, 256, 1024 goroutines under
   `-race`.
+
+#### Step 1 — as implemented
+
+The finding test (`checkpoint.TestCheckpoint_KeyInternedAtInstantRevivedByAddEdgeOnly`)
+failed 3 of 3 runs before any change: recovery held K dead with a live edge onto it
+(`live alive=true edge=true, recovered alive=false edge=true`). Risk 7 was a real defect.
+The test passes with step 1 and stays as its regression guard.
+
+Built as designed:
+
+- `graph/mapper.go`: per-shard `holes` bitset, `holeCount` and `next`; intern assigns
+  `idx = next` and fills holes below it; `Resolve` false and `Walk` skips on holes;
+  `Len` excludes holes; `MaxNodeID` stays `len(reverse)`-based.
+- `graph/mapper_restore.go`: `LoadFrom(entries, next *[256]uint64)` accepts gaps, keeps
+  the shard-hash and duplicate-key checks, adds a duplicate-intra check and
+  `idx ≥ next[s]` → `ErrMapperEntryCorrupted`, and materialises `reverse` to max idx + 1.
+- `graph/lpg`: `NodeBornAsOf` under the life-shard lock; the tombstone listing filters on
+  it. Risk 6 was real: `finishLifeWithdrawal` marked unborn after the record was deleted
+  and the lock released. `withdrawLocked` now marks unborn under the lock before deleting
+  the record; `TestNodeBornAsOf_AbortedCreationNeverReadsBorn` reads 647–799 wrong answers
+  per run (5 of 5 runs) with the old order and none with the new one.
+- `store/snapshot`: capture membership is `Covers ∧ NodeBornAsOf`; `nodeids.bin`
+  (`nodeids.go`); `ManifestVersion` 4 with optional `store_id`, `wal_redo_pos`,
+  `wal_format`, written empty and zero; loading accepts versions 1–4.
+- `store/recovery`: the mapper is restored with `MapperReadback.Next`, the marks read from
+  `nodeids.bin`.
+
+Deviations, with reasons:
+
+- **`Watermark` records the high-water mark `max(next, len(reverse))`, not
+  `len(reverse)`.** After a restore with `next > len(reverse)`, `len(reverse)` is below the
+  restored marks, so a following checkpoint would have written lower marks to
+  `nodeids.bin` and allowed restored-but-unborn ids to be reissued. `Covers` is true for a
+  hole either way.
+- **`NodeBornAsOf` refines "birth record visible to `at`".** A birth record `at` cannot see
+  answers born exactly when `lifeStamp.unbornBefore` is false: a revival, after `at`, of a
+  node removed earlier is dead at `at`, not a hole.
+- **`ErrCaptureNotQuiesced` is removed** (§3.2 "retired"), with example 37's
+  `capture_not_refused` gate and `checkpoint_refused_not_quiesced` telemetry, which could
+  no longer fail; `D09 checkpoint_ran` still gates the single checkpoint attempt.
+- **`LoadFrom(entries, nil)`** is the load of a snapshot without `nodeids.bin` (manifest
+  versions 1–3): the marks are derived from the highest restored index per shard.
+- **An image with no mapper pair** (an empty graph, or every assigned id a hole) still
+  takes the WAL-replay path and does not restore its `nodeids.bin` marks, so recovery's
+  self-sufficiency classification is unchanged (`cypher.TestIndexHydration_MapperlessSnapshotNeverHydrates`).
+  Nothing on disk names a hole's id until step 3's annex, which must revisit this;
+  `snapshot.ApplyMapperToGraph` already restores marks without pairs for any key type.
+- **`nodeids.bin` and manifest version 4 come only with `mapper.bin`.** A capture that
+  emits no mapper (a non-string key type without a mapper codec) still writes version 2.
+- **The present-time capture (`at == nil`, offline writer under exclusion) is unchanged:**
+  it carries every interned id.
 
 ### Step 2 — WAL v2 container (#3020, #2195, #3014)
 

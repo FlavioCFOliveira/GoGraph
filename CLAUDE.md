@@ -426,18 +426,37 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
   the MVCC paths of `graph/lpg`, and the MVCC examples such as
   `examples/37_mvcc_write_contention`, 17 and 25), and any other suite that writes
   temporary files intensively or runs for a very long time on disk.
+  - **What the RAM drive holds — and what it never holds.** Both rules are absolute.
+    - **It holds the graph's data files only:** the directories and files that
+      `store.Open`, `graph/lpg` and the persistence layer create for the graph —
+      store directories, WAL files and segments, snapshots, checkpoints, control
+      and marker files, and the `t.TempDir()` / `os.MkdirTemp` directories a test
+      creates for them. The graph is created and persisted there, so writes,
+      reads and traversals run through the real persistence path at RAM speed; the
+      drive stands in for a real disk and the graph behaves exactly as on one.
+    - **It never holds anything else:** no executables, no test binaries
+      (`go test -c` output), no build output or Go build temporaries, no logs, no
+      profiles or traces, no benchmark or `benchstat` output, no scratch scripts.
+      Those go to disk (the session scratchpad or the build cache).
   - It is not used for CPU-bound suites (parser, planner, algorithms): they gain
     nothing, and the drive takes RAM the tests need.
+  - Races that live in an fsync window are hidden by the RAM drive's microsecond
+    fsync. Concurrency tests therefore inject a seeded fsync latency
+    (`internal/synclatency.ForTest`, `store.Options.SyncLatency`); it is switched
+    off (`GOGRAPH_FSYNC_LATENCY=off`) for CPU and allocation benchmarks.
   - Mechanics on macOS. **Reuse first:** if a RAM volume is already mounted
     (`mount | grep -i ram`, or `diskutil info` showing `Virtual: Yes`), work in a
     fresh subdirectory on it; create a drive only when none exists. To create one:
     `dev=$(hdiutil attach -nomount ram://<sectors>)`, then
     `diskutil erasevolume APFS <Name> $dev`, which formats it and mounts it at
     `/Volumes/<Name>`. `newfs_apfs` followed by `mount -t apfs` fails (exit 66) and
-    leaves images that cannot be detached until a reboot. Point `TMPDIR` and
-    `GOTMPDIR` at the subdirectory so `t.TempDir()` and build temporaries land
-    there; `GOCACHE` stays on disk. At the end, delete the subdirectory, and eject
-    the drive (`diskutil eject $dev`) only if this run created it.
+    leaves images that cannot be detached until a reboot. Point **`TMPDIR`** at the
+    subdirectory so the graph directories that `t.TempDir()` and `os.MkdirTemp`
+    create land there. Point **`GOTMPDIR`** at a directory **on disk** — never at
+    the RAM drive — because Go builds and test binaries go there; `GOCACHE` stays on
+    disk; write `go test -c -o` binaries, logs, profiles and benchmark files to
+    disk. At the end, delete the subdirectory, and eject the drive
+    (`diskutil eject $dev`) only if this run created it.
   - Tests whose workload is sized by elapsed time grow with the medium's speed and
     can exhaust the drive or time out. They are tracked and fixed as defects, not
     run on disk forever.
