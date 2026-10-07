@@ -191,6 +191,12 @@ type Writer struct {
 	// nil after a constructor runs.
 	dirFsync func(string) error
 
+	// syncLatency, when non-nil, delays every commit-path data fsync (and, via
+	// the dirFsync wrapper [OpenWithSyncLatency] installs, every directory
+	// fsync). Testing only; set once at construction and never mutated, so it
+	// is read without a lock. See [SyncLatency].
+	syncLatency *SyncLatency
+
 	// path is the filesystem path of the WAL file, recorded by [Open] so
 	// [Writer.TruncatePrefix] can perform its crash-safe atomic-rename
 	// (write the surviving suffix to a sibling temp file, then rename it
@@ -628,7 +634,7 @@ func (w *Writer) SyncCtx(ctx context.Context) error {
 	// elsewhere (see dataSync). Like the group-commit leader path, this only
 	// needs the appended data and the grown file size durable, not the
 	// inode timestamps.
-	if err := dataSync(w.f); err != nil {
+	if err := w.dataSyncFile(); err != nil {
 		w.poison(err)
 		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		// The wrapped CLASS, not the bare cause: poison has just stored it into
@@ -873,7 +879,7 @@ func (w *Writer) leadGroupSyncLocked() error {
 	// fsync elsewhere; see dataSync. This is the per-commit WAL data
 	// durability point: the appended frames and the grown file size are made
 	// durable, which is all a commit requires.
-	syncErr := dataSync(w.f)
+	syncErr := w.dataSyncFile()
 	w.mu.Lock()
 
 	w.leaderActive = false

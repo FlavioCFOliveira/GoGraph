@@ -48,6 +48,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/store"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // ladderConfig is the shape of one ladder run.
@@ -71,6 +72,11 @@ type ladderConfig struct {
 	// arm's target defect (README.md, "Sizes"); the soak layer and an explicit
 	// -ladder-ops leave it empty.
 	rowOps map[string]int
+	// syncLatency, when non-nil, delays every WAL fsync of the arms' durable
+	// stores (store.Options.SyncLatency), so a run on a RAM drive keeps a real
+	// device's commit window (rmp #3022). The tests set it through
+	// internal/synclatency; the binary leaves it nil.
+	syncLatency *wal.SyncLatency
 }
 
 // minOpsPerWorker is the floor of operations each goroutine performs, so the top
@@ -267,15 +273,17 @@ type ladderEngine struct {
 	eng *cypher.Engine
 }
 
-// newLadderEngine opens a durable store for one arm. The row, level and arm name
-// the call site only (see storeDirFor).
-func newLadderEngine(row string, level int, arm string) (*ladderEngine, error) {
+// newLadderEngine opens a durable store for one arm, with lat as its fsync
+// latency (nil for none). The row, level and arm name the call site only (see
+// storeDirFor).
+func newLadderEngine(row string, level int, arm string, lat *wal.SyncLatency) (*ladderEngine, error) {
 	dir, err := storeDirFor(row, level, arm)
 	if err != nil {
 		return nil, err
 	}
 	o, err := store.Open[string, float64](dir, store.Options[string, float64]{
 		Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec(),
+		SyncLatency: lat,
 	})
 	if err != nil {
 		_ = os.RemoveAll(dir)

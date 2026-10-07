@@ -37,6 +37,7 @@ import (
 	indexhash "github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -55,7 +56,7 @@ func newSnapReadEngine(t *testing.T, walBacked bool, seed func(g *lpg.Graph[stri
 	seed(g)
 	var eng *Engine
 	if walBacked {
-		wr, err := wal.Open(filepath.Join(t.TempDir(), "wal"))
+		wr, err := wal.OpenWithSyncLatency(filepath.Join(t.TempDir(), "wal"), synclatency.ForTest(t))
 		if err != nil {
 			t.Fatal(err)
 		}

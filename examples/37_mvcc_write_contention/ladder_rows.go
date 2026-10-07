@@ -245,7 +245,7 @@ func (h *hist) skew(ctx context.Context, sh *anomaly.Shard, gid int) error {
 }
 
 func rowHistory(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
-	m, err := newLadderEngine("L01", level, "store")
+	m, err := newLadderEngine("L01", level, "store", lc.syncLatency)
 	if err != nil {
 		return err
 	}
@@ -354,7 +354,7 @@ func rowHistory(ctx context.Context, lc *ladderConfig, out *ladderOut, level int
 func rowHotCounter(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	for _, session := range []bool{false, true} {
 		row := "L04." + armName(session)
-		m, err := newLadderEngine("L04", level, armName(session))
+		m, err := newLadderEngine("L04", level, armName(session), lc.syncLatency)
 		if err != nil {
 			return err
 		}
@@ -411,7 +411,7 @@ func rowHotCounter(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 
 func rowLargeTxn(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	const hot = 16
-	m, err := newLadderEngine("L05", level, "store")
+	m, err := newLadderEngine("L05", level, "store", lc.syncLatency)
 	if err != nil {
 		return err
 	}
@@ -546,7 +546,7 @@ func seekScanAll(ctx context.Context, r cyRunner, q string, values []string) (in
 
 func rowIndexChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	items, uNodes := 64+level, 32+level/4
-	m, err := newLadderEngine("L06", level, "store")
+	m, err := newLadderEngine("L06", level, "store", lc.syncLatency)
 	if err != nil {
 		return err
 	}
@@ -823,9 +823,9 @@ func btreeContentMismatches(ctx context.Context, m *ladderEngine) (int, []string
 // ---------------------------------------------------------------------------
 // L08 — long-reader retention and release.
 
-func rowLongReader(ctx context.Context, _ *ladderConfig, out *ladderOut, level int) error {
+func rowLongReader(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	const nodes, residues = 256, 8
-	m, err := newLadderEngine("L08", level, "store")
+	m, err := newLadderEngine("L08", level, "store", lc.syncLatency)
 	if err != nil {
 		return err
 	}
@@ -910,9 +910,9 @@ func rowLongReader(ctx context.Context, _ *ladderConfig, out *ladderOut, level i
 // ---------------------------------------------------------------------------
 // L09 — the horizon capacity cliff (soak).
 
-func rowHorizonCliff(ctx context.Context, _ *ladderConfig, out *ladderOut, level int) error {
+func rowHorizonCliff(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	const nodes = 64
-	m, err := newLadderEngine("L09", level, "store")
+	m, err := newLadderEngine("L09", level, "store", lc.syncLatency)
 	if err != nil {
 		return err
 	}
@@ -1042,7 +1042,7 @@ func checkDisjoint(ctx context.Context, lc *ladderConfig, out *ladderOut, row st
 func rowDisjoint(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	for _, session := range []bool{false, true} {
 		row := "L11." + armName(session)
-		m, err := newLadderEngine("L11", level, armName(session))
+		m, err := newLadderEngine("L11", level, armName(session), lc.syncLatency)
 		if err != nil {
 			return err
 		}
@@ -1092,6 +1092,7 @@ func walArm(ctx context.Context, lc *ladderConfig, out *ladderOut, level int, se
 	defer func() { _ = os.RemoveAll(dir) }()
 	o, err := store.Open[string, float64](dir, store.Options[string, float64]{
 		Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec(),
+		SyncLatency: lc.syncLatency,
 	})
 	if err != nil {
 		return err
@@ -1205,7 +1206,7 @@ func rowMergeStorm(ctx context.Context, lc *ladderConfig, out *ladderOut, level 
 		// L14: autocommit MERGE, no constraint: no failure, duplicates counted.
 		{"L14", false, false, true},
 	} {
-		m, err := newLadderEngine(arm.row, level, "store")
+		m, err := newLadderEngine(arm.row, level, "store", lc.syncLatency)
 		if err != nil {
 			return err
 		}
@@ -1325,7 +1326,7 @@ func countDangling(g *lpg.Graph[string, float64]) (arcs, dead int) {
 
 func rowHubChurn(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	const hubs, xs = 4, 64
-	m, err := newLadderEngine("L15", level, "store")
+	m, err := newLadderEngine("L15", level, "store", lc.syncLatency)
 	if err != nil {
 		return err
 	}
@@ -1635,7 +1636,7 @@ func rowParallelCount(ctx context.Context, lc *ladderConfig, out *ladderOut, lev
 	if lc.soak {
 		perHolder = 150000 / holders
 	}
-	m, err := newLadderEngine("L17", level, "store")
+	m, err := newLadderEngine("L17", level, "store", lc.syncLatency)
 	if err != nil {
 		return err
 	}
@@ -1718,7 +1719,7 @@ func rowParallelCount(ctx context.Context, lc *ladderConfig, out *ladderOut, lev
 
 func rowAbortHeavy(ctx context.Context, lc *ladderConfig, out *ladderOut, level int) error {
 	const hubs, ts = 8, 64
-	m, err := newLadderEngine("L18", level, "store")
+	m, err := newLadderEngine("L18", level, "store", lc.syncLatency)
 	if err != nil {
 		return err
 	}
@@ -1802,7 +1803,7 @@ func rowDDLCycles(ctx context.Context, lc *ladderConfig, out *ladderOut, level i
 	if lc.soak {
 		cycles = 8
 	}
-	m, err := newLadderEngine("L19", level, "store")
+	m, err := newLadderEngine("L19", level, "store", lc.syncLatency)
 	if err != nil {
 		return err
 	}

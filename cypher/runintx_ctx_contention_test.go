@@ -27,6 +27,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -37,7 +38,7 @@ import (
 func newWALStoreEngineWithStore(t *testing.T) (*cypher.Engine, *txn.Store[string, float64]) {
 	t.Helper()
 	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
+	w, err := wal.OpenWithSyncLatency(filepath.Join(dir, "wal"), synclatency.ForTest(t))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}

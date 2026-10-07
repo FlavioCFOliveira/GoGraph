@@ -9,6 +9,8 @@ import (
 	"bytes"
 	"context"
 	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 )
 
 // samplerKeys are the frontier and growth counters every sampled arm emits.
@@ -82,7 +84,11 @@ func runLadder(t *testing.T, lc *ladderConfig) {
 }
 
 // TestLadder is the short layer: 1, 8 and 64 goroutines.
+//
+// The durable stores run with injected fsync latency (internal/synclatency,
+// rmp #3022), so the commit window a RAM drive shrinks stays open.
 func TestLadder(t *testing.T) {
 	lc := defaultLadderConfig()
+	lc.syncLatency = synclatency.ForTest(t)
 	runLadder(t, &lc)
 }

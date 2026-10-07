@@ -11,6 +11,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 )
 
 // durabilityKeys lists every check a complete in-process run must have printed.
@@ -56,8 +58,12 @@ func runDurability(t *testing.T, dc *durabilityConfig, keys []string) {
 }
 
 // TestDurability is the short layer: every in-process arm at 8 and 64 writers.
+//
+// The live stores run with injected fsync latency (internal/synclatency,
+// rmp #3022), so the commit window a RAM drive shrinks stays open.
 func TestDurability(t *testing.T) {
 	dc := defaultDurabilityConfig()
+	dc.syncLatency = synclatency.ForTest(t)
 	runDurability(t, &dc, durabilityKeys)
 }
 

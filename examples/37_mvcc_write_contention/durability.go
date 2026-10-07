@@ -86,6 +86,11 @@ type durabilityConfig struct {
 	dropLastAcked bool
 	// seed fixes the random choices of the writers.
 	seed uint64
+	// syncLatency, when non-nil, delays every WAL fsync of the live stores under
+	// load (store.Options.SyncLatency), so a run on a RAM drive keeps a real
+	// device's commit window (rmp #3022). The tests set it through
+	// internal/synclatency; the binary leaves it nil.
+	syncLatency *wal.SyncLatency
 	// checkpointTxns, when positive, replaces totalTxns for the checkpoint arm
 	// (D09, D16). The default is the smallest total measured to still fail with
 	// the fixes of rmp #2990 and #2991 reverted (README.md, "Sizes (rmp #2993)");
@@ -1030,13 +1035,14 @@ type liveStore struct {
 	eng *cypher.Engine
 }
 
-func openLive(ctx context.Context, row string, level int) (*liveStore, error) {
+func openLive(ctx context.Context, row string, level int, lat *wal.SyncLatency) (*liveStore, error) {
 	dir, err := storeDirFor(row, level, "live")
 	if err != nil {
 		return nil, err
 	}
 	o, err := store.Open[string, float64](dir, store.Options[string, float64]{
 		Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec(),
+		SyncLatency: lat,
 	})
 	if err != nil {
 		_ = os.RemoveAll(dir)
@@ -1074,7 +1080,7 @@ func perWriter(dc *durabilityConfig, level int) int { return max(minOpsPerWorker
 // in-process crash image taken while the writers, the large-value writer, the
 // open holder and the DDL cycler run.
 func armAbandon(ctx context.Context, dc *durabilityConfig, out *ladderOut, level int) error {
-	ls, err := openLive(ctx, "D01", level)
+	ls, err := openLive(ctx, "D01", level, dc.syncLatency)
 	if err != nil {
 		return err
 	}
@@ -1380,7 +1386,7 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 		sized.totalTxns = dc.checkpointTxns
 		dc = &sized
 	}
-	ls, err := openLive(ctx, "D09", level)
+	ls, err := openLive(ctx, "D09", level, dc.syncLatency)
 	if err != nil {
 		return err
 	}

@@ -729,7 +729,12 @@ self-conflict streak gate. The binary runs the phase after phase 5 with
 
 Every arm runs on the durable store (`store.Open`: WAL, durable commit, recovery) in its
 own directory under `TMPDIR`, removed when the arm ends (rmp #2993). Pointing `TMPDIR` at a
-RAM drive changes only the medium. The short layer and the binary's default run 256
+RAM drive changes only the medium. Because a RAM drive shrinks an fsync to microseconds,
+and with it the window between a commit's timestamp and its visibility, `TestLadder` and
+`TestLadderSoak` open every arm's store with an injected fsync latency drawn uniformly
+from 1-5 ms (`store.Options.SyncLatency`, set through `internal/synclatency`; rmp #3022).
+`GOGRAPH_FSYNC_LATENCY=off` disables it, and `GOGRAPH_FSYNC_LATENCY_SEED=<n>` replays the
+seed a failing test logs. The binary runs without it. The short layer and the binary's default run 256
 operations per arm and level, except L13 (32) and L15 (64); see "Sizes" below.
 `-ladder-ops` or `-ladder-soak` applies one total to every arm.
 
@@ -978,7 +983,10 @@ go run ./examples/37_mvcc_write_contention -ladder-levels "" -durability-levels 
 ```
 
 Every image and every derived copy is created under `TMPDIR` and removed at the end of
-its arm.
+its arm. `TestDurability` opens the live stores of the in-process arms (D01, D09) with the
+same injected fsync latency as the ladder (1-5 ms, `GOGRAPH_FSYNC_LATENCY=off` to disable,
+`GOGRAPH_FSYNC_LATENCY_SEED` to replay; rmp #3022); the binary and the kill -9 child run
+without it.
 
 ## Phase 8 — node identity across processes (GG07, rmp #3015)
 

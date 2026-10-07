@@ -40,6 +40,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
@@ -121,7 +122,7 @@ func TestCheckpoint_SnapshotUnderBarrier_NoPartialTransaction(t *testing.T) {
 
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal")
-	w, err := wal.Open(walPath)
+	w, err := wal.OpenWithSyncLatency(walPath, synclatency.ForTest(t))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}

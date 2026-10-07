@@ -33,6 +33,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -71,7 +72,7 @@ func runWithdrawnGateCase(t *testing.T, wiring string, writer ddlGateEntry) {
 	if wiring == "memory" {
 		eng = cypher.NewEngine(g)
 	} else {
-		w, err := wal.Open(filepath.Join(t.TempDir(), "wal"))
+		w, err := wal.OpenWithSyncLatency(filepath.Join(t.TempDir(), "wal"), synclatency.ForTest(t))
 		if err != nil {
 			t.Fatalf("wal.Open: %v", err)
 		}
