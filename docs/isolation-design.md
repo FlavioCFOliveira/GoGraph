@@ -409,22 +409,59 @@ in the pre-existing bug the audit found.
   become immutable per-label roaring snapshots (roaring clones only the touched
   containers) and be published as part of the same `Snapshot` flip, so a reader
   can never see "edge in adjacency but not yet in the label bitmap".
-- **`index.Manager` (hash exact-match, B-tree range).** Verified gap:
-  `index.Manager.Apply`/`ApplyBatch` exist but are **never called from any LPG
-  live write path** — these indexes are not maintained by live transactions at
-  all today. F3.4 wires live maintenance AND makes each registered index fold
-  its new version into the same atomic `Snapshot` flip. Subscribers without
-  `Serializer` keep the rebuild-on-restart contract.
+- **`index.Manager` (hash exact-match, B-tree range).** Live transactions
+  maintain these indexes. (Corrected 2026-10-07 at `cd97fdf5`, rmp #2610. This
+  bullet used to state that `index.Manager.Apply`/`ApplyBatch` were never called
+  from any live write path, which was false; a 2026-09-08 note at `efd32fb9`
+  corrected the claim but named `ApplyBatch` as the commit-time call, which it no
+  longer is.) The path, at `cd97fdf5`:
+  - Every write operator enqueues an `index.Change` into the transaction's
+    `exec.IndexBuffer` (`IndexBuffer.Enqueue`, `cypher/exec/index_writeback.go:30`).
+    A rollback takes `IndexBuffer.Rollback` (`:68`) and applies nothing.
+  - At commit, `armIndexCommit` (`cypher/index_commit_apply.go:313`), called from
+    `ExplicitTx.Commit` (`cypher/exectx.go:944`) and `Result.commitUnderBarrier`
+    (`cypher/api.go:7010`), drops a batch no index concerns
+    (`index.Manager.Concerns`, `graph/index/manager.go:606`) and otherwise installs
+    the transaction as its `lpg.CommitApplier`.
+  - At publication, lpg calls `ApplyCommitted` (`graph/lpg/mvcc_write.go:1092`),
+    which delivers the batch through `applyCommitted`
+    (`cypher/index_commit_apply.go:172`), `IndexBuffer.CommitInState`
+    (`cypher/exec/index_writeback.go:60`) and `index.Manager.ApplyBatchInState`
+    (`graph/index/manager.go:651`), before the commit record is published.
+  - `index.Manager.ApplyBatch` (`graph/index/manager.go:575`) is reached only
+    through `IndexBuffer.Commit` (`cypher/exec/index_writeback.go:48`), from two
+    fallbacks: `armIndexCommit` for a transaction without a versioned write
+    (`cypher/index_commit_apply.go:324`), and `Result.closeLocked` for a result not
+    finalised inside the write bracket (`cypher/api.go:7209`). Measured: with
+    `ApplyBatch` replaced by a panic, autocommit and explicit commits on a
+    persisted store maintained every bound index listed below and nothing
+    panicked; the same mutant panics in the `graph/index` tests.
+  - The index kinds that receive live maintenance are the BOUND ones: the hash
+    index of `CREATE INDEX` (`newBoundNodeHashIndex`, `cypher/index_binding.go:195`),
+    the string B-tree (`newBoundNodeBTreeIndex`, `:817`), the numeric companion of
+    either (`newBoundNodeBTreeIndexNumeric`, `:721`), and the hash index backing a
+    UNIQUE constraint (`cypher/api.go:4423`). Recovery re-registers bound
+    instances of the same kinds (`cypher/index_binding.go:1126`, `:1147`, `:1205`;
+    `cypher/api.go:2044`). Measured on a persisted store: each held the values
+    committed through autocommit and through an explicit transaction, and after a
+    reopen each held a value committed after recovery.
+  - An UNBOUND `hash.New`/`btree.New` receives no maintenance: its `Concerns` is
+    false and its `Apply`/`ApplyInState` are no-ops (`graph/index/hash/index.go:2058`,
+    `:2116`; `graph/index/btree/index.go:595`, `graph/index/btree/bound.go:211`).
+    Besides a caller's own Go-API registration, the module registers one only
+    when binding fails: in recovery (`cypher/index_binding.go:1129`, `:1150`), and
+    as the UNIQUE backing fallback (`cypher/api.go:2042`;
+    `cypher/exec/create_constraint.go:121-125`). Measured: 0 entries after the
+    commits above.
+  - A subscriber that does not implement `index.Serializer` is omitted from a
+    snapshot and rebuilt on restart (`store/snapshot/capture.go:567-596`).
 
-  > **SUPERSEDED (F3.4 delivered; verified 2026-09-08 at `efd32fb9`).** The gap above
-  > describes the state F3.4 was written against, and the paragraph contradicted the
-  > F3.4 entry in the staging list further down this document. Live maintenance IS
-  > wired. Every write operator enqueues an `index.Change` into a per-transaction
-  > `exec.IndexBuffer` (`cypher/exec/index_writeback.go`), and the buffer is drained
-  > through `index.Manager.ApplyBatch` inside the write bracket at three production
-  > sites: `cypher/exectx.go:808` (`ExplicitTx.Commit`) and `cypher/api.go:6732` and
-  > `:6911` (`Result.commitUnderBarrier` and `Result.closeLocked`, the autocommit and
-  > `RunInTx` paths). A rollback takes `IndexBuffer.Rollback` and applies nothing.
+  **F3.4 against the corrected premise.** The live-maintenance wiring F3.4
+  planned has no remaining scope. Its second half, folding each index into the
+  same atomic flip, is met by a different mechanism: the index is written inside
+  the publishing bracket before the commit record publishes, and a reader either
+  proves its snapshot is described (`index.Manager.DescribesSnapshot`) or answers
+  from the snapshot; see "Index reads describe the reader's snapshot" below.
 
 **Invariant:** every read-servable structure is reachable *only* through the
 `Snapshot` root. Any structure left directly mutable-and-read is a hole through
