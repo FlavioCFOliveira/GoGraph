@@ -189,9 +189,29 @@ func tryBuildIndexNestedLoopJoin(
 	// than needing a scan to discover that, so the fallback is confined to the one
 	// case that genuinely needs it: an integer too large for float64 to hold
 	// exactly (see exec.exactFloat64Key).
+	//
+	// THE COUNT MUST DESCRIBE THE READER'S SNAPSHOT (rmp #3013). The companion is
+	// written at commit time and read at the present, while innerRows is the
+	// snapshot's. A commit the snapshot cannot see — a peer's CREATE of a numerically
+	// keyed node after an explicit read transaction began — adds an entry the
+	// snapshot has no node for, so entries >= innerRows held while a node the
+	// snapshot DOES hold carried a non-numeric value, and the non-numeric-key
+	// shortcut then answered "no rows" for it: 0 rows where the scan returns 1.
+	// So the proof every index access path asks after its read ([seekSnapshot]) is
+	// asked here too, AFTER the count, and only a count it vouches for licenses the
+	// shortcut ([exec.IndexNestedLoopJoin.WithProvenNumericCoverage]). When it holds,
+	// the index — and therefore the count — describes the snapshot, and coverage is
+	// a fixed property of the snapshot's nodes for the whole execution. When it
+	// fails the join is still built, as rmp #2937 requires, but WITHOUT the
+	// shortcut: a non-numeric key then takes the operator's scan fallback, which
+	// reads the snapshot — exactly what a numeric key already does in this state,
+	// because its per-row proof fails for the same reason. A build with no proof (no
+	// snapshot-bound view) keeps the unguarded behaviour, as every other access
+	// path does.
 	if !numericIndexCoversScan(numIdx, innerRows) {
 		return nil, false, nil
 	}
+	coverageProven := coverageDescribesSnapshot(bopts.idxSnap)
 	outerRows, ok := estimateOuterRows(apply.Outer, labelSrc, params)
 	if !ok {
 		// No estimate means no basis to prefer this plan over the hash join that
@@ -256,10 +276,10 @@ func tryBuildIndexNestedLoopJoin(
 		return evalRow(bopts, innerKeyExpr, rc, params, reg)
 	}
 
-	// Coverage was proved above, so tell the operator: a non-numeric key then needs
-	// no scan to establish that it matches nothing.
+	// When coverage was proved at the reader's snapshot, tell the operator: a
+	// non-numeric key then needs no scan to establish that it matches nothing.
 	inlj := exec.NewIndexNestedLoopJoin(outerOp, innerOp, pointIdx, outerKeyFn, innerKeyFn).
-		WithProvenNumericCoverage(true)
+		WithProvenNumericCoverage(coverageProven)
 	// Every seek is asked, after it, whether the index described the reader's
 	// snapshot; a row whose seek cannot be vouched for takes the operator's own
 	// fallback, which drives the inner arm at that snapshot (rmp #2937).
@@ -311,6 +331,13 @@ func numericIndexCoversScan(numIdx boundNumericRange, scanRows int) bool {
 		return false
 	}
 	return entries >= uint64(scanRows)
+}
+
+// coverageDescribesSnapshot reports whether a coverage count just read from a
+// property index may stand for the reader's snapshot: true for a build with no
+// proof to ask, otherwise the proof's verdict, asked after the read (rmp #3013).
+func coverageDescribesSnapshot(snap seekSnapshot) bool {
+	return !snap.guarded() || snap.proof.DescribesSnapshot(snap.startTS)
 }
 
 // indexSeekLevelsPerHashRow is how many btree levels cost what ONE hash-join row
