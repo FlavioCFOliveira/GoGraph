@@ -61,7 +61,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
-	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -1454,9 +1453,9 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 		close(writersDone)
 	}()
 	waitAcked(log, dc.totalTxns/3, writersDone)
-	// ONE attempt, no retry (rmp #2991). A capture refused with
-	// snapshot.ErrCaptureNotQuiesced while writers run explicit transactions was a
-	// defect, not a mode: the checkpoint must succeed on its first attempt.
+	// ONE attempt, no retry (rmp #2991): a capture refusal under explicit-transaction
+	// load was a defect, not a mode, and checkpoint_ran gates the first attempt. The
+	// refusal itself (snapshot.ErrCaptureNotQuiesced) was retired by WAL v2 step 1.
 	var running bool
 	select {
 	case <-writersDone:
@@ -1465,10 +1464,6 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 		running = true
 	}
 	cpErr := cp.RunCheckpoint()
-	refused := 0
-	if errors.Is(cpErr, snapshot.ErrCaptureNotQuiesced) {
-		refused = 1
-	}
 	<-writersDone
 	if wErr != nil {
 		return wErr
@@ -1478,10 +1473,7 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 	}
 	reportTx(out, "D09", level, "checkpoint", &ws.st, 0)
 	out.tele("D09", level, "writers_running_at_checkpoint", running, "checkpoint_error", fmt.Sprintf("%q", errText(cpErr)),
-		"checkpoint_refused_not_quiesced", refused,
 		"serialiser_calls", calls.Load(), "wal_truncated_bytes", cp.Stats().WALTruncBytes)
-	out.check("D09", level, "capture_not_refused", refused == 0,
-		"checkpoint_refused_not_quiesced=%d: the capture refused itself under load: %v", refused, cpErr)
 	out.check("D09", level, "checkpoint_ran", cpErr == nil && len(imgs) == len(phases),
 		"checkpoint error %v, %d of %d phase images taken", cpErr, len(imgs), len(phases))
 	if len(imgs) != len(phases) {

@@ -31,44 +31,6 @@ type component struct {
 	present bool
 }
 
-// ErrCaptureNotQuiesced is returned by [CaptureGraph] when the instant it was given
-// is a plain [lpg.Graph.BeginRead] snapshot and the mapper filtered at that instant
-// would have an intra-index hole, so the image it would produce cannot be loaded back.
-//
-// # The precondition
-//
-// A NodeID is packed as (intra << shardBits) | shard and intra is assigned when the
-// key is INTERNED, not when the transaction commits. [graph.Mapper.LoadFrom] — the
-// function recovery seeds the interning table with — requires the intra indexes it
-// receives to form the contiguous sequence 0..N-1 within each shard, and rejects the
-// whole snapshot otherwise.
-//
-// A capture at an instant drops the ids [lpg.Graph.NodeInternedAsOf] reports as not
-// interned at that instant. That is safe only while the dropped ids form a per-shard
-// SUFFIX. With a plain snapshot the answer is inferred from life records, and two
-// cases break the suffix: an id interned by a transaction still open at the instant
-// (it sits below ids interned and committed later), and an id interned after the
-// instant by a transaction that then aborted (its withdrawn birth record makes it
-// read as interned long ago, rmp #2991). Dropping ids above a hole would lose
-// committed nodes whose WAL prefix the checkpointer is about to truncate, so the
-// capture refuses: a checkpoint that returns an error has published nothing and
-// truncated nothing.
-//
-// # How the checkpointer avoids it
-//
-// It opens the instant with [lpg.Graph.BeginCaptureRead], inside the commit
-// serialiser's drain. That snapshot carries the mapper watermark read just after the
-// instant, and membership is the per-shard prefix the watermark names, so this error
-// cannot occur for it. The drain does not stop every interning — an lpg write
-// transaction or an eager engine write that is not a registered store writer can hold
-// an interned, uncommitted key at the instant. The watermark covers that id, the
-// capture writes it as a tombstone with its key (it is not alive at the instant), and
-// because its transaction can only commit after the instant, its WAL frames follow
-// the checkpoint's watermark and recovery's replay revives the id. The drain is what
-// makes the durable-offset watermark and the instant describe one transaction
-// boundary.
-var ErrCaptureNotQuiesced = errors.New("snapshot: capture instant taken while a write transaction was open")
-
 // capturedIndex is one serialisable secondary index's payload, captured with
 // the same by-value discipline as [component].
 type capturedIndex struct {
@@ -117,8 +79,7 @@ type capturedIndex struct {
 // Now by VERSIONING: the caller opens an MVCC snapshot and passes it as `at`, every
 // component resolves through it, and writers commit throughout. Exclusion is still
 // available for callers that want the present (`at == nil`) and is what the offline
-// one-shot writer uses. See [CaptureGraph] for the obligations each mode carries and
-// [ErrCaptureNotQuiesced] for the one precondition the versioned mode keeps.
+// one-shot writer uses. See [CaptureGraph] for the obligations each mode carries.
 //
 // Concurrency: a Capture is an immutable value once returned; it shares no
 // state with the graph it was taken from and is safe to publish from another
@@ -138,11 +99,14 @@ type Capture[W any] struct {
 	// order is how many nodes the image carries — the count admitted by the same
 	// instant filter the mapper used. orderKnown distinguishes "not computed" (the
 	// present-time capture, which falls back to the CSR) from a genuine zero.
-	order       uint64
-	orderKnown  bool
-	labels      component
-	properties  component
-	mapper      component
+	order      uint64
+	orderKnown bool
+	labels     component
+	properties component
+	mapper     component
+	// nodeIDs is nodeids.bin: the mapper's per-shard high-water marks, emitted
+	// with mapper.bin (WAL v2 step 1).
+	nodeIDs     component
 	tombstones  component
 	edgeHandles component
 	indexes     []capturedIndex
@@ -263,9 +227,11 @@ func (c *Capture[W]) Size() uint64 { return c.csr.Size() }
 // this type exists to prevent (rmp #2269).
 //
 // With at != nil the caller does NOT need to exclude writers for the capture — that
-// is the whole point — but it MUST have opened at while no write transaction was
-// open, and must have built cs at the same instant. See [ErrCaptureNotQuiesced] for
-// what that precondition is and why it cannot be dropped.
+// is the whole point — and it must have built cs at the same instant. Transactions
+// open at the instant are allowed: the image carries only ids ever born as of at,
+// and every other assigned id is a hole (WAL v2 step 1). A snapshot opened with
+// [lpg.Graph.BeginCaptureRead] also supplies the per-shard high-water marks for
+// nodeids.bin; for any other snapshot they are read after the walk.
 //
 // The component writers this calls take only their own per-shard read locks and
 // never re-enter the visibility barrier, so calling CaptureGraph from inside a
@@ -375,32 +341,24 @@ func captureGraph[N comparable, W any](
 	var dead []graph.NodeID
 	if at != nil {
 		interned = make(map[graph.NodeID]struct{}, g.AdjList().Mapper().Len())
-		// skippedAt records, per mapper shard, the FIRST id the instant filter dropped.
-		// It exists to enforce the contiguity precondition described on
-		// [ErrCaptureNotQuiesced]: once a shard has dropped an id, every later id in
-		// that shard must be dropped too, or the image carries a hole recovery cannot
-		// load. A 256-entry slice rather than a map, because this is walked once per
-		// node on every checkpoint.
-		skippedAt := make([]graph.NodeID, graph.MapperShardCount())
-		skipped := make([]bool, graph.MapperShardCount())
-		var gapErr error
+		// MEMBERSHIP IS "EVER BORN AS OF THE INSTANT" (WAL v2 step 1,
+		// docs/design-wal-v2.md §3.2). An id is carried when it had been assigned at
+		// the instant and some committed transaction had created it by then, alive or
+		// since removed. Every other id — interned by a transaction still open at the
+		// instant, by one that later aborted, or after the instant — is a HOLE: absent
+		// from mapper.bin and not a tombstone. [graph.Mapper.LoadFrom] accepts holes,
+		// so no interleaving of interning, commits and aborts makes the image
+		// unloadable, and the refusal this walk used to raise (the retired ErrCaptureNotQuiesced)
+		// cannot occur.
+		//
+		// A hole rather than a tombstone matters after the instant: a key written as
+		// a tombstone is a REMOVED node, which an append (AddEdge) does not revive,
+		// while the live graph — where the key's creation was open or aborted, and a
+		// later transaction created it through an edge alone — holds it alive (design
+		// risk 7, pinned by checkpoint.TestCheckpoint_KeyInternedAtInstantRevivedByAddEdgeOnly).
 		g.AdjList().Mapper().Walk(func(id graph.NodeID, _ N) bool {
-			shard := graph.MapperShardOf(id)
-			if !g.NodeInternedAsOf(id, at) {
-				if !skipped[shard] {
-					skipped[shard], skippedAt[shard] = true, id
-				}
+			if !g.NodeInternedAsOf(id, at) || !g.NodeBornAsOf(id, at) {
 				return true
-			}
-			if skipped[shard] {
-				// A VISIBLE id above a DROPPED one in the same shard. See
-				// [ErrCaptureNotQuiesced] for why no correct image exists here and why
-				// failing is the only sound answer.
-				gapErr = fmt.Errorf("%w: shard %d drops node %d (interned, not visible at "+
-					"instant %d) but keeps node %d above it — the image would have an "+
-					"intra-index hole that graph.Mapper.LoadFrom rejects",
-					ErrCaptureNotQuiesced, shard, uint64(skippedAt[shard]), at.StartTS(), uint64(id))
-				return false
 			}
 			interned[id] = struct{}{}
 			if !g.NodeExistsAsOf(id, at) {
@@ -408,9 +366,6 @@ func captureGraph[N comparable, W any](
 			}
 			return true
 		})
-		if gapErr != nil {
-			return nil, gapErr
-		}
 		// tombstones.bin's input contract is ASCENDING ids, and the walk above does not
 		// produce them in that order: a NodeID packs as (intra << shardBits) | shard and
 		// Walk is shard-major, so it yields 0, 256, 512, …, 1, 257, … on any graph with
@@ -445,6 +400,24 @@ func captureGraph[N comparable, W any](
 	var mapperNodes uint64
 	if out.mapper, mapperNodes, err = captureMapper(g, codec, interned); err != nil {
 		return nil, fmt.Errorf("snapshot: capture %s: %w", MapperFile, err)
+	}
+
+	// nodeids.bin — the per-shard high-water marks, with every mapper.bin. A
+	// capture read's watermark was taken at the instant and covers every id the
+	// image carries; any other capture reads the mapper now, after its walk,
+	// which covers everything walked. Reservations (WAL v2 step 4) will raise
+	// these marks; today next[s] is the watermark.
+	if out.mapper.present {
+		wm := at.InternWatermark()
+		if wm == nil {
+			wm = g.AdjList().Mapper().Watermark()
+		}
+		next := wm.Next()
+		if out.nodeIDs, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
+			return WriteNodeIDs(w, &next)
+		}); err != nil {
+			return nil, fmt.Errorf("snapshot: capture %s: %w", NodeIDsFile, err)
+		}
 	}
 
 	// tombstones.bin — emitted ONLY when the instant sees a removed node, from the set

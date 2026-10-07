@@ -73,7 +73,7 @@ type LoadedSnapshot struct {
 // manifest indexing them. When the underlying [graph.Mapper] is
 // string-keyed (N=string) the writer additionally emits mapper.bin —
 // the durable (NodeID -> natural key) interning table — and the
-// manifest is stamped at [ManifestVersion] (v3). For any other N the
+// manifest is stamped at [ManifestVersion] (v4). For any other N the
 // writer falls back to the v2 layout (no mapper.bin) and the manifest
 // records [manifestVersionV2]; recovery from a v2 snapshot continues
 // to rely on WAL replay to re-intern keys.
@@ -586,6 +586,16 @@ func writeCaptureCore[W any](
 			return err
 		}
 	}
+	// nodeids.bin — the mapper's per-shard high-water marks, with every
+	// mapper.bin (WAL v2 step 1).
+	haveNodeIDs := capt.nodeIDs.present
+	if haveNodeIDs {
+		if err := writeCapturedComponent(fsys, filepath.Join(tmp, NodeIDsFile), capt.nodeIDs); err != nil {
+			_ = fsys.RemoveAll(tmp)
+			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+			return err
+		}
+	}
 
 	if err := ctx.Err(); err != nil {
 		_ = fsys.RemoveAll(tmp)
@@ -735,6 +745,9 @@ func writeCaptureCore[W any](
 	if haveMapper {
 		manifestVersion = ManifestVersion
 		files = append(files, FileEntry{Name: MapperFile, Size: mapperSize, CRC32C: mapperCRC})
+	}
+	if haveNodeIDs {
+		files = append(files, FileEntry{Name: NodeIDsFile, Size: capt.nodeIDs.size, CRC32C: capt.nodeIDs.crc})
 	}
 	// The tombstones.bin entry is additive and does NOT change the manifest
 	// version: it is an optional component (like indexes/<name>.bin),
@@ -1102,6 +1115,18 @@ func loadSnapshotFullWith(fsys fileSystem, dir string) (LoadedSnapshot, error) {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
 		}
+	}
+
+	// nodeids.bin — the mapper's per-shard high-water marks (WAL v2 step 1).
+	// Absent before manifest version 4; the mapper then loads with the marks
+	// derived from its highest restored index per shard.
+	if niEntry := findEntry(m.Files, NodeIDsFile); niEntry != nil {
+		next, nerr := readVerifiedNodeIDs(fsys, filepath.Join(dir, NodeIDsFile), niEntry.CRC32C)
+		if nerr != nil {
+			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
+			return LoadedSnapshot{}, nerr
+		}
+		mapperParsed.Next = next
 	}
 
 	// tombstones.bin — optional node-removal set. Absent for older

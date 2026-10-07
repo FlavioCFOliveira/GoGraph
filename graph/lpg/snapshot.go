@@ -260,37 +260,23 @@ func (g *Graph[N, W]) BeginRead() *Snapshot {
 }
 
 // BeginCaptureRead is [Graph.BeginRead] for a snapshot capture: it also records
-// the mapper's watermark ([graph.Mapper.Watermark]) at the snapshot's instant, so
-// [Graph.NodeInternedAsOf] answers exactly which ids the instant had interned
-// (rmp #2991).
+// the mapper's watermark ([graph.Mapper.Watermark]) just after the snapshot's
+// instant, so [Graph.NodeInternedAsOf] answers from the per-shard high-water
+// marks instead of inferring from life records (rmp #2991), and the capture can
+// write those marks to the image's nodeids.bin (WAL v2 step 1).
 //
-// # Why a capture needs it
+// # What the capture does with it
 //
-// Without the watermark, NodeInternedAsOf infers interning from the node's
-// birth record and treats an id with NO record as interned in every reader's
-// past. Withdrawing an aborted first creation deletes its record while readers
-// are live, so an id interned AFTER the instant by a transaction that then
-// aborted reads as interned before it. A capture walking the mapper lock-free
-// kept that id above a dropped one in the same shard and refused itself with
-// snapshot.ErrCaptureNotQuiesced. The watermark needs no record: interning is
-// append-only per shard, so the ids the instant had interned are a per-shard
-// prefix.
-//
-// # What a covered id means
-//
-// The watermark is read AFTER the instant, so it covers every id interned at or
-// before the instant. It can also cover ids that are not alive at the instant:
-// a key interned by a transaction still open at the instant (the commit
-// serialiser's drain waits for store-registered writers, not for an lpg write
-// transaction or an eager engine write that has interned a key without
-// committing), or one interned between the instant and the watermark read.
-// Such an id is reported interned and, through [Graph.NodeExistsAsOf], not
-// alive, so a capture writes it as a tombstone with its key. That is safe
-// because the transaction can only commit after the instant: its frames land
-// after the checkpoint's WAL watermark, and recovery replays its node creation
-// onto the tombstoned id, which revives it. What the watermark rules out is the
-// opposite error, an id interned after the instant reported as interned before
-// it with nothing after it to keep the shard's ids contiguous.
+// The watermark covers every id assigned at or before the instant, and may also
+// cover ids not born at the instant: a key interned by a transaction still open
+// at the instant (the commit serialiser's drain waits for store-registered
+// writers, not for an lpg write transaction or an eager engine write), one later
+// rolled back, or one interned between the instant and the watermark read. The
+// capture's membership is "covered AND ever born as of the instant"
+// ([Graph.NodeBornAsOf]); every other covered id is a HOLE — absent from
+// mapper.bin and not a tombstone — which graph.Mapper.LoadFrom accepts below the
+// recorded marks. A key created after the instant is then a new key to the WAL
+// replay, so it comes back alive whichever record created it (design risk 7).
 //
 // The extra cost is one O(shards) read of the mapper; ordinary reads use
 // [Graph.BeginRead] and pay nothing. It returns nil when versioning is disarmed,
@@ -304,6 +290,15 @@ func (g *Graph[N, W]) BeginCaptureRead() *Snapshot {
 	}
 	s.interned = g.adj.Mapper().Watermark()
 	return s
+}
+
+// InternWatermark returns the mapper watermark a [Graph.BeginCaptureRead]
+// snapshot recorded at its instant, or nil for any other snapshot.
+func (s *Snapshot) InternWatermark() *graph.MapperWatermark {
+	if s == nil {
+		return nil
+	}
+	return s.interned
 }
 
 // EndRead releases a read view obtained from [Graph.BeginRead].

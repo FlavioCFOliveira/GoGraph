@@ -23,7 +23,6 @@ package checkpoint
 // before the real capture, so it happens on every run.
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -119,8 +118,7 @@ func TestCheckpoint_CaptureIgnoresAbortedInternAfterInstant(t *testing.T) {
 	}}
 
 	if err := cp.RunCheckpoint(); err != nil {
-		t.Fatalf("RunCheckpoint: %v (snapshot.ErrCaptureNotQuiesced: %v)",
-			err, errors.Is(err, snapshot.ErrCaptureNotQuiesced))
+		t.Fatalf("RunCheckpoint: %v", err)
 	}
 	if !hookRan {
 		t.Fatal("the interleaving hook never ran: the capture was not reached")
@@ -156,15 +154,16 @@ func TestCheckpoint_CaptureIgnoresAbortedInternAfterInstant(t *testing.T) {
 // at the capture instant.
 //
 // X is interned by a BeginVersionedTx left open across the instant; Y is interned
-// above X in the same shard and committed before the instant. The capture read's
-// mapper watermark covers both: Y is captured alive and X as a tombstone with its
-// key. After the instant the open transaction is abandoned and X is created through
-// txn.Store with a property, so its frames follow the checkpoint's WAL watermark.
-// Recovery must be clean and hold the seed, Y, and X with its property: replaying
-// X's creation revives the tombstoned id.
+// above X in the same shard and committed before the instant. Y is captured alive.
+// X was never born at the instant, so since WAL v2 step 1 it is a HOLE in the image
+// (before it, it was written as a tombstone with its key; the test name keeps that
+// history). After the instant the open transaction is abandoned and X is created
+// through txn.Store with a property, so its frames follow the checkpoint's WAL
+// watermark. Recovery must be clean and hold the seed, Y, and X with its property:
+// replaying X's creation creates it anew.
 //
-// A plain BeginRead snapshot drops X (its birth is not visible) and keeps Y above
-// it, which is the hole snapshot.ErrCaptureNotQuiesced refuses.
+// Before rmp #2991 a plain BeginRead snapshot dropped X and kept Y above it, which
+// the now-retired snapshot.ErrCaptureNotQuiesced refused.
 func TestCheckpoint_CaptureTombstonesKeyOfTxnOpenAtInstant(t *testing.T) {
 	t.Parallel()
 	keyX, keyY := sameShardPair(t)
@@ -220,8 +219,7 @@ func TestCheckpoint_CaptureTombstonesKeyOfTxnOpenAtInstant(t *testing.T) {
 	}}
 
 	if err := cp.RunCheckpoint(); err != nil {
-		t.Fatalf("RunCheckpoint: %v (snapshot.ErrCaptureNotQuiesced: %v)",
-			err, errors.Is(err, snapshot.ErrCaptureNotQuiesced))
+		t.Fatalf("RunCheckpoint: %v", err)
 	}
 	if !hookRan {
 		t.Fatal("the interleaving hook never ran: the capture was not reached")
@@ -304,5 +302,92 @@ func TestCheckpoint_PrefixMarkerOnlyForSelfSufficientSnapshot(t *testing.T) {
 				t.Fatalf("prefix marker present = %v, want %v (stat: %v)", got, tc.wantMarker, serr)
 			}
 		})
+	}
+}
+
+// TestCheckpoint_KeyInternedAtInstantRevivedByAddEdgeOnly is the finding test of
+// docs/design-wal-v2.md §11 item 7, kept as the regression guard of WAL v2 step 1.
+// A transaction interns K and is still open at the capture instant. K is then
+// created after the WAL watermark through AddEdge alone — the only record the
+// Cypher adapter emits for an endpoint it creates — so the WAL suffix holds no
+// AddNode for K. Recovery must agree with the live graph on whether K exists.
+//
+// Before step 1 the capture wrote K as a tombstone with its key, replay's AddEdge
+// does not revive a removed node, and recovery held K dead with a live edge onto
+// it while the live graph held it alive: 3 of 3 runs failed with "live alive=true
+// edge=true, recovered alive=false edge=true". K is now a hole, which replay
+// creates anew.
+func TestCheckpoint_KeyInternedAtInstantRevivedByAddEdgeOnly(t *testing.T) {
+	t.Parallel()
+	keyK, keyY := sameShardPair(t)
+	dir, g, st, w, cp := newPairStore(t)
+	defer func() { _ = w.Close() }()
+
+	commit := func(what string, fn func(tx *txn.Tx[string, int64]) error) {
+		t.Helper()
+		tx := st.Begin()
+		if err := fn(tx); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("%s: %v", what, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("%s Commit: %v", what, err)
+		}
+	}
+	commit("seed", func(tx *txn.Tx[string, int64]) error { return tx.AddNode("seed") })
+
+	// K: interned by a transaction left open across the instant.
+	htx := g.BeginVersionedTx()
+	ended := false
+	defer func() {
+		if !ended {
+			htx.Abandon()
+			g.EndVersionedTx(htx)
+		}
+	}()
+	if err := g.Writer(htx).AddNode(keyK); err != nil {
+		t.Fatalf("K AddNode: %v", err)
+	}
+	// Y above K in the same shard, committed before the instant, so the capture's
+	// membership for K is not decided by being the shard's last id.
+	commit("Y", func(tx *txn.Tx[string, int64]) error { return tx.AddNode(keyY) })
+
+	cp.snap = interleavingBackend{beforeCapture: func() {
+		htx.Abandon()
+		g.EndVersionedTx(htx)
+		ended = true
+		// K created after the instant through an edge only: no AddNode record.
+		commit("K edge", func(tx *txn.Tx[string, int64]) error { return tx.AddEdge(keyK, "seed", 1) })
+	}}
+	if err := cp.RunCheckpoint(); err != nil {
+		t.Fatalf("RunCheckpoint: %v", err)
+	}
+	if cp.Stats().WALTruncBytes == 0 {
+		t.Fatal("the checkpoint truncated no WAL bytes: the snapshot is not what recovery starts from")
+	}
+	alive := func(gr *lpg.Graph[string, int64]) bool {
+		id, ok := gr.AdjList().Mapper().Lookup(keyK)
+		return ok && gr.NodeExistsAsOf(id, nil)
+	}
+	live := alive(g)
+	liveEdge := g.AdjList().HasEdge(keyK, "seed")
+	if err := w.Close(); err != nil {
+		t.Fatalf("wal.Close: %v", err)
+	}
+
+	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec: txn.NewStringCodec(), WeightCodec: txn.NewInt64WeightCodec(),
+	})
+	if err != nil || !res.IsClean() || !res.SnapshotHit {
+		t.Fatalf("recovery: err=%v clean=%v snapshotHit=%v", err, res.IsClean(), res.SnapshotHit)
+	}
+	rec := alive(res.Graph)
+	recEdge := res.Graph.AdjList().HasEdge(keyK, "seed")
+	if !live || !liveEdge {
+		t.Fatalf("premise: live graph K alive=%v edge=%v, want both true", live, liveEdge)
+	}
+	if rec != live || recEdge != liveEdge {
+		t.Errorf("K diverges after recovery: live alive=%v edge=%v, recovered alive=%v edge=%v",
+			live, liveEdge, rec, recEdge)
 	}
 }

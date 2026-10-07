@@ -211,8 +211,52 @@ func (m *Mapper[N]) shardFor(k N) uint64 {
 // The forward map answers Intern; the reverse slice answers Resolve.
 type mapperShard[N comparable] struct {
 	forward map[N]NodeID
+	// reverse is indexed by intra-shard index. A HOLE — an index below next
+	// that names no key (an id never born, restored by [Mapper.LoadFrom]) —
+	// holds the zero value and has its bit set in holes.
 	reverse []N
-	mu      sync.RWMutex
+	// holes is a lazily allocated bitset over reverse: bit i set means index i
+	// is a hole. Nil while the shard has none, which is every shard of a mapper
+	// that was never restored from a snapshot with holes (WAL v2 step 1).
+	holes []uint64
+	// holeCount is the number of set bits in holes.
+	holeCount int
+	// next is the shard's high-water mark: the intra index the next new key
+	// receives. Always >= len(reverse); greater only when a restore named a
+	// next above the last restored index.
+	next uint64
+	mu   sync.RWMutex
+}
+
+// isHoleLocked reports whether intra index idx (< len(reverse)) is a hole. The
+// caller holds s.mu.
+func (s *mapperShard[N]) isHoleLocked(idx uint64) bool {
+	w := idx >> 6
+	return w < uint64(len(s.holes)) && s.holes[w]&(1<<(idx&63)) != 0
+}
+
+// setHoleLocked marks idx as a hole. The caller holds s.mu for writing.
+func (s *mapperShard[N]) setHoleLocked(idx uint64) {
+	w := idx >> 6
+	if w >= uint64(len(s.holes)) {
+		grown := make([]uint64, w+1)
+		copy(grown, s.holes)
+		s.holes = grown
+	}
+	if s.holes[w]&(1<<(idx&63)) == 0 {
+		s.holes[w] |= 1 << (idx & 63)
+		s.holeCount++
+	}
+}
+
+// growToLocked extends reverse with holes up to (not including) idx. The caller
+// holds s.mu for writing.
+func (s *mapperShard[N]) growToLocked(idx uint64) {
+	var zero N
+	for uint64(len(s.reverse)) < idx {
+		s.setHoleLocked(uint64(len(s.reverse)))
+		s.reverse = append(s.reverse, zero)
+	}
 }
 
 // NewMapper returns a fresh, empty Mapper ready for concurrent use.
@@ -343,9 +387,14 @@ func (m *Mapper[N]) internSlowHook(s *mapperShard[N], shardIdx uint64, k N, onCr
 	if id, ok := s.forward[k]; ok {
 		return id, false
 	}
-	idx := uint64(len(s.reverse))
+	// The new key takes the shard's high-water mark. It equals len(reverse)
+	// except after a restore that named a higher next, when the indices in
+	// between become holes: ids that were reserved and never born.
+	idx := max(s.next, uint64(len(s.reverse)))
+	s.growToLocked(idx)
 	id := packNodeID(shardIdx, idx)
 	s.reverse = append(s.reverse, k)
+	s.next = idx + 1
 	s.forward[k] = id
 	if onCreate != nil {
 		onCreate(id)
@@ -369,7 +418,8 @@ func (m *Mapper[N]) Lookup(k N) (NodeID, bool) {
 }
 
 // Resolve returns the value previously interned under id, or the zero
-// value of N and false when id was not produced by this Mapper.
+// value of N and false when id was not produced by this Mapper or is a hole
+// (an id below the shard's high-water mark that names no key).
 func (m *Mapper[N]) Resolve(id NodeID) (N, bool) {
 	// unpackNodeID always returns a shard index in [0, mapperShardCount)
 	// thanks to the mask, so no further bounds check on shardIdx is
@@ -379,14 +429,14 @@ func (m *Mapper[N]) Resolve(id NodeID) (N, bool) {
 	s := &m.shards[shardIdx]
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if idx >= uint64(len(s.reverse)) {
+	if idx >= uint64(len(s.reverse)) || s.isHoleLocked(idx) {
 		var zero N
 		return zero, false
 	}
 	return s.reverse[idx], true
 }
 
-// Walk invokes fn for every interned (NodeID, value) pair, taking
+// Walk invokes fn for every interned (NodeID, value) pair, skipping holes, taking
 // each shard's RLock once for the whole iteration instead of once
 // per Resolve call. Returns early when fn returns false.
 //
@@ -411,6 +461,9 @@ func (m *Mapper[N]) Walk(fn func(NodeID, N) bool) {
 		s := &m.shards[shardIdx]
 		s.mu.RLock()
 		for intraIdx, v := range s.reverse {
+			if s.holes != nil && s.isHoleLocked(uint64(intraIdx)) {
+				continue
+			}
 			if !fn(packNodeID(shardIdx, uint64(intraIdx)), v) {
 				s.mu.RUnlock()
 				return
@@ -421,21 +474,22 @@ func (m *Mapper[N]) Walk(fn func(NodeID, N) bool) {
 }
 
 // Len returns the total number of values currently interned across
-// every shard. The returned count is a consistent snapshot per shard
-// but may not reflect concurrent inserts in other shards.
+// every shard, holes excluded. The returned count is a consistent snapshot
+// per shard but may not reflect concurrent inserts in other shards.
 func (m *Mapper[N]) Len() int {
 	n := 0
 	for i := range m.shards {
 		s := &m.shards[i]
 		s.mu.RLock()
-		n += len(s.reverse)
+		n += len(s.reverse) - s.holeCount
 		s.mu.RUnlock()
 	}
 	return n
 }
 
 // MaxNodeID returns one more than the largest [NodeID] that has been
-// assigned by this Mapper. It is the natural size for an array
+// assigned by this Mapper (holes included: it bounds the id space, not the
+// node count). It is the natural size for an array
 // indexed directly by NodeID (e.g. a CSR offsets array). Returns 0
 // when no value has been interned.
 func (m *Mapper[N]) MaxNodeID() NodeID {

@@ -700,8 +700,10 @@ func (c *Checkpointer[N, W]) RunCheckpoint() error {
 // The wired serialiser closes writer admission and drains the admitted writers to
 // zero, and a writer's registration spans its whole commit. Two things depend on
 // that and on nothing else: the watermark and the instant describe the same set of
-// transactions, and no id is interned by a still-open transaction when the instant
-// is taken (see [snapshot.ErrCaptureNotQuiesced]).
+// transactions. (It used to be said to also guarantee that no id is interned by a
+// still-open transaction at the instant; the drain does not stop an lpg write
+// transaction or an eager engine write, and since WAL v2 step 1 the capture does not
+// need it: an id not born at the instant is a hole in the image.)
 //
 // The storeMu fallback does NOT drain. It is correct only for the caller it was
 // written for — one that serialises its own writes under that same mutex, so there
@@ -758,8 +760,7 @@ func (c *Checkpointer[N, W]) awaitCommitQuiescence() error {
 //	  offset W, which equals the byte length of every frame committed so far (on a
 //	  frame boundary); and an MVCC instant, which is the moment the image
 //	  describes. The drain the commit lock performs is what makes those two
-//	  readings name the same transaction boundary, and it is also the
-//	  precondition the capture requires (see [snapshot.ErrCaptureNotQuiesced]).
+//	  readings name the same transaction boundary.
 //	  The constraint and index-definition sets are read here too. Then the lock
 //	  is released.
 //	Phase 1b (lock-free): serialise the ENTIRE graph image — adjacency plus
@@ -940,18 +941,14 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		//
 		// The snapshot is released by the deferred EndRead below, on every path.
 		//
-		// It is a CAPTURE read (rmp #2991): it also records the mapper watermark,
-		// read just after the instant. The capture below walks the mapper lock-free
-		// while writers intern, commit and abort; a withdrawn aborted creation has no
-		// life record left to say it was interned after the instant, and without the
-		// watermark it was kept above a dropped id and the capture refused itself
-		// with snapshot.ErrCaptureNotQuiesced. The drain does NOT stop every
-		// interning: an lpg write transaction or an eager engine write that is not a
-		// registered store writer can hold an interned, uncommitted key here. The
-		// watermark covers that id; the capture writes it as a tombstone with its
-		// key, and because the transaction can only commit after the instant, its
-		// frames follow the watermark W and recovery's replay revives the id. See
-		// lpg.Graph.BeginCaptureRead.
+		// It is a CAPTURE read (rmp #2991): it also records the mapper's per-shard
+		// high-water marks, read just after the instant, which the capture writes to
+		// nodeids.bin. The capture below walks the mapper lock-free while writers
+		// intern, commit and abort, and carries exactly the ids ever born as of the
+		// instant; every other assigned id — interned by a transaction open here (the
+		// drain does NOT stop an lpg write transaction or an eager engine write),
+		// rolled back, or interned later — is a hole, which recovery's LoadFrom
+		// accepts (WAL v2 step 1). See lpg.Graph.BeginCaptureRead.
 		at = c.g.BeginCaptureRead()
 		if c.afterWatermarkHook != nil {
 			c.afterWatermarkHook()

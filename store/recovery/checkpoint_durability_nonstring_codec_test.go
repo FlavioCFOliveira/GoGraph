@@ -97,8 +97,8 @@ func TestCheckpointDurability_NonStringKeysCodecTruncates(t *testing.T) {
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false, want true")
 	}
-	if res.SnapshotSchemaVersion != 3 {
-		t.Errorf("SnapshotSchemaVersion = %d, want 3 (self-sufficient v3 snapshot)", res.SnapshotSchemaVersion)
+	if res.SnapshotSchemaVersion != 4 {
+		t.Errorf("SnapshotSchemaVersion = %d, want 4 (self-sufficient v4 snapshot)", res.SnapshotSchemaVersion)
 	}
 	if res.WALOps != 0 {
 		t.Fatalf("WALOps = %d, want 0 (state must come from the snapshot alone)", res.WALOps)

@@ -24,14 +24,17 @@ import (
 )
 
 // ManifestVersion is the highest on-disk schema version this build
-// understands. The current build writes version 3 manifests via
-// [WriteSnapshotFull] when N=string (CSR + labels + properties +
-// mapper, fully self-sufficient on load), version 2 manifests via the
-// same writer for non-string N (CSR + labels + properties, requires
-// WAL replay to reconstruct the natural-key mapper), and version 1
-// manifests via the legacy [WriteSnapshotCSR] code path (CSR-only
-// snapshots). The loader transparently accepts all three.
-const ManifestVersion = 3
+// understands. The current build writes version 4 manifests via
+// [WriteSnapshotFull] whenever it emits mapper.bin (CSR + labels +
+// properties + mapper + nodeids.bin, fully self-sufficient on load; the
+// mapper may carry holes, which a build before WAL v2 step 1 cannot load,
+// so such a build refuses the version with [ErrManifestUnsupported]),
+// version 2 manifests via the same writer when it emits no mapper
+// (requires WAL replay to reconstruct the natural-key mapper), and
+// version 1 manifests via the legacy [WriteSnapshotCSR] code path
+// (CSR-only snapshots). The loader accepts versions 1 to 4; version 3 is
+// what builds before WAL v2 step 1 wrote with a mapper.
+const ManifestVersion = 4
 
 // manifestVersionV2 is the schema version emitted by [WriteSnapshotFull]
 // when the underlying [graph.Mapper] is keyed by a comparable type
@@ -491,6 +494,15 @@ type Manifest struct {
 	// in the `index_builder_epoch` KEY zeroes it into a REBUILD rather than into
 	// a hydration, and fails the manifest checksum on top of that.
 	IndexBuilderEpoch uint64 `json:"index_builder_epoch,omitempty"`
+
+	// StoreID, WALRedoPos and WALFormat are reserved for WAL v2
+	// (docs/design-wal-v2.md §3.3): the store identity, the WAL position
+	// this snapshot covers, and the WAL format it pairs with. Manifest
+	// version 4 defines them; this build writes them empty and zero, so
+	// omitempty keeps them out of the file.
+	StoreID    string `json:"store_id,omitempty"`
+	WALRedoPos uint64 `json:"wal_redo_pos,omitempty"`
+	WALFormat  int    `json:"wal_format,omitempty"`
 
 	// Integrity names the framing scheme the writer used, or is empty for a
 	// manifest written before the trailer existed. The current writer always sets

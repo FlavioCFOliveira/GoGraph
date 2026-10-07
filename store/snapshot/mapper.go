@@ -111,6 +111,10 @@ type MapperRawPair struct {
 type MapperReadback struct {
 	Pairs    []MapperPair
 	RawPairs []MapperRawPair
+	// Next is the per-shard high-water marks read from the snapshot's
+	// nodeids.bin, or nil for a snapshot without one (written before WAL v2
+	// step 1). The apply functions pass it to [graph.Mapper.LoadFrom].
+	Next *[graph.MapperShards]uint64
 }
 
 // WriteMapperString serialises every (NodeID -> string key) pair held

@@ -200,7 +200,7 @@ func TestSec_Core_MapperReloadIDStability(t *testing.T) {
 			// mapperShardFor(key); success alone proves the hash is
 			// deterministic and seed-free.
 			dst := NewMapper[string]()
-			if err := dst.LoadFrom(entries); err != nil {
+			if err := dst.LoadFrom(entries, nil); err != nil {
 				t.Fatalf("LoadFrom after persist: %v (a non-deterministic shard "+
 					"hash would surface here as ErrMapperEntryCorrupted)", err)
 			}

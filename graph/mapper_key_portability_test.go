@@ -85,11 +85,11 @@ func TestMapperLoadFrom_AttributesAnAddressDependentKey(t *testing.T) {
 			case pointerKey:
 				r := tc.restored.(pointerKey)
 				m := NewMapper[pointerKey]()
-				err = m.LoadFrom([]MapperEntry[pointerKey]{{Key: r, ID: packNodeID(mapperShardFor(w), 0)}})
+				err = m.LoadFrom([]MapperEntry[pointerKey]{{Key: r, ID: packNodeID(mapperShardFor(w), 0)}}, nil)
 			case interfaceKey:
 				r := tc.restored.(interfaceKey)
 				m := NewMapper[interfaceKey]()
-				err = m.LoadFrom([]MapperEntry[interfaceKey]{{Key: r, ID: packNodeID(mapperShardFor(w), 0)}})
+				err = m.LoadFrom([]MapperEntry[interfaceKey]{{Key: r, ID: packNodeID(mapperShardFor(w), 0)}}, nil)
 			default:
 				t.Fatalf("unhandled case type %T", w)
 			}
@@ -118,7 +118,7 @@ func TestMapperLoadFrom_GenuineCorruptionIsStillReportedAsCorruption(t *testing.
 	m := NewMapper[plainKey]()
 	k := plainKey{ID: "k", Seq: 1}
 	wrongShard := (mapperShardFor(k) + 1) & mapperShardMask
-	err := m.LoadFrom([]MapperEntry[plainKey]{{Key: k, ID: packNodeID(wrongShard, 0)}})
+	err := m.LoadFrom([]MapperEntry[plainKey]{{Key: k, ID: packNodeID(wrongShard, 0)}}, nil)
 	if !errors.Is(err, ErrMapperEntryCorrupted) {
 		t.Fatalf("a wrong recorded shard must be reported as corruption: %v", err)
 	}

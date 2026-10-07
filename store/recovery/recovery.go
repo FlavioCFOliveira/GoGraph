@@ -1511,7 +1511,7 @@ func openCodec[N comparable, W any](
 		// in RawPairs and is decoded through the supplied codec. v2
 		// snapshots without a mapper produce an empty readback here and
 		// the original WAL-replay-only reconstruction path applies.
-		haveMapper := len(loaded.Mapper.Pairs) > 0 || len(loaded.Mapper.RawPairs) > 0
+		haveMapper := mapperPresent(loaded.Mapper)
 		if haveMapper {
 			if len(loaded.Mapper.RawPairs) > 0 {
 				if err := snapshot.ApplyMapperToGraphWithCodec(g, loaded.Mapper, codec); err != nil {
@@ -2908,4 +2908,13 @@ func replayRemoveEdge[N comparable, W any](g *lpg.Graph[N, W], src, dst N) bool 
 		return false
 	}
 	return true
+}
+
+// mapperPresent reports whether a snapshot readback restores the interning table:
+// it carries mapper pairs. An image with no pair (an empty graph, or one whose every
+// assigned id is a hole) takes the WAL-replay path exactly as before WAL v2 step 1,
+// without restoring its nodeids.bin marks; nothing on disk names a hole's id until
+// the id annex of step 3, which revisits it.
+func mapperPresent(rb snapshot.MapperReadback) bool {
+	return len(rb.Pairs) > 0 || len(rb.RawPairs) > 0
 }

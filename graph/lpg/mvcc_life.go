@@ -1016,7 +1016,11 @@ func (g *Graph[N, W]) TombstonedIDsAsOf(s *Snapshot) []graph.NodeID {
 		//
 		// A tombstone is only meaningful for a node the image HOLDS: interned by the
 		// instant, and removed by it.
-		if g.NodeInternedAsOf(id, s) && !g.NodeExistsAsOf(id, s) {
+		//
+		// And BORN as of s (WAL v2 step 1): an id interned and never born — an
+		// aborted creation, or a creation still uncommitted at s — is a hole in the
+		// image, not a tombstone.
+		if g.NodeInternedAsOf(id, s) && g.NodeBornAsOf(id, s) && !g.NodeExistsAsOf(id, s) {
 			out = append(out, id)
 		}
 		return true
@@ -1085,4 +1089,41 @@ func (g *Graph[N, W]) NodeInternedAsOf(id graph.NodeID, s *Snapshot) bool {
 		return true
 	}
 	return born.visibleTo(s.startTS, s.txID)
+}
+
+// NodeBornAsOf reports whether id had EVER been born — created by a committed
+// transaction, alive or since removed — as of s (WAL v2 step 1). A snapshot
+// capture carries exactly these ids; an id interned and never born (an aborted
+// creation, or one whose transaction had not committed at s) is a hole.
+//
+// The answer is read under the life-shard lock, together with the unborn set:
+//
+//   - a birth record s can see (directly or through the record it displaced):
+//     born;
+//   - a birth record s cannot see: born only if the node existed before that
+//     record's transaction touched it ([lifeStamp.unbornBefore] false) — a
+//     revival of a committed node — and not born for a first creation;
+//   - no birth record: born unless id is in the unborn set. A reclaimed birth is
+//     in every reader's past; an aborted first creation is marked unborn BEFORE
+//     its record is withdrawn, under this same lock (see
+//     [lifeWithdrawal.withdrawLocked]), so there is no moment at which it reads
+//     as neither recorded nor unborn.
+//
+// A nil snapshot answers for the present: born unless unborn.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) NodeBornAsOf(id graph.NodeID, s *Snapshot) bool {
+	sh := g.nodeLifeShardFor(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	if s != nil {
+		if born, ok := sh.born[id]; ok {
+			b := born.asOfLocked(s.startTS, s.txID)
+			if b.visibleTo(s.startTS, s.txID) {
+				return true
+			}
+			return !b.unbornBefore
+		}
+	}
+	return !g.inUnborn(id)
 }

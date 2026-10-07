@@ -829,7 +829,7 @@ example with `go build -overlay` over a copy of the engine file with the fix rev
 | `L15` `stale_detach_refused`, `no_dangling_edge` | rmp #2997 (`32efbe73`) | 64 | 9 of 9 at 1, 8 and 64 goroutines: the interleaving is constructed | — |
 | `L16` `young_node_stays_invisible` | rmp #2999/#3001 (`676a6b94`) | 64 | 9 of 9 at 1, 8 and 64 goroutines: the interleaving is constructed | — |
 | `TestRun` phase 5 (catalogue) | rmp #2986 (`8f933554`) | the whole catalogue → not run | with the fix reverted, `TestCatalogue` fails (`GG06/gg06-delete-same-edge-instance`) while `TestRun` with phase 5 passed: phase 5 added no detection | 28.7 s → 0 s |
-| `TestDurability` checkpoint arm (D09, D16) | rmp #2990 and #2991 (`828f1661`) | 384 → 24 transactions | 24 of 24 runs fail (seeds 1-3 at 192, 96, 48 and 24, writers 8 and 64): `D09.missing_segment refused_loudly`, `D09 capture_not_refused`; at 64 writers the 4-per-writer floor keeps 256 | 4.4 s + 8.7 s → 0.25 s + 2.3 s |
+| `TestDurability` checkpoint arm (D09, D16) | rmp #2990 and #2991 (`828f1661`) | 384 → 24 transactions | 24 of 24 runs fail (seeds 1-3 at 192, 96, 48 and 24, writers 8 and 64): `D09.missing_segment refused_loudly`, `D09 capture_not_refused` (since WAL v2 step 1 the refusal no longer exists and `D09 checkpoint_ran` gates the first attempt); at 64 writers the 4-per-writer floor keeps 256 | 4.4 s + 8.7 s → 0.25 s + 2.3 s |
 
 Not reduced, because no defect was available to prove that a smaller size still detects:
 L01, L04, L05, L08, L10, L11, L17, L18, L19, and the abandon and fsync arms of phase 7
@@ -912,7 +912,7 @@ are verdicts, and `# durability.<row> level=<n> ...` lines are telemetry.
 | D06 | `D01.*`, `D02.*` | One transaction left open across the crash (the kill child reopens it every 5 ms) | `open_absent` |
 | D07 | every image | Clock read with the "before" count; new session; new commit | `clock_not_rewound`, `new_session_sees_acked`, `post_recovery_commit_is_new` |
 | D08 | `D08.reference`, `D08.torn`, `D08.garbled` | The durable image with its last frame cut by 3 bytes, or with its last byte inverted | `damaged_record_discarded_alone`: against the undamaged image, at most one transaction is lost, none is gained and none is partial. The garbled image must be opened for writing exactly when recovery reports it clean (`refused_unless_clean`) |
-| D09 | `D09`, `D09.pre_capture`, `D09.pre_truncate`, `D09.post_truncate`, `D09.missing_segment` | One checkpoint under load, with no retry, imaged before the capture, after the snapshot is published and before the WAL prefix is truncated, and after the truncation; the post-truncate image is then recovered without its snapshot directory | `checkpoint_ran`, `capture_not_refused` (`checkpoint_refused_not_quiesced=0`), every image gate at each phase, and `missing_segment.refused_loudly` (recovery returns `recovery.ErrMissingSnapshot` and is not clean). The kill runs add crashes at random checkpoint points |
+| D09 | `D09`, `D09.pre_capture`, `D09.pre_truncate`, `D09.post_truncate`, `D09.missing_segment` | One checkpoint under load, with no retry, imaged before the capture, after the snapshot is published and before the WAL prefix is truncated, and after the truncation; the post-truncate image is then recovered without its snapshot directory | `checkpoint_ran` (the single attempt succeeds), every image gate at each phase, and `missing_segment.refused_loudly` (recovery returns `recovery.ErrMissingSnapshot` and is not clean). The kill runs add crashes at random checkpoint points |
 | D10 | every fully opened image | Seek = scan for every attempted id on `:D(id)` and `:E(id)`, on `:L(id)`, and on the `:D`/`:E` count store | `seek_equals_scan`, `unique_holds` |
 | D11 | `D11`, `D01.*` | `CREATE`/`DROP INDEX cyc_g` and `CREATE`/`DROP CONSTRAINT cyc_e` cycled during the abandon arm | `ddl_ran`; after recovery, seek = scan on `cyc_g` when it is present (`seek_equals_scan`); no duplicate `:E(id)` while `cyc_e` is present (`unique_holds`) |
 | D12 | `D01.*` | Four transactions, each with one 1 MiB string | `blobs_identical` |
@@ -961,10 +961,13 @@ Both were found by this phase, are fixed, and are now gated.
   id. The checkpointer now opens its instant with `lpg.Graph.BeginCaptureRead`, which
   reads the mapper watermark just after the instant, and the capture keeps exactly the
   per-shard prefix the watermark names. The drain does not stop every interning: an id
-  the watermark covers but that is not visible at the instant is captured as a tombstone
-  with its key, and WAL replay revives it when its transaction committed after the
-  instant. The arm makes one attempt, with no retry, and gates `capture_not_refused`
-  (`checkpoint_refused_not_quiesced=0`).
+  the watermark covered but that was not visible at the instant was then captured as a
+  tombstone with its key, which WAL replay did not revive when its transaction created
+  the node through an edge alone (`docs/design-wal-v2.md` risk 7, confirmed). The arm
+  makes one attempt, with no retry, gated by `checkpoint_ran`. WAL v2
+  step 1 then retired the refusal itself: the capture carries only the ids ever born as
+  of its instant, every other assigned id is a hole, and recovery accepts holes
+  (`docs/design-wal-v2.md` §3).
 
 ### Observed, by contract
 

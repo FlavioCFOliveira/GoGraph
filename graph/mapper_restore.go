@@ -17,8 +17,8 @@ var ErrMapperNotEmpty = errors.New("graph: Mapper.LoadFrom on non-empty mapper")
 // ErrMapperEntryCorrupted is returned by [Mapper.LoadFrom] when the
 // supplied entries violate the on-disk invariants the snapshot writer
 // is responsible for upholding: an intra-shard index that disagrees
-// with the natural key's hash-derived shard, a non-contiguous
-// intra-shard slot sequence, or a duplicate (NodeID, key) record.
+// with the natural key's hash-derived shard, an intra-shard index at or
+// above the shard's recorded high-water mark, or a duplicate key.
 var ErrMapperEntryCorrupted = errors.New("graph: Mapper.LoadFrom entries corrupted")
 
 // ErrMapperKeyNotPortable is returned by [Mapper.LoadFrom], wrapped in
@@ -47,9 +47,9 @@ type MapperEntry[N comparable] struct {
 	ID  NodeID
 }
 
-// LoadFrom rebuilds m's internal state from a snapshot's entries. It
-// is intended for one-shot recovery initialisation against a fresh
-// (zero-state) Mapper.
+// LoadFrom rebuilds m's internal state from a snapshot's entries and the
+// per-shard high-water marks next (the snapshot's nodeids.bin). It is intended
+// for one-shot recovery initialisation against a fresh (zero-state) Mapper.
 //
 // The pre-conditions enforced are:
 //
@@ -57,27 +57,33 @@ type MapperEntry[N comparable] struct {
 //  2. Each entry's NodeID, when unpacked, must yield a shard index
 //     equal to mapperShardFor(entry.Key). The writer guarantees this
 //     because it composes NodeIDs via [packNodeID] from the same hash.
-//  3. After grouping entries by shard and sorting by intra-index,
-//     intra-indexes must form the contiguous sequence 0..N-1. Any gap
-//     surfaces as [ErrMapperEntryCorrupted].
-//  4. Within a shard, no two entries may collide on the natural key.
+//  3. When next is non-nil, every entry's intra index must lie below
+//     next[shard]; an index at or above it is [ErrMapperEntryCorrupted].
+//  4. Within a shard, no two entries may collide on the natural key or on
+//     the intra index.
 //
-// Post-condition: subsequent [Mapper.Intern] calls with a previously
-// seeded key return the original NodeID; new keys get fresh slots
-// after the seeded ones (the next intra-index is len(reverse)).
+// Gaps are accepted (WAL v2 step 1): an intra index below a shard's
+// high-water mark that no entry names is a HOLE — an id that was assigned and
+// never born, which a capture leaves out of the image. Holes resolve to
+// nothing ([Mapper.Resolve] false) and are skipped by [Mapper.Walk].
+//
+// Post-condition: a previously seeded key interns to its original NodeID; a
+// new key in shard s receives intra index next[s] (or the highest restored
+// index + 1 when next is nil, which is how a snapshot without nodeids.bin
+// loads).
 //
 // LoadFrom is safe for concurrent goroutines only with respect to
 // other LoadFrom calls (which would all fail with ErrMapperNotEmpty
 // after the first); it must not run concurrently with any
 // Intern/Lookup/Resolve/Walk call on the same Mapper.
-func (m *Mapper[N]) LoadFrom(entries []MapperEntry[N]) error {
+func (m *Mapper[N]) LoadFrom(entries []MapperEntry[N], next *[MapperShards]uint64) error {
 	// Pre-flight: every shard must be untouched. Walking under RLock
 	// is cheap and catches the "reseed a live mapper" mistake at the
 	// boundary instead of after we have mutated half the shards.
 	for i := range m.shards {
 		s := &m.shards[i]
 		s.mu.RLock()
-		empty := len(s.forward) == 0 && len(s.reverse) == 0
+		empty := len(s.forward) == 0 && len(s.reverse) == 0 && s.next == 0
 		s.mu.RUnlock()
 		if !empty {
 			return ErrMapperNotEmpty
@@ -111,14 +117,29 @@ func (m *Mapper[N]) LoadFrom(entries []MapperEntry[N]) error {
 			return fmt.Errorf("%w: NodeID %d shard %d != mapperShardFor(key) %d",
 				ErrMapperEntryCorrupted, uint64(e.ID), shardIdx, expected)
 		}
+		if next != nil && intraIdx >= next[shardIdx] {
+			return fmt.Errorf("%w: NodeID %d intra index %d is at or above shard %d's high-water mark %d",
+				ErrMapperEntryCorrupted, uint64(e.ID), intraIdx, shardIdx, next[shardIdx])
+		}
 		buckets[shardIdx] = append(buckets[shardIdx], indexedEntry{intra: intraIdx, key: e.Key})
 	}
 
-	// For every shard, sort by intra-index, assert contiguity and
-	// uniqueness, then commit forward/reverse in one shot.
+	// For every shard, sort by intra-index, assert uniqueness, then commit
+	// forward/reverse in one shot, materialising reverse only to the highest
+	// restored index + 1 with holes for the gaps.
 	for shardIdx := range buckets {
 		bucket := buckets[shardIdx]
+		var hw uint64
+		if next != nil {
+			hw = next[shardIdx]
+		}
 		if len(bucket) == 0 {
+			if hw > 0 {
+				s := &m.shards[shardIdx]
+				s.mu.Lock()
+				s.next = hw
+				s.mu.Unlock()
+			}
 			continue
 		}
 		sort.Slice(bucket, func(i, j int) bool {
@@ -126,26 +147,23 @@ func (m *Mapper[N]) LoadFrom(entries []MapperEntry[N]) error {
 		})
 		s := &m.shards[shardIdx]
 		s.mu.Lock()
-		// Pre-size to the exact count so subsequent inserts do not
-		// reshuffle the underlying slice's backing array. The forward
-		// map allocates one bucket per pair, which is the steady-state
-		// cost regardless of how the mapper was originally populated.
-		s.reverse = make([]N, 0, len(bucket))
+		top := bucket[len(bucket)-1].intra + 1
+		s.reverse = make([]N, 0, top)
 		s.forward = make(map[N]NodeID, len(bucket))
 		for i, ie := range bucket {
-			if ie.intra != uint64(i) {
+			if i > 0 && ie.intra == bucket[i-1].intra {
 				s.mu.Unlock()
-				return fmt.Errorf("%w: shard %d intra-index gap: got %d at slot %d",
-					ErrMapperEntryCorrupted, shardIdx, ie.intra, i)
+				return fmt.Errorf("%w: shard %d duplicate intra index %d", ErrMapperEntryCorrupted, shardIdx, ie.intra)
 			}
 			if _, dup := s.forward[ie.key]; dup {
 				s.mu.Unlock()
 				return fmt.Errorf("%w: shard %d duplicate key", ErrMapperEntryCorrupted, shardIdx)
 			}
-			id := packNodeID(uint64(shardIdx), ie.intra)
+			s.growToLocked(ie.intra)
 			s.reverse = append(s.reverse, ie.key)
-			s.forward[ie.key] = id
+			s.forward[ie.key] = packNodeID(uint64(shardIdx), ie.intra)
 		}
+		s.next = max(hw, top)
 		s.mu.Unlock()
 	}
 

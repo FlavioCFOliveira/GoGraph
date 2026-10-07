@@ -225,7 +225,7 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 	if g.nodeLifeActive.Load() == 0 {
 		return 0
 	}
-	var lw lifeWithdrawal
+	lw := lifeWithdrawal{markUnborn: g.markUnborn}
 	for i := range g.nodeLifeShards {
 		sh := &g.nodeLifeShards[i]
 		sh.mu.Lock()
@@ -278,7 +278,7 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 // marked aborted (ACID audit round 6, finding M1). A node entered more than once
 // is withdrawn by its first visit.
 func (g *Graph[N, W]) reclaimAbortedLifeOf(ids []graph.NodeID) int {
-	var lw lifeWithdrawal
+	lw := lifeWithdrawal{markUnborn: g.markUnborn}
 	for _, id := range ids {
 		sh := g.nodeLifeShardFor(id)
 		sh.mu.Lock()
@@ -301,6 +301,12 @@ func (g *Graph[N, W]) reclaimAbortedLifeOf(ids []graph.NodeID) int {
 // tombstone bitmap, the unborn set and the churn gate, for
 // [Graph.finishLifeWithdrawal] to settle outside the shard locks.
 type lifeWithdrawal struct {
+	// markUnborn marks an id unborn. [lifeWithdrawal.withdrawLocked] calls it
+	// UNDER the life-shard lock, before it deletes the aborted birth record, so
+	// [Graph.NodeBornAsOf] never sees an aborted first creation as neither
+	// recorded nor unborn (WAL v2 step 1, design risk 6). The lock order is
+	// life shard, then unbornMu, which is a leaf lock.
+	markUnborn  func(graph.NodeID)
 	toTombstone []lifeTombstone
 	toRevive    []graph.NodeID
 	released    []LabelID
@@ -349,14 +355,21 @@ func (lw *lifeWithdrawal) withdrawLocked(sh *nodeLifeShard, id graph.NodeID) {
 	diedAborted := hasDied && died.at() == mvcc.AbortedTS
 	switch {
 	case bornAborted && diedAborted:
+		revive := aliveBefore(born, died)
+		if !revive && born.unbornBefore {
+			lw.markUnborn(id)
+		}
 		lw.withdrawRecordLocked(sh, true, id, born)
 		lw.withdrawRecordLocked(sh, false, id, died)
-		if aliveBefore(born, died) {
+		if revive {
 			lw.toRevive = append(lw.toRevive, id)
 		} else {
 			lw.toTombstone = append(lw.toTombstone, lifeTombstone{id: id, unborn: born.unbornBefore})
 		}
 	case bornAborted:
+		if !born.wasAlive && born.unbornBefore {
+			lw.markUnborn(id)
+		}
 		lw.withdrawRecordLocked(sh, true, id, born)
 		if born.wasAlive {
 			lw.toRevive = append(lw.toRevive, id)
@@ -412,7 +425,9 @@ func (g *Graph[N, W]) finishLifeWithdrawal(lw *lifeWithdrawal) int {
 		if t.unborn {
 			// The node existed only by the aborted transaction's creation:
 			// a first birth, or a create-then-delete pair (rmp #2947, see
-			// [Graph.unborn]).
+			// [Graph.unborn]). withdrawLocked already marked it under the life-
+			// shard lock (WAL v2 step 1); marking is idempotent, and repeating it
+			// here keeps the set right for any withdrawal built without the hook.
 			g.markUnborn(t.id)
 		}
 	}

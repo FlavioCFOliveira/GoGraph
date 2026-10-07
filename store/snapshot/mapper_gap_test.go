@@ -1,36 +1,22 @@
 package snapshot
 
-// mapper_gap_test.go — rmp #2310: the concurrent capture filters the mapper, and
-// [graph.Mapper.LoadFrom] requires the intra-shard indexes it is handed to be
-// CONTIGUOUS.
+// mapper_gap_test.go — the concurrent capture filters the mapper at its instant
+// (rmp #2310), and since WAL v2 step 1 (docs/design-wal-v2.md §3) the ids it
+// leaves out are HOLES rather than a refusal.
 //
 // Layer: short.
 //
-// # The precondition, and what happens when it does not hold
-//
 // A NodeID is packed as (intra << shardBits) | shard, and intra is assigned when the
-// key is INTERNED. LoadFrom groups the entries it is given by shard, sorts them by
-// intra, and rejects the whole snapshot with ErrMapperEntryCorrupted unless the
-// sequence is exactly 0..N-1 (graph/mapper_restore.go, precondition 3).
-//
-// Before rmp #2310 the capture emitted every interned id, so the sequence was
-// complete by construction. The concurrent capture emits only the ids interned AS OF
-// its instant — which it must, or the recovered graph would hold nodes that did not
-// exist then. Dropping ids is safe only while the dropped set is a per-shard SUFFIX,
-// and that holds exactly when no write transaction is open when the instant is taken:
-// interning is monotone within a shard, so the only invisible ids are then the ones
-// interned afterwards.
-//
-// An id interned by a STILL-OPEN transaction breaks it — it sits below ids that later
-// transactions have already interned and committed. Measured before the guard: the
-// capture produced a mapper whose shard 114 held intra 1 and not intra 0, and
-// LoadFrom rejected it with "shard 114 intra-index gap: got 1 at slot 0". A snapshot
-// that cannot be loaded is a checkpoint that has already destroyed the WAL prefix it
-// folded, so the capture must refuse to produce one.
+// key is INTERNED. The capture carries only the ids ever born as of its instant, so
+// an id interned by a transaction still open at the instant, or by one that aborts,
+// can sit below a carried id of the same shard. Before step 1 that gap made
+// [graph.Mapper.LoadFrom] reject the image ("shard 114 intra-index gap: got 1 at
+// slot 0"), so the capture refused with ErrCaptureNotQuiesced. LoadFrom now accepts
+// gaps below the per-shard high-water marks the image records in nodeids.bin, and
+// the capture always succeeds.
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"testing"
 
@@ -59,102 +45,176 @@ func sameShardKeys(t *testing.T) (string, string) {
 	return "", ""
 }
 
-// TestCapture_FilteredMapperKeepsIntraIndexesContiguous drives the exact ordering the
-// precondition is vulnerable to — a key interned FIRST and committed SECOND — and
-// asserts the captured mapper still loads.
-//
-// # Why it is deterministic
-//
-// The ordering is constructed, not raced for: transaction A interns its key and is
-// held open; transaction B then interns the neighbouring slot in the same shard and
-// commits; the instant is taken between the two. A is therefore guaranteed to be the
-// filtered-out entry and guaranteed to sit BELOW B in the shard's intra sequence, so
-// the hole is in the middle every time this test runs.
-func TestCapture_FilteredMapperKeepsIntraIndexesContiguous(t *testing.T) {
+// holeImage captures g at at and returns the mapper pairs, the tombstoned ids and
+// the nodeids.bin high-water marks of the image.
+func holeImage(t *testing.T, g *lpg.Graph[string, float64], at *lpg.Snapshot) (map[graph.NodeID]string, []graph.NodeID, *[graph.MapperShards]uint64) {
+	t.Helper()
+	cs := csr.BuildFromAdjListAsOf(g.AdjList(),
+		func(id graph.NodeID) bool { return g.NodeExistsAsOf(id, at) },
+		at.StartTS(), at.TxID())
+	capt, err := CaptureGraph[string, float64](g, cs, nil, at)
+	if err != nil {
+		t.Fatalf("CaptureGraph: %v", err)
+	}
+	rb, err := ReadMapperString(bytes.NewReader(capt.mapper.bytes))
+	if err != nil {
+		t.Fatalf("ReadMapperString: %v", err)
+	}
+	pairs := make(map[graph.NodeID]string, len(rb.Pairs))
+	for _, p := range rb.Pairs {
+		pairs[p.ID] = p.Key
+	}
+	var dead []graph.NodeID
+	if capt.tombstones.present {
+		tb, terr := ReadTombstones(bytes.NewReader(capt.tombstones.bytes))
+		if terr != nil {
+			t.Fatalf("ReadTombstones: %v", terr)
+		}
+		dead = tb.IDs
+	}
+	if !capt.nodeIDs.present {
+		t.Fatal("the capture emitted mapper.bin without nodeids.bin")
+	}
+	next, err := ReadNodeIDs(bytes.NewReader(capt.nodeIDs.bytes))
+	if err != nil {
+		t.Fatalf("ReadNodeIDs: %v", err)
+	}
+	return pairs, dead, next
+}
+
+// assertHole checks that idA is a hole of the image — absent from mapper.bin, not
+// a tombstone, below the shard's high-water mark — that idB is carried, and that
+// the image loads with A's slot left empty.
+func assertHole(t *testing.T, pairs map[graph.NodeID]string, dead []graph.NodeID,
+	next *[graph.MapperShards]uint64, idA, idB graph.NodeID, keyA, keyB string) {
+	t.Helper()
+	if k, ok := pairs[idA]; ok {
+		t.Errorf("mapper.bin carries the never-born node %d (%q); want a hole", uint64(idA), k)
+	}
+	if pairs[idB] != keyB {
+		t.Errorf("mapper.bin lacks the committed node %d (%q)", uint64(idB), keyB)
+	}
+	for _, d := range dead {
+		if d == idA {
+			t.Errorf("tombstones.bin names the never-born node %d; a hole is not a removal", uint64(idA))
+		}
+	}
+	shard := graph.MapperShardOf(idB)
+	if next[shard] <= uint64(idB)>>8 {
+		t.Errorf("nodeids.bin next[%d] = %d, not above node %d", shard, next[shard], uint64(idB))
+	}
+	entries := make([]graph.MapperEntry[string], 0, len(pairs))
+	for id, k := range pairs {
+		entries = append(entries, graph.MapperEntry[string]{ID: id, Key: k})
+	}
+	m := graph.NewMapper[string]()
+	if err := m.LoadFrom(entries, next); err != nil {
+		t.Fatalf("the image does not load: %v", err)
+	}
+	if _, ok := m.Resolve(idA); ok {
+		t.Errorf("node %d resolves after the load; want a hole", uint64(idA))
+	}
+	if id := m.Intern(keyA); id == idA || uint64(id)>>8 < next[graph.MapperShardOf(id)] {
+		t.Errorf("re-interning %q gave %d, want an id at or above the shard's high-water mark", keyA, uint64(id))
+	}
+}
+
+// TestCapture_OpenTransactionAtInstantLeavesAHole drives the interleaving the
+// retired ErrCaptureNotQuiesced refused: transaction A interns its key and is
+// still open at the instant, and B interns the next slot of the same shard and
+// commits before it (WAL v2 step 1, docs/design-wal-v2.md §3.2). The capture
+// must succeed, leave A's id as a hole — absent from mapper.bin and not a
+// tombstone — and produce an image that loads.
+func TestCapture_OpenTransactionAtInstantLeavesAHole(t *testing.T) {
 	keyA, keyB := sameShardKeys(t)
 
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 	defer func() { _ = g.Close() }()
 
-	// A interns first and stays OPEN.
 	txA := g.BeginVersionedTx()
+	defer g.EndVersionedTx(txA)
 	if err := g.Writer(txA).AddNode(keyA); err != nil {
-		g.EndVersionedTx(txA)
 		t.Fatalf("A AddNode(%q): %v", keyA, err)
 	}
-	// B interns the next slot in the same shard and COMMITS.
 	if err := g.ApplyVersioned(func(tx lpg.WriteTx) error {
 		return g.Writer(tx).AddNode(keyB)
 	}); err != nil {
-		g.EndVersionedTx(txA)
 		t.Fatalf("B AddNode(%q): %v", keyB, err)
 	}
-
-	idA, okA := g.AdjList().Mapper().Lookup(keyA)
-	idB, okB := g.AdjList().Mapper().Lookup(keyB)
-	if !okA || !okB {
-		g.EndVersionedTx(txA)
-		t.Fatalf("both keys must be interned: %q=%v %q=%v", keyA, okA, keyB, okB)
-	}
-	if graph.MapperShardOf(idA) != graph.MapperShardOf(idB) {
-		g.EndVersionedTx(txA)
-		t.Fatalf("probe keys landed in different shards (%d, %d): the test's premise is gone",
-			graph.MapperShardOf(idA), graph.MapperShardOf(idB))
-	}
-	if uint64(idA) >= uint64(idB) {
-		g.EndVersionedTx(txA)
-		t.Fatalf("A must have interned BEFORE B for the hole to be in the middle: idA=%d idB=%d",
-			uint64(idA), uint64(idB))
+	idA, _ := g.AdjList().Mapper().Lookup(keyA)
+	idB, _ := g.AdjList().Mapper().Lookup(keyB)
+	if graph.MapperShardOf(idA) != graph.MapperShardOf(idB) || idA >= idB {
+		t.Fatalf("premise: A=%d must sit below B=%d in one shard", uint64(idA), uint64(idB))
 	}
 
-	// The instant: B has committed, A has not.
 	at := g.BeginRead()
-	if g.NodeInternedAsOf(idA, at) {
-		g.EndRead(at)
-		g.EndVersionedTx(txA)
-		t.Fatal("the uncommitted transaction's node is visible at the instant: the capture " +
-			"would not filter it and this test could not produce the hole it exists to test")
-	}
-	if !g.NodeInternedAsOf(idB, at) {
-		g.EndRead(at)
-		g.EndVersionedTx(txA)
-		t.Fatal("the committed transaction's node is NOT visible at the instant")
-	}
+	defer g.EndRead(at)
+	pairs, dead, next := holeImage(t, g, at)
+	assertHole(t, pairs, dead, next, idA, idB, keyA, keyB)
+}
 
-	cs := csr.BuildFromAdjListAsOf(g.AdjList(),
-		func(id graph.NodeID) bool { return g.NodeExistsAsOf(id, at) },
-		at.StartTS(), at.TxID())
-	capt, err := CaptureGraph[string, float64](g, cs, nil, at)
-	g.EndRead(at)
-	g.EndVersionedTx(txA)
+// TestCapture_AbortedCreationAfterInstantLeavesAHole is the abort half: A's
+// creation is rolled back after the instant, which withdraws its birth record.
+// Before WAL v2 step 1 the withdrawn id read as interned long ago and was kept
+// above a dropped one; now it is a hole, through a capture read and through a
+// plain one.
+func TestCapture_AbortedCreationAfterInstantLeavesAHole(t *testing.T) {
+	for _, captureRead := range []bool{true, false} {
+		t.Run(fmt.Sprintf("capture_read=%v", captureRead), func(t *testing.T) {
+			keyA, keyB := sameShardKeys(t)
+			g := lpg.New[string, float64](adjlist.Config{Directed: true})
+			defer func() { _ = g.Close() }()
+			if err := g.ApplyVersioned(func(tx lpg.WriteTx) error {
+				return g.Writer(tx).AddNode("seed")
+			}); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			at := g.BeginRead()
+			if captureRead {
+				g.EndRead(at)
+				at = g.BeginCaptureRead()
+			}
+			defer g.EndRead(at)
+			// After the instant: B commits, then A is created and rolled back.
+			if err := g.ApplyVersioned(func(tx lpg.WriteTx) error {
+				return g.Writer(tx).AddNode(keyB)
+			}); err != nil {
+				t.Fatalf("B: %v", err)
+			}
+			txA := g.BeginVersionedTx()
+			if err := g.Writer(txA).AddNode(keyA); err != nil {
+				t.Fatalf("A: %v", err)
+			}
+			txA.Abandon()
+			g.EndVersionedTx(txA)
+			idA, _ := g.AdjList().Mapper().Lookup(keyA)
+			idB, _ := g.AdjList().Mapper().Lookup(keyB)
+			pairs, dead, _ := holeImage(t, g, at)
+			for _, id := range []graph.NodeID{idA, idB} {
+				if _, ok := pairs[id]; ok {
+					t.Errorf("node %d, interned after the instant, is in mapper.bin", uint64(id))
+				}
+				for _, d := range dead {
+					if d == id {
+						t.Errorf("node %d, interned after the instant, is a tombstone", uint64(id))
+					}
+				}
+			}
+			if _, ok := pairs[mustLookup(t, g, "seed")]; !ok {
+				t.Error("the seed node is missing from mapper.bin")
+			}
+		})
+	}
+}
 
-	// THE CONTRACT: the capture must REFUSE. Producing an image here is the defect —
-	// there is no correct one, and the alternative to refusing is a snapshot recovery
-	// rejects after the WAL prefix that could have repaired it has been truncated.
-	if err == nil {
-		t.Fatalf("CaptureGraph accepted an instant taken while transaction A was still open "+
-			"and produced an image of %d node(s). Node %d (%q) was interned before node %d "+
-			"(%q) in shard %d but is not visible at the instant, so the image has a hole in "+
-			"the middle of that shard's intra sequence",
-			capt.Order(), uint64(idA), keyA, uint64(idB), keyB, graph.MapperShardOf(idA))
+// mustLookup returns the id of key k.
+func mustLookup(t *testing.T, g *lpg.Graph[string, float64], k string) graph.NodeID {
+	t.Helper()
+	id, ok := g.AdjList().Mapper().Lookup(k)
+	if !ok {
+		t.Fatalf("key %q not interned", k)
 	}
-	if !errors.Is(err, ErrCaptureNotQuiesced) {
-		t.Fatalf("CaptureGraph failed with %v, want %v", err, ErrCaptureNotQuiesced)
-	}
-	if capt != nil {
-		t.Error("CaptureGraph returned both an error and a capture; a refused capture must " +
-			"yield nothing a caller could publish by mistake")
-	}
-
-	// The failure must be REACHABLE, not merely declared: confirm the image the guard
-	// prevented really would have been unloadable, by handing LoadFrom the entry set
-	// the filter would have produced.
-	entries := []graph.MapperEntry[string]{{ID: idB, Key: keyB}}
-	if lerr := graph.NewMapper[string]().LoadFrom(entries); !errors.Is(lerr, graph.ErrMapperEntryCorrupted) {
-		t.Errorf("LoadFrom accepted the holed entry set (%v): the precondition the guard "+
-			"enforces is not actually enforced downstream, so the guard may be unnecessary "+
-			"or may be guarding the wrong thing", lerr)
-	}
+	return id
 }
 
 // TestCapture_QuiescedInstantEmitsEveryVisibleNode is the positive arm: with no write
@@ -199,7 +259,7 @@ func TestCapture_QuiescedInstantEmitsEveryVisibleNode(t *testing.T) {
 		entries = append(entries, graph.MapperEntry[string]{ID: p.ID, Key: p.Key})
 	}
 	fresh := graph.NewMapper[string]()
-	if lerr := fresh.LoadFrom(entries); lerr != nil {
+	if lerr := fresh.LoadFrom(entries, nil); lerr != nil {
 		t.Fatalf("the captured mapper does not load back: %v", lerr)
 	}
 	for _, k := range []string{keyA, keyB} {

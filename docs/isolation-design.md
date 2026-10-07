@@ -548,18 +548,19 @@ writer stays registered through its MVCC publish:
   durable below `W` but not yet published would be missing from the image and
   truncated away — an acknowledged commit lost. Asserted by
   `checkpoint.TestCheckpoint_WatermarkAndInstantDescribeTheSameBoundary`.
-- The instant-filtered mapper's per-shard intra indexes must stay contiguous, or
-  recovery cannot load the image (`snapshot.ErrCaptureNotQuiesced`). The checkpointer
-  opens `at` with `lpg.Graph.BeginCaptureRead`, which records the mapper watermark
-  just after the instant; the capture keeps exactly the per-shard prefix the
-  watermark names, so the image is contiguous by construction (rmp #2991). The drain
-  does not stop every interning: an lpg write transaction or an eager engine write
-  that is not a registered store writer can hold an interned, uncommitted key at
-  `at`. The watermark covers that id and the capture writes it as a tombstone with
-  its key; its transaction can only commit after `at`, so its frames follow `W` and
-  recovery's replay revives the id. Asserted by
-  `checkpoint.TestCheckpoint_CaptureIgnoresAbortedInternAfterInstant` and
-  `checkpoint.TestCheckpoint_CaptureTombstonesKeyOfTxnOpenAtInstant`.
+- The image's mapper must load. The checkpointer opens `at` with
+  `lpg.Graph.BeginCaptureRead`, which records the mapper's per-shard high-water marks
+  just after the instant (rmp #2991). The capture carries exactly the ids ever born as
+  of `at` (`lpg.Graph.NodeBornAsOf`); every other assigned id is a hole, absent from
+  `mapper.bin` and not a tombstone, and `graph.Mapper.LoadFrom` accepts holes below the
+  marks the image records in `nodeids.bin` (WAL v2 step 1, `docs/design-wal-v2.md` §3).
+  The drain does not stop every interning: an lpg write transaction or an eager engine
+  write that is not a registered store writer can hold an interned, uncommitted key at
+  `at`; that key is a hole, and its transaction, which can only commit after `at`,
+  creates it anew in recovery's replay. Asserted by
+  `checkpoint.TestCheckpoint_CaptureIgnoresAbortedInternAfterInstant`,
+  `checkpoint.TestCheckpoint_CaptureTombstonesKeyOfTxnOpenAtInstant` and
+  `checkpoint.TestCheckpoint_KeyInternedAtInstantRevivedByAddEdgeOnly`.
 
 The reclamation horizon is pinned only for step 2 — an in-memory, O(V+E) window with
 no disk I/O — never across the snapshot write. Pinned by
