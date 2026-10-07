@@ -419,13 +419,21 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
   single test, not its whole package. This narrows a run's **extent**; it never
   licenses a trickle of small edits each followed by its own run (see
   [Work synergy policy](#work-synergy-policy)).
-- **Use a RAM drive (tmpfs) whenever it naturally speeds a run up — this is very
-  important.** It applies to suites whose cost is I/O: the whole persistence
-  component (`store/` — `wal`, `checkpoint`, `snapshot`, `recovery`, `txn`,
-  `bulkimport` — and `internal/crashinject/`), the MVCC machinery (`graph/mvcc`,
-  the MVCC paths of `graph/lpg`, and the MVCC examples such as
+- **Every test runs on the RAM drive by default — this is very important.** Every
+  test run, in every package, takes the RAM drive for the graph data files it
+  creates, unless doing so compromises the test's effectiveness (see the
+  exceptions below). The largest gain is in suites whose cost is I/O: the whole
+  persistence component (`store/` — `wal`, `checkpoint`, `snapshot`, `recovery`,
+  `txn`, `bulkimport` — and `internal/crashinject/`), the MVCC machinery
+  (`graph/mvcc`, the MVCC paths of `graph/lpg`, and the MVCC examples such as
   `examples/37_mvcc_write_contention`, 17 and 25), and any other suite that writes
   temporary files intensively or runs for a very long time on disk.
+  - **Purpose — acceleration only, never realism.** The RAM drive exists for one
+    reason: to speed up the I/O on the graph's data files, which is substantially
+    slower on a real disk (SSD/HDD), so that persistence, durability and MVCC
+    scenarios execute faster. It is **never** a realistic deployment scenario: no
+    conclusion about production performance, latency, throughput or durability
+    cost is drawn from a run on it. Such conclusions require a real disk.
   - **What the RAM drive holds — and what it never holds.** Both rules are absolute.
     - **It holds the graph's data files only:** the directories and files that
       `store.Open`, `graph/lpg` and the persistence layer create for the graph —
@@ -438,8 +446,12 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
       (`go test -c` output), no build output or Go build temporaries, no logs, no
       profiles or traces, no benchmark or `benchstat` output, no scratch scripts.
       Those go to disk (the session scratchpad or the build cache).
-  - It is not used for CPU-bound suites (parser, planner, algorithms): they gain
-    nothing, and the drive takes RAM the tests need.
+  - **Exceptions — only where effectiveness would be compromised.** A test stays on
+    disk only when the RAM drive would weaken what it proves: a test that measures
+    real-device fsync latency or throughput, and any test whose finding depends on
+    real-disk timing that injected latency cannot reproduce. A CPU-bound suite
+    (parser, planner, algorithms) also runs with the RAM-drive environment; it
+    creates few or no data files, so it neither gains nor loses.
   - Races that live in an fsync window are hidden by the RAM drive's microsecond
     fsync. Concurrency tests therefore inject a seeded fsync latency
     (`internal/synclatency.ForTest`, `store.Options.SyncLatency`); it is switched
