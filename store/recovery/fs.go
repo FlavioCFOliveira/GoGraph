@@ -43,6 +43,10 @@ type recoveryFS interface {
 	OpenWALReader(path string) (*wal.Reader, error)
 	// LoadSnapshot loads the snapshot rooted at snapDir.
 	LoadSnapshot(snapDir string) (snapshot.LoadedSnapshot, error)
+	// WritePrefixMarker makes the WAL prefix marker for walPath durable (temp,
+	// fsync, rename, parent-dir fsync): the control record recovery gives a
+	// store created before the marker existed (rmp #3002).
+	WritePrefixMarker(walPath string) error
 }
 
 // osBackend is the production recovery filesystem backend: every method
@@ -62,6 +66,8 @@ func (osBackend) RemoveAll(path string) error { return os.RemoveAll(path) }
 func (osBackend) ParentDirSync(childPath string) error { return parentDirFsync(childPath) }
 
 func (osBackend) OpenWALReader(path string) (*wal.Reader, error) { return wal.OpenReader(path) }
+
+func (osBackend) WritePrefixMarker(walPath string) error { return wal.WritePrefixMarker(walPath) }
 
 func (osBackend) LoadSnapshot(snapDir string) (snapshot.LoadedSnapshot, error) {
 	return snapshot.LoadSnapshotFull(snapDir)

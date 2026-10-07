@@ -101,6 +101,10 @@ func (s simRecoveryFS) OpenWALReader(path string) (*wal.Reader, error) {
 	return wal.NewReader(rh, rh), nil
 }
 
+func (s simRecoveryFS) WritePrefixMarker(walPath string) error {
+	return wal.WritePrefixMarkerFS(simWALFS(s), walPath)
+}
+
 func (s simRecoveryFS) LoadSnapshot(snapDir string) (snapshot.LoadedSnapshot, error) {
 	return snapshot.LoadSnapshotFullFS(simSnapshotFS(s), snapDir)
 }

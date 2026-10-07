@@ -25,14 +25,19 @@ package checkpoint
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // interleavingBackend is the production snapshot backend with one hook run
@@ -245,5 +250,59 @@ func TestCheckpoint_CaptureTombstonesKeyOfTxnOpenAtInstant(t *testing.T) {
 	v, ok := rg.GetNodeProperty(keyX, "p")
 	if s, _ := v.String(); !ok || s != "after-instant" {
 		t.Errorf("X property p = %v (present %v), want \"after-instant\"", v, ok)
+	}
+}
+
+// TestCheckpoint_PrefixMarkerOnlyForSelfSufficientSnapshot pins the storage
+// audit's F4 on rmp #3002: the control record means "history requires a
+// snapshot", so a checkpoint whose snapshot is not self-sufficient — an int-keyed
+// store with no mapper codec, which never truncates — writes no marker. The arm
+// with a mapper codec is the control: the same workload then writes it.
+func TestCheckpoint_PrefixMarkerOnlyForSelfSufficientSnapshot(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		codec      bool
+		wantMarker bool
+	}{
+		{"no mapper codec: not self-sufficient", false, false},
+		{"control: mapper codec", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			w, err := wal.Open(filepath.Join(dir, "wal"))
+			if err != nil {
+				t.Fatalf("wal.Open: %v", err)
+			}
+			defer func() { _ = w.Close() }()
+			g := lpg.New[int, int64](adjlist.Config{Directed: true})
+			st := txn.NewStoreWithOptions[int, int64](g, w, txn.Options[int, int64]{
+				Codec: txn.NewIntCodec(), WeightCodec: txn.NewInt64WeightCodec(),
+			})
+			opts := []Option[int, int64]{WithCommitSerialiser[int, int64](st.RunUnderCommitLock)}
+			if tc.codec {
+				opts = append(opts, WithMapperCodec[int, int64](txn.NewIntCodec()))
+			}
+			var unused sync.Mutex
+			cp := New[int, int64](Config{Dir: dir}, g, w, &unused, opts...)
+			tx := st.Begin()
+			if err := tx.AddNode(1); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+			if err := cp.RunCheckpoint(); err != nil {
+				t.Fatalf("RunCheckpoint: %v", err)
+			}
+			if got, want := cp.Stats().WALTruncBytes > 0, tc.wantMarker; got != want {
+				t.Fatalf("WAL truncated = %v, want %v: the arm does not model its case", got, want)
+			}
+			_, serr := os.Stat(wal.PrefixTruncatedMarkerPath(filepath.Join(dir, "wal")))
+			if got := serr == nil; got != tc.wantMarker {
+				t.Fatalf("prefix marker present = %v, want %v (stat: %v)", got, tc.wantMarker, serr)
+			}
+		})
 	}
 }

@@ -1490,10 +1490,16 @@ func armCheckpoint(ctx context.Context, dc *durabilityConfig, out *ladderOut, le
 	// D16: snapshot plus tail replay equals a full replay of the same WAL. The
 	// pre-truncate image of the run's first checkpoint holds the whole WAL and the
 	// published snapshot; without the snapshot directory recovery replays the WAL
-	// from its first frame.
+	// from its first frame. The checkpoint has already written the WAL prefix
+	// marker by then (rmp #3002), and recovery refuses a marker without a snapshot
+	// even over a complete WAL, so the reference clone drops the marker too: it
+	// is the directory as it stood before any checkpoint.
 	pre := base + "-pre_truncate-nosnap"
 	if err := cloneWithoutSnapshot(base+"-pre_truncate", pre, brs["pre_truncate"].walLimit); err != nil {
 		return err
+	}
+	if err := os.Remove(wal.PrefixTruncatedMarkerPath(filepath.Join(pre, walFile))); err != nil {
+		return fmt.Errorf("D16: remove prefix marker: %w", err)
 	}
 	withSnap := base + "-pre_truncate-ref"
 	defer func() { _ = os.RemoveAll(withSnap) }()

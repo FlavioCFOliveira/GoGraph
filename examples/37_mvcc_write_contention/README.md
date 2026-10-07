@@ -898,7 +898,7 @@ are verdicts, and `# durability.<row> level=<n> ...` lines are telemetry.
 | D13 | `D13` | The torn image: recovery interrupted inside the WAL replay (a context that reports cancellation from its second check, so at the first replayed frame; structural, rmp #3000), then opened for writing (which repairs the torn tail) and closed, then recovered again | `recovery_interrupted`, `double_recovery_identical` |
 | D14 | `D14` | Negative control: the seam cuts the durable image at the last WAL frame carrying an acknowledged transaction's tag. Off by default (`durabilityConfig.dropLastAcked`) | `TestDurabilityNegativeControl`: `acked_present` must fail |
 | D15 | `D01.*`, `D02.*` | Transactions ordered by the WAL offset of their tag | `wal_tags_seen`, `no_hole`: no acknowledged transaction is absent below a recovered one |
-| D16 | `D16` | The pre-truncate image recovered with its snapshot, and without it (a full WAL replay) | `snapshot_used`, `checkpoint_plus_tail_equals_full_replay` (identical state fingerprints) |
+| D16 | `D16` | The pre-truncate image recovered with its snapshot, and without it and its WAL prefix marker (a full WAL replay) | `snapshot_used`, `checkpoint_plus_tail_equals_full_replay` (identical state fingerprints) |
 
 ### Negative control (D14)
 

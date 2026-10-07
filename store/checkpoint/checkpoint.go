@@ -1126,6 +1126,36 @@ func (c *Checkpointer[N, W]) writeAndTruncate(seq uint64, capt *snapshot.Capture
 		c.setErr(seq, err)
 		return err
 	}
+	// THE CONTROL RECORD, AT EVERY CHECKPOINT THAT MAY TRUNCATE (rmp #3002). The
+	// snapshot is now published and proven readable. When it is self-sufficient —
+	// the condition phase 3 requires before it discards any WAL byte — the store's
+	// history may from here on depend on it, so the prefix marker is made durable
+	// before any truncation. It is rewritten at every such checkpoint, not only at
+	// a Writer's first truncation, so a store whose marker predates the marker's
+	// existence or was removed regains it — PostgreSQL's arrangement, which
+	// rewrites pg_control (UpdateControlFile in CreateCheckPoint) before
+	// RemoveOldXlogFiles. A checkpoint whose snapshot is not self-sufficient never
+	// truncates and writes no record, so the record always means "history requires
+	// a snapshot".
+	//
+	// The check is the same manifest-composition test phase 3 repeats under the
+	// commit lock. A DDL that commits between the two can turn this "yes" into
+	// phase 3's "no"; the record is then written for a self-sufficient, readable
+	// snapshot whose WAL is retained, which is the accepted fail-stop direction.
+	// It runs lock-free, in phase 2, and does not take the WAL's append lock, so it
+	// adds no stall to any commit.
+	selfSufficient, err := c.snapshotIsSelfSufficient(snapDir, c.g.HasConstraints(), c.g.HasIndexes())
+	if err != nil {
+		c.setErr(seq, err)
+		return err
+	}
+	if selfSufficient {
+		if err := c.wlog.MarkPrefixTruncated(); err != nil {
+			err = fmt.Errorf("checkpoint: prefix marker, WAL retained: %w", err)
+			c.setErr(seq, err)
+			return err
+		}
+	}
 	// fsync the WAL so the suffix [watermark, end) — the frames committed
 	// concurrently during the snapshot write — is durable before we touch the
 	// prefix. Snapshot durable (writeSnapshot publishes with its own fsync +

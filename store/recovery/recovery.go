@@ -728,12 +728,16 @@ var ErrCommittedTxnCorruptOp = errors.New("recovery: corrupt op inside a committ
 // [Result.TailErr]) when the directory's WAL is a suffix whose prefix a
 // checkpoint truncated, and no snapshot covers that prefix (rmp #2990).
 //
-// [wal.Writer.TruncatePrefix] makes the marker [wal.PrefixTruncatedMarkerPath]
-// durable before its first truncation; a directory that holds the marker but no
-// snapshot manifest has lost the only copy of every commit the checkpoint
-// folded. Recovery refuses it rather than replaying the suffix onto an empty
-// graph and reporting a shorter history as clean. [Result.IsClean] is false and
-// no WAL frame is replayed, so the returned graph is empty.
+// The marker [wal.PrefixTruncatedMarkerPath] is the store's durable control
+// record that its history requires a snapshot: the WAL writer makes it durable
+// before it discards history, the checkpointer rewrites it at every checkpoint,
+// and recovery writes it the first time it loads a self-sufficient snapshot of
+// a store that lacks it (rmp #3002). A directory that holds the marker but no
+// snapshot manifest has lost the only copy of every commit a checkpoint may
+// have folded, and is refused even when its WAL happens to be complete.
+// Recovery refuses it rather than replaying the suffix onto an empty graph and
+// reporting a shorter history as clean. [Result.IsClean] is false and no WAL
+// frame is replayed, so the returned graph is empty.
 //
 // It is a fail-stop condition with no automatic repair: restore the snapshot
 // directory from a backup. Removing the marker opens the WAL suffix alone, which
@@ -1114,6 +1118,13 @@ func accumulateIndexOp(is *indexSet, op *Op) (isIndex, ok bool) {
 // [ErrMissingSnapshot] and replays nothing, because the WAL alone is not the
 // store's history.
 //
+// The first CLEAN recovery that loads a self-sufficient snapshot of a store
+// without that marker (a store created before the marker existed) writes it
+// durably, so a later loss of the snapshot is refused (rmp #3002). That
+// recovery therefore needs write access to dir: on a read-only directory it
+// fails with the write error. An unclean recovery writes nothing. [OpenCtx]
+// and [OpenFS] behave identically.
+//
 // A torn or truncated WAL tail — the normal state after a crash between
 // two fsyncs — is benign: Open recovers the committed prefix, returns a
 // nil error, and records the cut via [Result.TailErr] / [Result.IsClean].
@@ -1149,6 +1160,9 @@ func Open[N comparable, W any](dir string, opts Options[N, W]) (Result[N, W], er
 // checked at the snapshot-load boundary and at every 4096 WAL frames
 // replayed; on cancellation the function returns the partially-
 // recovered Result paired with the wrapped ctx.Err.
+//
+// Like [Open], its first clean recovery of a store without the WAL prefix
+// marker writes the marker, and so needs write access to dir (rmp #3002).
 func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[N, W]) (Result[N, W], error) {
 	defer metrics.Time("store.recovery.OpenCtx").Stop()
 	if opts.Codec == nil {
@@ -1174,7 +1188,9 @@ func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 // parameter type is unexported (mirroring
 // [github.com/FlavioCFOliveira/GoGraph/store/wal.OpenWith]); production code
 // calls [Open], which supplies the OS backend. Passing the OS backend here is
-// behaviourally equivalent to [Open].
+// behaviourally equivalent to [Open], including the WAL prefix marker write
+// on the first clean recovery of a store without it, made through fsys
+// (rmp #3002).
 func OpenFS[N comparable, W any](fsys recoveryFS, dir string, opts Options[N, W]) (Result[N, W], error) {
 	return OpenCtxFS[N, W](context.Background(), fsys, dir, opts)
 }
@@ -1800,7 +1816,46 @@ func openCodec[N comparable, W any](
 		metrics.IncCounter("store.recovery.openCodec.corruptTail", 1)
 		return res, res.TailErr
 	}
+	// GIVE A PRE-MARKER STORE ITS CONTROL RECORD (rmp #3002). A store whose WAL
+	// prefix was truncated before the marker existed has no marker, so losing
+	// its snapshot later would be indistinguishable from a store that never
+	// checkpointed. A self-sufficient snapshot is what a truncation requires and
+	// what a checkpoint publishes before truncating, so the first recovery that
+	// loads one writes the marker if it is absent; from then on the store's
+	// history requires a snapshot, as PostgreSQL's pg_control names the
+	// checkpoint recovery must find. The accepted consequence is that such a
+	// store whose WAL happens to be complete is also refused if the snapshot is
+	// lost. Written only on a CLEAN recovery, so a refused directory, and one
+	// opened read-only after an unclean recovery (store.Options.AllowUnclean),
+	// is left byte-for-byte as recovery found it; a failure to write it fails the
+	// open, because the record is what makes a later snapshot loss detectable.
+	if err := ensurePrefixMarker(fsys, filepath.Join(dir, "wal"), res.SnapshotSelfSufficient && res.IsClean()); err != nil {
+		metrics.IncCounter("store.recovery.openCodec.errors", 1)
+		return res, err
+	}
 	return res, nil
+}
+
+// ensurePrefixMarker makes the WAL prefix marker for walPath durable when due
+// (a clean recovery that loaded a self-sufficient snapshot) and absent, and
+// does nothing otherwise (rmp #3002). See the call site in [openCodec] for why
+// recovery writes it.
+func ensurePrefixMarker(fsys recoveryFS, walPath string, due bool) error {
+	if !due {
+		return nil
+	}
+	_, err := fsys.Stat(wal.PrefixTruncatedMarkerPath(walPath))
+	switch {
+	case err == nil:
+		return nil
+	case !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("recovery: probe WAL prefix marker: %w", err)
+	}
+	if err := fsys.WritePrefixMarker(walPath); err != nil {
+		return fmt.Errorf("recovery: write WAL prefix marker: %w", err)
+	}
+	metrics.IncCounter("store.recovery.openCodec.prefixMarkerWritten", 1)
+	return nil
 }
 
 // ReplayResult reports what a single WAL-replay pass consumed and recovered. It
