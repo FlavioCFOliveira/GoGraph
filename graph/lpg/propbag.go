@@ -354,6 +354,24 @@ func (b *propBag) get(key PropertyKeyID) (PropertyValue, bool) {
 	return PropertyValue{}, false
 }
 
+// has reports whether key is present, reading only the record keys: unlike
+// [propBag.get] it decodes no value, so it never allocates.
+func (b *propBag) has(key PropertyKeyID) bool {
+	if b.m != nil {
+		_, ok := b.m[key]
+		return ok
+	}
+	buf := b.buf // one snapshot; see [propBag.get]
+	for off := 0; off < len(buf); {
+		k, next := bagKeyAt(buf, off)
+		if k == key {
+			return true
+		}
+		off = next
+	}
+	return false
+}
+
 // promote moves the stream's records into a map and switches tier. extra is a
 // capacity hint for the records the caller is about to add.
 func (b *propBag) promote(extra int) {
