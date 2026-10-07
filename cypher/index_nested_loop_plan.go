@@ -44,6 +44,7 @@ package cypher
 // writing statement can therefore use it too.
 
 import (
+	"context"
 	"math"
 	"sync/atomic"
 
@@ -151,7 +152,22 @@ func tryBuildIndexNestedLoopJoin(
 	}
 
 	// ── The cost gate ──
-	innerRows, ok := estimateLeadingScanRows(apply.Inner, labelSrc)
+	//
+	// innerRows is EXACT, not the planner's O(1) bound, because the coverage proof
+	// below rests on it (rmp #3010). An upper bound would also be sound there — it
+	// can only make the proof fail more often — but under MVCC churn every bound
+	// exceeds the index's entry count, so the join would silently stop engaging
+	// whenever any write is in flight. The exact count keeps the plan this
+	// statement got before; it is computed under the statement's context, and the
+	// label scan's Init reuses it through the statement's memo (rmp #3011).
+	ctx := bopts.queryCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	innerRows, ok, err := exactLeadingScanRows(ctx, apply.Inner, labelSrc)
+	if err != nil {
+		return nil, false, err
+	}
 	if !ok || innerRows < indexNestedLoopMinPopulation {
 		return nil, false, nil
 	}

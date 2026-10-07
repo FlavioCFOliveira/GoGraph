@@ -105,6 +105,7 @@ package cypher
 // exact.
 
 import (
+	"context"
 	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -389,44 +390,64 @@ func collectReorderCandidates(root ir.LogicalPlan) []*ir.Apply {
 // disturbed. The two agree asymptotically (the exact form differs by the additive
 // drain(a) term), and the product is the conservative direction for a filtered
 // arm, since it never charges the composed component more than its parts.
-func reorderComponentCardinality(plan ir.LogicalPlan, labelSrc labelResolverIface, params map[string]expr.Value, totalNodes int64) (componentCost, bool) {
+//
+// # Plan-choice counts are O(1); the statistics denominator stays exact (rmp #3010)
+//
+// The drain is [labelCardinalityEstimate]'s figure: exact when the O(1) count
+// answers, an O(1) upper bound (estBound) under MVCC churn. The swap only reorders
+// two result-identical drives, so a bound is enough, and every label's bound
+// carries the same churn term. A FILTERED component's statistics, however, divide
+// by N, and [statsSnapshotFresh] rejects an upper bound there (rmp #2771), so
+// [reorderFilteredRows] resolves the exact N under ctx — and only when a statistic
+// for the predicate exists, since the providers read N only then. ctx's error is
+// returned when the statement is cancelled while N is computed.
+func reorderComponentCardinality(ctx context.Context, plan ir.LogicalPlan, labelSrc labelResolverIface, params map[string]expr.Value, totalNodes int64) (componentCost, bool, error) {
 	switch n := plan.(type) {
 	case *ir.NodeByLabelScan:
 		e := labelCardinalityEstimate(labelSrc, n.Label)
-		return componentCost{drain: e, rows: e}, true
+		return componentCost{drain: e, rows: e}, true, nil
 	case *ir.AllNodesScan:
 		e := estimate{rows: float64(totalNodes), source: estExact}
-		return componentCost{drain: e, rows: e}, true
+		return componentCost{drain: e, rows: e}, true, nil
 	case *ir.Selection:
 		scan, ok := reorderFilteredScan(n)
 		if !ok {
-			return componentCost{}, false
+			return componentCost{}, false, nil
 		}
 		drain := labelCardinalityEstimate(labelSrc, scan.Label)
-		rows, rowsErr := reorderFilteredRows(n, scan, labelSrc, params, drain)
+		rows, rowsErr, err := reorderFilteredRows(ctx, n, scan, labelSrc, params, drain)
+		if err != nil {
+			return componentCost{}, false, err
+		}
 		// The 0 <= rows <= drain invariant is enforced by [clampComponentRows] at
 		// both interval ends rather than here, so a stale statistic reporting more
 		// rows than the label now holds cannot reach the cost rule either way.
-		return componentCost{drain: drain, rows: rows, rowsErr: rowsErr}, true
+		return componentCost{drain: drain, rows: rows, rowsErr: rowsErr}, true, nil
 	case *ir.Apply:
-		lo, ok1 := reorderComponentCardinality(n.Outer, labelSrc, params, totalNodes)
-		hi, ok2 := reorderComponentCardinality(n.Inner, labelSrc, params, totalNodes)
+		lo, ok1, err := reorderComponentCardinality(ctx, n.Outer, labelSrc, params, totalNodes)
+		if err != nil {
+			return componentCost{}, false, err
+		}
+		hi, ok2, err := reorderComponentCardinality(ctx, n.Inner, labelSrc, params, totalNodes)
+		if err != nil {
+			return componentCost{}, false, err
+		}
 		if !ok1 || !ok2 {
-			return componentCost{}, false
+			return componentCost{}, false, nil
 		}
 		if lo.rowsErr != 0 || hi.rowsErr != 0 {
 			// Unreachable while [isReorderBareComponent] gates what may compose: a
 			// bare arm's estimate is exact. Declining rather than compounding two
 			// certified intervals keeps that gate the single place the restriction
 			// is expressed.
-			return componentCost{}, false
+			return componentCost{}, false, nil
 		}
 		return componentCost{
 			drain: estimate{rows: lo.drain.rows * hi.drain.rows, source: weakerSource(lo.drain.source, hi.drain.source)},
 			rows:  estimate{rows: lo.rows.rows * hi.rows.rows, source: weakerSource(lo.rows.source, hi.rows.source)},
-		}, true
+		}, true, nil
 	default:
-		return componentCost{}, false
+		return componentCost{}, false, nil
 	}
 }
 
@@ -438,10 +459,12 @@ func reorderComponentCardinality(plan ir.LogicalPlan, labelSrc labelResolverIfac
 // It replaces the "estExact unless both are estExact, else estFallback" rule the
 // composed component used before rmp #2766, and reproduces it exactly over the
 // provenances that rule could ever see: [labelCardinalityEstimate] and the
-// AllNodesScan total yield only estExact or estFallback, and this function maps
+// AllNodesScan total yielded only estExact or estFallback, and this function maps
 // (exact, exact) to exact and (exact, fallback) to fallback identically. It
 // differs only for estStats and estHeuristic, neither of which could reach a
-// component before the filtered arm existed.
+// component before the filtered arm existed. Since rmp #3010 the label count may
+// also be estBound, which sits between estExact and estStats: a product with a
+// bound is a bound, still trustworthy.
 func weakerSource(a, b estSource) estSource {
 	if a > b {
 		return a
@@ -469,26 +492,24 @@ func weakerSource(a, b estSource) estSource {
 // (rmp #2772), and an absent statistic is estFallback — and [planStaysDefault] then
 // keeps the written order.
 func reorderFilteredRows(
+	ctx context.Context,
 	sel *ir.Selection,
 	scan *ir.NodeByLabelScan,
 	labelSrc labelResolverIface,
 	params map[string]expr.Value,
 	labelRows estimate,
-) (estimate, float64) {
+) (estimate, float64, error) {
 	src, ok := labelSrc.(statsSource)
 	if !ok {
-		return estimate{source: estFallback}, 0
+		return estimate{source: estFallback}, 0, nil
 	}
-	// N comes from the DRAIN, not from a second resolution (rmp #2771). The drain
-	// is this label's live-node count as [labelCardinalityEstimate] resolved it —
-	// through the zero-alloc exact count, or through the label bitmap when that
-	// count declined — so reusing it makes the estimator and the drain agree by
-	// construction AND keeps the query path free of the second bitmap the
-	// providers' own [resolveLabelPopulation] would otherwise build.
-	pop := populationFromDrain(labelRows)
 	if prop, lit, okEq := extractEqFromAST(sel.PredicateExpr, scan.NodeVar, params); okEq {
 		if lit == nil || expr.IsNull(lit) {
-			return estimate{source: estFallback}, 0
+			return estimate{source: estFallback}, 0, nil
+		}
+		pop, err := reorderPopulation(ctx, src, labelSrc, scan.Label, prop, labelRows)
+		if err != nil {
+			return estimate{}, 0, err
 		}
 		// An MCV hit is an exact per-value count for the snapshot the statistic was
 		// built from, so its certified error is zero — and since rmp #2772 the
@@ -499,24 +520,53 @@ func reorderFilteredRows(
 		// reasoned about. [TestReorderStatsFreshness_EqualityScreenIsRedundant] holds
 		// the equivalence, and [TestStatsEqualityFreshness_NaNLiteralSurvivesStaleness]
 		// holds the one verdict whose treatment the removal changes.
-		return statsEqualityEstimateWith(src, scan.Label, prop, lit, pop), 0
+		return statsEqualityEstimateWith(src, scan.Label, prop, lit, pop), 0, nil
 	}
 	if prop, op, bound, okRange := extractRangeComparison(sel.PredicateExpr, scan.NodeVar, params); okRange {
 		if bound == nil || expr.IsNull(bound) {
-			return estimate{source: estFallback}, 0
+			return estimate{source: estFallback}, 0, nil
+		}
+		pop, err := reorderPopulation(ctx, src, labelSrc, scan.Label, prop, labelRows)
+		if err != nil {
+			return estimate{}, 0, err
 		}
 		e, absErr := statsRangeEstimateWith(src, scan.Label, prop, op, bound, pop)
-		e = reorderStatsFreshness(src, scan.Label, prop, labelRows, e)
+		e = reorderStatsFreshness(src, scan.Label, prop, pop, e)
 		if !e.trustworthy() {
-			return e, 0
+			return e, 0, nil
 		}
 		// absErr is an error on the SELECTIVITY; scale it by the label count to get
 		// rows. N over-states the histogram's summarised total (which excludes
 		// out-of-domain and NaN values), so the product over-states the row error —
-		// the conservative direction.
-		return e, absErr * labelRows.rows
+		// the conservative direction. A trustworthy estimate implies N is known.
+		return e, absErr * pop.n, nil
 	}
-	return estimate{source: estFallback}, 0
+	return estimate{source: estFallback}, 0, nil
+}
+
+// reorderPopulation resolves the EXACT live-node count N of label that the
+// statistics providers divide by, for a filtered component whose drain is
+// labelRows.
+//
+// An EXACT drain is N itself, read off it as before (rmp #2771), which keeps the
+// query path free of a second resolution. A BOUND drain (estBound, rmp #3010) is
+// not N — the staleness rule rejects an upper bound — so N is then resolved
+// exactly under ctx through [labelExactRows], but ONLY when a statistic for
+// (label, prop) exists: without one the providers return before they read N, so
+// resolving it would be an MVCC correction paid for nothing. A cancelled
+// statement gets ctx's error.
+func reorderPopulation(ctx context.Context, src statsSource, labelSrc labelResolverIface, label, prop string, labelRows estimate) (labelPopulation, error) {
+	if labelRows.source != estBound {
+		return populationFromDrain(labelRows), nil
+	}
+	if _, ok := lookupStats(src, label, prop); !ok {
+		return labelPopulation{}, nil
+	}
+	n, err := labelExactRows(ctx, labelSrc, label)
+	if err != nil {
+		return labelPopulation{}, err
+	}
+	return labelPopulation{n: float64(n), known: true}, nil
 }
 
 // reorderStatsFreshness demotes a trustworthy RANGE estimate to estFallback when
@@ -566,7 +616,9 @@ func reorderFilteredRows(
 // The whole formulation — the deletes tolerance, the denominator, and the b − 1/B
 // firing region — lives in [statsSnapshotFresh] so that the provider and this screen
 // cannot drift into two different rules.
-func reorderStatsFreshness(src statsSource, label, prop string, labelRows, e estimate) estimate {
+//
+// pop is the label's EXACT live-node count as [reorderPopulation] resolved it.
+func reorderStatsFreshness(src statsSource, label, prop string, pop labelPopulation, e estimate) estimate {
 	if !e.trustworthy() {
 		return e
 	}
@@ -574,7 +626,7 @@ func reorderStatsFreshness(src statsSource, label, prop string, labelRows, e est
 	if !ok {
 		return estimate{rows: e.rows, source: estFallback}
 	}
-	if !statsSnapshotFresh(st, populationFromDrain(labelRows)) {
+	if !statsSnapshotFresh(st, pop) {
 		return estimate{rows: e.rows, source: estFallback}
 	}
 	return e
@@ -688,14 +740,24 @@ func reorderPathHasStats(outer, inner componentCost) bool {
 // The gate (design §1): EVERY estimate on the path is trustworthy — both arms'
 // drain AND rows (else the trustworthiness veto keeps the written order) — and the
 // swap is a strict improvement under [reorderSwapWins].
-func computeReorderSwaps(candidates []*ir.Apply, labelSrc labelResolverIface, params map[string]expr.Value, totalNodes int64) map[*ir.Apply]bool {
+//
+// It returns ctx's error when the statement is cancelled while an exact
+// statistics denominator is being resolved (rmp #3010); the plan-choice counts
+// themselves are O(1) and never wait.
+func computeReorderSwaps(ctx context.Context, candidates []*ir.Apply, labelSrc labelResolverIface, params map[string]expr.Value, totalNodes int64) (map[*ir.Apply]bool, error) {
 	if len(candidates) == 0 {
-		return nil
+		return nil, nil
 	}
 	var swaps map[*ir.Apply]bool
 	for _, ap := range candidates {
-		outer, ok1 := reorderComponentCardinality(ap.Outer, labelSrc, params, totalNodes)
-		inner, ok2 := reorderComponentCardinality(ap.Inner, labelSrc, params, totalNodes)
+		outer, ok1, err := reorderComponentCardinality(ctx, ap.Outer, labelSrc, params, totalNodes)
+		if err != nil {
+			return nil, err
+		}
+		inner, ok2, err := reorderComponentCardinality(ctx, ap.Inner, labelSrc, params, totalNodes)
+		if err != nil {
+			return nil, err
+		}
 		if !ok1 || !ok2 {
 			continue
 		}
@@ -711,5 +773,5 @@ func computeReorderSwaps(candidates []*ir.Apply, labelSrc labelResolverIface, pa
 		}
 		swaps[ap] = true
 	}
-	return swaps
+	return swaps, nil
 }

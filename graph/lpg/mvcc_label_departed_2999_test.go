@@ -59,7 +59,7 @@ func TestLabelBitmapAsOf_AbortedCreateBetweenTheSamples_2999(t *testing.T) {
 			}
 
 			var acquired *roaring64.Bitmap
-			got := g.labelBitmapAsOfFiltered(snap, oneLabel(lid), func() (*roaring64.Bitmap, bool) {
+			got, _ := g.labelBitmapAsOfFiltered(context.Background(), snap, oneLabel(lid), func() (*roaring64.Bitmap, bool) {
 				// A transaction creates a labelled node, the image is acquired
 				// while it is a member, and the transaction aborts — all
 				// between the pre-acquire and the post-acquire samples.

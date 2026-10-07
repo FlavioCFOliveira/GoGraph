@@ -2874,7 +2874,7 @@ func (e *Engine) buildReadPhysical(
 		// at all on the query path, which passes no sink.
 		bopts.estimates = &planEstimateCollector{
 			into: estimates,
-			src:  &lpgLabelResolver{g: e.g.ReadAt(nil), eng: e},
+			src:  &lpgLabelResolver{g: e.g.ReadAt(nil), eng: e, ctx: ctx},
 		}
 	}
 	// Point the build at this plan's cross-execution analysis memo (rmp #2383).
@@ -2950,7 +2950,11 @@ func (e *Engine) buildReadPhysical(
 	// multiset; SuppressReorder (baked into the candidate set) guarantees no
 	// downstream operator observes the change.
 	if e.joinReorderEnabled && len(entry.reorderCandidates) > 0 {
-		bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, params, int64(e.g.LiveOrderStored()))
+		swaps, err := computeReorderSwaps(ctx, entry.reorderCandidates, labelSrc, params, int64(e.g.LiveOrderStored()))
+		if err != nil {
+			return nil, nil, err
+		}
+		bopts.reorderSwap = swaps
 	}
 	bopts.seekHint = entry.pushedSeekHints
 	// Single-edge anchor-swap gating (#2090): when the Engine permits it and
@@ -2982,7 +2986,18 @@ func (e *Engine) buildReadPhysical(
 	// the whole result set (#1830).
 	bopts.maxResultRows = e.maxResultRows
 	bopts.maxResultBytes = e.maxResultBytes
-	return buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
+	op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
+	if err == nil && estimates != nil {
+		// A rendering build reads exact statistics populations through the
+		// collector's resolver, which DEMOTES an estimate rather than fail when the
+		// statement is cancelled mid-correction ([resolveLabelPopulation]). Such a
+		// rendering must not be returned as if it were complete (rmp #3010).
+		if cerr := ctx.Err(); cerr != nil {
+			_ = op.Close()
+			return nil, nil, cerr
+		}
+	}
+	return op, cols, err
 }
 
 // Explain returns a textual representation of the plan that executes query with
@@ -3312,7 +3327,9 @@ func (e *Engine) explainInputsFor(entry *planCacheEntry, params map[string]expr.
 	var anchorSwaps map[*ir.Expand]bool
 	if e.joinReorderEnabled {
 		if cands := collectReorderCandidates(plan); len(cands) > 0 {
-			reorderSwaps = computeReorderSwaps(cands, labelSrc, params, int64(e.g.LiveOrderStored()))
+			// This rendering API takes no context, so the gate cannot be
+			// cancelled and cannot fail.
+			reorderSwaps, _ = computeReorderSwaps(context.Background(), cands, labelSrc, params, int64(e.g.LiveOrderStored()))
 		}
 	}
 	if e.anchorSwapEnabled {
@@ -7478,6 +7495,93 @@ type lpgLabelResolver struct {
 	// query path DOES gate on these estimates — the join reorder consumes them —
 	// so the claim that they are inert or display-only no longer holds.
 	eng *Engine
+	// ctx is the statement's context, consulted ONLY where an interface carries
+	// none of its own — the statistics population fallback of the rendering
+	// paths ([resolveLabelPopulation]). nil means the resolution cannot be
+	// cancelled. Every other cancellable resolution takes its context as an
+	// argument (rmp #3010).
+	ctx context.Context //nolint:containedctx // per-statement scope, mirrors buildOpts.queryCtx
+	// memo reuses one corrected label bitmap per label for the statement this
+	// resolver serves (rmp #3011). nil disables reuse; it is set only for a read
+	// build at a pinned snapshot, where every resolution of a label describes the
+	// same instant. See [labelBitmapMemo].
+	memo *labelBitmapMemo
+}
+
+// labelBitmapMemoSlots bounds how many distinct labels one statement's memo holds.
+// A label beyond it is resolved afresh on every call, exactly as before the memo
+// existed, so the bound costs only reuse, never correctness.
+const labelBitmapMemoSlots = 4
+
+// labelBitmapMemo holds the snapshot-corrected bitmap of each label one READ
+// statement has resolved, so the statement corrects each label once (rmp #3011).
+//
+// # Why it exists
+//
+// A label scan resolves its bitmap in Init, and an Apply re-Inits its inner arm
+// once per outer row. Under MVCC churn every resolution is an O(suspects)
+// correction, so `MATCH (a:P), (b:P) RETURN count(*)` with 3 000 committed and
+// 150 000 uncommitted :P nodes corrected the :P bitmap 3 001 times and ran for
+// 2 min 21 s, measured on Apple M4 — for an answer that is the same every time.
+//
+// # Why reuse cannot change a result
+//
+// [lpg.Graph.LabelBitmapAsOfContext] answers what the reader's SNAPSHOT holds,
+// and a read statement's snapshot is fixed for its whole execution and the
+// statement writes nothing. So every resolution of one label within it is the
+// same set, and the bitmap is read-only by contract. The memo is therefore
+// enabled only for a read build with a non-nil snapshot; a present-time view
+// (rendering) or a writer's view, whose own writes move between resolutions,
+// never gets one.
+//
+// # Bounds and concurrency
+//
+// At most [labelBitmapMemoSlots] labels, held in the read build's scaffold — no
+// allocation — and released with it at the end of the statement. The mutex is
+// per statement, never global: morsel-parallel workers build and Init their
+// sub-plans concurrently against the one resolver, and the lock serialises only
+// the slot table, never a correction.
+type labelBitmapMemo struct {
+	mu  sync.Mutex
+	n   int
+	lid [labelBitmapMemoSlots]lpg.LabelID
+	bm  [labelBitmapMemoSlots]*roaring64.Bitmap
+}
+
+// get returns the memoised bitmap of lid, or nil. A nil memo holds nothing.
+func (m *labelBitmapMemo) get(lid lpg.LabelID) *roaring64.Bitmap {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.n {
+		if m.lid[i] == lid {
+			return m.bm[i]
+		}
+	}
+	return nil
+}
+
+// put records bm as lid's bitmap when a slot is free and returns the bitmap the
+// caller must use: the one already recorded, if a concurrent resolution got
+// there first, so every reader of the statement shares one instance.
+func (m *labelBitmapMemo) put(lid lpg.LabelID, bm *roaring64.Bitmap) *roaring64.Bitmap {
+	if m == nil {
+		return bm
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.n {
+		if m.lid[i] == lid {
+			return m.bm[i]
+		}
+	}
+	if m.n < labelBitmapMemoSlots {
+		m.lid[m.n], m.bm[m.n] = lid, bm
+		m.n++
+	}
+	return bm
 }
 
 // Counts returns the relationship count-store this resolver reads, or nil when
@@ -7512,17 +7616,48 @@ func (s *lpgLabelResolver) ResolvePropertyID(name string) (uint32, bool) {
 	return uint32(pid), true
 }
 
-// ResolveLabelBitmap implements exec.labelResolver.
+// ResolveLabelBitmap implements exec.labelResolver. It cannot be cancelled; a
+// caller holding the statement's context uses
+// [lpgLabelResolver.ResolveLabelBitmapContext].
 func (s *lpgLabelResolver) ResolveLabelBitmap(name string) *roaring64.Bitmap {
+	// context.Background is never cancelled, so the error is always nil.
+	bm, _ := s.ResolveLabelBitmapContext(context.Background(), name)
+	return bm
+}
+
+// ResolveLabelBitmapContext is [lpgLabelResolver.ResolveLabelBitmap] under ctx:
+// the same snapshot-corrected bitmap, or ctx's error when the statement is
+// cancelled while it is corrected — never a partially corrected bitmap (rmp
+// #3010). A label already resolved by this statement is answered from the memo
+// (rmp #3011).
+func (s *lpgLabelResolver) ResolveLabelBitmapContext(ctx context.Context, name string) (*roaring64.Bitmap, error) {
 	lid, ok := s.g.Registry().Lookup(name)
 	if !ok {
-		return roaring64.New()
+		return roaring64.New(), nil
+	}
+	if bm := s.memo.get(lid); bm != nil {
+		return bm, nil
 	}
 	// Through the snapshot-aware accessor, not the raw index. The index is a
 	// CANDIDATE source: it over-reports while a removal is deferred, and it
 	// under-reports nothing only because removals are deferred. See
 	// lpg/mvcc_index.go (rmp #2290).
-	return s.g.Raw().LabelBitmapAsOf(lid, s.g.Snapshot())
+	bm, err := s.g.Raw().LabelBitmapAsOfContext(ctx, lid, s.g.Snapshot())
+	if err != nil {
+		return nil, err
+	}
+	return s.memo.put(lid, bm), nil
+}
+
+// statementLabelBitmap resolves name under the statement context the resolver
+// carries ([lpgLabelResolver.ctx]), for a caller whose interface has no context
+// of its own. A resolver without one cannot be cancelled.
+func (s *lpgLabelResolver) statementLabelBitmap(name string) (*roaring64.Bitmap, error) {
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.ResolveLabelBitmapContext(ctx, name)
 }
 
 // HasLabelByID reports whether the node identified by id carries name AT THIS
@@ -7537,8 +7672,18 @@ func (s *lpgLabelResolver) HasLabelByID(id uint64, name string) bool {
 	return s.g.HasNodeLabelByID(graph.NodeID(id), name)
 }
 
-// ResolveLabelsCardinality reports the EXACT size of the labels' intersection
-// without materialising it, backing the planner's gate (#2133).
+// ResolveLabelsCardinality reports the size of the labels' intersection,
+// backing the planner's gate (#2133): exact when no MVCC history is live or the
+// history backlog is at most [planExactBacklog] (then through the statement's
+// cancellable correction), otherwise an O(1) UPPER BOUND.
+//
+// It was the EXACT size until rmp #3010, and exactness cost a full correction of
+// the conjunction bitmap whenever history was live — an O(suspects) walk in
+// planning that the statement could not cancel. The gate only CHOOSES between two
+// result-identical plans, and because the bound adds the same churn term to the
+// conjunction as to each label's own bound ([labelCardinalityEstimate]), the gate
+// decides under churn as it would on the raw index. See
+// [lpg.Graph.LabelsCountBound].
 //
 // It delegates to label.Index.IntersectCardinality, which runs roaring's
 // allocation-free AndCardinality against the LIVE bitmaps under one read-lock.
@@ -7561,13 +7706,24 @@ func (s *lpgLabelResolver) ResolveLabelsCardinality(names []string) (uint64, boo
 		}
 		lids = append(lids, lid)
 	}
-	// Through the as-of form, NOT NodeIndex() directly: the raw bitmaps are only
-	// authoritative when nothing is deferred and no label or node history is live.
-	// See [lpg.Graph.LabelsCountExact] for what reading them unconditionally cost
-	// (rmp #2326).
-	n, ok := s.g.Raw().LabelsCountExact(lids, s.g.Snapshot())
+	// Through the snapshot-aware bound, NOT NodeIndex() directly: the raw
+	// intersection alone could UNDER-count for a snapshot reader, which would let
+	// the gate admit on a number below the truth (rmp #2326). The bound never
+	// under-counts.
+	n, exact, ok := s.g.Raw().LabelsCountBound(lids, s.g.Snapshot())
 	if !ok {
 		return 0, false
+	}
+	// The hybrid of [lpgLabelResolver.ResolveLabelCountPlan]: exact while the
+	// correction is cheap, so the gate decides on the figure it always had.
+	if !exact && s.g.Raw().LabelHistoryBacklog() <= planExactBacklog {
+		ctx := s.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if bm, err := s.ResolveLabelsBitmapContext(ctx, names); err == nil {
+			return bm.GetCardinality(), true
+		}
 	}
 	return uint64(n), true
 }
@@ -7588,18 +7744,26 @@ func (s *lpgLabelResolver) ResolveLabelsCardinality(names []string) (uint64, boo
 // An unknown label makes the conjunction empty by definition, so it short-circuits
 // to an empty bitmap without touching the index.
 func (s *lpgLabelResolver) ResolveLabelsBitmap(names []string) *roaring64.Bitmap {
+	// context.Background is never cancelled, so the error is always nil.
+	bm, _ := s.ResolveLabelsBitmapContext(context.Background(), names)
+	return bm
+}
+
+// ResolveLabelsBitmapContext is [lpgLabelResolver.ResolveLabelsBitmap] under ctx,
+// with the cancellation contract of [lpgLabelResolver.ResolveLabelBitmapContext].
+func (s *lpgLabelResolver) ResolveLabelsBitmapContext(ctx context.Context, names []string) (*roaring64.Bitmap, error) {
 	if len(names) == 0 {
-		return roaring64.New()
+		return roaring64.New(), nil
 	}
 	ids := make([]lpg.LabelID, 0, len(names))
 	for _, n := range names {
 		lid, ok := s.g.Registry().Lookup(n)
 		if !ok {
-			return roaring64.New()
+			return roaring64.New(), nil
 		}
 		ids = append(ids, lid)
 	}
-	return s.g.Raw().LabelsBitmapAsOf(ids, s.g.Snapshot())
+	return s.g.Raw().LabelsBitmapAsOfContext(ctx, ids, s.g.Snapshot())
 }
 
 // ResolveLabelCount reports the number of live nodes that carry name, read
@@ -7640,11 +7804,50 @@ func (s *lpgLabelResolver) ResolveLabelCount(name string) (int64, bool) {
 // is present so the optional interface has the same shape as the exact-or-nothing
 // one and so a resolver that cannot answer can say so.
 func (s *lpgLabelResolver) ResolveLabelCountAsOf(name string) (int64, bool) {
+	// context.Background is never cancelled, so the error is always nil.
+	n, ok, _ := s.ResolveLabelCountAsOfContext(context.Background(), name)
+	return n, ok
+}
+
+// ResolveLabelCountAsOfContext is [lpgLabelResolver.ResolveLabelCountAsOf] under
+// ctx: a cancelled statement gets ctx's error instead of waiting for the count's
+// correction (rmp #3010). A label this statement has already resolved is counted
+// from the memoised bitmap (rmp #3011).
+func (s *lpgLabelResolver) ResolveLabelCountAsOfContext(ctx context.Context, name string) (int64, bool, error) {
+	lid, ok := s.g.Registry().Lookup(name)
+	if !ok {
+		return 0, true, nil
+	}
+	if bm := s.memo.get(lid); bm != nil {
+		return int64(bm.GetCardinality()), true, nil
+	}
+	n, err := s.g.Raw().LabelCountAsOfContext(ctx, lid, s.g.Snapshot())
+	if err != nil {
+		return 0, false, err
+	}
+	return n, true, nil
+}
+
+// ResolveLabelCountPlan implements [labelPlanCounter]: the count a plan-choice site
+// reads (rmp #3010). It is the O(1) exact count when that answers; otherwise the
+// exact snapshot count through the statement's cancellable, memoised correction
+// while the graph's history backlog is at most [planExactBacklog]; otherwise —
+// or when the statement is cancelled meanwhile — the O(1) upper bound.
+func (s *lpgLabelResolver) ResolveLabelCountPlan(name string) (int64, bool) {
 	lid, ok := s.g.Registry().Lookup(name)
 	if !ok {
 		return 0, true
 	}
-	return s.g.Raw().LabelCountAsOf(lid, s.g.Snapshot()), true
+	raw, snap := s.g.Raw(), s.g.Snapshot()
+	if n, ok := raw.LabelCountExact(lid, snap); ok {
+		return n, true
+	}
+	if raw.LabelHistoryBacklog() <= planExactBacklog {
+		if bm, err := s.statementLabelBitmap(name); err == nil {
+			return int64(bm.GetCardinality()), true
+		}
+	}
+	return raw.LabelCountBound(lid, snap)
 }
 
 // ResolveLabelCountBound reports an UPPER BOUND on the number of live nodes that
@@ -20215,6 +20418,39 @@ type execLabelAdapter struct {
 // ResolveLabelBitmap implements exec.labelResolver.
 func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return a.labelSrc.ResolveLabelBitmap(name)
+}
+
+// ResolveLabelBitmapContext forwards the cancellable resolution (rmp #3010) when
+// the underlying resolver offers it, and otherwise resolves without cancellation
+// exactly as [execLabelAdapter.ResolveLabelBitmap] does.
+func (a *execLabelAdapter) ResolveLabelBitmapContext(ctx context.Context, name string) (*roaring64.Bitmap, error) {
+	if cr, ok := a.labelSrc.(labelBitmapContextResolver); ok {
+		return cr.ResolveLabelBitmapContext(ctx, name)
+	}
+	return a.labelSrc.ResolveLabelBitmap(name), nil
+}
+
+// ResolveLabelsBitmapContext forwards the cancellable conjunction (rmp #3010),
+// falling back as [execLabelAdapter.ResolveLabelsBitmap] does.
+func (a *execLabelAdapter) ResolveLabelsBitmapContext(ctx context.Context, names []string) (*roaring64.Bitmap, error) {
+	if cr, ok := a.labelSrc.(interface {
+		ResolveLabelsBitmapContext(context.Context, []string) (*roaring64.Bitmap, error)
+	}); ok {
+		return cr.ResolveLabelsBitmapContext(ctx, names)
+	}
+	return a.ResolveLabelsBitmap(names), nil
+}
+
+// ResolveLabelCountAsOfContext forwards the cancellable snapshot count (rmp
+// #3010), falling back as [execLabelAdapter.ResolveLabelCountAsOf] does.
+func (a *execLabelAdapter) ResolveLabelCountAsOfContext(ctx context.Context, name string) (int64, bool, error) {
+	if lc, ok := a.labelSrc.(interface {
+		ResolveLabelCountAsOfContext(context.Context, string) (int64, bool, error)
+	}); ok {
+		return lc.ResolveLabelCountAsOfContext(ctx, name)
+	}
+	n, ok := a.ResolveLabelCountAsOf(name)
+	return n, ok, nil
 }
 
 // HasLabelByID forwards the per-node label check an index-driven rewrite needs
