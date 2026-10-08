@@ -183,6 +183,53 @@ func adjEffective(info *commitInfo, ts uint64) uint64 {
 type adjVersionShard struct {
 	d  map[graph.NodeID]*adjStamps
 	mu sync.Mutex
+	// grown records that d has held more than [adjKeepEntries] entries since it
+	// was allocated; see [adjVersionShard.releaseIfEmptyLocked].
+	grown bool
+}
+
+// adjKeepEntries is the largest map an emptied shard keeps for reuse.
+//
+// A direct write is an implicit transaction that publishes at once, so the next
+// vacuum pass finds every stamp it made below the watermark and empties the
+// shard. Releasing the emptied map made the next write on that shard allocate a
+// new one: measured at one map allocation per 3.5 direct writes on an
+// AddEdge+SetEdgeLabel build (rmp #3025). An emptied map is kept instead, but
+// only while it has never held more than this many entries: Go maps do not
+// shrink, so a map that once grew past one group is released as before, and
+// the memory an idle graph keeps is bounded by one smallest map per shard.
+const adjKeepEntries = 8
+
+// entryLocked returns id's stamps, creating an empty entry when there is none.
+// The caller holds the shard lock.
+func (sh *adjVersionShard) entryLocked(id graph.NodeID) *adjStamps {
+	if e := sh.d[id]; e != nil {
+		return e
+	}
+	return sh.newEntryLocked(id)
+}
+
+// newEntryLocked creates an empty entry for id, which has none, allocating the
+// shard's map when it has been released. The caller holds the shard lock.
+func (sh *adjVersionShard) newEntryLocked(id graph.NodeID) *adjStamps {
+	e := &adjStamps{}
+	if sh.d == nil {
+		sh.d = make(map[graph.NodeID]*adjStamps, adjKeepEntries)
+	}
+	sh.d[id] = e
+	if len(sh.d) > adjKeepEntries {
+		sh.grown = true
+	}
+	return e
+}
+
+// releaseIfEmptyLocked drops an emptied map that has grown past
+// [adjKeepEntries] and keeps a smaller one for the next write (rmp #3025). The
+// caller holds the shard lock.
+func (sh *adjVersionShard) releaseIfEmptyLocked() {
+	if len(sh.d) == 0 && sh.grown {
+		sh.d, sh.grown = nil, false
+	}
 }
 
 // adjVersions is the per-node adjacency conflict index.
@@ -266,11 +313,7 @@ func (av *adjVersions) claimAppend(src graph.NodeID, tx *writeCtx) error {
 		}
 	}
 	if e == nil {
-		e = &adjStamps{}
-		if sh.d == nil {
-			sh.d = make(map[graph.NodeID]*adjStamps, 8)
-		}
-		sh.d[src] = e
+		e = sh.newEntryLocked(src)
 	}
 	e.set(&e.appendInfo, &e.appendTS, tx.record(), tx.txID)
 	tx.tx.Touch(touchedAdjClaims)
@@ -323,15 +366,7 @@ func (av *adjVersions) claimAppendPair(ids [2]graph.NodeID, n int, tx *writeCtx)
 	}
 	rec := tx.record()
 	for _, id := range ids {
-		sh := &av.shards[av.shardIndex(id)]
-		e := sh.d[id]
-		if e == nil {
-			e = &adjStamps{}
-			if sh.d == nil {
-				sh.d = make(map[graph.NodeID]*adjStamps, 8)
-			}
-			sh.d[id] = e
-		}
+		e := av.shards[av.shardIndex(id)].entryLocked(id)
 		e.set(&e.appendInfo, &e.appendTS, rec, tx.txID)
 		tx.noteSide(sideAdjClaim, uint64(id), 0, 0)
 	}
@@ -383,14 +418,7 @@ func (av *adjVersions) stampAppend(src graph.NodeID, tx *writeCtx) {
 	sh := av.shard(src)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	e := sh.d[src]
-	if e == nil {
-		e = &adjStamps{}
-		if sh.d == nil {
-			sh.d = make(map[graph.NodeID]*adjStamps, 8)
-		}
-		sh.d[src] = e
-	}
+	e := sh.entryLocked(src)
 	e.set(&e.appendInfo, &e.appendTS, tx.record(), tx.txID)
 	tx.tx.Touch(touchedAdjClaims)
 	tx.noteSide(sideAdjClaim, uint64(src), 0, 0)
@@ -426,11 +454,7 @@ func (av *adjVersions) noteExclusive(src graph.NodeID, tx *writeCtx) error {
 			}
 		}
 	} else {
-		e = &adjStamps{}
-		if sh.d == nil {
-			sh.d = make(map[graph.NodeID]*adjStamps, 8)
-		}
-		sh.d[src] = e
+		e = sh.newEntryLocked(src)
 	}
 	e.set(&e.exclusiveInfo, &e.exclusiveTS, tx.record(), tx.txID)
 	tx.tx.Touch(touchedAdjClaims)
@@ -460,9 +484,7 @@ func (av *adjVersions) truncate(watermark uint64) (freed int) {
 				freed++
 			}
 		}
-		if len(sh.d) == 0 {
-			sh.d = nil
-		}
+		sh.releaseIfEmptyLocked()
 		sh.mu.Unlock()
 	}
 	return freed

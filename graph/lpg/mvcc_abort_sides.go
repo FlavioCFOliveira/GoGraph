@@ -510,9 +510,7 @@ func (av *adjVersions) clearAbortedOf(ids []graph.NodeID) (freed int) {
 		sh := av.shard(id)
 		sh.mu.Lock()
 		freed += sh.clearAbortedLocked(id)
-		if len(sh.d) == 0 {
-			sh.d = nil
-		}
+		sh.releaseIfEmptyLocked()
 		sh.mu.Unlock()
 	}
 	return freed
@@ -561,9 +559,7 @@ func (av *adjVersions) clearAborted() (freed int) {
 		for id := range sh.d {
 			freed += sh.clearAbortedLocked(id)
 		}
-		if len(sh.d) == 0 {
-			sh.d = nil
-		}
+		sh.releaseIfEmptyLocked()
 		sh.mu.Unlock()
 	}
 	return freed
