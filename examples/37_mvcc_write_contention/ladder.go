@@ -96,6 +96,11 @@ func defaultLadderConfig() ladderConfig {
 		// #2988 reverted at every level at 64 operations (9 of 9 runs).
 		"L13": 32,
 		"L15": 64,
+		// The Turso arms (ladder_turso.go), at the totals measured in README.md,
+		// "Turso arms (rmp #3017, #3018)".
+		"IX11": 16,
+		"L21":  4,
+		"L22":  32,
 	}}
 }
 
@@ -207,8 +212,11 @@ func ladderRows() []ladderRow {
 		{id: "L13", run: rowMergeStorm},  // L13, L14, MG11
 		{id: "L15", run: rowHubChurn},    // L15, L16
 		{id: "L17", run: rowParallelCount, once: true},
-		{id: "L18", run: rowAbortHeavy}, // L18
-		{id: "L19", run: rowDDLCycles},  // L19 (DD08 overlap, DD09 drain)
+		{id: "L18", run: rowAbortHeavy},     // L18
+		{id: "L19", run: rowDDLCycles},      // L19 (DD08 overlap, DD09 drain)
+		{id: "IX11", run: rowIX11Load},      // IX11 load arm (ladder_turso.go)
+		{id: "L21", run: rowReclaimReader},  // L21
+		{id: "L22", run: rowBankCheckpoint}, // L22
 	}
 }
 

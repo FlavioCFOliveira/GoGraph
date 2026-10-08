@@ -1037,6 +1037,7 @@ func phaseDurability(ctx context.Context, w io.Writer, dc *durabilityConfig) (*l
 	for _, level := range dc.levels {
 		for _, arm := range []func(context.Context, *durabilityConfig, *ladderOut, int) error{
 			armAbandon, armCheckpoint, armFsync,
+			armTornAppend, armHeldCheckpoint, armCancelPhases, // D17-D19 (durability_turso.go)
 		} {
 			if err := arm(ctx, dc, out, level); err != nil {
 				return out, err

@@ -196,6 +196,7 @@ func TestIXAccessPaths(t *testing.T) {
 	}{
 		{build: ix01}, {build: ix02}, {build: ix03}, {build: ix04Hash}, {build: ix04Btree}, {build: ix05},
 		{build: ix06}, {build: ix07}, {build: ix08, ddl: []string{ixHash}}, {build: ix09}, {build: ix10},
+		{build: ix11Hash}, {build: ix11Btree},
 		{build: dd01Commit, ddl: []string{ixHash}}, {build: dd01Rollback, ddl: []string{ixHash}},
 		{build: dd02, ddl: []string{ixHash, ixK}}, {build: dd03}, {build: dd04},
 		{build: dd05Commit, ddl: []string{uniqueK}}, {build: dd05Rollback, ddl: []string{uniqueK}},

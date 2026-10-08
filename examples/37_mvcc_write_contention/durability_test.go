@@ -34,6 +34,11 @@ var durabilityKeys = []string{
 	"D09.missing_segment.refused_loudly",
 	"D04.failure_seen", "D04.post_poison_commit_refused", "D04.failed_not_visible",
 	"D04.reopen.acked_present", "D04.reopen.refused_absent", "D04.recovers_exactly_the_acknowledged",
+	"D17.torn_record_discarded_alone", "D17.epoch1_survives_second_recovery", "D17.epoch2_present",
+	"D18.t1_acked_while_t0_held", "D18.checkpoint_waited", "D18.checkpoint_ran_after_release",
+	"D18.acked_present_after_crash",
+	"D19.a_refused_with_canceled", "D19.a_retry_commits", "D19.c_completes", "D19.no_unexpected_errors",
+	"D19.committed_equals_ok_in_memory", "D19.committed_equals_ok_after_crash", "D19.later_commit_not_blocked",
 }
 
 // runDurability runs phase 7 and holds it to every check and every key.

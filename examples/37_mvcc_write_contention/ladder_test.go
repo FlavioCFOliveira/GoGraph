@@ -29,9 +29,9 @@ var txKeys = []string{"commits_per_sec", "refused_attempts", "longest_retry_stre
 func requiredKeys(lc *ladderConfig) []string {
 	sampled := []string{"L01", "L04.sessionless", "L04.session", "L05", "L06", "L08",
 		"L10.sessionless", "L10.session", "L11.sessionless", "L11.session",
-		"L13", "MG11", "L14", "L15", "L18", "L19"}
+		"L13", "MG11", "L14", "L15", "L18", "L19", "IX11", "L21"}
 	writers := []string{"L01", "L04.sessionless", "L04.session", "L05", "L06", "L08",
-		"L10.sessionless", "L10.session", "L11.sessionless", "L11.session", "L15", "L18", "L19"}
+		"L10.sessionless", "L10.session", "L11.sessionless", "L11.session", "L15", "L18", "L19", "L22"}
 	var keys []string
 	for _, r := range sampled {
 		for _, k := range samplerKeys {
@@ -52,7 +52,11 @@ func requiredKeys(lc *ladderConfig) []string {
 		"L08.versions_held", "L08.retention_shown", "L10.sessionless.store_bytes_after",
 		"L10.sessionless.commit_p99_during_checkpoint", "L13.duplicates", "L13.failed_callers", "L14.duplicates",
 		"L15.dangling_arcs", "L15.stale_detach_refused", "L16.traversal_repeatable", "L16.young_node_stays_invisible", "L17.cancel_return_lag", "L18.dangling_arcs",
-		"L19.ddl_max_latency", "mem.heap_alloc_bytes")
+		"L19.ddl_max_latency", "mem.heap_alloc_bytes",
+		"IX11.seeks_planned_as_index", "IX11.commits_overlapped_reads", "IX11.never_mixed", "IX11.seek_equals_scan",
+		"L21.reclaimed_during_reads", "L21.node_seen_exactly_once", "L21.value_committed_by_start", "L21.repeatable",
+		"L22.checkpoints_ran", "L22.snapshot_total_and_count_constant", "L22.crash_image_after_checkpoint",
+		"L22.crash.snapshot_used", "L22.crash.total_and_count_unchanged", "L22.crash.acked_present")
 	if lc.soak {
 		keys = append(keys, "L09.unregistered_snapshots", "L09.past_capacity_unregistered",
 			"L10.sessionless.self_streak_below_budget", "L11.sessionless.self_streak_below_budget")
