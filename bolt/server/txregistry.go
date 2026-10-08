@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -276,8 +277,14 @@ func (e *txEntry) loadStatus() (state, query string) {
 type txRegistry struct {
 	clk     clock.Clock
 	entries map[string]*txEntry
-	mu      sync.Mutex
-	seq     uint64
+	// order is [txRegistry.list]'s sort buffer, reused across listings so a
+	// polled listing allocates only the slice it returns. It is guarded by mu,
+	// sized by the largest listing so far — bounded by the open transactions,
+	// which Options.MaxConnections and the per-principal quota bound — and
+	// cleared after every use so it never keeps an ended entry alive.
+	order []*txEntry
+	mu    sync.Mutex
+	seq   uint64
 }
 
 // newTxRegistry returns an empty registry using clk for start and elapsed times.
@@ -331,8 +338,23 @@ func (r *txRegistry) list() []TransactionInfo {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.clk.Now()
-	out := make([]TransactionInfo, 0, len(r.entries))
+	// Sorted as POINTERS, then copied out in order: O(n log n), not the insertion
+	// sort this replaced. The map's iteration order is random, so with the distinct
+	// instants a real clock always produces the input is a genuine permutation and
+	// an insertion sort is quadratic in expectation — measured at 672 µs per call
+	// over 512 open transactions and 2.54 ms over 1024 (rmp #2562), on the operator
+	// listing that is polled exactly when many are open. Sorting the 8-byte
+	// pointers rather than the 100-plus-byte TransactionInfo values keeps the swaps
+	// cheap, which is what holds the small and the all-equal listings at the
+	// insertion sort's cost. Entries that share an instant keep no defined relative
+	// order, as before: the map iteration already randomised it.
+	order := r.order[:0]
 	for _, e := range r.entries {
+		order = append(order, e)
+	}
+	slices.SortFunc(order, func(a, b *txEntry) int { return a.startedAt.Compare(b.startedAt) })
+	out := make([]TransactionInfo, 0, len(order))
+	for _, e := range order {
 		// One atomic load per entry, so State and Query belong to the same instant
 		// even though the entry's owner may be refreshing them right now. Across
 		// entries they need not: see the consistency note on [Server.Transactions].
@@ -348,13 +370,8 @@ func (r *txRegistry) list() []TransactionInfo {
 			Elapsed:   now.Sub(e.startedAt),
 		})
 	}
-	// Insertion sort: the list is bounded by open transactions, which the writer
-	// serialisation and Options.MaxConnections keep small.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j].StartedAt.Before(out[j-1].StartedAt); j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
-	}
+	clear(order)
+	r.order = order[:0]
 	return out
 }
 
