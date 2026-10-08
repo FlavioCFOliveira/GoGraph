@@ -136,6 +136,50 @@ type Snapshot struct {
 type snapMemo struct {
 	mu      sync.Mutex
 	verdict map[*commitInfo]bool
+	// pruneAt is the memo size at which the next pin first drops the entries
+	// that no longer change an answer; see [snapMemo.pruneLocked]. Zero means
+	// [snapMemoPruneFloor].
+	pruneAt int
+}
+
+// snapMemoPruneFloor is the smallest memo [snapMemo.pruneLocked] runs on. A
+// snapshot meets few in-flight transactions at once, so most memos never reach
+// it and never pay for a sweep.
+const snapMemoPruneFloor = 64
+
+// pruneLocked drops every pinned verdict that a fresh classification now gives
+// unchanged, and sets the size of the next prune to twice what survives (rmp
+// #3026). The caller holds m.mu.
+//
+// # Why dropping such an entry changes no answer
+//
+// An entry is dropped only when its record has RESOLVED — committed or aborted,
+// both terminal states whose stamp is never written again — and [mvcc.Visible]
+// on that final stamp equals the pinned verdict. A later visit misses the memo,
+// classifies the record afresh, gets that same verdict, and does not pin it
+// again, because a terminal record is never pinned. The test is the verdict
+// itself, not an argument about when the record committed, so it holds for every
+// snapshot: a reader at a real instant, whose in-flight pins commit above its
+// start and stay invisible, sheds them all; the snapshot's own record, pinned
+// visible and committed above the start, keeps its pin, as does every pin of a
+// snapshot at the top of the commit space (a store commit's apply, a direct
+// write), where a record pinned invisible commits below the start.
+//
+// # Why the memo stays bounded
+//
+// Before this, a long-lived snapshot kept one entry per transaction it ever met
+// in flight, for its whole life (found in rmp #2873). Now the memo never exceeds
+// pruneAt, which is the larger of [snapMemoPruneFloor] and twice the entries the
+// last prune kept, and a prune visits the memo once per that many new pins, so
+// its cost is amortised to a constant per pin.
+func (m *snapMemo) pruneLocked(startTS, txID uint64) {
+	for info, v := range m.verdict {
+		cur := info.TS()
+		if (cur < mvcc.TxIDBase || cur == mvcc.AbortedTS) && mvcc.Visible(cur, startTS, txID) == v {
+			delete(m.verdict, info)
+		}
+	}
+	m.pruneAt = max(snapMemoPruneFloor, 2*len(m.verdict))
 }
 
 // pinnedVerdict is one pinned classification of an owned snapshot.
@@ -192,6 +236,8 @@ func (s *Snapshot) visible(info *commitInfo, ts, startTS, txID uint64) bool {
 	if cur >= mvcc.TxIDBase && cur != mvcc.AbortedTS {
 		if m.verdict == nil {
 			m.verdict = make(map[*commitInfo]bool, 4)
+		} else if len(m.verdict) >= max(m.pruneAt, snapMemoPruneFloor) {
+			m.pruneLocked(startTS, txID)
 		}
 		m.verdict[info] = v
 	}

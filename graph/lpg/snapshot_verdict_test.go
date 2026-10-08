@@ -88,3 +88,76 @@ func TestSnapshotVisible_OwnedSnapshotPinsWithoutAMemo(t *testing.T) {
 		t.Fatal("a committed record is invisible to a new committed-only read")
 	}
 }
+
+// TestSnapshotVisible_LongSnapshotMemoStaysBounded covers rmp #3026: a long-lived
+// shared snapshot meets thousands of transactions in flight that then commit or
+// abort. The memo drops each pin once its record has resolved to the verdict it
+// pinned, so it stays within [snapMemoPruneFloor], and it keeps every pin a fresh
+// classification would answer differently: the snapshot's own record, and records
+// that resolved below the start after being pinned invisible.
+func TestSnapshotVisible_LongSnapshotMemoStaysBounded(t *testing.T) {
+	const startTS, ownTx, transactions = 100, mvcc.TxIDBase + 1, 16 * snapMemoPruneFloor
+	s := newSharedSnapshot(startTS, ownTx, 0)
+
+	own := mvcc.NewCommitInfo(ownTx)
+	held := make([]*commitInfo, 3) // in flight for the whole run
+	for i := range held {
+		held[i] = mvcc.NewCommitInfo(mvcc.TxIDBase + 2 + uint64(i))
+	}
+	if !s.visible(own, 0, startTS, ownTx) {
+		t.Fatal("the snapshot's own in-flight record is invisible")
+	}
+	for _, h := range held {
+		if s.visible(h, 0, startTS, ownTx) {
+			t.Fatal("another transaction's in-flight record is visible")
+		}
+	}
+
+	resolved := make([]*commitInfo, 0, transactions)
+	peak := 0
+	for i := range uint64(transactions) {
+		rec := mvcc.NewCommitInfo(mvcc.TxIDBase + 100 + i)
+		if s.visible(rec, 0, startTS, ownTx) {
+			t.Fatalf("transaction %d: in-flight record is visible", i)
+		}
+		if i%3 == 0 {
+			rec.Abort()
+		} else {
+			rec.Commit(startTS + 1 + i)
+		}
+		if s.visible(rec, 0, startTS, ownTx) {
+			t.Fatalf("transaction %d: resolved record became visible", i)
+		}
+		resolved = append(resolved, rec)
+		peak = max(peak, len(s.memo.verdict))
+	}
+	if peak > snapMemoPruneFloor {
+		t.Fatalf("memo peaked at %d entries over %d resolved transactions, want at most %d",
+			peak, transactions, snapMemoPruneFloor)
+	}
+
+	// The pins that must survive every prune: resolved, but a fresh classification
+	// would now answer otherwise.
+	own.Commit(startTS + 2*transactions)
+	for _, h := range held {
+		h.Commit(startTS - 1)
+	}
+	for i := range uint64(4 * snapMemoPruneFloor) { // force further prunes
+		rec := mvcc.NewCommitInfo(mvcc.TxIDBase + 1_000_000 + i)
+		_ = s.visible(rec, 0, startTS, ownTx)
+		rec.Abort()
+	}
+	if !s.visible(own, 0, startTS, ownTx) {
+		t.Fatal("the snapshot's own record became invisible after it committed")
+	}
+	for _, h := range held {
+		if s.visible(h, 0, startTS, ownTx) {
+			t.Fatal("a record pinned invisible became visible after it committed below the start")
+		}
+	}
+	for i, rec := range resolved {
+		if s.visible(rec, 0, startTS, ownTx) {
+			t.Fatalf("transaction %d: answer changed after its pin was dropped", i)
+		}
+	}
+}
