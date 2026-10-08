@@ -14517,11 +14517,14 @@ func tryBuildIndexSeekFromSelection(
 		}
 		guard.admit = admit
 	}
-	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal, guard, bopts.pendingIdx); ok {
+	// The statement's sole seek leaf is judged against the earlier statements'
+	// unflushed changes only; see [soleSeekLeaf] (rmp #3056).
+	pending := bopts.pendingIdx.forSeekFrom(sel)
+	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal, guard, pending); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
-	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal, guard, bopts.pendingIdx); ok {
+	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal, guard, pending); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
