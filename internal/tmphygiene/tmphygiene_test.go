@@ -122,6 +122,7 @@ var ownedTempPrefixes = []string{
 	"gograph-ex27-sweep-",
 	"gograph-ex27-",
 	"ex37-store-",
+	"ex37-gg07-",
 	"plandiff-shared-",
 	// store/... — godoc Example stores and cross-process test fixtures.
 	"bulk-example",
