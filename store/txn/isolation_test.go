@@ -87,11 +87,15 @@ func TestIsolation_Commit_NoPartialTransactionObservable(t *testing.T) {
 // seen half. When this was written the reader held lpg.Graph.View, which rmp
 // #2344 removed; the test name records that era.
 //
-// If this test ever goes green, one of two things has happened: ordinary writes
-// have gone back to excluding readers (in which case the write-scaling gate
-// should have failed first), or the unversioned accessors have gained an implicit
-// snapshot. Either is a change of architecture and must be a deliberate decision,
-// not a silent drift — which is exactly what a negative control is for.
+// Each accessor call already reads through its own snapshot of the newest
+// committed state (rmp #2965), so neither call observes a half-applied
+// transaction; what no call provides is one snapshot shared by BOTH calls. If
+// this test ever stops observing partial transactions, one of two things has
+// happened: ordinary writes have gone back to excluding readers (in which case
+// the write-scaling gate should have failed first), or consecutive accessor
+// calls have come to share one snapshot. Either is a change of architecture and
+// must be a deliberate decision, not a silent drift — which is exactly what a
+// negative control is for.
 //
 // Being a race, it is inherently probabilistic: the workload is sized so that the
 // interleaving is overwhelmingly likely (300 commits against 8 spinning readers

@@ -21,7 +21,6 @@ package lpg
 // Layer: short. Race-clean.
 
 import (
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -56,49 +55,6 @@ func runWithWatchdog(t *testing.T, body func()) (recovered any) {
 			"(the re-entrancy guard failed to trip)", reentrancyWatchdog)
 		return nil
 	}
-}
-
-// queueWriter starts a goroutine that calls ApplyAtomically and blocks inside it
-// until cleanup. It served the reader-nested cases, which ran inside Graph.View
-// and needed a queued writer to make a nested read acquisition deadlock-prone;
-// rmp #2344 removed Graph.View and those cases, and no test calls it now.
-//
-// It returns only settle, which yields the scheduler a few times so the writer
-// goroutine reaches its blocked-on-Lock state before the caller attempts the
-// nested acquisition. settle is best-effort (the guard fires deterministically
-// regardless, so the test never depends on exact timing — settle only makes the
-// "would otherwise deadlock" condition real).
-//
-// Letting the writer proceed and joining it is deferred to t.Cleanup, which runs
-// AFTER the test body has fully unwound, so the blocked writer can finish and
-// exit, hence the cleanup-time join.
-func queueWriter(t *testing.T, g *Graph[string, int64]) (settle func()) {
-	t.Helper()
-	started := make(chan struct{}) // closed just before the writer blocks on Lock
-	hold := make(chan struct{})    // closed at cleanup to let the writer finish
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		close(started)
-		_ = g.ApplyAtomically(func() error {
-			<-hold
-			return nil
-		})
-	}()
-	settle = func() {
-		<-started
-		// Yield so the writer goroutine advances from "started" into the blocked
-		// ApplyAtomically -> visMu.Lock wait, queuing behind the outer RLock.
-		for i := 0; i < 100; i++ {
-			runtime.Gosched()
-		}
-	}
-	t.Cleanup(func() {
-		close(hold)
-		wg.Wait()
-	})
-	return settle
 }
 
 func newReentrancyGraph(t *testing.T) *Graph[string, int64] {

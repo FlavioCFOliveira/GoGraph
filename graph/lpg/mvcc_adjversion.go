@@ -89,24 +89,24 @@ const adjVersionShards = 64
 
 // adjStamps is one node's pair of adjacency write stamps.
 //
-// Each side is held either as a raw timestamp (a published write) or as the
-// *[commitInfo] of the transaction that made it (still in flight), exactly as
-// every other versioned store here does — an in-flight write's effective instant
-// is its transaction id until the record publishes, and reading it through the
-// record is what makes the transition atomic for a concurrent checker.
+// Each side holds the *[commitInfo] of the transaction that made the write, or
+// nil when no write is recorded on it. The side's effective instant is the
+// record's: the transaction id while it is in flight, the commit timestamp once
+// it publishes, [mvcc.AbortedTS] once it aborts. Reading it through the record is
+// what makes the transition atomic for a concurrent checker. Every stamp is
+// written with the transaction's record, never a raw timestamp, so a side needs
+// no timestamp field of its own (rmp #3059).
 type adjStamps struct {
 	appendInfo    *commitInfo
 	exclusiveInfo *commitInfo
-	appendTS      uint64
-	exclusiveTS   uint64
 	// floorTS is the newest COMMIT timestamp a stamp displaced from either side,
 	// or zero. Every check tests it beside the two sides; see [adjStamps.set].
 	floorTS uint64
 }
 
-// set records rec (tx's commit record, effective instant txID) on one side —
-// *info and *ts are that side's fields — first folding the value it displaces
-// into floorTS when that value is a COMMITTED write of another transaction.
+// set records rec (tx's commit record) on one side — info is that side's field —
+// first folding the value it displaces into floorTS when that value is a
+// COMMITTED write of another transaction.
 //
 // # Why a displaced commit must outlive its slot (rmp #2997)
 //
@@ -143,23 +143,23 @@ type adjStamps struct {
 // by a write that skips the test — an undo replay or [adjVersions.stampAppend] on
 // a node this transaction is creating — whose displaced writer is refused by the
 // existence cross-check of the node it is racing to create.
-func (e *adjStamps) set(info **commitInfo, ts *uint64, rec *commitInfo, txID uint64) {
+func (e *adjStamps) set(info **commitInfo, rec *commitInfo) {
 	if *info != rec {
-		if h := adjEffective(*info, *ts); h != 0 && h < mvcc.TxIDBase && h > e.floorTS {
+		if h := stampTS(*info); h != 0 && h < mvcc.TxIDBase && h > e.floorTS {
 			e.floorTS = h
 		}
 	}
-	*info, *ts = rec, txID
+	*info = rec
 }
 
 // blocking returns the instant of the first write recorded in e that tx may not
 // write over — the exclusive side, the append side, then the floor of displaced
 // commits ([adjStamps.set]) — or false when there is none.
 func (e *adjStamps) blocking(tx *writeCtx) (uint64, bool) {
-	if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
+	if head := stampTS(e.exclusiveInfo); tx.conflicts(head) {
 		return head, true
 	}
-	if head := adjEffective(e.appendInfo, e.appendTS); tx.conflicts(head) {
+	if head := stampTS(e.appendInfo); tx.conflicts(head) {
 		return head, true
 	}
 	if e.floorTS != 0 && tx.conflicts(e.floorTS) {
@@ -168,7 +168,17 @@ func (e *adjStamps) blocking(tx *writeCtx) (uint64, bool) {
 	return 0, false
 }
 
-// ts resolves one side's effective instant.
+// stampTS resolves one [adjStamps] side's effective instant, or zero when the
+// side records no write.
+func stampTS(info *commitInfo) uint64 {
+	if info != nil {
+		return info.TS()
+	}
+	return 0
+}
+
+// adjEffective resolves the effective instant of a stamp held as a record or a
+// raw timestamp.
 func adjEffective(info *commitInfo, ts uint64) uint64 {
 	if info != nil {
 		return info.TS()
@@ -315,7 +325,7 @@ func (av *adjVersions) claimAppend(src graph.NodeID, tx *writeCtx) error {
 	if e == nil {
 		e = sh.newEntryLocked(src)
 	}
-	e.set(&e.appendInfo, &e.appendTS, tx.record(), tx.txID)
+	e.set(&e.appendInfo, tx.record())
 	tx.tx.Touch(touchedAdjClaims)
 	tx.noteSide(sideAdjClaim, uint64(src), 0, 0)
 	return nil
@@ -367,7 +377,7 @@ func (av *adjVersions) claimAppendPair(ids [2]graph.NodeID, n int, tx *writeCtx)
 	rec := tx.record()
 	for _, id := range ids {
 		e := av.shards[av.shardIndex(id)].entryLocked(id)
-		e.set(&e.appendInfo, &e.appendTS, rec, tx.txID)
+		e.set(&e.appendInfo, rec)
 		tx.noteSide(sideAdjClaim, uint64(id), 0, 0)
 	}
 	tx.tx.Touch(touchedAdjClaims)
@@ -419,7 +429,7 @@ func (av *adjVersions) stampAppend(src graph.NodeID, tx *writeCtx) {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	e := sh.entryLocked(src)
-	e.set(&e.appendInfo, &e.appendTS, tx.record(), tx.txID)
+	e.set(&e.appendInfo, tx.record())
 	tx.tx.Touch(touchedAdjClaims)
 	tx.noteSide(sideAdjClaim, uint64(src), 0, 0)
 }
@@ -456,7 +466,7 @@ func (av *adjVersions) noteExclusive(src graph.NodeID, tx *writeCtx) error {
 	} else {
 		e = sh.newEntryLocked(src)
 	}
-	e.set(&e.exclusiveInfo, &e.exclusiveTS, tx.record(), tx.txID)
+	e.set(&e.exclusiveInfo, tx.record())
 	tx.tx.Touch(touchedAdjClaims)
 	tx.noteSide(sideAdjClaim, uint64(src), 0, 0)
 	return nil
@@ -477,8 +487,8 @@ func (av *adjVersions) truncate(watermark uint64) (freed int) {
 		sh := &av.shards[i]
 		sh.mu.Lock()
 		for id, e := range sh.d {
-			a := adjEffective(e.appendInfo, e.appendTS)
-			x := adjEffective(e.exclusiveInfo, e.exclusiveTS)
+			a := stampTS(e.appendInfo)
+			x := stampTS(e.exclusiveInfo)
 			if a <= watermark && x <= watermark && e.floorTS <= watermark {
 				delete(sh.d, id)
 				freed++

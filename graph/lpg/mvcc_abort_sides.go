@@ -528,8 +528,8 @@ func (sh *adjVersionShard) clearAbortedLocked(id graph.NodeID) int {
 	if e == nil {
 		return 0
 	}
-	a := adjEffective(e.appendInfo, e.appendTS)
-	x := adjEffective(e.exclusiveInfo, e.exclusiveTS)
+	a := stampTS(e.appendInfo)
+	x := stampTS(e.exclusiveInfo)
 	if a == mvcc.AbortedTS && x == mvcc.AbortedTS && e.floorTS == 0 {
 		delete(sh.d, id)
 		return 1
@@ -537,10 +537,10 @@ func (sh *adjVersionShard) clearAbortedLocked(id graph.NodeID) int {
 	// One side aborted and the other live: clear only the aborted side, so the
 	// live one keeps refusing what it must.
 	if a == mvcc.AbortedTS {
-		e.appendInfo, e.appendTS = nil, 0
+		e.appendInfo = nil
 	}
 	if x == mvcc.AbortedTS {
-		e.exclusiveInfo, e.exclusiveTS = nil, 0
+		e.exclusiveInfo = nil
 	}
 	return 0
 }
