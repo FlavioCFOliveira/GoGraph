@@ -1423,8 +1423,9 @@ func (g *Graph[N, W]) ApplyVersioned(fn func(WriteTx) error) error {
 //
 // ctx bounds the WAITS only: the call returns ctx's error, wrapping
 // [context.Canceled] or [context.DeadlineExceeded], when ctx is already done on
-// entry or finishes while an attempt is parked behind another bounded
-// transaction or backing off. Every such return happens between attempts, so
+// entry or finishes while an attempt waits for the visibility gate behind a
+// strong holder (rmp #2985), is parked behind another bounded transaction, or is
+// backing off. Every such return happens before an attempt runs apply, so
 // the transaction is aborted, holds nothing, has not run durable, and has handed
 // on any waiters it inherited. ctx does NOT interrupt a running attempt: once
 // apply has run, durable is called and the attempt ends as it decides, so a
@@ -1450,7 +1451,7 @@ func (g *Graph[N, W]) ApplyDurable(ctx context.Context, apply func(WriteTx) erro
 	// woken (see [txWaitTable.yieldToHandoffs]).
 	g.txWait.yieldToHandoffs()
 	for attempt := 0; ; attempt++ {
-		head, retry, err := g.applyDurableOnce(apply, durable, inherited, woken)
+		head, retry, err := g.applyDurableOnce(ctx, apply, durable, inherited, woken)
 		inherited, woken = waitQueue{}, false // entered with the attempt, handed on by its end
 		if !retry {
 			return err
@@ -1493,9 +1494,25 @@ func (g *Graph[N, W]) ApplyDurable(ctx context.Context, apply func(WriteTx) erro
 // woken says a hand-off woke this attempt's caller; the token it owes is retired
 // once apply has run — its claims are then taken, or it was refused — panic
 // included.
-func (g *Graph[N, W]) applyDurableOnce(apply func(WriteTx) error, durable func() error, inherited waitQueue, woken bool) (head uint64, retry bool, err error) {
+//
+// The shared acquisition of the visibility gate is bounded by ctx (rmp #2985): a
+// strong holder — [Graph.ApplyAtomically], [Graph.ApplyAtomicallyTx], or the
+// barrier [Graph.LockBarrier] holds until [Graph.UnlockBarrier], and through them
+// a DDL's registration and backfill — would otherwise hold a durable commit past
+// its deadline for its whole tenure. When ctx finishes first the attempt holds
+// nothing and has run neither apply nor durable; it hands on the queue it
+// inherited and retires the hand-off token it owes, exactly as a waiter that gives
+// up does, and returns ctx's error.
+func (g *Graph[N, W]) applyDurableOnce(ctx context.Context, apply func(WriteTx) error, durable func() error, inherited waitQueue, woken bool) (head uint64, retry bool, err error) {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	visTok := g.visGate.WeakLockAuto()
+	visTok, gerr := g.visGate.WeakLockCtxAuto(ctx)
+	if gerr != nil {
+		g.txWait.handOff(inherited)
+		if woken {
+			g.txWait.handoffDone()
+		}
+		return 0, false, fmt.Errorf("lpg: ApplyDurable: waiting for the visibility gate: %w", gerr)
+	}
 	g.barrier.stampWriter(gid)
 	w := g.beginBoundedWrite()
 	txID := w.txID // w is recycled by finishWriteShared; the id is not
