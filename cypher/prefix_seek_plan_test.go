@@ -129,9 +129,12 @@ func TestPrefixSeekPlanShape(t *testing.T) {
 		name:  "non_selective_prefix_vetoed_by_gate",
 		query: `MATCH (p:PfxPerson) WHERE p.name STARTS WITH "name" RETURN p.name`,
 	}, {
-		// An empty range is correct but pointless to seek.
-		name:  "zero_match_prefix_vetoed_by_gate",
-		query: `MATCH (p:PfxPerson) WHERE p.name STARTS WITH "zzz" RETURN p.name`,
+		// An empty range seeks (rmp #3061): the gate's count has already paid the
+		// descent, and the scan would read every node to return zero rows.
+		name:     "zero_match_prefix_seeks",
+		query:    `MATCH (p:PfxPerson) WHERE p.name STARTS WITH "zzz" RETURN p.name`,
+		wantSeek: true,
+		wantText: `range="zzz".."zz{"(excl)`,
 	}}
 
 	for _, tc := range cases {

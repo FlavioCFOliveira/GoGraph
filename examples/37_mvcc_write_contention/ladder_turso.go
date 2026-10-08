@@ -43,10 +43,12 @@ import (
 // ix11LoadNodes is the number of :L nodes every commit re-values: above the two
 // changes the engine's index buffer holds inline, so every delivery is a batch.
 // Each node's value carries its id plus 100, so up to 900 nodes no value is a
-// prefix of another's (the btree seek is a prefix seek: the planner serves a
-// parameterised btree equality by a scan). 64 is the planner's floor here, not
-// the delivery's: at 32 and 48 nodes the btree prefix seek is planned as a label
-// scan (measured), and seeks_planned_as_index would fail.
+// prefix of another's (the btree arm seeks by prefix). 64 is the planner's floor
+// here, not the delivery's: below rangeSeekMinLabelPopulation (64) every btree
+// seek, equality and prefix alike, is planned as a label scan (measured at 32 and
+// 48 nodes), and seeks_planned_as_index would fail. From 64 nodes the btree seek
+// is planned from the index for a key present in it and for one absent from it
+// (rmp #3061).
 const ix11LoadNodes = 64
 
 const (

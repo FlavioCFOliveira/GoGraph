@@ -867,7 +867,7 @@ with the injected fsync latency, levels 1, 8 and 64, three runs per size:
 
 | Gate | Seeded mutant | Total ops | Detection | Green |
 |---|---|---|---|---|
-| `IX11` `seek_equals_scan` | `index.Manager.DescribesSnapshot` always true (the seek never declines to the scan) | 16 | 3 of 3 runs at every level; at 4, level 1 runs too few commits to overlap a read (`commits_overlapped_reads` fails) | 3 of 3 |
+| `IX11` `seek_equals_scan` | `index.Manager.DescribesSnapshot` always true (the seek never declines to the scan) | 16 | 3 of 3 runs at every level; at 4, level 1 runs too few commits to overlap a read (`commits_overlapped_reads` fails). Since rmp #3061 the btree arm's read of the next generation's key, absent from the reader's snapshot, is planned as a seek, not a label scan, so both btree reads compare a seek with a scan; re-measured: 3 of 3 runs at every level | 3 of 3 |
 | `L21` `value_committed_by_start`, `repeatable` | `Horizon.Oldest` returns its fallback without scanning the readers (reclaim past the watermark) | 4 (the 4-per-goroutine floor) | 3 of 3 runs at every level (`repeatable`; `value_committed_by_start` at 8 and 64 in every run) | 3 of 3 |
 | `L22.crash` `acked_present`, `total_and_count_unchanged` | `Checkpointer.awaitCommitQuiescence` returns at once (checkpoint capture skew: the durable-but-unpublished window is not waited out) | 32 | 5 of 5 runs fail at one level or more, never at the same levels every run (for example `1 of 174 acknowledged transfers missing`, `recovered sum=12802`); at 16, 2 of 3 | 3 of 3 |
 

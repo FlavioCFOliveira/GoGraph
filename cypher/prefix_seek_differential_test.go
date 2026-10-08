@@ -244,10 +244,12 @@ func TestPrefixSeekDifferential(t *testing.T) {
 		// Gate vetoes — correct answers, no seek.
 		{name: "empty_prefix_all_rows", prefix: "", wantSeek: false},
 		{name: "prefix_matching_every_row", prefix: "name", wantSeek: false},
-		{name: "prefix_matching_zero_rows", prefix: "zzz", wantSeek: false},
-		{name: "prefix_longer_than_any_value", prefix: "name0000zzzzzzzz", wantSeek: false},
+		// Empty ranges seek (rmp #3061): the gate's count has already paid the
+		// descent, and the scan would read every node to return zero rows.
+		{name: "prefix_matching_zero_rows", prefix: "zzz", wantSeek: true},
+		{name: "prefix_longer_than_any_value", prefix: "name0000zzzzzzzz", wantSeek: true},
 		// A prefix whose successor region is empty in the index.
-		{name: "prefix_between_values", prefix: "name0001x", wantSeek: false},
+		{name: "prefix_between_values", prefix: "name0001x", wantSeek: true},
 	}
 
 	for _, tc := range cases {

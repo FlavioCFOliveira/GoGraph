@@ -365,9 +365,9 @@ func tryStringRangeSeek(
 
 // rangeCountWins applies the shared selectivity/population gate: the label
 // population must be at least rangeSeekMinLabelPopulation, and the EXACT
-// in-range count (early-exit at budget) must be non-empty and within
-// rangeSeekMaxSelectivity of the population. count is the type-specific
-// RangeCount closure (string or float64). The count is INCLUSIVE [lo, hi]
+// in-range count (early-exit at budget) must be within
+// rangeSeekMaxSelectivity of the population; an empty range seeks (rmp #3061).
+// count is the type-specific RangeCount closure (string or float64). The count is INCLUSIVE [lo, hi]
 // (a tiny over-count of at most the two boundary values when a bound is
 // exclusive), which only makes the gate marginally more conservative; the
 // residual Selection Filter re-checks every row regardless.
@@ -424,13 +424,16 @@ func rangeSeekBudget(g *lpg.ReadView[string, float64], label string) (uint64, bo
 
 // rangeCountWithinBudget is the selectivity half of the shipped gate, applied to
 // a count already taken against budget: the count must be exact (not
-// early-exited), non-empty, and within budget.
+// early-exited) and within budget.
 //
-// Over budget, unknown, or empty: keep the scan. (An empty range is correct but
-// pointless to seek; the scan+filter yields the same zero rows without an index
-// descent.)
+// Over budget or unknown: keep the scan. An EMPTY range seeks (rmp #3061): the
+// count that proved it empty has already paid the index descent, and the scan it
+// used to fall back to reads every node of the label to return the same zero
+// rows. Measured on a btree-only string equality whose value is absent: 1.39 ms
+// and 20 071 allocs/op at 20 000 nodes on the scan, 3.6 us and 82 allocs/op on
+// the seek.
 func rangeCountWithinBudget(count uint64, exact bool, budget uint64) bool {
-	return exact && count != 0 && count <= budget
+	return exact && count <= budget
 }
 
 // findBoundStringBTree returns the first bound string btree index covering
