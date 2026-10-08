@@ -2,14 +2,16 @@ package cypher
 
 // reader_under_write_tx_bench_test.go — characterisation benchmark for audit
 // finding F7 (#1836): quantify the reader tail latency caused by the
-// engine-wide visibility barrier a write [ExplicitTx] holds for its entire
-// lifetime (head-of-line blocking).
+// engine-wide visibility barrier a write [ExplicitTx] held for its entire
+// lifetime (head-of-line blocking) when this was written. rmp #2305 retired that
+// hold and rmp #2344 removed lpg.Graph.View; a reader now takes an MVCC snapshot
+// and no lock, so this measures whether any tail remains.
 //
 // The #1671 closure that deferred the copy-on-write cure measured readers under
 // a STEADY SMALL writer, not a single write transaction held open across
 // simulated round-trips. This benchmark fills that gap: it measures a scanning
-// read query's latency (Engine.Run, which reads under lpg.Graph.View -> the
-// barrier's RLock) in two modes — no concurrent writer, and a background writer
+// read query's latency (Engine.Run, which reads at an MVCC snapshot) in two
+// modes — no concurrent writer, and a background writer
 // that holds a write ExplicitTx open for a fixed think-time each cycle — and
 // reports p50/p99. The delta is the head-of-line-blocking tail the ExplicitTx
 // operational-contract godoc warns about.

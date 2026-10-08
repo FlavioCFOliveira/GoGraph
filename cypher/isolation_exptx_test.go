@@ -3,18 +3,20 @@ package cypher_test
 // isolation_exptx_test.go — regression gate for ExplicitTx read-committed
 // isolation (task #1412, isolation option b: whole-tx visMu.Lock).
 //
-// # Isolation contract after task #1412
+// # Isolation contract
 //
-// [Engine.BeginTx] now acquires the graph's transaction-visibility write lock
-// (visMu via [lpg.Graph.LockBarrier]) for the whole lifetime of the explicit
-// transaction. A concurrent [Engine.Run] or [lpg.Graph.View] call acquires the
-// read-side of the same lock, so it BLOCKS while the explicit transaction is open
-// and is released only once [ExplicitTx.Commit] or [ExplicitTx.Rollback] is
-// called. Readers therefore observe either the pre-transaction state or the fully
-// committed/rolled-back state — never an intermediate dirty write.
+// Task #1412 made [Engine.BeginTx] hold the graph's barrier exclusively for the
+// whole transaction, so readers blocked. That is no longer the mechanism: rmp
+// #2305 retired the hold, and rmp #2344 removed lpg.Graph.View. Each statement
+// of an explicit transaction now holds the schema barrier SHARED for its own
+// duration only ([lpg.Graph.ApplyInVersionedTx]), and every write it makes is
+// stamped with the transaction's commit record, which stays unpublished until
+// [ExplicitTx.Commit]. A concurrent [Engine.Run] reads at its own MVCC snapshot
+// and never blocks, so it observes either the pre-transaction state or the
+// fully committed state — never an intermediate dirty write.
 //
 // The tests in this file cover:
-//   - Readers block during an open ExplicitTx and observe the post-Commit state.
+//   - Readers do not block during an open ExplicitTx and observe the post-Commit state.
 //   - After Rollback, readers observe the pre-transaction state (0 nodes).
 //   - Across multiple Exec calls within one ExplicitTx, no intermediate count is
 //     ever observable by a concurrent reader (atomic multi-statement visibility).
@@ -144,9 +146,9 @@ func TestExplicitTx_Isolation_ReadCommitted(t *testing.T) {
 		}
 		_ = res.Close()
 
-		// Concurrent reader: launched while the transaction is still open.
-		// Because ExplicitTx now holds visMu.Lock, Engine.Run blocks on visMu.RLock
-		// inside Graph.View and cannot proceed until Commit releases the lock.
+		// Concurrent reader: launched while the transaction is still open. It
+		// reads at its own MVCC snapshot; the open transaction's commit record is
+		// unpublished, so none of its writes are visible.
 		type readResult struct {
 			count int64
 			err   error

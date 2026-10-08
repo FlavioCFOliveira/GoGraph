@@ -118,11 +118,12 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 		//   - resolving the bitmap through a snapshot (LabelBitmapAsOf). That filters
 		//     through the versioned label store, which CORRECTS the staleness that is
 		//     the whole subject of the test.
-		//   - taking both reads inside View. The writer mutates under ApplyAtomically,
-		//     which holds the barrier exclusively, so a reader holding it shared cannot
-		//     observe the intermediate state AT ALL — which is exactly what this file
-		//     already says about the pre-rmp-#2308 world: "the visibility barrier hid
-		//     both windows".
+		//   - taking both reads inside Graph.View (since removed by rmp #2344). The
+		//     writer mutates under ApplyAtomically, which holds the barrier
+		//     exclusively, so a reader that held it shared could not observe the
+		//     intermediate state AT ALL — which is exactly what this file already
+		//     says about the pre-rmp-#2308 world: "the visibility barrier hid both
+		//     windows".
 		//
 		// So the read must stay present-time and barrier-free, and the pair cannot be
 		// made atomic. What discriminates the two cases instead is the BAG: a false

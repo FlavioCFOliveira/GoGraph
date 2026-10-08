@@ -9,9 +9,10 @@ package cypher_test
 // concurrent RunInTx CREATE that grew the node space could grow the live
 // adjacency between the CSR snapshot and the filter loop, so the loop indexed
 // the fixed-length snapshot vertices slice out of range and panicked with
-// "index out of range [N] with length N". The build now runs INSIDE
-// Graph.View / Graph.ApplyAtomically, so readers and writers are serialised by
-// visMu and the snapshot can no longer be torn.
+// "index out of range [N] with length N". The fix first ran the build inside
+// the visibility barrier. Today the build takes no barrier: every read it binds
+// resolves through the query's read view at ONE MVCC instant (rmp #2289,
+// [Engine.buildReadPhysical]), and rmp #2344 removed Graph.View.
 //
 // The test runs relationship MATCH readers (which exercise the edge-type
 // filter build) concurrently with writers that CREATE fresh nodes, growing the

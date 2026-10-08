@@ -3,9 +3,10 @@ package cypher_test
 // isolation_test.go — F3.3 isolation proof for the Cypher engine
 // (docs/isolation-design.md). Concurrent Cypher reads (Engine.Run via RunAny)
 // and writes (Engine.RunInTx via RunInTxAny) must never let a reader observe a
-// partially-applied write transaction. Run/RunInTx now execute the whole query
-// under the graph's visibility barrier (Graph.View / Graph.ApplyAtomically) and
-// materialise the rows, so a reader sees either none or all of a write
+// partially-applied write transaction. Run reads the whole query at one MVCC
+// snapshot and takes no barrier (rmp #2344 removed Graph.View); RunInTx stamps
+// every write of the statement with one commit record, published by a single
+// atomic store. A reader therefore sees either none or all of a write
 // transaction's effects.
 
 import (

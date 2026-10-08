@@ -13,12 +13,16 @@ package mtaudit_test
 //
 // # What is being measured
 //
-// `Engine.Run` holds the graph read barrier ([lpg.Graph.View], an RLock on
-// visMu) across BUILD and DRAIN, so a long analytical query holds it for its
-// whole duration. A write takes the same barrier EXCLUSIVELY
-// ([lpg.Graph.ApplyAtomically]). Go's sync.RWMutex prefers a waiting writer, so
-// once the writer queues behind the long read, every short reader arriving
-// after it parks until the long read finishes and the write completes.
+// When this was written, `Engine.Run` held the graph read barrier
+// (lpg.Graph.View, an RLock on visMu) across BUILD and DRAIN, so a long
+// analytical query held it for its whole duration, and a write took the same
+// barrier EXCLUSIVELY. Go's sync.RWMutex prefers a waiting writer, so once the
+// writer queued behind the long read, every short reader arriving after it
+// parked until the long read finished and the write completed. That mechanism
+// is gone: `Engine.Run` reads through an MVCC snapshot and takes no barrier
+// (rmp #2290; rmp #2344 removed lpg.Graph.View), and an ordinary write holds
+// the graph's schema barrier SHARED ([lpg.Graph.ApplyVersioned]), so neither
+// waits on the other. The four cells below measure whether a collapse remains.
 //
 // The signature of that mechanism is that each ingredient alone is harmless and
 // only the COMBINATION collapses, which is why this test measures all four

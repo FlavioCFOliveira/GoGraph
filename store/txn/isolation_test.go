@@ -33,11 +33,11 @@ import (
 // transaction points at one commit record, published with a single atomic store,
 // so a snapshot resolves either all of the transaction or none of it.
 //
-// This test therefore reads through a snapshot, which is what the module now
-// documents as the way to get a consistent view of DATA ([lpg.Graph.View]'s own
-// doc, and the visMu field comment). Its negative control,
+// This test therefore reads through a snapshot, which is what the module
+// documents as the way to get a consistent view of DATA (the visGate field
+// comment in graph/lpg/lpg.go). Its negative control,
 // TestIsolation_ViewWithUnversionedReadIsNotAtomic, pins the OTHER half — that
-// View plus an unversioned accessor no longer provides this — so the move is
+// two separate direct accessor calls do not provide this — so the move is
 // recorded as a deliberate relocation of the guarantee and not as a test that was
 // loosened to go green.
 //
@@ -80,11 +80,12 @@ func TestIsolation_Commit_NoPartialTransactionObservable(t *testing.T) {
 // comment.
 //
 // It runs the identical workload with the identical invariant, reading through
-// [lpg.Graph.View] plus UNVERSIONED accessors, and requires that this DOES observe
-// partial transactions. GoGraph updates the stored value in place and keeps the
-// inverse in the version chain, so an accessor that resolves no version reads the
-// newest value — another transaction's uncommitted work included — and a shared
-// View no longer excludes the writer that is making it.
+// two separate direct accessor calls ([lpg.Graph.GetNodeProperty]) and no
+// snapshot, and expects to observe partial transactions. Each call reads the
+// latest COMMITTED version at its own instant (rmp #2965, round 5), and nothing
+// ties the two instants together, so a commit landing between the calls is
+// seen half. When this was written the reader held lpg.Graph.View, which rmp
+// #2344 removed; the test name records that era.
 //
 // If this test ever goes green, one of two things has happened: ordinary writes
 // have gone back to excluding readers (in which case the write-scaling gate

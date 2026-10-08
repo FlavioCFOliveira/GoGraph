@@ -6,7 +6,7 @@ package cypher_test
 // eagerly written under the visibility barrier. Before the fix, only the WAL
 // transaction and the secondary-index buffer rolled back; the in-memory graph
 // stayed dirty (in-memory-vs-durable divergence) until the process restarted —
-// an Atomicity violation observable by concurrent View readers and the next
+// an Atomicity violation observable by concurrent readers and the next
 // query.
 //
 // These tests drive the PUBLIC Cypher engine and assert the live graph is clean

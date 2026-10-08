@@ -1914,10 +1914,11 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		// call is reachable by any client; Engine.RefreshStatistics is not, because an
 		// embedded caller is already inside the trust boundary.
 		//
-		// It binds the LOCKED variant: a procedure runs inside query execution, which is
-		// already inside Graph.View, and visMu is non-re-entrant — taking it again from
-		// the same goroutine would DEADLOCK a production binary (the re-entrancy guard
-		// only turns that into a panic in a debug or race build).
+		// It binds the LOCKED variant, which acquires nothing and scans the present
+		// stored state (see [Engine.scanStatsLocked]). The split dates from when query
+		// execution ran inside Graph.View, a non-re-entrant read barrier that a nested
+		// acquisition would have deadlocked; rmp #2344 removed Graph.View, and neither
+		// refresh entry point takes a barrier now.
 		RefreshStatistics: func(ctx context.Context) error { return e.RefreshStatisticsLocked(ctx) },
 	})
 	// Recovered-constraint safety net (#1918, #1981): recovery seeds the graph's
@@ -2695,8 +2696,10 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	// for exclusion that is not there and would misjudge what makes the build sound.
 	// The guarantee is unchanged; its mechanism is the instant, not the lock.)
 	//
-	// Nothing here may call g.View/g.ApplyAtomically: visMu is non-re-entrant, and a
-	// DDL transition still takes it exclusively — see lpg.Graph.View/ApplyAtomically.
+	// Nothing here may call g.ApplyAtomically: it takes the graph's schema barrier
+	// (visGate, an mvcc.Gate) exclusively, and the barrier's re-entrancy guard panics
+	// on a nested acquisition in a debug or race build. A read itself takes no
+	// barrier: lpg.Graph.View, its former read side, was removed by rmp #2344.
 	var (
 		r        *Result
 		buildErr error
@@ -2798,11 +2801,13 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 // second gate-resolution site for rendering.
 //
 // The caller must already have pinned a snapshot ([lpg.Graph.BeginRead] plus
-// [lpg.Graph.ReadAt]): the cost gates read live label counts, the node total, and
-// count-store cells, and they must all come from one consistent instant. (This
-// used to say "must already hold the graph's read barrier"; rmp #2344 removed
-// lpg.Graph.View and a read takes no barrier at all — the snapshot's start
-// timestamp is what makes the correlated reads agree.)
+// [lpg.Graph.ReadAt]): every read the operator tree binds resolves at its start
+// timestamp. The cost gates do NOT all read at that instant: label counts resolve
+// at the snapshot, but the node total (LiveOrderStored) and the count-store cells
+// are read from the present, each cell by one atomic load. A skewed gate input
+// can only choose between plans with identical results. (This used to say "must
+// already hold the graph's read barrier"; rmp #2344 removed lpg.Graph.View and a
+// read takes no barrier at all.)
 //
 // prof is nil for an ordinary execution and non-nil only for [Engine.Profile];
 // it is threaded onto the build options so the single wrapping point in
@@ -2937,9 +2942,12 @@ func (e *Engine) buildReadPhysical(
 	bopts.bitmapIntersectEnabled = e.bitmapIntersectEnabled
 	// Disjoint-component reorder gating (#2091): when the Engine permits it and
 	// the plan has memoised order-safe candidates, apply the live cardinality
-	// gate against this query's snapshot. The live node total (for AllNodesScan
-	// components) and every label count are read under View's visibility
-	// barrier, so all cost inputs come from one consistent snapshot.
+	// gate. The inputs do NOT come from one instant, and no barrier makes them:
+	// every label count resolves at this query's snapshot through labelSrc (exact,
+	// or an upper bound when the label's history backlog is large), while the node
+	// total for AllNodesScan components is LiveOrderStored, the present stored
+	// count. A skewed input can only pick the other of two plans whose results are
+	// identical, so it costs performance, never correctness.
 	//
 	// params is passed because a FILTERED component's row estimate depends on the
 	// bound operand (rmp #2766): `(a:A {x: $p})` and `(a:A {x: 1})` are the same
@@ -2959,10 +2967,13 @@ func (e *Engine) buildReadPhysical(
 	bopts.seekHint = entry.pushedSeekHints
 	// Single-edge anchor-swap gating (#2090): when the Engine permits it and
 	// the plan has memoised order-safe single-edge sites, apply the live
-	// count-store cost gate against this query's snapshot. N(label) and every
-	// D(label,relType,dir) cell (and its dirty flag) are read under View's
-	// visibility barrier — exclusive against a committing writer — so all cost
-	// inputs come from one consistent snapshot. The swap re-roots the pattern
+	// count-store cost gate. Its inputs do NOT come from one instant, and no
+	// barrier makes them: N(label) resolves at this query's snapshot through
+	// labelSrc, while every D(label,relType,dir) cell and its dirty flag are read
+	// from the PRESENT count store, each cell by one atomic load, with writers
+	// committing concurrently (graph/index/count). A skewed input can only choose
+	// between two plans with identical results, so it costs performance, never
+	// correctness. The swap re-roots the pattern
 	// onto its other endpoint (OUT-ward only) with an identical multiset;
 	// SuppressReorder (baked into the candidate set) guarantees no downstream
 	// operator observes the emission-order change.
@@ -3052,9 +3063,8 @@ func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.V
 	// A SNAPSHOT, not the barrier (rmp #2304). EXPLAIN reads the same label
 	// cardinalities and index metadata Run reads to choose a plan, so it should
 	// read them the way Run does — and Run has taken no lock since rmp #2290.
-	// Coming here through Graph.View instead would now stop every writer for the
-	// duration of a diagnostic that renders a plan and throws it away, because
-	// #2304 made View exclusive.
+	// (This path once went through Graph.View, which rmp #2304 had made stop every
+	// writer for the duration of a diagnostic; rmp #2344 removed Graph.View.)
 	snap := e.g.BeginRead()
 	defer e.g.EndRead(snap)
 	// The estimates the planner derived, collected during the build and rendered
@@ -4742,8 +4752,9 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 // documented order.
 func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kind exec.ConstraintKind, idxMgr *index.Manager) error {
 	op := exec.NewCreateConstraintOp(name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
-	// The visibility barrier is not re-entrant, so nothing inside the closure may
-	// call Graph.View or Graph.ApplyAtomically. newBoundNodeHashIndex touches only
+	// The schema barrier is not re-entrant, so nothing inside the closure may call
+	// Graph.ApplyAtomically again (Graph.View, its former read side, was removed by
+	// rmp #2344). newBoundNodeHashIndex touches only
 	// index.Manager metadata; backfillNodeHashIndex and scanLabelProperty read
 	// graph state directly and take no barrier; BeginRead/EndRead touch only the
 	// reclamation horizon (atomics) and the MVCC clock. All four are the same
@@ -6019,13 +6030,13 @@ type Result struct {
 	cbuf *exec.CountBuffer
 	cs   *count.Store
 
-	// matRows holds the rows drained under the transaction-visibility barrier
-	// (Graph.View for reads, Graph.ApplyAtomically for writes) at creation, so
-	// the whole query observes/produces one atomic, partial-transaction-free
-	// state (audit gap F3, docs/isolation-design.md). Once materialised the
-	// Result serves these buffered rows and holds NO lock while the caller
-	// iterates, so a long-open Result can never deadlock a concurrent writer —
-	// the property that makes the barrier safe for the lazy executor. matOn
+	// matRows holds the rows drained at creation (audit gap F3,
+	// docs/isolation-design.md). A read drains through one MVCC snapshot and takes
+	// no barrier; a write drains inside its bracket, which holds the schema
+	// barrier SHARED, and its writes stay invisible to other readers until the
+	// transaction's commit record is published. Once materialised the Result
+	// serves these buffered rows and holds NO lock while the caller iterates, so a
+	// long-open Result can never hold a writer's bracket open. matOn
 	// distinguishes a materialised Result (serve matRows) from a raw streaming
 	// one (delegate to rs).
 	// matRows holds the materialised rows column-oriented (struct-of-arrays):
@@ -6070,9 +6081,10 @@ type Result struct {
 	// walHandled is set once the WAL transaction has been committed (fsynced)
 	// or rolled back inside the write query's ApplyAtomically window (#1281,
 	// durable-then-visible). When set, closeLocked must NOT touch r.tx again —
-	// the durability decision was already made and finalised under the barrier,
-	// so the WAL fsync happens-before the mutations become observable to a
-	// concurrent Graph.View reader. It is the WAL analogue of bufHandled. For a
+	// the durability decision was already made and finalised inside the write
+	// bracket, so the WAL fsync happens-before the transaction's commit record is
+	// published and its mutations become visible to a concurrent snapshot reader.
+	// It is the WAL analogue of bufHandled. For a
 	// read query, or a write whose WAL commit is still deferred to Close (none,
 	// post-#1281), it stays false and closeLocked owns the commit/rollback.
 	walHandled bool
@@ -6375,11 +6387,12 @@ func (r *Result) rowSlice(i int) []expr.Value {
 // installs a fresh map for the next Next), which avoids the extra shallow copy
 // that re-hashing every column into a new map would cost — the alloc count is
 // unchanged (one map per retained row either way) but the per-row copy loop is
-// removed. It MUST be called inside Graph.View (read queries) or
-// Graph.ApplyAtomically (write queries): the whole drain — every graph read and
-// every eager write — then happens under one barrier acquisition, so a
-// concurrent reader observes the query's writes atomically and the query itself
-// observes a consistent, partial-transaction-free snapshot. After materialize
+// removed. A read query calls it with its reads bound to one MVCC snapshot and no
+// barrier held; a write query calls it inside its write bracket (the schema
+// barrier held SHARED), where every eager write is stamped with the
+// transaction's commit record. A concurrent reader therefore observes the
+// query's writes all at once, when that record is published, and the query
+// itself observes one consistent instant. After materialize
 // returns, the Result holds no lock; iteration is served from matRows. Errors
 // encountered during the drain are recorded on the ResultSet and surfaced via
 // Result.Err(); Close still commits/rolls back.
@@ -7019,8 +7032,10 @@ func (r *Result) commitUnderBarrier() {
 	}
 	// Relationship count-store (#2082): apply this transaction's count deltas and
 	// dirty markings AFTER the WAL fsync and alongside the index buffer, on the
-	// same durable-then-visible side of the barrier. A View reader that sees the
-	// graph writes sees the matching counts. cbuf is nil for a write that touched
+	// same durable-then-visible side of the bracket. The cells are not versioned:
+	// a snapshot reader that sees the graph writes sees the matching counts, and
+	// a reader may also see the counts before the transaction's commit record is
+	// published (graph/index/count). cbuf is nil for a write that touched
 	// no count cell (bare CREATE (:N)); Commit is a no-op on a nil store.
 	if r.cbuf != nil {
 		recordCountCommit(r.cs, r.cbuf) // observability (#2087): count deltas applied
@@ -20942,9 +20957,10 @@ func (e *Engine) runInTxAttempt(ctx context.Context, sess *lpg.Session[string, f
 // Widening this bracket cannot move any of them.
 //
 // The re-entrancy constraint survives and is stricter than it looks: nothing inside
-// may call g.View / g.ApplyAtomically / g.ApplyVersioned, because visMu is
-// non-re-entrant and Go's RWMutex prefers a queued writer, so a nested SHARED
-// acquisition deadlocks the moment an exclusive acquirer queues.
+// may call g.ApplyAtomically / g.ApplyVersioned, because the schema barrier
+// (visGate, an mvcc.Gate) is not re-entrant: a nested SHARED acquisition deadlocks
+// the moment an exclusive acquirer waits. (g.View, the barrier's former read side,
+// was removed by rmp #2344.)
 //
 // commit selects the transaction-finalisation behaviour:
 //

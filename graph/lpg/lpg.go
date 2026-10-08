@@ -729,8 +729,8 @@ type Graph[N comparable, W any] struct {
 	// tombstoneMu, CLONE the current bitmap, mutate the private clone, and
 	// atomic.Store the new pointer — copy-on-write. The clone cost is
 	// O(tombstones) and paid only on the rare delete/revive, never on a
-	// read. A concurrent lpg.Graph.View reader therefore observes either
-	// the pre- or the post-mutation set, never a torn state; the clone
+	// read. A concurrent reader, which loads the pointer once, therefore
+	// observes either the pre- or the post-mutation set, never a torn state; the clone
 	// deep-copies (copyOnWrite is never enabled), so mutating it cannot
 	// race a reader still holding the previously published bitmap.
 	tombstoneMu sync.Mutex
@@ -902,9 +902,9 @@ type Graph[N comparable, W any] struct {
 	// used to take it shared, so a read never excludes a writer and this lock is
 	// now only a consistent view of what the catalog holders change. A caller that
 	// needs a consistent view of DATA takes a snapshot. The checkpointer's capture
-	// (store/checkpoint) is such a View caller and rests on the store's own
-	// quiesce — RunUnderCommitLock drains in-flight commits to zero — rather than
-	// on this lock; rmp #2310 moves it to a transactional instant. See
+	// (store/checkpoint) is such a caller: it opens an MVCC instant under the
+	// store's commit lock, paired with the WAL's durable offset (rmp #2310), and
+	// does not rest on this lock. See
 	// [Graph.BeginRead] for the reader side that replaced Graph.View, and
 	// docs/isolation-design.md for the full division and the measurement behind it.
 	//

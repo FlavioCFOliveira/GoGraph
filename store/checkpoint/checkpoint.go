@@ -890,8 +890,8 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		// The capture is bytes, not a graph, so phase 2 stays lock-free: what
 		// moves under the lock is the in-memory serialisation, never the disk
 		// I/O. The component writers take only their own per-shard read locks
-		// and never re-enter the barrier, so this cannot deadlock or trip
-		// View's re-entrancy guard.
+		// and never acquire the graph's schema barrier, so this cannot deadlock
+		// or trip the barrier's re-entrancy guard.
 		// THE INSTANT IS OPENED HERE, PAIRED WITH THE WATERMARK (rmp #2310).
 		//
 		// This is ALL the commit lock still does for the image: it makes the durable

@@ -233,13 +233,15 @@ func sameByHandle(a, b map[uint64]map[string]lpg.PropertyValue) bool {
 	return true
 }
 
-// TestByHandle_ConcurrentViewReaders_NoRace runs many lock-free Graph.View
+// TestByHandle_ConcurrentViewReaders_NoRace runs many lock-free snapshot
 // readers over the by-handle store concurrently with a writer that repeatedly
 // SETs and REMOVEs a property on ONE parallel relationship instance. Under
 // `go test -race` it must show no data race: by-handle writes happen inside the
-// ApplyAtomically barrier (which Engine.RunInTx takes), and View readers see a
-// consistent snapshot. This guards the per-instance store's sharded-mutex
-// concurrency contract end-to-end.
+// write bracket Engine.RunInTx opens ([lpg.Graph.ApplyVersioned], the schema
+// barrier held SHARED), each read query resolves at its own MVCC snapshot, and
+// the store's per-shard mutexes order every access. (The name dates from
+// lpg.Graph.View, removed by rmp #2344.) This guards the per-instance store's
+// sharded-mutex concurrency contract end-to-end.
 //
 // Layer: soak (concurrency stress; the deterministic sibling-isolation tests
 // above carry the short-layer coverage).

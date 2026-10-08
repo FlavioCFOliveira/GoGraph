@@ -185,9 +185,11 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 // lpg mechanism, with no WAL/I/O so it can run many iterations.
 //
 // A writer repeatedly sets node "a".v and node "b".v to the SAME value
-// inside one ApplyAtomically call. Readers inside View read both and assert
-// equality. The barrier guarantees a reader observes either none or all of a
-// transaction's writes, so a.v == b.v must hold on every pinned read; a
+// inside one ApplyAtomically call, so both versions share one commit record.
+// Readers read both through one pinned MVCC snapshot and assert equality (the
+// test name dates from Graph.View, removed by rmp #2344). The shared record is
+// published by a single atomic store, so a snapshot observes either none or all
+// of a transaction's writes, and a.v == b.v must hold on every pinned read; a
 // partial transaction (new a.v, old b.v) would trip the counter. Run under
 // -race (the per-shard locks already prevent data races, so the gap proven
 // closed here is the logical partial-transaction visibility).

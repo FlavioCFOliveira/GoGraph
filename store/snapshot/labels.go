@@ -403,7 +403,7 @@ func snapshotRegistry(reg *lpg.LabelRegistry) []string {
 // a shard read lock deadlocks against a concurrent writer's queued internSlow
 // write lock, because sync.RWMutex admits no new readers once a writer waits.
 // The non-blocking checkpoint runs the collectors in its lock-free phase 2 with
-// no commit lock and no Graph.View held, so a concurrent committer interning a
+// no commit lock and no graph barrier held, so a concurrent committer interning a
 // fresh key is exactly such a writer (#1648).
 func collectInternedNodeIDs[N comparable, W any](g *lpg.Graph[N, W]) []graph.NodeID {
 	ids := make([]graph.NodeID, 0, 64)
