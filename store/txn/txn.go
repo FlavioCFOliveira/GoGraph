@@ -3845,6 +3845,16 @@ func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 		// memory kept a label recovery did not. From the claim on, no other
 		// transaction can commit a label or property on the node, so the second
 		// pass sees every one committed before it.
+		//
+		// The second pass reads a FRESH latest-committed view, never rv (rmp
+		// #3030). rv's snapshot pins the verdict of every version it first read
+		// in flight, for repeatable reads: a peer write the first pass saw
+		// uncommitted stays invisible to rv after the peer commits. The claim's
+		// cross-check reads the head's stamp, sees that commit, and passes, so a
+		// second pass through rv skipped a value replay strips. A view built
+		// after the claim classifies the peer anew. Everything it sees committed
+		// precedes this transaction in the log: a peer publishes only after its
+		// sequence is minted, and this transaction mints its own after this apply.
 		rv := wv.Read()
 		strip := func() error {
 			for _, lbl := range rv.NodeLabels(op.Src) {
@@ -3865,6 +3875,7 @@ func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 		if ok, err := wv.RemoveNode(op.Src); !ok {
 			return err
 		}
+		rv = wv.Graph().LatestViewOf(wv.Tx(), true)
 		if err := strip(); err != nil {
 			return err
 		}
