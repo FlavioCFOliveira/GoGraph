@@ -322,18 +322,18 @@ const schemaMutationCheckEvery = 60
 // ([TestSchemaMutation_MergeGateWired],
 // [TestSchemaMutation_NonVacuityGatesAreNotVerdicts]). It is bit-reproducible.
 //
-// # The one thing the seed does not reach
+// # Node ids
 //
 // Bit-reproducibility covers the op stream, the crash and checkpoint schedule,
-// and the outcome: all three are pure functions of the seed. It does NOT cover
-// the synthetic keys the engine mints for created nodes. Those are
-// "__cx_"+hex(n) drawn from a PROCESS-GLOBAL counter (cypher/exec), so their
-// values — and therefore the [graph.NodeID]s derived from them, since a node's
-// id encodes the mapper shard its key hashes to — depend on how many nodes every
-// other test in the process created first. Two runs of the same seed take the
-// same decisions over graphs whose node ids differ.
+// and the outcome: all three are pure functions of the seed. Since rmp #3021
+// the synthetic keys the engine mints for created nodes ("__cx_"+hex(n)) come
+// from the run's own graph (graph/lpg KeySequence), not from a process-global
+// counter, so on a fresh graph they — and the [graph.NodeID]s derived from
+// them — follow from the seed as well.
 //
-// Nothing this scenario asserts may therefore depend on a particular node id.
+// Nothing this scenario asserts may still depend on a particular node id: tests
+// deliberately advance the fixture graph's sequence (Config.beforeFixture) to
+// steer the fixture onto specific ids.
 // The handle-collision fixture ([seedMergeHandleCollision]) is the one place that
 // touches node ids at all, and since rmp #2524 it tolerates every id it can draw
 // rather than reporting the unlucky ones as engine violations: before that fix
