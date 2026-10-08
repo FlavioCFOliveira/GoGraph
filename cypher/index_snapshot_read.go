@@ -127,6 +127,9 @@ func (r *snapshotSeekResidual) Admit(nodeID uint64) bool {
 // index's posting lists have.
 func (r *snapshotSeekResidual) AppendMatching(keys []expr.Value, dst []uint64) []uint64 {
 	src := lpgLabelResolver{g: r.view}
+	if allStringKeys(keys) {
+		return r.appendMatchingStrings(src, keys, dst)
+	}
 	it := src.ResolveLabelBitmap(r.label).Iterator()
 	for it.HasNext() {
 		id := it.Next()
@@ -137,6 +140,51 @@ func (r *snapshotSeekResidual) AppendMatching(keys []expr.Value, dst []uint64) [
 		for _, k := range keys {
 			if snapshotSeekKeyEquals(pv, k) {
 				dst = append(dst, id)
+				break
+			}
+		}
+	}
+	return dst
+}
+
+// allStringKeys reports whether every seek key is a string, the case
+// [snapshotSeekResidual.appendMatchingStrings] serves.
+func allStringKeys(keys []expr.Value) bool {
+	for _, k := range keys {
+		if _, ok := k.(expr.StringValue); !ok {
+			return false
+		}
+	}
+	return len(keys) > 0
+}
+
+// appendMatchingStrings is [snapshotSeekResidual.AppendMatching] for string keys,
+// and returns exactly what [snapshotSeekKeyEquals] would select: a stored string
+// equal to a key that is not a temporal encoding. It reads each node's value
+// without boxing it into a [lpg.PropertyValue], so it allocates nothing per node
+// (rmp #3057). This path runs whenever the index cannot prove it describes the
+// reader's snapshot, which concurrent commits make frequent, and it walks every
+// node of the label: boxing each string cost one allocation per node, so the
+// statement's allocations grew with the label's population.
+func (r *snapshotSeekResidual) appendMatchingStrings(src lpgLabelResolver, keys []expr.Value, dst []uint64) []uint64 {
+	pid, ok := r.view.PropertyKeys().Lookup(r.key)
+	if !ok {
+		// A key never interned is carried by no node.
+		return dst
+	}
+	it := src.ResolveLabelBitmap(r.label).Iterator()
+	for it.HasNext() {
+		id := it.Next()
+		s, isString, found := r.view.NodePropertyStringIDByID(graph.NodeID(id), pid)
+		if !found || !isString {
+			// Only a string can equal a string key.
+			continue
+		}
+		for _, k := range keys {
+			if ks, _ := k.(expr.StringValue); s == string(ks) {
+				if _, isTemporal := decodeTemporalString(s); !isTemporal {
+					dst = append(dst, id)
+				}
 				break
 			}
 		}

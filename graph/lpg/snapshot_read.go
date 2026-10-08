@@ -228,6 +228,66 @@ func (g *Graph[N, W]) NodePropertyIDAsOf(id graph.NodeID, pid PropertyKeyID, s *
 	return v, ok2
 }
 
+// NodePropertyStringIDAsOf is [Graph.NodePropertyIDAsOf] for a caller that only
+// compares string values: it returns the string without boxing it into a
+// [PropertyValue], so it allocates nothing on the current-version path. isString
+// is false when the property holds another kind; ok is false when it is absent.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) NodePropertyStringIDAsOf(id graph.NodeID, pid PropertyKeyID, s *Snapshot) (str string, isString, ok bool) {
+	// The same lock and snapshot visibility as [Graph.NodePropertyIDAsOf], but the
+	// version chain is walked for pid alone ([propStringAsOfLockedSnap]) instead of
+	// rebuilding the whole bag, which cloned it for every node a later commit had
+	// touched.
+	sh := g.nodePropShardFor(id)
+	sh.mu.RLock()
+	if s != nil && sh.d != nil {
+		str, isString, ok = propStringAsOfLockedSnap(sh, id, pid, s)
+	} else {
+		bag := sh.m[id]
+		str, isString, ok = bag.getString(pid)
+	}
+	sh.mu.RUnlock()
+	return str, isString, ok
+}
+
+// propStringAsOfLockedSnap is [Graph.propBagAsOfLockedSnap] followed by
+// [propBag.getString], restricted to the one key pid. The chain walk visits the
+// same undo records in the same order and stops at the same visible one; an undo
+// on another key cannot change pid's value, so applying only pid's undos yields
+// the value the rebuilt bag would hold, and allocates nothing. The caller holds
+// the shard's read lock.
+func propStringAsOfLockedSnap(sh *nodePropShard, id graph.NodeID, pid PropertyKeyID, snap *Snapshot) (string, bool, bool) {
+	cur := sh.m[id]
+	undone, present := false, false
+	var val PropertyValue
+	for d := sh.d[id]; d != nil; d = d.next {
+		if snap.visible(d.info, d.ts, snap.startTS, snap.txID) {
+			break
+		}
+		if d.key != pid {
+			continue
+		}
+		switch d.action {
+		case undoSetProp:
+			undone, present, val = true, true, d.prev
+		case undoDelProp:
+			undone, present, val = true, false, PropertyValue{}
+		}
+	}
+	if !undone {
+		return cur.getString(pid)
+	}
+	if !present {
+		return "", false, false
+	}
+	if val.kind != PropString {
+		return "", false, true
+	}
+	str, _ := val.v.(string)
+	return str, true, true
+}
+
 // GetNodePropertyAsOf is [Graph.NodePropertyByIDAsOf] keyed by the external
 // node key.
 //

@@ -354,6 +354,58 @@ func (b *propBag) get(key PropertyKeyID) (PropertyValue, bool) {
 	return PropertyValue{}, false
 }
 
+// getString is [propBag.get] for a caller that only wants a string value. It
+// returns the string itself rather than a [PropertyValue], so a string read
+// does not box the string header and allocates nothing. isString is false when
+// key holds a value of another kind; ok is false when key is absent.
+func (b *propBag) getString(key PropertyKeyID) (s string, isString, ok bool) {
+	if b.m != nil {
+		v, found := b.m[key]
+		if !found {
+			return "", false, false
+		}
+		if v.kind != PropString {
+			return "", false, true
+		}
+		str, _ := v.v.(string)
+		return str, true, true
+	}
+	// One snapshot of the buffer for the whole scan; see [propBag.get].
+	buf := b.buf
+	for off := 0; off < len(buf); {
+		k, next := bagKeyAt(buf, off)
+		if k == key {
+			str, isStr := bagStringAt(buf, off)
+			return str, isStr, true
+		}
+		off = next
+	}
+	return "", false, false
+}
+
+// bagStringAt decodes the string payload of the record at off without building
+// a [PropertyValue]. It reports false, and decodes nothing, when the record is
+// not a string. The returned string aliases buf exactly as [bagDecodeAt]'s does.
+// It must stay in lockstep with bagDecodeAt's string arm; the two are pinned
+// against each other by TestBagStringAtAgreesWithDecodeAt.
+func bagStringAt(buf []byte, off int) (string, bool) {
+	meta := buf[off]
+	if PropertyKind(meta&bagMaskType>>bagShiftType) != PropString {
+		return "", false
+	}
+	idN := bagSizeOf(meta & bagMaskIDSize >> bagShiftIDSize)
+	lN := bagSizeOf(meta & bagMaskPaySize)
+	p := off + 1 + idN
+	n := int(bagUint(buf, p, lN))
+	p += lN
+	if n == 0 {
+		return "", true
+	}
+	//nolint:gosec // G103: audited exactly as in bagDecodeAt; buf is produced only by
+	// bagAppend, so p+n is the record end <= len(buf), and published bytes are immutable.
+	return unsafe.String(&buf[p], n), true
+}
+
 // has reports whether key is present, reading only the record keys: unlike
 // [propBag.get] it decodes no value, so it never allocates.
 func (b *propBag) has(key PropertyKeyID) bool {

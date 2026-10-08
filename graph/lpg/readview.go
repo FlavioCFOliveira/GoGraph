@@ -126,6 +126,13 @@ func (v *ReadView[N, W]) NodePropertyByID(id graph.NodeID, key string) (Property
 	return v.g.NodePropertyByIDAsOf(id, key, v.snap)
 }
 
+// NodePropertyStringIDByID is [Graph.NodePropertyStringIDAsOf] at this view's
+// instant: the string value id carries under the interned key pid, without
+// allocating.
+func (v *ReadView[N, W]) NodePropertyStringIDByID(id graph.NodeID, pid PropertyKeyID) (s string, isString, ok bool) {
+	return v.g.NodePropertyStringIDAsOf(id, pid, v.snap)
+}
+
 // NodePropertiesByIDFunc streams id's properties at this view's instant.
 func (v *ReadView[N, W]) NodePropertiesByIDFunc(id graph.NodeID, visit func(name string, pv PropertyValue)) {
 	v.g.NodePropertiesByIDFuncAsOf(id, v.snap, visit)
