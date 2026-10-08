@@ -197,8 +197,10 @@ func (g *Graph[N, W]) addEdgeHIfAbsentInfo(src, dst N, w W, handle uint64, tx *w
 			return false, err
 		}
 		// An edge this transaction, or a replay, already inserted is visible to
-		// it whether or not it has committed.
-		if g.HasEdgeHandleAsOf(src, dst, handle, &tx.snap) {
+		// it whether or not it has committed. Read after the admit, through a
+		// view no earlier read of tx has pinned ([Graph.admittedRead], rmp #3032).
+		var cs Snapshot
+		if g.HasEdgeHandleAsOf(src, dst, handle, g.admittedRead(&cs, tx)) {
 			return false, nil
 		}
 	}

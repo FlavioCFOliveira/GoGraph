@@ -321,7 +321,10 @@ func (g *Graph[N, W]) delEdgePropertyInfo(src, dst N, key string, tx *writeCtx) 
 		if g.adjVer.admits([2]graph.NodeID{srcID}, 1, tx) != nil {
 			return
 		}
-		if !edgeKeyOnPair(g.EntryViewAsOf(srcID, &tx.snap), dstID, keyID) {
+		// Read after the admit through a view no earlier read of tx has pinned
+		// ([Graph.admittedRead], rmp #3032).
+		var cs Snapshot
+		if !edgeKeyOnPair(g.EntryViewAsOf(srcID, g.admittedRead(&cs, tx)), dstID, keyID) {
 			return
 		}
 	}

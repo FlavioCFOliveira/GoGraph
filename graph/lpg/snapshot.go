@@ -372,3 +372,32 @@ func (g *Graph[N, W]) latestCommitted(cs *Snapshot) *Snapshot {
 	cs.startTS = implicitStartTS
 	return cs
 }
+
+// admittedRead returns the position a write of tx reads at once an admit check
+// on the object has passed: tx's own snapshot when tx began at a real instant,
+// and otherwise a fresh view of every committed version plus tx's own, built on
+// the caller's stack value cs (rmp #3032). tx must not be nil.
+//
+// A transaction that began at the top of the commit space — a store commit's
+// bounded apply, or a direct write's implicit transaction — admits a version as
+// soon as it commits, but its snapshot keeps the verdict "invisible" for any
+// record an EARLIER read classified in flight. A read through that snapshot
+// after the admit can therefore deny a version the admit just accepted: a store
+// commit whose OpRemoveNode had read a peer in flight later found the peer's
+// committed edge handle absent and inserted it a second time, while replay,
+// idempotent on the handle, kept one. The fresh view has no pins, so it
+// classifies the admitted head anew; every version it sees committed precedes tx
+// in the log, because tx mints its sequence after its apply.
+//
+// A transaction that began at a real instant keeps its snapshot, which is
+// already consistent with the admit: a record it pinned in flight can only
+// commit above its start, so the admit refuses that record rather than accepting
+// it. Reading the latest state there would instead show commits made after tx
+// began, which its snapshot isolation must not.
+func (g *Graph[N, W]) admittedRead(cs *Snapshot, tx *writeCtx) *Snapshot {
+	if tx.startTS != implicitStartTS {
+		return &tx.snap
+	}
+	cs.startTS, cs.txID = implicitStartTS, tx.txID
+	return cs
+}

@@ -3658,7 +3658,10 @@ func (g *Graph[N, W]) removeAllEdgesFromInfo(src N, tx *writeCtx) bool {
 		if err := g.adjVer.admits([2]graph.NodeID{srcID}, 1, tx); err != nil {
 			return false
 		}
-		if len(g.EntryViewAsOf(srcID, &tx.snap).Neighbours) == 0 {
+		// Read after the admit through a view no earlier read of tx has pinned
+		// ([Graph.admittedRead], rmp #3032).
+		var cs Snapshot
+		if len(g.EntryViewAsOf(srcID, g.admittedRead(&cs, tx)).Neighbours) == 0 {
 			return false
 		}
 	}
