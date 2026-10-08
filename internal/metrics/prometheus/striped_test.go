@@ -356,15 +356,28 @@ func TestExposition_PromotedUnderConcurrencyMatchesTotals(t *testing.T) {
 // allocator and the exact assignment is not contractual; what is asserted is
 // that the index DISTINGUISHES goroutines at all, which is the property the
 // design depends on.
+//
+// Every goroutine stays alive until all of them have sampled. Under -race an
+// exited goroutine's stack is reused by one that samples later, so without the
+// barrier the test measured stack reuse instead of concurrent goroutines:
+// measured over 200 rounds at 8 goroutines, 123 rounds had fewer than 5
+// distinct stack addresses, which no shard function can spread. The shards
+// exist for goroutines that emit concurrently, which are alive by definition.
 func TestShardIndex_SpreadsAcrossShards(t *testing.T) {
 	for _, tc := range []struct{ n, wantOccupied int }{
 		{8, 5},
-		{64, 16},
+		// 20, not 16: under -race the old shift-and-mask reached at most 16
+		// shards (bit 11 constant at a 4 KiB stack stride), so 16 let a revert
+		// of the multiplicative mix pass. The mix's lowest observed occupancy
+		// at 64 goroutines is 22.
+		{64, 20},
 	} {
 		occupied := make([]bool, shardCount)
 		var mu sync.Mutex
-		var wg sync.WaitGroup
+		var wg, sampled sync.WaitGroup
 		start := make(chan struct{})
+		release := make(chan struct{})
+		sampled.Add(tc.n)
 		for i := 0; i < tc.n; i++ {
 			wg.Add(1)
 			go func() {
@@ -374,9 +387,13 @@ func TestShardIndex_SpreadsAcrossShards(t *testing.T) {
 				mu.Lock()
 				occupied[idx] = true
 				mu.Unlock()
+				sampled.Done()
+				<-release
 			}()
 		}
 		close(start)
+		sampled.Wait()
+		close(release)
 		wg.Wait()
 
 		got := 0
