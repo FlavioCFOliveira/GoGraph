@@ -168,11 +168,21 @@ is skipped or reordered.
   stability is affected** — direct dependents, and any component the change can
   reach. Decide this from the change itself: a package the change cannot reach does
   not warrant a run.
-- **The full `make ci` gate is reserved for very special moments**, and there are
-  exactly three: the close of a sprint, any push, and a specific request from the
-  user. For a push, only its correctness stages decide; measurement stages are
-  reported, never gating (see [Tests and validation](#concrete-applications)). Nothing else qualifies — it is never a per-task step and never a reflex at
+- **Tests are slow, so every change runs only the tests it needs.** New features,
+  fixes, improvements and adjustments run only the tests that cover the change and
+  the components it affects — never the full battery.
+- **The full `make ci` gate is reserved for key moments**, and there are exactly
+  four: release preparation, the close of a sprint, any push, and a specific request
+  from the user. At any other moment the full battery runs only when the change is
+  large or has wide impact, and that judgement is stated explicitly. For a push,
+  only its correctness stages decide; measurement stages are
+  reported, never gating (see [Tests and validation](#concrete-applications)). The full gate is never a per-task step and never a reflex at
   the end of an iteration.
+- **Every new test is effective at minimum cost.** When writing a test, size its
+  workload, iterations, goroutine counts, data and duration to the smallest that
+  still proves its claim, so that it can still fail on the defect it guards. Never
+  spend CPU, memory, disk or wall-clock time beyond what the test's evidence needs,
+  and never cut effectiveness to save cost.
 - The enforceable detail — what the targeted validation must cover, which
   compliance gates a change drags in, what `make ci` still guarantees, and how to
   read its exit status — is in [Tests and validation](#concrete-applications).
@@ -404,10 +414,11 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
 
 **Tests and validation.**
 
-- **`make ci` runs ONCE, at SPRINT CLOSE — never per task.** The full gate takes
+- **`make ci` runs at the key moments only — release preparation, sprint close, a push, or the user's request — never per task.** The full gate takes
   roughly fifteen minutes and re-runs the entire module, so running it after every
-  task spends hours re-proving what has not changed. It runs at the close of the
-  sprint, before any push, and whenever the user asks for it.
+  task spends hours re-proving what has not changed. Outside those moments it runs
+  only when a change is large or has wide impact, as
+  [What to test, and when](#what-to-test-and-when) states.
 - **Per task, run the targeted validation instead** — this is step 3 of the
   [Development workflow](#development-workflow) loop: the package under change, its
   direct dependents, and any gate the change can plausibly move — plus the
