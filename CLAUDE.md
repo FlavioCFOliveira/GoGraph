@@ -664,7 +664,7 @@ Reach for whatever fits the problem at hand: for example RocksDB, LevelDB, or SQ
 - **It serves four quality axes.** Every insight harvested must make GoGraph a more exemplary implementation in **Performance**, **Efficiency**, **Correctness**, and **Security**. An insight that serves none of these is noise.
 - **It makes decisions objective and assertive.** A design choice backed by how two or three mature engines actually solved the same problem is a settled question; an unbacked preference is not. Use prior art to close decisions, not to widen them.
 - **It is evidence, not authority.** The [Decision framework — correct → secure → fast](#decision-framework--correct--secure--fast) still ranks the trade-offs, and [Measure to decide](#measure-to-decide) still requires that any claimed win be measured **in GoGraph itself**: a technique that is fast in C++ or on the JVM may lose in Go. Benchmark before adopting, and record the result.
-- **Extract the insight, not the code.** Take the structural idea — the algorithm, the memory layout, the ordering of operations — and re-implement it idiomatically in Go. Copying source from a reference project into GoGraph is forbidden; see [Never copy — reimplement](#never-copy--reimplement).
+- **Extract the insight; copy code only under a compatible licence.** Take the structural idea — the algorithm, the memory layout, the ordering of operations — and implement it idiomatically in Go. Code itself may be copied only under the rules in [Copying open-source code](#copying-open-source-code).
 - **Cite what you consulted.** When a reference project influences a non-obvious decision, record which project, which version or commit, and which file or component you read — in the task description, a code comment, or the audit document — exactly as [Sub-Agents (Specialists)](#sub-agents-specialists) requires of specialist findings.
 - **Store what outlives the task.** Comparisons and insights of lasting value belong in the [Knowledge Graph](#knowledge-graph), so the project's understanding of the prior art compounds instead of being re-derived each cycle.
 
@@ -672,7 +672,7 @@ Reach for whatever fits the problem at hand: for example RocksDB, LevelDB, or SQ
 
 Before designing or implementing any component, **state clearly and objectively what that component is for**. Only then — and always as a function of that objective, the macro objective first — study how the leading or most successful open-source projects solved the same problem, and use that knowledge to take better-informed decisions **for this project**.
 
-Reference projects are treated as **good practice to be analysed**, never as a solution to be adopted automatically. What is extracted from them is **understanding** — the structure, the algorithm, the reason for the decision, the trade-offs accepted — never code to transcribe.
+Reference projects are treated as **good practice to be analysed**, never as a solution to be adopted automatically. What is extracted from them is **understanding** — the structure, the algorithm, the reason for the decision, the trade-offs accepted. Their code is copied only under the rules in [Copying open-source code](#copying-open-source-code).
 
 Follow this sequence for each component:
 
@@ -691,13 +691,15 @@ Follow this sequence for each component:
 8. **Document the decision.** Record the decision taken, the alternatives considered, the sources consulted, and the reasoning, in a form that can be audited and revisited.
 9. **Validate empirically.** When the approach has a measurable impact, measure it **in this project** rather than trusting the reference's claims (see [Measure to decide](#measure-to-decide)).
 
-### Never copy — reimplement
+### Copying open-source code
 
-- **Copying code directly from open-source projects into GoGraph is forbidden**: whole files, blocks of code, or line-by-line transcription or translation into another language.
-- The implementation must be **original**, idiomatic for Go and for this project's conventions, and designed for the objectives defined in [The inspiration protocol](#the-inspiration-protocol).
-- **Copying a decision without understanding it is equally forbidden.** Adopting an approach merely because a reference project uses it is a form of guessing (see [Never guess — evidence over assumption](#never-guess--evidence-over-assumption)). If you cannot explain why it suits this component, do not adopt it.
-- **Licences and legal obligations.** Inspiration does not dispense with respecting the source project's licence. Several primary references are copyleft or source-available — Neo4j is GPLv3, MariaDB GPLv2, Memgraph BSL 1.1 — and none of their licences is GoGraph's to redistribute. Never incorporate third-party code without checking the licence **and without the user's explicit authorisation**. If you conclude that reusing code or adopting a dependency is the best route, **ask the user first** (see [Decision autonomy](#decision-autonomy)), presenting the options and identifying the licence of each.
-- **Attribution.** Record in the [Knowledge Graph](#knowledge-graph) and in the documentation which source inspired each decision — for traceability and credit, never as a way of legitimising a copy.
+- **Copying code from an open-source repository is allowed** when its licence is **compatible** with GoGraph's (MIT) and the code is **useful** to GoGraph as a whole or to one of its parts. The copy may be whole files or blocks of code, and may be used as copied.
+- **The copied code becomes GoGraph code.** It evolves with the project like any other code — adapted, refactored, optimised, or rewritten. Preserving the original version is **not** a requirement.
+- **Copied code meets the same bar as original code.** It is idiomatic Go, follows this project's conventions, satisfies every [Compliance Mandate](#compliance-mandates), and is tested.
+- **Incompatible licences stay forbidden.** Copyleft and source-available code is never copied: Neo4j is GPLv3, MariaDB and InnoDB (MySQL) GPLv2, Memgraph BSL 1.1. From these, only the insight is taken and re-implemented. When compatibility is in doubt, **ask the user** (see [Decision autonomy](#decision-autonomy)), identifying the licence.
+- **Licence obligations are honoured.** Keep the copyright and licence notice the source licence requires, in the copied file or in a `THIRD_PARTY_NOTICES` entry, and record the source repository, the commit, and the path.
+- **Copying a decision without understanding it is forbidden.** Adopting an approach merely because a reference project uses it is a form of guessing (see [Never guess — evidence over assumption](#never-guess--evidence-over-assumption)). If you cannot explain why it suits this component, do not adopt it — copied or not.
+- **Attribution.** Record in the [Knowledge Graph](#knowledge-graph) and in the documentation which source each copied block or inspired decision comes from, for traceability and credit.
 
 ### Prior-art safeguards
 
