@@ -255,11 +255,12 @@ func buildSeekSetOperator(
 		if !hasCard {
 			continue
 		}
-		total, servable := mergedPostingCount(card, keys, budget)
-		// Over budget, or no key this index can serve. An empty result is correct
-		// but pointless to seek: the scan reaches the same zero rows without an
-		// index descent, which is the range seek's rule too.
-		if !servable || total == 0 {
+		// Over budget: the scan is the cheaper answer. An EMPTY result seeks (rmp
+		// #3062): the per-key cardinalities that proved it empty have already paid
+		// the probes, and the scan it used to fall back to reads every node of the
+		// label to return the same zero rows. The range seek's gate follows the same
+		// rule (rmp #3061).
+		if !mergedPostingCountWithinBudget(card, keys, budget) {
 			return nil, false
 		}
 		op := exec.NewNodeByIndexSeekSet(exec.NewStringHashIndex(sl), keys, budget)
@@ -274,14 +275,15 @@ func buildSeekSetOperator(
 	return nil, false
 }
 
-// mergedPostingCount sums the exact posting counts of the distinct string keys,
-// stopping as soon as the running total exceeds budget.
+// mergedPostingCountWithinBudget sums the exact posting counts of the distinct
+// string keys, stopping as soon as the running total exceeds budget, and reports
+// whether the total stays within budget.
 //
 // A NULL key contributes nothing and is skipped, mirroring
 // [exec.NodeByIndexSeekSet.Init]. Every other key is a string: a set carrying a
 // key of another kind was declined by [stringOrNullKeys] before this runs.
-// servable is false only when the budget is exceeded.
-func mergedPostingCount(card hashStringCardinality, keys []expr.Value, budget uint64) (total uint64, servable bool) {
+func mergedPostingCountWithinBudget(card hashStringCardinality, keys []expr.Value, budget uint64) bool {
+	var total uint64
 	seen := make(map[string]struct{}, len(keys))
 	for _, k := range keys {
 		if k == nil || k.Kind() != expr.KindString {
@@ -295,10 +297,10 @@ func mergedPostingCount(card hashStringCardinality, keys []expr.Value, budget ui
 		seen[s] = struct{}{}
 		total += card.Cardinality(s)
 		if total > budget {
-			return total, false
+			return false
 		}
 	}
-	return total, true
+	return true
 }
 
 // extractKeySetFromAST returns the property and the key values of a predicate
