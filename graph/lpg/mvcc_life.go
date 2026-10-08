@@ -418,6 +418,22 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive, unbornB
 		_ = tx.conflictErr(mvcc.StoreNodeExistence, head)
 		return false
 	}
+	// NO DEATH ON AN UNBORN ID (rmp #3029). Withdrawing an aborted first creation
+	// marks the id unborn and deletes its birth record under this lock, and flips
+	// the tombstone only after releasing it. In between, the node has no record and
+	// looks alive, so a removal records the death of a living node; if that removal
+	// aborts in turn, the withdrawal of a lone death revives the node and clears
+	// its unborn mark — a node no committed transaction created, which later writes
+	// then build on without the commit annex naming it. The unborn mark is read
+	// under the same lock as the head above, so the test is atomic with the
+	// withdrawal. Refused as a conflict; a birth on an unborn id is a legitimate
+	// revival and is not refused here.
+	if !alive && tx != nil && g.unbornN.Load() != 0 && g.inUnborn(id) {
+		sh.mu.Unlock()
+		g.labelChurn.releaseAll(held)
+		_ = tx.conflictErr(mvcc.StoreNodeExistence, mvcc.AbortedTS)
+		return false
+	}
 	// Inside the lock, so the record this write lands on is the one the check
 	// just cleared. deltaStamp allocates the transaction's commit record on
 	// first use; it takes no lock of its own and cannot reach back here.

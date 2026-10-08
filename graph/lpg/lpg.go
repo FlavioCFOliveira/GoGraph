@@ -2539,17 +2539,40 @@ func (g *Graph[N, W]) existenceNoOpAdmits(id graph.NodeID, tx *writeCtx) bool {
 	if tx == nil {
 		return true
 	}
-	// AN ABORT IN PROGRESS (WAL v2 step 3). Withdrawing an aborted first creation
-	// marks the id unborn and deletes its birth record under the life-shard lock,
-	// and flips the tombstone only afterwards. In between the node has no record
-	// and looks alive in the stored state, so a write here would build on a node
-	// that is about to vanish — without creating it, and so without naming it in
-	// the commit marker's id annex. Refused as a conflict: the bounded commit
-	// waits and reruns, and by then the key reads unborn and the write creates it.
-	if g.unbornN.Load() != 0 && g.inUnborn(id) && !g.IsTombstonedStored(id) {
+	// THE HEAD FIRST, THE UNBORN SET LAST (rmp #3029). Withdrawing an aborted
+	// first creation marks the id unborn and THEN deletes its birth record, both
+	// under the life-shard lock, decrements the record count after the unlock, and
+	// flips the tombstone last. Read in this order, every interleaving refuses:
+	// a head read that still finds the record finds it uncommitted or aborted and
+	// conflicts; one that finds it gone — through the shard lock or through the
+	// record count — is ordered after the unborn mark, which the read below then
+	// sees. Reading the unborn set first let a write slip between the two reads
+	// of one withdrawal and find neither.
+	if !g.existenceHeadAdmits(id, tx) {
+		return false
+	}
+	// AN UNBORN ID IS NEVER A NO-OP (WAL v2 step 3, rmp #3029). Every caller
+	// decided BEFORE this call that the key is not "unborn and tombstoned" — the
+	// state in which it would have recreated the node — so an unborn id here
+	// means that decision raced the withdrawal: either the flip is still to come,
+	// and the node is about to vanish, or it landed between the caller's read and
+	// this one, and the node is already dead. Either way the write would build on
+	// a node it does not create, so the commit marker's id annex would not name
+	// it, and recovery refuses such a log (ErrUnboundNodeKey). Testing the
+	// tombstone here as well, as this did before rmp #3029, admitted the second
+	// case. Refused as a conflict: the bounded commit waits and reruns, and the
+	// rerun reads the key unborn and tombstoned and recreates it.
+	if g.unbornN.Load() != 0 && g.inUnborn(id) {
 		_ = tx.conflictErr(mvcc.StoreNodeExistence, mvcc.AbortedTS)
 		return false
 	}
+	return true
+}
+
+// existenceHeadAdmits is the existence-head half of [Graph.existenceNoOpAdmits]:
+// it refuses only on another transaction's uncommitted birth or death. tx is
+// non-nil.
+func (g *Graph[N, W]) existenceHeadAdmits(id graph.NodeID, tx *writeCtx) bool {
 	if g.nodeLifeActive.Load() == 0 {
 		return true
 	}
@@ -2766,10 +2789,14 @@ func (g *Graph[N, W]) reviveInfo(n N, tx *writeCtx) {
 	}
 	// A key whose only creation aborted never existed, so it is not revived,
 	// exactly as a key never interned is not (ACID audit round 6, finding C2):
-	// reviving it made memory hold a node no WAL record creates. Its existence
-	// head is still tested before the no-op verdict, as for every other one.
+	// reviving it made memory hold a node no WAL record creates. Leaving it dead
+	// IS this call's answer for an unborn key, so only its existence head is
+	// tested before the no-op verdict (rmp #3029: the unborn refusal of
+	// [Graph.existenceNoOpAdmits] would refuse it forever).
 	if g.unbornN.Load() != 0 && g.isUnborn(id) {
-		g.existenceNoOpAdmits(id, tx)
+		if tx != nil {
+			g.existenceHeadAdmits(id, tx)
+		}
 		return
 	}
 	g.revive(id, tx)

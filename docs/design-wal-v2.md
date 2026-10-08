@@ -806,7 +806,10 @@ Deviations, with reasons:
   to vanish without creating it, so its marker did not annex it and the strict rule
   refused the recovery (found by `store/txn.TestDifferential_MemoryEqualsRecovery`, 1 run
   in 1 to 1 in 3). `lpg.Graph.existenceNoOpAdmits` now refuses that state as a retryable
-  conflict (6 of 6 runs clean after).
+  conflict (6 of 6 runs clean after). rmp #3029 widened the refusal to every unborn id,
+  tombstoned or not: the callers classify the key in two reads ("unborn and tombstoned",
+  then this test), and a write whose reads straddled the tombstone flip passed both and
+  still built on the dead node (2 to 3 runs in 20).
 - **Step 1 deviation 5 stays.** An image with no mapper pair still does not restore its
   `nodeids.bin` marks: every id a later transaction created is placed by its annex, and
   `PlaceUnborn` raises the shard's high-water mark past it, so the marks are not needed
