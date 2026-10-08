@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testbin"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -137,7 +138,9 @@ func BuildPriorReleaseHelperWithOptions(ctx context.Context, repoRoot, tag strin
 		return nil, fmt.Errorf("sim: cross-release: ref %q not present in repo", tag)
 	}
 
-	tmpRoot, err := os.MkdirTemp("", "gograph-xrelease-")
+	// The worktree and the helper binary are build artefacts, not graph data:
+	// testbin keeps them on disk, outside TMPDIR and GOTMPDIR (rmp #3028).
+	tmpRoot, err := testbin.MkdirTemp("gograph-xrelease-")
 	if err != nil {
 		return nil, fmt.Errorf("sim: cross-release: temp root: %w", err)
 	}
@@ -219,15 +222,12 @@ var errForcedWALOnly = errors.New("sim: cross-release: checkpoint stage skipped 
 // writing the binary to binPath. It is the single build seam both stages of
 // [BuildPriorReleaseHelper] use, so the two attempts differ ONLY in which source
 // files are staged — never in build flags or environment.
+//
+// The `go build` work files go to disk through [testbin.Go], never to TMPDIR or
+// GOTMPDIR (rmp #3028).
 func buildXreleaseHelper(ctx context.Context, worktree, binPath string) error {
-	//nolint:gosec // G204: fixed `go build` of a constant, harness-internal package path.
-	build := exec.CommandContext(ctx, "go", "build", "-o", binPath, "./"+xreleaseHelperPkg)
-	build.Dir = worktree
-	build.Env = os.Environ()
-	var buildErr bytes.Buffer
-	build.Stderr = &buildErr
-	if err := build.Run(); err != nil {
-		return fmt.Errorf("%w (%s)", err, strings.TrimSpace(buildErr.String()))
+	if _, stderr, err := testbin.Go(ctx, worktree, "build", "-o", binPath, "./"+xreleaseHelperPkg); err != nil {
+		return fmt.Errorf("%w (%s)", err, strings.TrimSpace(string(stderr)))
 	}
 	return nil
 }

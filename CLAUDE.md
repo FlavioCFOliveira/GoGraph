@@ -485,6 +485,9 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
       RAM drive while the binary itself stays on disk. A binary built with
       `go test -c -o <disk>` is run the same way, with both variables on the RAM
       drive in its own environment only.
+    - A test harness builds its child binaries through `internal/testbin`, which
+      writes them and the child `go` command's temporaries under
+      `os.UserCacheDir()/gograph-testbin` on disk, never under `TMPDIR` or `GOTMPDIR`.
     - Logs, profiles and benchmark files are written to disk.
     At the end, delete the subdirectory, and eject the drive
     (`diskutil eject $dev`) only if this run created it.

@@ -20,10 +20,11 @@ package main
 import (
 	"bytes"
 	"context"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/testbin"
 )
 
 // TestRealCrashRecovery proves the module's durability contract across a real
@@ -67,16 +68,15 @@ func TestRealCrashRecovery(t *testing.T) {
 	}
 }
 
-// buildExampleBinary compiles this example into a temp binary and returns its
-// path. It skips (rather than fails) when `go build` cannot run — e.g. an
-// offline sandbox — mirroring the cross-process pattern in example 25.
+// buildExampleBinary compiles this example into a disk directory outside TMPDIR
+// and GOTMPDIR (internal/testbin, rmp #3028) and returns the binary's path. It
+// skips (rather than fails) when `go build` cannot run — e.g. an offline
+// sandbox — mirroring the cross-process pattern in example 25.
 func buildExampleBinary(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "ex17")
-	cmd := exec.Command("go", "build", "-o", bin, ".") //nolint:gosec // G204: fixed argv — "go build" with a literal flag and an output path under this test's temp dir.
-	cmd.Dir = "."
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Skipf("go build skipped: %v\n%s", err, out)
+	bin := filepath.Join(testbin.TempDir(t), "ex17")
+	if _, stderr, err := testbin.Go(context.Background(), ".", "build", "-o", bin, "."); err != nil {
+		t.Skipf("go build skipped: %v\n%s", err, stderr)
 	}
 	return bin
 }

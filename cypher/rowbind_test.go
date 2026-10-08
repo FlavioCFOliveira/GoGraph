@@ -20,7 +20,6 @@ package cypher
 //     (rmp #2864 established that: 3897/3897 held with its demotion rule removed).
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -31,6 +30,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testbin"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -81,16 +81,16 @@ func TestPopulateRowCtx_PerRowPathPerformsNoNameLookup(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go tool unavailable: cannot compile the package for its assembly listing")
 	}
-	cmd := exec.Command("go", "build", "-gcflags=-S", "github.com/FlavioCFOliveira/GoGraph/cypher")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		t.Skipf("go build -gcflags=-S failed (%v): %s", err, truncate(stderr.String(), 400))
+	// testbin keeps the build's work files on disk, outside TMPDIR and GOTMPDIR
+	// (rmp #3028).
+	_, listing, err := testbin.Go(context.Background(), ".", "build", "-gcflags=-S", "github.com/FlavioCFOliveira/GoGraph/cypher")
+	if err != nil {
+		t.Skipf("go build -gcflags=-S failed (%v): %s", err, truncate(string(listing), 400))
 	}
-	body, ok := funcAssembly(stderr.String(), "github.com/FlavioCFOliveira/GoGraph/cypher.populateRowCtx")
+	body, ok := funcAssembly(string(listing), "github.com/FlavioCFOliveira/GoGraph/cypher.populateRowCtx")
 	if !ok {
 		t.Fatalf("no STEXT block for populateRowCtx in the assembly listing (%d bytes): the "+
-			"extraction matched nothing, so this test proves nothing", stderr.Len())
+			"extraction matched nothing, so this test proves nothing", len(listing))
 	}
 	for _, call := range mapLookupRuntimeCalls {
 		if strings.Contains(body, call) {

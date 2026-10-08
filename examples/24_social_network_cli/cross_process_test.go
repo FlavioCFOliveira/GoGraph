@@ -2,13 +2,30 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/testbin"
 )
+
+// buildSocialCLI compiles this example into a fresh disk directory outside
+// TMPDIR and GOTMPDIR (internal/testbin, rmp #3028), so the test never picks up
+// a stale executable from the working tree and never writes a binary or a build
+// temporary to a RAM-drive TMPDIR. It returns the binary's path and skips the
+// test when `go build` cannot run (e.g. an offline sandbox).
+func buildSocialCLI(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(testbin.TempDir(t), "social_cli")
+	if _, stderr, err := testbin.Go(context.Background(), ".", "build", "-o", binary, "."); err != nil {
+		t.Skipf("go build skipped: %v\n%s", err, stderr)
+	}
+	return binary
+}
 
 // TestCLI_CrossProcessSnapshotConsistency builds the example binary,
 // runs the full init → seed → snapshot → stats lifecycle as four
@@ -26,16 +43,7 @@ func TestCLI_CrossProcessSnapshotConsistency(t *testing.T) {
 		t.Skip("cross-process test takes ~1s; skipped in short mode")
 	}
 
-	binDir := t.TempDir()
-	binary := filepath.Join(binDir, "social_cli")
-
-	// Build the example binary in an isolated temp dir so the test
-	// cannot pick up a stale executable from the working tree.
-	buildCmd := exec.Command("go", "build", "-o", binary, ".") //nolint:gosec // G204: fixed argv — "go build" with a literal flag and an output path under this test's temp dir.
-	buildCmd.Dir = "."
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Skipf("go build skipped: %v\n%s", err, string(out))
-	}
+	binary := buildSocialCLI(t)
 
 	dataDir := t.TempDir()
 	runStep := func(args ...string) (string, error) {
@@ -121,14 +129,7 @@ func TestCLI_CrossProcessCypherCreateSurvives(t *testing.T) {
 		t.Skip("cross-process CREATE test takes ~1s; skipped in short mode")
 	}
 
-	binDir := t.TempDir()
-	binary := filepath.Join(binDir, "social_cli")
-
-	buildCmd := exec.Command("go", "build", "-o", binary, ".") //nolint:gosec // G204: fixed argv — "go build" with a literal flag and an output path under this test's temp dir.
-	buildCmd.Dir = "."
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Skipf("go build skipped: %v\n%s", err, string(out))
-	}
+	binary := buildSocialCLI(t)
 
 	dataDir := t.TempDir()
 	runStep := func(args ...string) (string, error) {

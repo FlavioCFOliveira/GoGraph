@@ -30,7 +30,6 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -48,16 +47,7 @@ func TestSocialCLI_CrossProcess_FoFDeterminism(t *testing.T) {
 	}
 	defer goleak.VerifyNone(t)
 
-	// Build the binary into a temp dir so the test never picks up a stale
-	// executable from the working tree.
-	binDir := t.TempDir()
-	binary := filepath.Join(binDir, "social_cli")
-
-	buildCmd := exec.Command("go", "build", "-o", binary, ".") //nolint:gosec // G204: fixed argv — "go build" with a literal flag and an output path under this test's temp dir.
-	buildCmd.Dir = "."
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Skipf("go build skipped: %v\n%s", err, string(out))
-	}
+	binary := buildSocialCLI(t)
 
 	dataDir := t.TempDir()
 

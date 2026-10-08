@@ -6,8 +6,8 @@ package crashinject_test
 // helper_cleanup_internal_test.go proves removeHelperDir removes a real
 // populated directory. That is worthless if the path the process-exit hook is
 // given is not the path the build actually created, so this file asserts the
-// build RECORDS its directory, that the recorded path is the temp directory the
-// leak was made of, and that the cached binary really lives inside it.
+// build RECORDS its directory, that the recorded path is the directory the build
+// created under the testbin root, and that the cached binary really lives inside it.
 //
 // Why the post-exit state itself is not asserted here: a test cannot observe its
 // own process after os.Exit. The end-to-end evidence is the before/after count
@@ -21,11 +21,12 @@ import (
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashinject"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testbin"
 )
 
 // TestHelperBinaryDir_RecordsTheDirectoryTheBuildCreated forces a helper build
 // (via a Run that exits immediately on an unknown scenario) and then asserts the
-// recorded directory is a real, temp-rooted, correctly-prefixed directory that
+// recorded directory is a real, testbin-rooted, correctly-prefixed directory that
 // contains the cached binary.
 func TestHelperBinaryDir_RecordsTheDirectoryTheBuildCreated(t *testing.T) {
 	// Not parallel: reads package-level state that RemoveHelperBinary mutates.
@@ -39,20 +40,23 @@ func TestHelperBinaryDir_RecordsTheDirectoryTheBuildCreated(t *testing.T) {
 			"would have nothing to remove and the leak is back")
 	}
 
-	// The recorded path must be the kind of path that accumulates: under the
-	// system temp root, carrying the prefix the guard in internal/tmphygiene
-	// counts. A path outside os.TempDir() would mean the leak moved rather than
-	// being fixed.
-	tmpRoot, err := filepath.EvalSymlinks(os.TempDir())
+	// The recorded path must sit directly under the testbin root, which is on
+	// disk and outside TMPDIR and GOTMPDIR (rmp #3028), and carry the prefix the
+	// guard in internal/tmphygiene lists.
+	root, err := testbin.Root()
 	if err != nil {
-		t.Fatalf("EvalSymlinks(os.TempDir()): %v", err)
+		t.Fatalf("testbin.Root: %v", err)
+	}
+	binRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", root, err)
 	}
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
 	}
-	if parent := filepath.Dir(resolved); parent != tmpRoot {
-		t.Errorf("helper dir %q sits in %q, want the system temp root %q", dir, parent, tmpRoot)
+	if parent := filepath.Dir(resolved); parent != binRoot {
+		t.Errorf("helper dir %q sits in %q, want the testbin root %q", dir, parent, binRoot)
 	}
 	if base := filepath.Base(dir); !strings.HasPrefix(base, "gograph-crashinject-") {
 		t.Errorf("helper dir base = %q, want the gograph-crashinject- prefix "+
