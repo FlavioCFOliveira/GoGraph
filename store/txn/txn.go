@@ -542,6 +542,10 @@ type Store[N comparable, W any] struct {
 	g   *lpg.Graph[N, W]
 	wal *wal.Writer // nil only when readOnly
 
+	// ids records the graph mapper's node id reservations in the WAL (WAL v2
+	// step 4, idreserve.go). nil for a store without a WAL or a graph.
+	ids *idReserver[N]
+
 	// readOnly is set by [NewReadOnlyStore]: the store has no WAL, and every
 	// commit that buffered an op is refused with [ErrReadOnlyStore]. Fixed at
 	// construction, so it is read without synchronisation.
@@ -714,6 +718,7 @@ func NewStoreWithCodecCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.
 	}
 	s.applyWaiters = make(map[uint64]chan struct{}, 64)
 	s.inflightCond = sync.NewCond(&s.inflightMu)
+	s.installIDReserver()
 	return s
 }
 
@@ -783,7 +788,42 @@ func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wa
 	s.appliedSeq = opts.ResumeTxnSeq
 	s.applyWaiters = make(map[uint64]chan struct{}, 64)
 	s.inflightCond = sync.NewCond(&s.inflightMu)
+	s.installIDReserver()
 	return s
+}
+
+// installIDReserver installs the store's id reserver on its graph's mapper when
+// the store has both a WAL and a graph (WAL v2 step 4). From then on every new
+// node id the mapper issues is covered by a ReserveIDs record logged ahead of any
+// transaction that can use it.
+func (s *Store[N, W]) installIDReserver() {
+	if s.wal == nil || s.g == nil {
+		return
+	}
+	m := s.g.AdjList().Mapper()
+	s.ids = newIDReserver(m, s.wal)
+	m.SetIDReserver(s.ids)
+}
+
+// Close ends the store's use of its WAL for node id reservations (WAL v2 step 4):
+// it stops the reservation prefetch goroutine and appends the mapper's exact
+// per-shard high-water marks (a NextIDsExact record), so the next recovery
+// resumes at those marks and a clean restart wastes no id. It does not close the
+// WAL and does not refuse later transactions: a node created after Close
+// reserves synchronously, and its reservation is logged after the exact marks.
+//
+// Call it with writers quiesced, before the WAL is closed — [store.Opened]'s
+// close does so inside [Store.RunUnderCommitLock]. Without a call the next
+// recovery falls back to the logged reservations and wastes at most one batch
+// per shard. Close is idempotent; it returns the WAL's append error, if any. A
+// store without a WAL has nothing to close.
+//
+// Concurrency: safe for concurrent use with every other Store method.
+func (s *Store[N, W]) Close() error {
+	if s.ids == nil {
+		return nil
+	}
+	return s.ids.close()
 }
 
 // NewReadOnlyStore returns a Store over g that has no WAL and refuses every

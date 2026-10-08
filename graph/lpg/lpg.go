@@ -427,6 +427,9 @@ type Graph[N comparable, W any] struct {
 	nodeIdx *label.Index
 	edgeIdx *label.Index
 
+	// keySeq is the graph's synthetic node-key sequence ([Graph.KeySequence]).
+	keySeq KeySequence
+
 	// labelDeltas arms the P0 MVCC spike (rmp #2275); labelDeltaActive mirrors
 	// the number of live label deltas as a lock-free gate, exactly as
 	// tombstoneActive does for the tombstone set.

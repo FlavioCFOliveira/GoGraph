@@ -475,6 +475,7 @@ var liveUnjournaledMethods = []string{
 	"EdgePropertiesAt", "EdgeLabelsByHandle", "SetEdgePropertyByHandle", "DelEdgePropertyByHandle",
 	"EdgePropertiesByHandle", "FirstEdgeHandle", "EdgeHandles", "HasEdgeHandle", "OutNeighbours",
 	"InNeighbours", "OutDegree", "ResolveNodeID", "ResolveNodeLabel", "WalkNodeIDs",
+	"KeySequence",
 }
 
 // TestLiveTopo_GraphMutatorMethodsAreClassified fails when a method is added to

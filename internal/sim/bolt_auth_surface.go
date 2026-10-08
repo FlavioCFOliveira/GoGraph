@@ -262,10 +262,10 @@ type boltAuthRunner struct {
 	ev  *BoltAuthEvidence
 }
 
-// walCounters reads the live WAL frame/byte counters.
+// walCounters reads the live WAL transaction frame/byte counters
+// ([simTxnWALCounters]).
 func (r *boltAuthRunner) walCounters() (frames, bytes uint64) {
-	s := r.st.WAL().Stats()
-	return s.Frames, s.Bytes
+	return simTxnWALCounters(r.st.WAL())
 }
 
 // arm runs one probe, bracketing it between two readings of the WAL counters and

@@ -133,7 +133,8 @@ func redoDir(t *testing.T) (dir string, redo uint64, last []waltest.FrameLoc) {
 		t.Fatal(err)
 	}
 	for _, l := range locs {
-		if l.Frame.Pos >= m.WALRedoPos {
+		// Node id control records (WAL v2 step 4) are not transaction frames.
+		if l.Frame.Pos >= m.WALRedoPos && (len(l.Frame.Payload) == 0 || l.Frame.Payload[0] != wal.ControlRecordTag) {
 			last = append(last, l)
 		}
 	}

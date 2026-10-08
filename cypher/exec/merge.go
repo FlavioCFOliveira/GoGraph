@@ -428,20 +428,12 @@ func (op *Merge) WithIndexProber(prober MergeIndexProber) *Merge {
 // to the ON MATCH or ON CREATE branch depending on whether the search
 // returned any rows.
 //
-// The first Merge.Init (or [CreateNode.Init]) in the process also seeds
-// [globalNodeCounter] past the largest synthetic key already interned in
-// op.mutator, so that minting keys for that graph rarely probes an occupied
-// key. Uniqueness against __cx_merge_<hex> keys persisted by an earlier
-// process does not rest on the seed — it covers only the first graph — but
-// on [mintNodeKey] (rmp #3015), which rejects every key the graph holds. The
-// seed is gated by [globalNodeCounterSeededOnce] so the O(N) scan runs at
-// most once per process regardless of how many CreateNode / Merge operators
-// are built.
+// It also seeds the target graph's key sequence once per graph
+// ([seedNodeKeySequence]); uniqueness against __cx_merge_<hex> keys the graph
+// already holds rests on [mintNodeKey]'s probe (rmp #3015).
 func (op *Merge) Init(ctx context.Context) error {
 	op.resetRunState(ctx)
-	globalNodeCounterSeededOnce.Do(func() {
-		seedGlobalNodeCounter(op.mutator)
-	})
+	seedNodeKeySequence(op.mutator)
 	return op.child.Init(ctx)
 }
 

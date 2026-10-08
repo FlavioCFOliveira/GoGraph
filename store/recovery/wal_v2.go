@@ -196,12 +196,12 @@ func replayLogWithoutSnapshot[N comparable, W any](
 		if lr == nil {
 			return ReplayResult{}, nil
 		}
-		return replayWALInto(ctx, lr, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false)
+		return replayWALInto(ctx, lr, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false, nil)
 	}
 	if cerr := checkSnapshotReachesWAL(ctl, false, &snapshot.Manifest{}, false); cerr != nil {
 		return ReplayResult{TailErr: cerr}, nil
 	}
-	return replayWALInto(ctx, &chainSource{log: log, legacy: lr, storeID: ctl.StoreID}, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false)
+	return replayWALInto(ctx, &chainSource{log: log, legacy: lr, storeID: ctl.StoreID}, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false, nil)
 }
 
 // openWALChecked opens the write-ahead log at walPath and applies the checks

@@ -48,6 +48,7 @@ func mustAddEdge(t *testing.T, s *stubMutator, src, dst string, w float64) (grap
 // ─────────────────────────────────────────────────────────────────────────────
 
 type stubMutator struct {
+	keySeq     lpg.KeySequence
 	mu         sync.Mutex
 	nodes      map[string]graph.NodeID // key → ID
 	nextID     graph.NodeID
@@ -457,6 +458,8 @@ func (s *stubMutator) OutDegree(n string) int {
 	defer s.mu.Unlock()
 	return len(s.edges[n])
 }
+
+func (s *stubMutator) KeySequence() *lpg.KeySequence { return &s.keySeq }
 
 func (s *stubMutator) ResolveNodeID(n string) (graph.NodeID, bool) {
 	s.mu.Lock()

@@ -424,14 +424,24 @@ func captureGraph[N comparable, W any](
 	// nodeids.bin — the per-shard high-water marks, with every mapper.bin. A
 	// capture read's watermark was taken at the instant and covers every id the
 	// image carries; any other capture reads the mapper now, after its walk,
-	// which covers everything walked. Reservations (WAL v2 step 4) will raise
-	// these marks; today next[s] is the watermark.
+	// which covers everything walked. Each mark is raised to the shard's logged
+	// reservation limit (WAL v2 step 4, docs/design-wal-v2.md §2.4, §3.3): a
+	// checkpoint calls this after reading its redo position W, and a reservation
+	// is published under the WAL writer's mutex in the same hold that appends it,
+	// so every reservation below W is read here. An id a later transaction takes
+	// from such a reservation is thereby never reissued, even once the segment
+	// holding the reservation is reclaimed.
 	if out.mapper.present {
+		m := g.AdjList().Mapper()
 		wm := at.InternWatermark()
 		if wm == nil {
-			wm = g.AdjList().Mapper().Watermark()
+			wm = m.Watermark()
 		}
 		next := wm.Next()
+		reserved := m.ReservedLimits()
+		for i := range next {
+			next[i] = max(next[i], reserved[i])
+		}
 		if out.nodeIDs, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
 			return WriteNodeIDs(w, &next)
 		}); err != nil {

@@ -250,10 +250,9 @@ const (
 	// A node's id is [graph.NodeID](intraShardIndex<<8 | shard), so id 0 means
 	// "first key interned in shard 0". Which shard a node lands in is decided by
 	// the FNV-1a hash of the synthetic key the engine mints for it
-	// (cypher/exec: "__cx_"+hex(globalNodeCounter)), and that counter is
-	// PROCESS-GLOBAL: its value when this fixture runs depends on how many nodes
-	// every earlier test in the process created. The scenario's seed does not
-	// reach it, so on roughly 0.4% of process histories the first decoy lands on
+	// (cypher/exec: "__cx_"+hex(n), n drawn from the graph's lpg.KeySequence).
+	// The sequence belongs to the fixture's graph, but a graph that already holds
+	// nodes, or a change to how keys are minted, can still put the first decoy on
 	// id 0 through no fault of the engine.
 	//
 	// One alternative always suffices, and deterministically: if the first

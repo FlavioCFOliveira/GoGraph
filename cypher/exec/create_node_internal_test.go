@@ -1,12 +1,11 @@
 package exec
 
 // create_node_internal_test.go — package-internal coverage for the synthetic
-// node-key parser and the [globalNodeCounter] seeding helper used by
-// [CreateNode] to defend against cross-process counter resets.
+// node-key parser and the per-graph key-sequence seeding helper
+// ([seedNodeKeySequence]) used by [CreateNode] to start past recovered keys.
 
 import (
 	"strconv"
-	"sync/atomic"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -53,7 +52,11 @@ func TestParseSynthKeySuffix(t *testing.T) {
 // methods panic so any future change to the seeder's surface fails loudly.
 type seedStubMutator struct {
 	keys map[graph.NodeID]string
+	seq  lpg.KeySequence
 }
+
+// KeySequence returns the stub graph's key sequence.
+func (m *seedStubMutator) KeySequence() *lpg.KeySequence { return &m.seq }
 
 func newSeedStubMutator(keys map[graph.NodeID]string) *seedStubMutator {
 	return &seedStubMutator{keys: keys}
@@ -144,96 +147,59 @@ func (m *seedStubMutator) RemoveNode(string)              { panic("unused") }
 func (m *seedStubMutator) IsTombstoned(graph.NodeID) bool { return false }
 
 // Compile-time check: seedStubMutator must satisfy GraphMutator so the
-// production seedGlobalNodeCounter accepts it directly. If a future change
+// production seedNodeKeySequence accepts it directly. If a future change
 // adds a method to GraphMutator, this line fails to compile and the stub
 // must be updated accordingly.
 var _ GraphMutator = (*seedStubMutator)(nil)
 
-// TestSeedGlobalNodeCounter_LocalLogic exercises the CAS-based advancement
-// logic with a local counter so the test is robust against ordering with
-// other tests in the same binary that may already have advanced
-// [globalNodeCounter].
-func TestSeedGlobalNodeCounter_LocalLogic(t *testing.T) {
-	// Local replica of the seeder body, parameterised on the counter and
-	// the input. Behaviour MUST match seedGlobalNodeCounter exactly; if
-	// it ever drifts, [TestCreateNode_InitSeedsCounter] catches the gap.
-	seedLocal := func(counter *atomic.Uint64, keys map[graph.NodeID]string) {
-		var maxSeen uint64
-		for _, key := range keys {
-			if v, ok := parseSynthKeySuffix(key); ok && v > maxSeen {
-				maxSeen = v
-			}
-		}
-		for {
-			cur := counter.Load()
-			if cur >= maxSeen {
-				return
-			}
-			if counter.CompareAndSwap(cur, maxSeen) {
-				return
-			}
-		}
+// TestSeedNodeKeySequence_AdvancesPastHexMax: the seed raises the graph's
+// sequence past the largest suffix of either synthetic key form and ignores
+// every other key.
+func TestSeedNodeKeySequence_AdvancesPastHexMax(t *testing.T) {
+	m := newSeedStubMutator(map[graph.NodeID]string{
+		1:  "alice",
+		2:  "bob",
+		10: "__cx_1",
+		11: "__cx_a",
+		12: "__cx_ff",
+		13: "__cx_merge_ffff", // counted: merge keys share the sequence
+		14: "__cy_1",          // ignored: wrong prefix
+	})
+	seedNodeKeySequence(m)
+	if got := m.seq.Load(); got != 0xffff {
+		t.Fatalf("sequence = %#x, want %#x", got, 0xffff)
 	}
-
-	t.Run("empty input leaves counter at zero", func(t *testing.T) {
-		var c atomic.Uint64
-		seedLocal(&c, nil)
-		if got := c.Load(); got != 0 {
-			t.Fatalf("counter advanced from empty input: got %d", got)
-		}
-	})
-
-	t.Run("mix of create, merge and user keys advances past hex max", func(t *testing.T) {
-		var c atomic.Uint64
-		keys := map[graph.NodeID]string{
-			1:  "alice",
-			2:  "bob",
-			10: "__cx_1",
-			11: "__cx_a",
-			12: "__cx_ff",
-			13: "__cx_merge_ffff", // counted: merge keys share globalNodeCounter
-			14: "__cy_1",          // ignored: wrong prefix
-		}
-		seedLocal(&c, keys)
-		if got := c.Load(); got != 0xffff {
-			t.Fatalf("counter = %d, want %d", got, 0xffff)
-		}
-	})
-
-	t.Run("counter never rolls backwards under CAS", func(t *testing.T) {
-		var c atomic.Uint64
-		c.Store(100)
-		keys := map[graph.NodeID]string{1: "__cx_a"} // max = 10
-		seedLocal(&c, keys)
-		if got := c.Load(); got != 100 {
-			t.Fatalf("counter regressed from 100 to %d", got)
-		}
-	})
 }
 
-// TestCreateNode_InitSeedsCounter drives the actual production seeder by
-// calling [seedGlobalNodeCounter] directly on a stub mutator that contains
-// a high synthetic key. The package-level [globalNodeCounter] is advanced
-// monotonically, so calling the seeder multiple times in the same test
-// process is safe even if a previous test already fired
-// [globalNodeCounterSeededOnce]: this test never relies on the Once gate.
-func TestCreateNode_InitSeedsCounter(t *testing.T) {
+// TestSeedNodeKeySequence_NeverRollsBackAndRunsOnce: a seed below the current
+// value leaves it, and a second seed of the same graph does not scan again.
+func TestSeedNodeKeySequence_NeverRollsBackAndRunsOnce(t *testing.T) {
+	m := newSeedStubMutator(map[graph.NodeID]string{1: "__cx_a"}) // max = 10
+	m.seq.Add(100)
+	seedNodeKeySequence(m)
+	if got := m.seq.Load(); got != 100 {
+		t.Fatalf("sequence regressed from 100 to %d", got)
+	}
+	m.keys[2] = "__cx_fffff"
+	seedNodeKeySequence(m)
+	if got := m.seq.Load(); got != 100 {
+		t.Fatalf("a second seed of one graph scanned again: sequence %d", got)
+	}
+}
+
+// TestCreateNode_InitSeedsSequence drives the seeder through CreateNode.Init's
+// helper and mints through the production path: the minted suffix is past the
+// seeded maximum.
+func TestCreateNode_InitSeedsSequence(t *testing.T) {
 	const seededMax = uint64(0x1000)
 	m := newSeedStubMutator(map[graph.NodeID]string{
 		1: "alice",
 		2: "__cx_1000",
 	})
-
-	// Call the production seeder directly. It is idempotent under CAS,
-	// so this is safe to invoke regardless of the package Once state.
-	seedGlobalNodeCounter(m)
-
-	if got := globalNodeCounter.Load(); got < seededMax {
-		t.Fatalf("globalNodeCounter = %#x after seed, want >= %#x", got, seededMax)
+	seedNodeKeySequence(m)
+	if got := m.seq.Load(); got < seededMax {
+		t.Fatalf("sequence = %#x after seed, want >= %#x", got, seededMax)
 	}
-
-	// Use a CreateNode receiver to call freshNodeKey through the same
-	// path production code uses.
 	op := &CreateNode{mutator: m}
 	next := op.freshNodeKey()
 	suffix, ok := parseSynthKeySuffix(next)
@@ -248,13 +214,40 @@ func TestCreateNode_InitSeedsCounter(t *testing.T) {
 	}
 }
 
-// TestSeedGlobalNodeCounter_NilMutator confirms the no-op contract for a
-// nil mutator. Important so unit tests that construct CreateNode without a
-// backing mutator still work after the seeding hook was added to Init.
-func TestSeedGlobalNodeCounter_NilMutator(t *testing.T) {
-	before := globalNodeCounter.Load()
-	seedGlobalNodeCounter(nil)
-	if after := globalNodeCounter.Load(); after != before {
-		t.Fatalf("counter changed from %d to %d for nil mutator", before, after)
+// TestMintNodeKey_PerGraphDeterminism: two graphs in one process mint the same
+// keys for the same history. Before the sequence moved onto the graph, the
+// second graph continued the first one's process-global counter, so a
+// simulator replaying one seed twice in a process created different keys —
+// different mapper shards, hence different WAL id reservations (WAL v2 step 4).
+func TestMintNodeKey_PerGraphDeterminism(t *testing.T) {
+	mint := func() []string {
+		m := newSeedStubMutator(map[graph.NodeID]string{})
+		seedNodeKeySequence(m)
+		out := make([]string, 0, 4)
+		for i := 0; i < 4; i++ {
+			k := mintNodeKey(m, "")
+			m.keys[graph.NodeID(i+1)] = k
+			out = append(out, k)
+		}
+		return out
+	}
+	a, b := mint(), mint()
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("graph 2 minted %v, graph 1 minted %v", b, a)
+		}
+	}
+	if a[0] != synthKeyPrefix+"1" {
+		t.Fatalf("a fresh graph minted %q first, want %q", a[0], synthKeyPrefix+"1")
+	}
+}
+
+// TestSeedNodeKeySequence_NilMutator confirms the no-op contract for a nil
+// mutator, so unit tests that construct CreateNode without a backing mutator
+// still work, and that minting without a mutator still yields a synthetic key.
+func TestSeedNodeKeySequence_NilMutator(t *testing.T) {
+	seedNodeKeySequence(nil)
+	if k := mintNodeKey(nil, ""); k != synthKeyPrefix+"1" {
+		t.Fatalf("mintNodeKey(nil) = %q", k)
 	}
 }

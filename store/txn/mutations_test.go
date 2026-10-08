@@ -822,7 +822,10 @@ func walFrameCountEquals(path string, want int) error {
 	}
 	defer func() { _ = r.Close() }()
 	frames := 0
-	if err := r.Replay(func(_ wal.Frame) error {
+	if err := r.Replay(func(f wal.Frame) error {
+		if len(f.Payload) > 0 && f.Payload[0] == wal.ControlRecordTag {
+			return nil // a node id reservation (WAL v2 step 4), not a transaction frame
+		}
 		frames++
 		return nil
 	}); err != nil {
@@ -846,6 +849,9 @@ func assertFirstFrameKind(path string, wantVersion, wantKind byte) error {
 	var first wal.Frame
 	var seen bool
 	if err := r.Replay(func(f wal.Frame) error {
+		if len(f.Payload) > 0 && f.Payload[0] == wal.ControlRecordTag {
+			return nil // a node id reservation (WAL v2 step 4), not a transaction frame
+		}
 		if !seen {
 			first = f
 			seen = true

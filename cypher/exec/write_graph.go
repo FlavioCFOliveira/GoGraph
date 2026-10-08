@@ -260,6 +260,11 @@ type GraphMutator interface {
 	// returning ok=false when the node has not been interned yet.
 	ResolveNodeID(n string) (graph.NodeID, bool)
 
+	// KeySequence returns the target graph's synthetic node-key sequence, from
+	// which CREATE and MERGE mint the keys of nodes the query does not name.
+	// Every mutator over one graph returns that graph's sequence.
+	KeySequence() *lpg.KeySequence
+
 	// ResolveNodeLabel translates an internal NodeID back to the user-facing
 	// node key, returning ok=false when id is unknown.
 	ResolveNodeLabel(id graph.NodeID) (string, bool)

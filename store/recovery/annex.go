@@ -58,7 +58,7 @@ func opKey[N comparable](op *Op, endpoint uint64, codec txn.Codec[N]) (N, error)
 // placed: replaying that op fails on its own, and the replay classifies the
 // transaction as it always has ([ErrCommittedTxnCorruptOp]) without binding any of
 // its keys into the recovered graph.
-func placeAnnex[N comparable, W any](g *lpg.Graph[N, W], committed []Op, annex []byte, codec txn.Codec[N]) (*annexPlacements[N], error) {
+func placeAnnex[N comparable, W any](g *lpg.Graph[N, W], committed []Op, annex []byte, codec txn.Codec[N], check func(graph.NodeID) error) (*annexPlacements[N], error) {
 	n, read := binary.Uvarint(annex)
 	if read <= 0 || n > uint64(len(annex)) {
 		return nil, fmt.Errorf("%w: entry count", ErrCommitAnnexCorrupt)
@@ -104,6 +104,13 @@ func placeAnnex[N comparable, W any](g *lpg.Graph[N, W], committed []Op, annex [
 	}
 	if len(annex) != 0 {
 		return nil, fmt.Errorf("%w: %d trailing bytes", ErrCommitAnnexCorrupt, len(annex))
+	}
+	if check != nil {
+		for _, e := range entries {
+			if err := check(e.id); err != nil {
+				return nil, err
+			}
+		}
 	}
 	var placed []annexPlacement[N]
 	for _, e := range entries {
@@ -203,10 +210,10 @@ func withdrawAnnex[N comparable, W any](g *lpg.Graph[N, W], a *annexPlacements[N
 
 // replayCommitAnnex runs [placeAnnex] for a commit marker body that carries an id
 // annex, and does nothing for one that does not.
-func replayCommitAnnex[N comparable, W any](g *lpg.Graph[N, W], committed []Op, body []byte, codec txn.Codec[N]) (*annexPlacements[N], error) {
+func replayCommitAnnex[N comparable, W any](g *lpg.Graph[N, W], committed []Op, body []byte, codec txn.Codec[N], check func(graph.NodeID) error) (*annexPlacements[N], error) {
 	annex, ok := commitAnnex(body)
 	if !ok {
 		return nil, nil
 	}
-	return placeAnnex(g, committed, annex, codec)
+	return placeAnnex(g, committed, annex, codec, check)
 }

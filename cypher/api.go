@@ -22539,6 +22539,9 @@ func (a *lpgMutatorAdapter) ResolveNodeID(n string) (graph.NodeID, bool) {
 	return a.g.AdjList().Mapper().Lookup(n)
 }
 
+// KeySequence returns the graph's synthetic node-key sequence.
+func (a *lpgMutatorAdapter) KeySequence() *lpg.KeySequence { return a.g.KeySequence() }
+
 // ResolveNodeLabel translates a NodeID back to its node key.
 func (a *lpgMutatorAdapter) ResolveNodeLabel(id graph.NodeID) (string, bool) {
 	return a.g.AdjList().Mapper().Resolve(id)
@@ -24053,6 +24056,9 @@ func (a *walMutatorAdapter) OutDegree(n string) int {
 func (a *walMutatorAdapter) ResolveNodeID(n string) (graph.NodeID, bool) {
 	return a.g.AdjList().Mapper().Lookup(n)
 }
+
+// KeySequence returns the graph's synthetic node-key sequence.
+func (a *walMutatorAdapter) KeySequence() *lpg.KeySequence { return a.g.KeySequence() }
 
 // ResolveNodeLabel translates a NodeID back to its node key.
 func (a *walMutatorAdapter) ResolveNodeLabel(id graph.NodeID) (string, bool) {

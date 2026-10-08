@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -93,6 +94,9 @@ type Mapper[N comparable] struct {
 	// dominated per-row cost. kind is set once in NewMapper and never mutated,
 	// so concurrent reads in shardFor are race-free.
 	kind keyKind
+	// reserver is the installed id reserver ([Mapper.SetIDReserver]), nil when
+	// none is installed: a WAL-less mapper interns without limit (WAL v2 step 4).
+	reserver atomic.Pointer[idReserverRef]
 }
 
 // keyKind enumerates the concrete key types that [Mapper.shardFor] can hash
@@ -225,7 +229,13 @@ type mapperShard[N comparable] struct {
 	// receives. Always >= len(reverse); greater only when a restore named a
 	// next above the last restored index.
 	next uint64
-	mu   sync.RWMutex
+	// idLimit is the reserved limit (WAL v2 step 4): with a reserver installed,
+	// every intra index below it is covered by a logged reservation, and a new key
+	// whose index is at or above it reserves first. Written by the reserver
+	// ([Mapper.PublishReservation]) with no mapper lock; read by the interner
+	// under s.mu. Monotone non-decreasing; math.MaxUint64 means unlimited.
+	idLimit atomic.Uint64
+	mu      sync.RWMutex
 }
 
 // isHoleLocked reports whether intra index idx (< len(reverse)) is a hole. The
@@ -391,6 +401,13 @@ func (m *Mapper[N]) internSlowHook(s *mapperShard[N], shardIdx uint64, k N, onCr
 	// except after a restore that named a higher next, when the indices in
 	// between become holes: ids that were reserved and never born.
 	idx := max(s.next, uint64(len(s.reverse)))
+	if ref := m.reserver.Load(); ref != nil {
+		// WAL v2 step 4: the id is issued only once a logged reservation covers it.
+		// The lock order is mapper shard, then the reserver's (the WAL writer's).
+		if idx >= s.idLimit.Load() {
+			ref.r.ReserveIDs(int(shardIdx), idx+1)
+		}
+	}
 	s.growToLocked(idx)
 	id := packNodeID(shardIdx, idx)
 	s.reverse = append(s.reverse, k)

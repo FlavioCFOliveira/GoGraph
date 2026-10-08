@@ -394,6 +394,9 @@ func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, []string
 	// The handle/id collision the node-only outer-relationship family needs
 	// (rmp #2515) is CONSTRUCTED before the first tick and proven, so the family is
 	// never driven over a graph on which a misdirected write would land nowhere.
+	if cfg.beforeFixture != nil {
+		cfg.beforeFixture(sm)
+	}
 	fixture, v := seedMergeHandleCollision(ctx, sm)
 	if len(v) > 0 {
 		return sm.report(0, Op{Kind: OpCreate, Cypher: "<handle-collision fixture>"}, v), nil, nil

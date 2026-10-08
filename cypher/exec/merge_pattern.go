@@ -563,11 +563,11 @@ func (op *MergePattern) WithLeadingClause(leading bool) *MergePattern {
 	return op
 }
 
-// Init initialises the operator and its child. The first MergePattern.Init
-// (or [CreateNode.Init] / [Merge.Init]) in the process also seeds
-// [globalNodeCounter], exactly as those operators do. Fresh-node keys minted
-// here are kept clear of __cx_merge_<hex> keys replayed from an earlier
-// process by [mintNodeKey] (rmp #3015), not by the seed.
+// Init initialises the operator and its child, and seeds the target graph's key
+// sequence once per graph ([seedNodeKeySequence]), exactly as [CreateNode.Init]
+// and [Merge.Init] do. Fresh-node keys minted here are kept clear of
+// __cx_merge_<hex> keys replayed from an earlier process by [mintNodeKey]
+// (rmp #3015), not by the seed.
 func (op *MergePattern) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.matched = nil
@@ -575,9 +575,7 @@ func (op *MergePattern) Init(ctx context.Context) error {
 	op.created = false
 	op.done = false
 	op.firedOnce = false
-	globalNodeCounterSeededOnce.Do(func() {
-		seedGlobalNodeCounter(op.mutator)
-	})
+	seedNodeKeySequence(op.mutator)
 	return op.child.Init(ctx)
 }
 

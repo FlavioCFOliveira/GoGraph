@@ -29,3 +29,12 @@ func ApplyOpForTest[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) er
 func (t *Tx[N, W]) BufferOpForTest(op Op[N, W]) {
 	t.ops = append(t.ops, op)
 }
+
+// IDBatchForTest reports the id reservation batch size of shard (WAL v2 step
+// 4), or 0 for a store without a reserver.
+func (s *Store[N, W]) IDBatchForTest(shard int) uint64 {
+	if s.ids == nil {
+		return 0
+	}
+	return s.ids.batchOf(shard)
+}

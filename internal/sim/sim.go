@@ -40,6 +40,10 @@ const (
 
 // Config parameterises a simulation run.
 type Config struct {
+	// beforeFixture, when non-nil, runs on the fresh simulator before a scenario
+	// constructs its fixtures. Tests use it to place the graph's synthetic
+	// node-key sequence; it is unexported, so only this package can set it.
+	beforeFixture func(*Simulator)
 	// Workload is the actor mix. When nil, [DefaultWorkload] is used.
 	Workload *Workload
 	// OnOp, when non-nil, is called synchronously with each tick and the

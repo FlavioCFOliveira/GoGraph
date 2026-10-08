@@ -292,7 +292,18 @@ func openCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 		ResumeTxnSeq: opts.ResumeTxnSeq,
 	}, opts.MaxTxnOps)
 	closeOpts := make([]Option, 0, 1+len(opts.CloseOptions))
-	closeOpts = append(closeOpts, WithQuiesce(st.RunUnderCommitLock))
+	// The quiesce also closes the store's id reservations (WAL v2 step 4): with
+	// writers drained, the exact per-shard id marks are appended just before the
+	// WAL's final flush and fsync, so a clean restart wastes no node id.
+	closeOpts = append(closeOpts, WithQuiesce(func(fn func() error) error {
+		return st.RunUnderCommitLock(func() error {
+			idErr := st.Close()
+			if err := fn(); err != nil {
+				return err
+			}
+			return idErr
+		})
+	}))
 	closeOpts = append(closeOpts, opts.CloseOptions...)
 	return &Opened[N, W]{
 		DB:     New(wlog, closeOpts...),

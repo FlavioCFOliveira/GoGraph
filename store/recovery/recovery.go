@@ -511,6 +511,8 @@ func tailErrIsCorruption(err error) bool {
 		errors.Is(err, ErrUnboundNodeKey),
 		errors.Is(err, ErrCommitAnnexCorrupt),
 		errors.Is(err, graph.ErrNodeIDMismatch),
+		errors.Is(err, ErrIDBeyondReservation),
+		errors.Is(err, ErrIDRecordCorrupt),
 		errors.Is(err, ErrCommittedTxnCorruptOp),
 		isWALV2Corruption(err):
 		// ErrCommittedTxnCorruptOp is not-clean but not fail-stop; see the
@@ -787,6 +789,22 @@ func Decode(payload []byte) (Op, error) {
 		// not an op; any other kind is refused like an unknown record.
 		if _, ok := wal.DecodeLegacySeal(payload); ok {
 			return Op{Version: wal.ControlRecordTag, Kind: txn.OpKind(wal.CtlLegacySeal)}, nil
+		}
+		// The id records of WAL v2 step 4. Body is the payload, so the replay
+		// decodes it with the wal decoders.
+		if _, _, ok, err := wal.DecodeReserveIDs(payload); ok {
+			if err != nil {
+				metrics.IncCounter("store.recovery.Decode.errors", 1)
+				return Op{}, fmt.Errorf("%w: %w", ErrIDRecordCorrupt, err)
+			}
+			return Op{Version: wal.ControlRecordTag, Kind: txn.OpKind(wal.CtlReserveIDs), Body: payload}, nil
+		}
+		if _, ok, err := wal.DecodeNextIDsExact(payload); ok {
+			if err != nil {
+				metrics.IncCounter("store.recovery.Decode.errors", 1)
+				return Op{}, fmt.Errorf("%w: %w", ErrIDRecordCorrupt, err)
+			}
+			return Op{Version: wal.ControlRecordTag, Kind: txn.OpKind(wal.CtlNextIDsExact), Body: payload}, nil
 		}
 		metrics.IncCounter("store.recovery.Decode.errors", 1)
 		return Op{}, fmt.Errorf("%w: unknown WAL control record", ErrUnsupportedRecordVersion)
@@ -1667,7 +1685,7 @@ func openCodec[N comparable, W any](
 	}
 	defer plan.close()
 	if plan.src != nil {
-		walRes, walErr := replayWALInto(ctx, plan.src, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, plan.redo, plan.schemaBelowRedo)
+		walRes, walErr := replayWALInto(ctx, plan.src, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, plan.redo, plan.schemaBelowRedo, loaded.Mapper.Next)
 		// The node facets the SUFFIX touched. In a checkpointed directory the WAL
 		// replayed IS the suffix above the redo position, so this is exactly what
 		// a caller needs to decide whether a snapshot index payload still
@@ -1997,7 +2015,7 @@ func ReplayWAL[N comparable, W any](
 	if log, ok := r.(*wal.Log); ok {
 		res, err = replayLogWithoutSnapshot(ctx, log, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched)
 	} else {
-		res, err = replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false)
+		res, err = replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false, nil)
 	}
 	res.Constraints = cAcc.snapshot()
 	res.Indexes = iAcc.snapshot()
@@ -2061,8 +2079,13 @@ func replayWALInto[N comparable, W any](
 	touched *touchSet,
 	redo int64,
 	schemaBelowRedo bool,
+	idBase *[graph.MapperShards]uint64,
 ) (ReplayResult, error) {
 	var res ReplayResult
+	// WAL v2 step 4: the node id marks the log's reservations and clean-close
+	// records name, applied to the mapper once the replay ends, whatever ends it.
+	ids := newIDReplay(g.AdjList().Mapper(), idBase)
+	defer ids.apply(g.AdjList().Mapper())
 	// crossed reports that a frame at or above redo has been read; belowPending
 	// counts the buffered ops read below redo at that moment.
 	crossed, belowPending := redo < 0, 0
@@ -2112,9 +2135,18 @@ func replayWALInto[N comparable, W any](
 			break
 		}
 		if op.Version == wal.ControlRecordTag {
-			// The legacy seal: no op follows it in the legacy file, so ops
-			// still buffered are orphans of a transaction that never committed.
-			pending, belowPending = pending[:0], 0
+			switch byte(op.Kind) {
+			case wal.CtlReserveIDs:
+				shard, limit, _, _ := wal.DecodeReserveIDs(op.Body)
+				ids.reserve(int(shard), limit)
+			case wal.CtlNextIDsExact:
+				next, _, _ := wal.DecodeNextIDsExact(op.Body)
+				ids.exact(&next, crossed)
+			default:
+				// The legacy seal: no op follows it in the legacy file, so ops
+				// still buffered are orphans of a transaction that never committed.
+				pending, belowPending = pending[:0], 0
+			}
 			continue
 		}
 		if op.Version == txn.OpRecordV3 {
@@ -2192,7 +2224,7 @@ func replayWALInto[N comparable, W any](
 			belowPending = 0
 			// WAL v2 step 3: a marker that carries an id annex binds every created
 			// key to its exact id before the ops replay, under the strict rule.
-			annexed, annexErr := replayCommitAnnex(g, committed, op.Body, codec)
+			annexed, annexErr := replayCommitAnnex(g, committed, op.Body, codec, ids.check)
 			if annexErr != nil {
 				metrics.IncCounter("store.recovery.openCodec.commitAnnex", 1)
 				res.TailErr = fmt.Errorf("%w (txn seq %d, WAL frame %d)", annexErr, commitSeq, frameIdx)

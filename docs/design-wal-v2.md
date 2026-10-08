@@ -1,6 +1,6 @@
 # Design: WAL v2 — one on-disk format revision for #3021, #3020, #2195 and #3014
 
-Status: **approved; steps 1, 2 and 3 implemented** (step 4 not yet implemented).
+Status: **approved; steps 1, 2, 3 and 4 implemented**.
 
 This document records a design, not the current behaviour of the code. Each implementation
 step (§9) updates it to match what was built.
@@ -841,6 +841,121 @@ Tests:
 - `goleak` for the reserver.
 - Throughput at 1, 8, 64, 256, 1024 goroutines against step 3, with `benchstat`.
 
+#### Step 4 — as implemented
+
+Built as designed:
+
+- `graph.IDReserver`, `Mapper.SetIDReserver` and per-shard atomic limits
+  (`graph/mapper_reserve.go`). In `internSlowHook`, under the shard write lock, an index at
+  or above the shard's limit reserves before the id is issued. A mapper with no reserver
+  pays one atomic load per new key.
+- `txn.Store` installs the reserver (`store/txn/idreserve.go`) when it has a WAL and a
+  graph; `NewReadOnlyStore` installs none. A reservation is one `ReserveIDs` frame
+  (`wal.AppendReserveIDs`) appended through `AppendRun` with no fsync; the limit is
+  published inside the same `w.mu` hold that appends it.
+- `txn.Store.Close` (new) appends `NextIDsExact`. `store.Open` calls it inside the close
+  quiesce, just before the WAL's final flush and fsync.
+- The checkpoint writes `nodeids.bin` marks `max(watermark, reserved limit)`; the capture
+  reads the limits after W.
+- Recovery decodes both records, applies them in log order, and checks every annex id
+  (`ErrIDBeyondReservation`). `ErrIDBeyondReservation` and the new `ErrIDRecordCorrupt`
+  (a malformed id record) are open-fatal.
+- Crash points `wal.reserve.appended-pre-fsync` and
+  `wal.close.exactnext-appended-pre-fsync` (§8) are breakpoints in the reserver.
+
+**User decision (2026-10-08): reservation is synchronous, and synthetic node keys are minted
+per graph.** The first implementation prefetched batches on a background goroutine and the
+Cypher engine minted anonymous node keys from a process-global counter. Both made the WAL
+frame sequence a function of more than the operations performed: the goroutine's
+reservations landed at scheduling-dependent positions, and two identical simulator runs in
+one process minted different keys, which hash to different mapper shards and so produce
+reservation frames at different points. Eight `internal/sim` reproducibility and
+"appends nothing" tests failed. The decision:
+
+- **No prefetch goroutine.** The interner that reaches its shard's limit appends the
+  reservation itself, under its shard lock (mapper shard → `w.mu`, the §5.2 order), as
+  PostgreSQL's `GetNewObjectId` does under `OidGenLock`. The WAL holds the same frames in
+  the same order for the same sequence of operations
+  (`TestIDReserve_FramesAreAFunctionOfTheOperations`).
+- **Synthetic node keys come from the target graph's `lpg.KeySequence`**
+  (`Graph.KeySequence`, reached through `exec.GraphMutator.KeySequence`), seeded once per
+  graph past the graph's existing `__cx_` keys. Every engine writing one graph shares its
+  sequence; `mintNodeKey`'s probe still refuses a key the graph holds (rmp #3015). There is
+  no package-level counter.
+- **The simulator's "a refused, doomed or abandoned transaction appends nothing" contracts
+  count transaction frames only** (`internal/sim` `simTxnWALCounters`, from the new
+  `wal.Stats.ControlFrames`/`ControlBytes`). A reservation is logged whatever becomes of the
+  transaction that asked for the id — PostgreSQL NEXTOID semantics — and carries no
+  transaction data.
+
+Deviations, with reasons:
+
+- **One limit, not `loggedLimit` and `limit`.** Under PostgreSQL semantics they are equal;
+  the limit is published inside the append's `w.mu` hold, so a checkpoint reading it after
+  W sees every reservation below W. The strict option (§5.4) is not built.
+- **Batch arithmetic.** A reservation for index i covers up to `i + 1 + K`. A shard's first
+  reservation in a session has K = 64, and K doubles after each reservation the shard
+  makes, up to 65 536: with no prefetch, "exhausted before the prefetch lands" no longer
+  exists, and a deterministic rule replaces it. A shard creating n nodes logs O(log n)
+  reservations; a crash restart wastes at most the shard's last batch.
+- **`NextIDsExact` replaces the marks instead of joining the §4 item 10 maximum** when it
+  lies at or above the redo position. Below it, it only raises the marks, because the
+  snapshot is newer. The maximum would waste up to K ids per shard on every clean restart
+  after a checkpoint (whose `nodeids.bin` holds the reservation limits), against §5.3.
+  The exact marks are read at close, after every id the log or a snapshot could name was
+  issued; PostgreSQL believes a shutdown checkpoint exactly for the same reason.
+  `Mapper.RestoreNext` applies the result, floored at each shard's assigned length.
+- **`ErrIDBeyondReservation` is checked only in shards a `ReserveIDs` or `NextIDsExact`
+  record names**, against the largest mark the snapshot, the mapper or any record names.
+  A log written before step 4, or ids interned before the store installed its reserver,
+  carry no reservation and must still open.
+- **Reservations below the redo position are read** (they only raise the marks), and the
+  snapshot's `nodeids.bin` marks seed the replay even for an image with no mapper pair.
+  This closes the gap step 1 deviation 5 left open for reservations in reclaimed
+  segments.
+- **An append failure makes every shard unlimited.** It means the writer is closed or
+  will poison at its next sync (a failed frame write leaves the buffer's sticky error), so
+  no id issued later can reach a durable record. `Mapper.ReservedLimits` reads an
+  unlimited shard as 0, so `nodeids.bin` never records it.
+- A store assembled by hand (`store.New` with `WithQuiesce(st.RunUnderCommitLock)`) does
+  not call `Store.Close`; its restarts have crash-restart semantics (at most one batch
+  wasted per shard).
+- Tests that counted WAL frames or asserted the first frame's tag skip control records
+  (`store/txn`: `txn_test.go`, `mutations_test.go`, `weight_txn_test.go`,
+  `store_codec_test.go`; `store/walv2_audit_fixes_test.go` `redoDir`).
+
+Tests (`store/txn/idreserve_test.go`, `store/id_reserve_test.go`,
+`cypher/exec/create_node_internal_test.go`):
+
+- `TestIDReserve_NeverReissued_MixedLifecycle`: four seeds, eight sessions each, of
+  commits on both commit paths, rollbacks, checkpoints, clean closes and crashes (the
+  directory copied while open). A new key never receives an id protected for another
+  key: its transaction was durable, or its reservation became durable through a later
+  commit's fsync, a checkpoint or a clean close. On `6725348d` all four seeds fail (14,
+  6, 21 and 12 protected ids reissued).
+- `TestIDReserve_AnnexBeyondReservationIsRefused`: on `6725348d` the store opens.
+  `TestIDReserve_CorruptRecordIsRefused` covers `ErrIDRecordCorrupt`.
+- `TestIDReserve_CleanRestartWastesNoID` (with and without a checkpoint before the close):
+  fails when `Store.Close` appends no exact marks (every shard resumes at 65).
+- `TestIDReserve_CrashRestartWastesAtMostOneBatch`: every shard resumes within one batch
+  above its mark.
+- `TestIDReserve_ExhaustionBurstsUnderLatency`: 32 writers × 2 transactions × 64 creates in
+  one shard, seeded fsync latency, checkpoints running throughout. It finishes within a
+  60 s watchdog, the shard's batch doubles, and every id survives the reopen.
+- `TestIDReserve_SynchronousNoGoroutine` (`goleak.VerifyNone`): interning 2 000 keys into
+  one shard starts no goroutine, and nothing outlives `Close`.
+- `TestIDReserve_FramesAreAFunctionOfTheOperations`: two stores given the same operations
+  write byte-identical frame sequences.
+- `TestMintNodeKey_PerGraphDeterminism`: two graphs in one process mint the same keys.
+
+Measured with synchronous reservation and per-graph keys, RAM drive, fsync latency off,
+interleaved `6725348d`/step-4 binaries, n = 6, `benchstat`; relative only, not production
+latencies: `BenchmarkWriteScaling_StoreAPI` (two created nodes per durable commit) at 1, 8,
+64, 256 and 1024 writers shows no significant difference in sec/op, ops/s, B/op or
+allocs/op (every p ≥ 0.18; geomean sec/op −0.16 %). A reservation costs one `w.mu`
+acquisition per batch per shard, and the batch doubles, so it is not separable at this
+benchmark's resolution.
+
 ---
 
 ## 10. Prior art
@@ -854,7 +969,7 @@ a pinned commit. "Repo-cited" means the reference is already cited in this repos
 | Data CRC first, header CRC after the position | PostgreSQL `XLogRecordAssemble`/`XLogInsertRecord`; position reserved inside the insertion lock (`ReserveXLogInsertLocation`, cited at `txn.go:2349-2353`, commit `50d6e533`) | Verified at pinned commit (PostgreSQL `10cc5aa96a6df7cb1d7c47e978cc94f01f785cb7`, `xloginsert.c:979-1007`, `xlog.c:1001-1007`). |
 | Control file before old WAL removal | PostgreSQL `UpdateControlFile` in `CreateCheckPoint` before `RemoveOldXlogFiles` (cited at `writer.go:1406-1409`, `checkpoint.go:1135-1137`) | Repo-cited. |
 | Segments, 16 MiB, remove below redo | PostgreSQL `wal_segment_size`, `KeepLogSeg`/`RemoveOldXlogFiles`; RocksDB numbered `NNNNNN.log` deleted below `min_log_number_to_keep` (`PurgeObsoleteFiles`); its recyclable record type adds a log number, stored as a 4-byte value truncated from the 64-bit log number | Verified at pinned commit (PostgreSQL `10cc5aa96a6df7cb1d7c47e978cc94f01f785cb7`, RocksDB `0561153b73fb0a24387a8808215b076424546f7e`). GoGraph does not recycle segments, so `pos` alone defeats stale data. |
-| Reservation without fsync; checkpoint stores the counter | PostgreSQL `GetNewObjectId`/`XLogPutNextOid`, `VAR_OID_PREFETCH = 8192`, `CheckPoint.nextOid` | Recalled, verify. |
+| Reservation without fsync; checkpoint stores the counter | PostgreSQL `GetNewObjectId`/`XLogPutNextOid`, `VAR_OID_PREFETCH = 8192`, `CheckPoint.nextOid` | Verified at pinned commit (PostgreSQL `10cc5aa96a6df7cb1d7c47e978cc94f01f785cb7`): `VAR_OID_PREFETCH` `varsup.c:32`; `GetNewObjectId` logs the next batch under `OidGenLock` when `oidCount` reaches 0 (`varsup.c:620-626`); `XLogPutNextOid` does not flush, because any record using the OIDs follows it (`xlog.c:8985-9008`); an online checkpoint stores `nextOid + oidCount`, the logged limit (`xlog.c:7943-7946`); redo believes `XLOG_NEXTOID` and a shutdown checkpoint exactly (`xlog.c:9283-9298`, `9304-9312`) and ignores an online checkpoint's counter (`xlog.c:9425-9434`). |
 | Explicit id in the WAL; next = max + 1 | Memgraph vertex-create deltas carry the Gid; recovery derives `next_vertex_id`; the snapshot stores next ids | Recalled, verify (BSL; ideas only). |
 | Id high-water persisted; Neo4j reuses freed ids | Neo4j `IndexedIdGenerator` (highId + free-id tree), `neostore.transaction.db.N` with a store-id header, `db.tx_log.rotation.size` | Recalled, verify (GPLv3; ideas only). Reuse rejected per `docs/design-space-reclamation.md:85-93`. |
 | Checkpoint waits on the observer, not on commits | PostgreSQL `DELAY_CHKPT_START` (`checkpoint.go:925-931`) | Repo-cited. |

@@ -112,6 +112,12 @@ type Stats struct {
 	// poisoned by an earlier failure are not counted (mirroring how
 	// context-cancelled calls are not counted).
 	SyncFailed uint64
+	// ControlFrames and ControlBytes count the subset of Frames and Bytes whose
+	// payload is a control record ([ControlRecordTag]): node id reservations and
+	// the clean-close id marks (WAL v2 step 4). Frames − ControlFrames is the
+	// number of transaction frames.
+	ControlFrames uint64
+	ControlBytes  uint64
 }
 
 // segMeta is one retained segment as the writer tracks it.
@@ -254,6 +260,8 @@ type Writer struct {
 	bytes      atomic.Uint64
 	syncs      atomic.Uint64
 	syncFailed atomic.Uint64
+	ctlFrames  atomic.Uint64
+	ctlBytes   atomic.Uint64
 
 	mu     sync.Mutex
 	closed atomic.Bool
@@ -955,6 +963,10 @@ func (w *Writer) appendLocked(payload []byte) error {
 	w.frames.Add(1)
 	//nolint:gosec // G115: io.Writer forbids a negative n
 	w.bytes.Add(uint64(n))
+	if len(payload) > 0 && payload[0] == ControlRecordTag {
+		w.ctlFrames.Add(1)
+		w.ctlBytes.Add(uint64(n)) //nolint:gosec // G115: io.Writer forbids a negative n
+	}
 	return nil
 }
 
@@ -1258,10 +1270,12 @@ func (w *Writer) poison(err error) {
 // Stats returns a snapshot of the writer's lifetime counters.
 func (w *Writer) Stats() Stats {
 	return Stats{
-		Frames:     w.frames.Load(),
-		Bytes:      w.bytes.Load(),
-		Syncs:      w.syncs.Load(),
-		SyncFailed: w.syncFailed.Load(),
+		Frames:        w.frames.Load(),
+		Bytes:         w.bytes.Load(),
+		Syncs:         w.syncs.Load(),
+		SyncFailed:    w.syncFailed.Load(),
+		ControlFrames: w.ctlFrames.Load(),
+		ControlBytes:  w.ctlBytes.Load(),
 	}
 }
 

@@ -210,16 +210,81 @@ func decodeSegmentHeader(b []byte) (storeID, segNo uint64, err error) {
 }
 
 // Control records ride in a frame payload whose leading byte is
-// [ControlRecordTag] (docs/design-wal-v2.md §1.2). This build writes and reads
-// only [CtlLegacySeal].
+// [ControlRecordTag] (docs/design-wal-v2.md §1.2).
 const (
 	// ControlRecordTag is the leading payload byte of a control record.
 	ControlRecordTag byte = 0xFC
+	// CtlReserveIDs is the control-record kind of an id reservation: every
+	// intra index below the limit in the shard may have been issued (WAL v2
+	// step 4). Body: u8 shard | u64 limit.
+	CtlReserveIDs byte = 1
+	// CtlNextIDsExact is the control-record kind written at a clean close: the
+	// exact per-shard high-water marks (WAL v2 step 4). Body: 256 × uvarint next.
+	CtlNextIDsExact byte = 2
 	// CtlLegacySeal is the control-record kind that seals the legacy
 	// single-file log: no frame of that file follows it.
 	CtlLegacySeal  byte = 3
 	legacySealSize      = 2 + 8 + 8
+	// ReserveIDsSize is the payload length of a [CtlReserveIDs] record.
+	ReserveIDsSize = 2 + 1 + 8
+	// idShards is the shard count both id records cover (graph.MapperShards).
+	idShards = 256
 )
+
+// ErrControlRecordCorrupt is returned by [DecodeReserveIDs] and
+// [DecodeNextIDsExact] for a payload of their kind that does not parse.
+var ErrControlRecordCorrupt = errors.New("wal: control record corrupt")
+
+// AppendReserveIDs appends the payload of a [CtlReserveIDs] record for shard
+// and limit to dst and returns it.
+func AppendReserveIDs(dst []byte, shard uint8, limit uint64) []byte {
+	dst = append(dst, ControlRecordTag, CtlReserveIDs, shard)
+	return binary.LittleEndian.AppendUint64(dst, limit)
+}
+
+// DecodeReserveIDs parses a [CtlReserveIDs] payload. ok is false for a payload
+// of another kind; err is [ErrControlRecordCorrupt] for one of this kind with the
+// wrong length.
+func DecodeReserveIDs(payload []byte) (shard uint8, limit uint64, ok bool, err error) {
+	if len(payload) < 2 || payload[0] != ControlRecordTag || payload[1] != CtlReserveIDs {
+		return 0, 0, false, nil
+	}
+	if len(payload) != ReserveIDsSize {
+		return 0, 0, true, fmt.Errorf("%w: reservation of %d bytes", ErrControlRecordCorrupt, len(payload))
+	}
+	return payload[2], binary.LittleEndian.Uint64(payload[3:]), true, nil
+}
+
+// AppendNextIDsExact appends the payload of a [CtlNextIDsExact] record carrying
+// next to dst and returns it.
+func AppendNextIDsExact(dst []byte, next *[idShards]uint64) []byte {
+	dst = append(dst, ControlRecordTag, CtlNextIDsExact)
+	for _, v := range next {
+		dst = binary.AppendUvarint(dst, v)
+	}
+	return dst
+}
+
+// DecodeNextIDsExact parses a [CtlNextIDsExact] payload. ok is false for a
+// payload of another kind; err is [ErrControlRecordCorrupt] for one of this kind
+// that does not hold exactly 256 marks.
+func DecodeNextIDsExact(payload []byte) (next [idShards]uint64, ok bool, err error) {
+	if len(payload) < 2 || payload[0] != ControlRecordTag || payload[1] != CtlNextIDsExact {
+		return next, false, nil
+	}
+	b := payload[2:]
+	for i := range next {
+		v, n := binary.Uvarint(b)
+		if n <= 0 {
+			return next, true, fmt.Errorf("%w: exact marks truncated at shard %d", ErrControlRecordCorrupt, i)
+		}
+		next[i], b = v, b[n:]
+	}
+	if len(b) != 0 {
+		return next, true, fmt.Errorf("%w: %d trailing bytes after the exact marks", ErrControlRecordCorrupt, len(b))
+	}
+	return next, true, nil
+}
 
 // LegacySeal is the decoded [CtlLegacySeal] record: the store id the legacy log
 // was sealed for and the segment position at which its history continues. It is
