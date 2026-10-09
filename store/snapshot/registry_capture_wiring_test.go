@@ -71,7 +71,7 @@ func TestWriteLabels_SelfHealRetriesAndSucceeds(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	size, crc, err := writeLabels(&buf, g, nil, snap)
+	size, crc, err := writeLabels(&buf, g, nil, snap, componentBufMax)
 	if err != nil {
 		t.Fatalf("writeLabels must self-heal and succeed, got %v", err)
 	}
@@ -137,7 +137,7 @@ func TestWriteLabels_BreakRequiresBothCollectors(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if _, _, err := writeLabels(&buf, g, nil, snap); err != nil {
+	if _, _, err := writeLabels(&buf, g, nil, snap, componentBufMax); err != nil {
 		t.Fatalf("writeLabels must self-heal on an edge-only race, got %v", err)
 	}
 	if calls != 2 {
@@ -184,7 +184,7 @@ func TestWriteLabels_ExhaustionReturnsErrorWritesNothing(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	size, crc, err := writeLabels(&buf, g, nil, snap)
+	size, crc, err := writeLabels(&buf, g, nil, snap, componentBufMax)
 	if err == nil {
 		t.Fatal("writeLabels must return the collector error when the retry budget is exhausted")
 	}
@@ -243,7 +243,7 @@ func TestWriteProperties_SelfHealRetriesAndSucceeds(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if _, _, err := writeProperties(&buf, g, nil, snap, newArena); err != nil {
+	if _, _, err := writeProperties(&buf, g, nil, snap, newArena, componentBufMax); err != nil {
 		t.Fatalf("writeProperties must self-heal and succeed, got %v", err)
 	}
 	if snapCalls != forcedRetries+1 {
@@ -305,7 +305,7 @@ func TestWriteProperties_BreakRequiresBothCollectors(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if _, _, err := writeProperties(&buf, g, nil, snap, newPropValueArena); err != nil {
+	if _, _, err := writeProperties(&buf, g, nil, snap, newPropValueArena, componentBufMax); err != nil {
 		t.Fatalf("writeProperties must self-heal on an edge-only race, got %v", err)
 	}
 	if snapCalls != 2 {
@@ -353,7 +353,7 @@ func TestWriteProperties_ExhaustionReturnsErrorWritesNothing(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	size, crc, err := writeProperties(&buf, g, nil, snap, newArena)
+	size, crc, err := writeProperties(&buf, g, nil, snap, newArena, componentBufMax)
 	if err == nil {
 		t.Fatal("writeProperties must return the collector error when the retry budget is exhausted")
 	}

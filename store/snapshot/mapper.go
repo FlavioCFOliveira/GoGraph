@@ -140,17 +140,17 @@ type MapperReadback struct {
 // The CRC32C covers the entire on-disk file, including the magic
 // header. The reader recomputes the CRC end-to-end at load time.
 func WriteMapperString(w io.Writer, m *graph.Mapper[string], include func(graph.NodeID) bool) (size int64, crc uint32, err error) {
-	size, crc, _, err = writeMapperStringN(w, m, include)
+	size, crc, _, err = writeMapperStringN(w, m, include, componentBufMax)
 	return size, crc, err
 }
 
 // writeMapperStringN is [WriteMapperString] also reporting how many pairs it emitted —
 // the number of NODES the image carries, which is what [Capture.Order] must report so
 // the manifest cannot disagree with what a recovery reconstructs (rmp #2310).
-func writeMapperStringN(w io.Writer, m *graph.Mapper[string], include func(graph.NodeID) bool) (size int64, crc uint32, emitted uint64, err error) {
+func writeMapperStringN(w io.Writer, m *graph.Mapper[string], include func(graph.NodeID) bool, bufSize int) (size int64, crc uint32, emitted uint64, err error) {
 	defer metrics.Time("store.snapshot.WriteMapperString").Stop()
 
-	bw := bufio.NewWriterSize(w, 1<<20)
+	bw := bufio.NewWriterSize(w, bufSize)
 	hasher := crc32.New(castagnoli)
 	tee := io.MultiWriter(bw, hasher)
 
@@ -274,23 +274,23 @@ type keyDecoder[N comparable] interface {
 // deterministically. The CRC32C covers the entire on-disk file,
 // including the magic header.
 func WriteMapper[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncoder[N], include func(graph.NodeID) bool) (size int64, crc uint32, err error) {
-	size, crc, _, err = writeMapperN(w, m, codec, include)
+	size, crc, _, err = writeMapperN(w, m, codec, include, componentBufMax)
 	return size, crc, err
 }
 
 // writeMapperN is [WriteMapper] also reporting how many pairs it emitted — the number
 // of NODES the image carries, which is what [Capture.Order] reports (rmp #2310).
-func writeMapperN[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncoder[N], include func(graph.NodeID) bool) (size int64, crc uint32, emitted uint64, err error) {
+func writeMapperN[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncoder[N], include func(graph.NodeID) bool, bufSize int) (size int64, crc uint32, emitted uint64, err error) {
 	defer metrics.Time("store.snapshot.WriteMapper").Stop()
 
 	// String keys reuse the frozen version-1 path so the bytes stay
 	// identical to the pre-codec writer. The any() probe matches the
 	// exact dynamic type, mirroring the writer-side dispatch in full.go.
 	if sm, ok := any(m).(*graph.Mapper[string]); ok {
-		return writeMapperStringN(w, sm, include)
+		return writeMapperStringN(w, sm, include, bufSize)
 	}
 
-	bw := bufio.NewWriterSize(w, 1<<20)
+	bw := bufio.NewWriterSize(w, bufSize)
 	hasher := crc32.New(castagnoli)
 	tee := io.MultiWriter(bw, hasher)
 
