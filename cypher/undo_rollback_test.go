@@ -76,28 +76,6 @@ func walEngineWithGraph(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float6
 	return cypher.NewEngineWithStore(store), g, w, dir
 }
 
-// walMultigraphEngineWithGraph mirrors [walEngineWithGraph] but builds the
-// graph with adjlist.Config.Multigraph enabled — the openCypher TCK storage
-// model, in which each CREATE of a relationship between the same endpoints
-// becomes a distinct parallel slot carrying its own stable handle and its own
-// per-instance type/properties. The multigraph mode is what makes the
-// "remove one parallel edge, then fail a later row" interleaving of #1327
-// reachable; a simple graph collapses parallel CREATEs onto one slot.
-func walMultigraphEngineWithGraph(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64], *wal.Writer, string) {
-	t.Helper()
-	dir := t.TempDir()
-	w, err := wal.OpenWithSyncLatency(filepath.Join(dir, "wal"), synclatency.ForTest(t))
-	if err != nil {
-		t.Fatalf("wal.Open: %v", err)
-	}
-	g := lpg.New[string, float64](adjlist.Config{})
-	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
-		Codec:       txn.NewStringCodec(),
-		WeightCodec: txn.NewFloat64WeightCodec(),
-	})
-	return cypher.NewEngineWithStore(store), g, w, dir
-}
-
 // runWrite runs a write query to completion and returns the error surfaced by
 // the result (drain error preferred, else Close error). A successful write
 // returns nil.
@@ -370,7 +348,7 @@ func TestRunInTx_DeleteThenFailRestoresEdge(t *testing.T) {
 // the survivor — an Atomicity gap: the rollback left a state that neither fully
 // contained nor fully excluded the removed instance.
 func TestRunInTx_ParallelEdgeRemovalThenFailRestoresPerHandleMetadata(t *testing.T) {
-	eng, g, w, _ := walMultigraphEngineWithGraph(t)
+	eng, g, w, _ := walEngineWithGraph(t)
 	t.Cleanup(func() { _ = w.Close() })
 
 	// Seed two distinctly-typed parallel edges between the same ordered pair,

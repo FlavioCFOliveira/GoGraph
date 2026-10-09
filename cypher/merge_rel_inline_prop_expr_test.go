@@ -88,7 +88,7 @@ func TestMerge_Rel_InlineProp_NonLiteral_DrivesSearch_Idempotent(t *testing.T) {
 	}
 }
 
-// TestMerge_Rel_InlineProp_NonLiteral_DiscriminatesMatch_Multigraph verifies the
+// TestMerge_Rel_InlineProp_NonLiteral_DiscriminatesMatch_ParallelEdges verifies the
 // evaluated property discriminates the search predicate: against a single
 // existing edge, a MERGE whose evaluated inline property equals it binds to it
 // (no new edge), while a MERGE whose evaluated property differs does not match
@@ -100,7 +100,7 @@ func TestMerge_Rel_InlineProp_NonLiteral_DrivesSearch_Idempotent(t *testing.T) {
 // separate, pre-existing MergeRelationship limitation shared by the literal
 // path — the per-pair property view cannot tell parallel edges apart — and is
 // deliberately out of scope here.)
-func TestMerge_Rel_InlineProp_NonLiteral_DiscriminatesMatch_Multigraph(t *testing.T) {
+func TestMerge_Rel_InlineProp_NonLiteral_DiscriminatesMatch_ParallelEdges(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)

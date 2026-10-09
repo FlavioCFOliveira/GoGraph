@@ -477,12 +477,12 @@ func (m mutationUndo) recordDecEdgeCreateCount(src, dst string, had bool) {
 // per-handle labels/properties so the inverse is self-sufficient — it does not
 // rely on the handle store having survived the removal.
 //
-// The per-CREATE-INDEX store ([Graph.SetEdgeLabelAt] et al.) is the simple-graph
-// fallback and is keyed by CREATE order, not by adjacency slot; no removal path
-// (DELETE or this undo's re-add) ever mutates it, so it survives a
-// removal-then-fail rollback unchanged and needs no capture. In multigraph mode
-// — where this exotic interleaving lives — the per-handle store is the
-// authoritative per-instance surface (see graph/lpg/edge_handle.go).
+// The per-CREATE-INDEX store ([Graph.SetEdgeLabelAt] et al.) is keyed by CREATE
+// order, not by adjacency slot; no removal path (DELETE or this undo's re-add)
+// ever mutates it, so it survives a removal-then-fail rollback unchanged and
+// needs no capture. For a parallel instance — where this exotic interleaving
+// lives — the per-handle store is the authoritative per-instance surface (see
+// graph/lpg/edge_handle.go).
 type removedEdgePreimage struct {
 	props    map[string]lpg.PropertyValue
 	src, dst string
@@ -496,7 +496,7 @@ type removedEdgePreimage struct {
 	createCount  int64
 	// handle is the stable handle of the FIRST src→dst adjacency slot — the
 	// one RemoveEdge will remove — or 0 when the edge carries no handle
-	// (simple-graph or pre-Stage-2 storage). On undo the edge is re-added with
+	// (pre-Stage-2 storage). On undo the edge is re-added with
 	// this handle so a removed parallel instance keeps its identity.
 	handle  uint64
 	hadEdge bool
@@ -683,9 +683,9 @@ func captureAllOutEdgePreimages(
 			}
 		}
 		if slot < 0 || slot >= len(handles) {
-			// No per-slot identity to recover (simple graph, or storage without a
-			// handle column): parallel edges cannot carry distinct identities
-			// there, so the first slot stands for the slot.
+			// No per-slot identity to recover (storage without a handle
+			// column): parallel edges cannot carry distinct identities there,
+			// so the first slot stands for the slot.
 			pre[i] = r.captureRemovedEdge(n, dst)
 			continue
 		}

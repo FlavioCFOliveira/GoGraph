@@ -1,8 +1,8 @@
 package cypher_test
 
-// prop_remove_lost_update_config_test.go — rmp #2943 on the graph configurations
-// the shapes in prop_remove_lost_update_test.go do not reach: a simple
-// (non-multigraph) directed graph, and an undirected graph.
+// prop_remove_lost_update_config_test.go — rmp #2943 on the relationship
+// pattern shapes prop_remove_lost_update_test.go does not reach: a directed
+// and an undirected pattern binding the one stored relationship.
 
 import (
 	"errors"
@@ -45,7 +45,7 @@ func lostRmConfigEngine(t *testing.T, cfg adjlist.Config, walBacked bool, setup 
 }
 
 // TestPropRemove_RelationshipShapesOnEveryConfiguration runs the relationship
-// lost-update shapes on a simple directed graph and on an undirected graph,
+// lost-update shapes through a directed and an undirected pattern,
 // under both endings of T: after T's rollback P's committed write must be the
 // final state, and after T's commit P and T may not both have committed.
 func TestPropRemove_RelationshipShapesOnEveryConfiguration(t *testing.T) {
@@ -55,8 +55,8 @@ func TestPropRemove_RelationshipShapesOnEveryConfiguration(t *testing.T) {
 		tRel string // pattern T binds r through
 		pRel string // pattern P binds r through
 	}{
-		{"directed-simple", adjlist.Config{}, `(:A)-[r:R]->(:B)`, `(:A)-[r:R]->(:B)`},
-		{"undirected", adjlist.Config{}, `(:A)-[r:R]-(:B)`, `(:A)-[r:R]-(:B)`},
+		{"directed-pattern", adjlist.Config{}, `(:A)-[r:R]->(:B)`, `(:A)-[r:R]->(:B)`},
+		{"undirected-pattern", adjlist.Config{}, `(:A)-[r:R]-(:B)`, `(:A)-[r:R]-(:B)`},
 	}
 	type shape struct {
 		name, setup, tOp, pOp, check, want string

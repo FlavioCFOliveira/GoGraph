@@ -54,7 +54,7 @@ func recIsNull(v interface{}) bool {
 func TestShortestPath_BasicChain(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:0})`,
 		`CREATE (b:N {k:1})`,
 		`CREATE (c:N {k:2})`,
@@ -84,7 +84,7 @@ func TestShortestPath_BasicChain(t *testing.T) {
 func TestShortestPath_NoPath_Match(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:0})`,
 		`CREATE (b:N {k:1})`,
 	)
@@ -101,7 +101,7 @@ func TestShortestPath_NoPath_Match(t *testing.T) {
 func TestShortestPath_NoPath_OptionalMatch(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:0})`,
 		`CREATE (b:N {k:1})`,
 	)
@@ -121,7 +121,7 @@ func TestAllShortestPaths_Ties(t *testing.T) {
 	// Diamond a→b→d, a→c→d (no direct a→d edge): two length-2 shortest paths.
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:0})`,
 		`CREATE (b:N {k:1})`,
 		`CREATE (c:N {k:2})`,
@@ -149,7 +149,7 @@ func TestAllShortestPaths_Ties(t *testing.T) {
 func TestShortestPath_Undirected(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:0})`,
 		`CREATE (b:N {k:1})`,
 		`CREATE (c:N {k:2})`,
@@ -177,7 +177,7 @@ func TestShortestPath_Undirected(t *testing.T) {
 func TestShortestPath_TypeFilter(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:0})`,
 		`CREATE (b:N {k:1})`,
 		`CREATE (c:N {k:2})`,
@@ -205,16 +205,16 @@ func TestShortestPath_TypeFilter(t *testing.T) {
 	}
 }
 
-// TestShortestPath_MultigraphPerInstanceType is the core rmp #1692 contract: a
+// TestShortestPath_ParallelEdgesPerInstanceType is the core rmp #1692 contract: a
 // shortest path crossing a multigraph pair with PARALLEL typed edges reports
 // the OWN type of the edge actually traversed, not a merged type. Because both
 // parallel edges connect the same pair, the shortest path uses one of them; the
 // reported type must be one of the real types (T1 or T2), and the property read
 // must track it.
-func TestShortestPath_MultigraphPerInstanceType(t *testing.T) {
+func TestShortestPath_ParallelEdgesPerInstanceType(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:1})`,
 		`CREATE (b:N {k:2})`,
 		`MATCH (a:N {k:1}),(b:N {k:2}) CREATE (a)-[:T1 {w:10}]->(b)`,
@@ -262,7 +262,7 @@ func TestShortestPath_MultigraphPerInstanceType(t *testing.T) {
 func TestShortestPath_ZeroLength(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng, `CREATE (a:N {k:0})`)
+	seedEngine(t, eng, `CREATE (a:N {k:0})`)
 	rows := runShortest(t, eng,
 		`MATCH (a:N {k:0}) MATCH p = shortestPath((a)-[*0..]->(a)) RETURN length(p) AS len`)
 	if len(rows) != 1 {

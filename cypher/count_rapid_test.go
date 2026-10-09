@@ -40,9 +40,9 @@ var (
 	countTypes  = []string{"R", "S", "T"}
 )
 
-// newMultigraphEngine builds a directed multigraph engine (the openCypher
+// newParallelEdgeEngine builds a directed multigraph engine (the openCypher
 // storage model) with the given per-relabel OUT recount budget.
-func newMultigraphEngine(budget int) (*Engine, *lpg.Graph[string, float64]) {
+func newParallelEdgeEngine(budget int) (*Engine, *lpg.Graph[string, float64]) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	return NewEngineWithOptions(g, EngineOptions{MaxLabelRecountEdges: budget}), g
 }
@@ -81,7 +81,7 @@ func TestCountStore_Rapid(t *testing.T) {
 
 	rapid.Check(t, func(rt *rapid.T) {
 		budget := rapid.SampledFrom([]int{0, 2, 8}).Draw(rt, "budget")
-		eng, g := newMultigraphEngine(budget)
+		eng, g := newParallelEdgeEngine(budget)
 		src := resolverFor(eng)
 		ctx := context.Background()
 
@@ -172,7 +172,7 @@ const countWorkloadPool = 12
 // sequence, so two same-seed runs also agree on those ids.
 func runSeededCountWorkload(t *testing.T, seed int64) count.Snapshot {
 	t.Helper()
-	eng, _ := newMultigraphEngine(8)
+	eng, _ := newParallelEdgeEngine(8)
 	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // determinism is the point; not security-sensitive.
 
 	// A fixed pool of uniquely-keyed nodes, each with a deterministic initial

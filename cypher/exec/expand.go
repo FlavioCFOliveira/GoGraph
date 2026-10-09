@@ -84,7 +84,7 @@ type CSRAdjacency interface {
 	EdgesSlice() []graph.NodeID
 	// HandlesSlice returns the per-slot stable edge handles parallel to
 	// EdgesSlice, or nil when the snapshot carries no handles (a
-	// non-multigraph never built via AddEdgeH). The forward and reverse
+	// pre-handle snapshot). The forward and reverse
 	// CSRs of the same graph carry the SAME handle for a given logical
 	// edge, which is what lets the reverse traversal recover per-instance
 	// edge identity across parallel edges (rmp #1634).
@@ -164,7 +164,7 @@ type Expand struct {
 	fwdHandles []uint64       // snapshot of fwd.HandlesSlice() (nil unless multigraph)
 	revVerts   []uint64       // snapshot of rev.VerticesSlice() (nil for DirOut)
 	revEdges   []graph.NodeID // snapshot of rev.EdgesSlice() (nil for DirOut)
-	revHandles []uint64       // snapshot of rev.HandlesSlice() (nil for DirOut / non-multigraph)
+	revHandles []uint64       // snapshot of rev.HandlesSlice() (nil for DirOut / pre-handle)
 	inputRow   Row            // current input row (borrowed reference)
 	// Pending state for emitting an edge N times when its
 	// CREATE-multiplicity is greater than 1 (Merge5 [21]). The full row
@@ -299,8 +299,8 @@ type ExpandConfig struct {
 	// for the directed edge (srcID, dstID). When the returned count is N >
 	// 1, the operator emits the corresponding output row N times in a row,
 	// reflecting the openCypher rule that `MATCH ()-[r]->()` enumerates
-	// each CREATE call separately even when the underlying simple-graph
-	// storage collapsed them to one entry (Merge5 [21]). A nil fn (or
+	// each CREATE call separately even when storage holds fewer entries
+	// than CREATE calls (Merge5 [21]). A nil fn (or
 	// returning 0 / 1) disables the multiplicity emit and behaves like a
 	// plain single-row Expand.
 	MultiplicityFn func(srcID, dstID uint64) int64
@@ -1036,8 +1036,7 @@ func (op *Expand) advanceRevEdge() (src, edge, dst int64, st edgeStatus) {
 // O(V+E) table, which matters because Init runs once per outer row here.
 //
 // The lower bound remains the fallback for a CSR carrying no handles (a
-// non-multigraph or a legacy snapshot). There a pair occupies a single slot, so
-// the first match IS the instance and the two agree.
+// pre-handle snapshot), where the first match stands for the instance.
 func (op *Expand) reverseEdgePassesFilter(dst, src, revPos uint64) bool {
 	if !op.admit.Active() {
 		return true // no filter declared → accept all

@@ -147,7 +147,7 @@ func TestByHandleProbeSkip_GoAPIGraph_AllThreeConsumersAgree(t *testing.T) {
 // by-handle properties the probe must still run, and each parallel instance
 // must report its OWN property (rmp #1684) across all three consumers.
 func TestByHandleProbeSkip_ByHandleGraph_PerInstanceStillHolds(t *testing.T) {
-	eng, g := inMemMultigraphEngine(t)
+	eng, g := inMemParallelEdgeEngine(t)
 
 	seed := []string{
 		`CREATE (a:N {key: 'x'})`,
@@ -193,7 +193,7 @@ func TestByHandleProbeSkip_ByHandleGraph_PerInstanceStillHolds(t *testing.T) {
 // ladder buildEdgeProps documents — so a latched graph and an unlatched one
 // answer identically for a Go-API-built edge.
 func TestByHandleProbeSkip_LatchedGraphKeepsPerPairEdgesCorrect(t *testing.T) {
-	eng, g := inMemMultigraphEngine(t)
+	eng, g := inMemParallelEdgeEngine(t)
 
 	// A Cypher-created relationship latches the graph.
 	for _, q := range []string{

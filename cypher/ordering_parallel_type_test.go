@@ -51,7 +51,7 @@ const nDst = 40
 // rather than the handle composition.
 func buildParallelTypeFixture(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64]) {
 	t.Helper()
-	eng, g := inMemMultigraphEngine(t)
+	eng, g := inMemParallelEdgeEngine(t)
 	mustRunWrite(t, eng, `CREATE (a:N {key:'src'})`)
 	for d := nDst - 1; d >= 0; d-- { // descending
 		key := fmt.Sprintf("d%02d", d)
@@ -172,7 +172,7 @@ func TestOrdering_ParallelEdgeTypes_FixtureIsHandleBearing(t *testing.T) {
 // flipped, so it cannot go green over a defect both arms share.
 func TestOrdering_QueryResultsMatchAdjacencyOracle(t *testing.T) {
 	t.Parallel()
-	eng, g := inMemMultigraphEngine(t)
+	eng, g := inMemParallelEdgeEngine(t)
 	mustRunWrite(t, eng, `CREATE (a:N {key:'src'})`)
 	// Descending destinations past the insertion-sort cutoff, with parallel edges on
 	// every third destination so runs of length > 1 exist.
@@ -256,7 +256,7 @@ func TestOrdering_ParallelEdgeTypes_ReverseDirection(t *testing.T) {
 			nPar, nDest := nPar, nDest
 			t.Run(fmt.Sprintf("types%d_dests%d", nPar, nDest), func(t *testing.T) {
 				t.Parallel()
-				eng, _ := inMemMultigraphEngine(t)
+				eng, _ := inMemParallelEdgeEngine(t)
 				mustRunWrite(t, eng, `CREATE (a:N {key:'src'})`)
 				for d := 0; d < nDest; d++ {
 					mustRunWrite(t, eng, fmt.Sprintf(`CREATE (b:N {key:'d%d'})`, d))

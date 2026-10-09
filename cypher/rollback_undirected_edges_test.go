@@ -1,22 +1,15 @@
 package cypher_test
 
-// rollback_undirected_edges_test.go — regression tests for rmp #2886: on an
-// UNDIRECTED multigraph a rolled-back transaction that removes relationships
-// must leave the committed graph byte-for-byte unchanged.
+// rollback_undirected_edges_test.go — regression tests for rmp #2886: a
+// rolled-back transaction that removes relationships reached against their
+// stored direction must leave the committed graph byte-for-byte unchanged.
 //
-// An undirected relationship occupies two adjacency slots sharing one handle:
-// the slot it was created as (a→b) and its mirror (b→a). Its type and
-// properties are stored under the creation order only, and removing it clears
-// both orders. The undo pre-image was captured in the order the removal was
-// reached through, so a removal reached through the mirror — DETACH DELETE of
-// the relationship's end node, or a DELETE of a relationship bound through its
-// mirror slot — rolled back to a reversed relationship with no type and no
-// properties.
-//
-// The engine warns that undirected storage does not give openCypher read
-// semantics (cypher/api.go); these tests do not assert read semantics. They
-// assert only that a rollback does not change what was committed, whatever the
-// storage reads back.
+// A relationship's type and properties are stored under its creation order
+// (a→b). A removal reached from the relationship's END node — an undirected or
+// incoming pattern anchored there, or DETACH DELETE of the end node — must
+// still capture the undo pre-image under the stored order, or the rollback
+// re-adds a reversed relationship with no type and no properties. Storage is a
+// directed multigraph (rmp #3072); the undirected side is the pattern only.
 //
 // Layer: short. Engines, graphs and stores are local; the suite is goleak-clean.
 
@@ -37,31 +30,30 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
-// undirectedConfig is the storage shape under test.
-var undirectedConfig = adjlist.Config{}
-
 // undirectedEdgeStatements are every #2885 statement plus the removals that
-// reach a relationship through its mirror slot on an undirected graph: a
-// directed pattern anchored on a relationship's end node binds the mirror, and
-// node 3 is the end node of four committed relationships, three of them
-// parallel. Node 4 carries the self-loop, which has no mirror.
+// reach a relationship from its end node: node 3 is the end node of four
+// committed relationships, three of them parallel, so an undirected or incoming
+// pattern anchored on it binds them against their stored direction. Node 4
+// carries the self-loop, which both directions reach.
 var undirectedEdgeStatements = append(slices.Clone(parallelEdgeStatements),
-	"MATCH (a:S {k: 1})-[r]->(b) DELETE r RETURN b.k",
-	"MATCH (a:S {k: 3})-[r]->(b) DELETE r RETURN b.k",
+	"MATCH (a:S {k: 1})-[r]-(b) DELETE r RETURN b.k",
+	"MATCH (a:S {k: 3})-[r]-(b) DELETE r RETURN b.k",
+	"MATCH (a:S {k: 3})<-[r]-(b) DELETE r RETURN b.k",
 	"MATCH (a:S {k: 3})-[r:U]-(b) DELETE r RETURN b.k",
 	"MATCH (a:S {k: 3}) DETACH DELETE a",
 	"MATCH (a:S {k: 4}) DETACH DELETE a",
-	"MATCH (a:S {k: 3})-[r]->(b) SET r.z = 1 RETURN b.k",
+	"MATCH (a:S {k: 4})-[r]-(b) DELETE r RETURN b.k",
+	"MATCH (a:S {k: 3})-[r]-(b) SET r.z = 1 RETURN b.k",
 )
 
-// TestRollback_UndirectedEdges_InMemory_2886 covers the in-memory engine over an
-// undirected multigraph. Each statement runs in its own subtest over a freshly
+// TestRollback_UndirectedEdges_InMemory_2886 covers the in-memory engine. Each
+// statement runs in its own subtest over a freshly
 // seeded graph, and the final subtest replays the whole list over ONE graph,
 // for the reason [TestRollback_ParallelEdges_InMemory_2885] gives.
 func TestRollback_UndirectedEdges_InMemory_2886(t *testing.T) {
 	newSeeded := func(t *testing.T) (*cypher.Engine, []string) {
 		t.Helper()
-		g := lpg.New[string, float64](undirectedConfig)
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 		seedParallelEdges(t, eng)
 		base := graphDump(t, eng)
@@ -84,13 +76,11 @@ func TestRollback_UndirectedEdges_InMemory_2886(t *testing.T) {
 	})
 }
 
-// TestRollback_UndirectedEdges_Durable_2886 covers the WAL-backed engine over an
-// undirected multigraph and what recovery returns afterwards. A fresh directory
-// recovers as a DIRECTED graph, so the first open builds the undirected graph
-// itself; the final checkpoint persists its shape in the snapshot manifest, and
-// the reopen must return it. The statements are rolled back again after the
-// reopen, over the relationships recovery rebuilt, and the graph is compared
-// with the baseline once more.
+// TestRollback_UndirectedEdges_Durable_2886 covers the WAL-backed engine and
+// what recovery returns afterwards. After a final checkpoint the reopen must
+// return the committed graph, the statements are rolled back again over the
+// relationships recovery rebuilt, and the graph is compared with the baseline
+// once more.
 func TestRollback_UndirectedEdges_Durable_2886(t *testing.T) {
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal")
@@ -99,7 +89,7 @@ func TestRollback_UndirectedEdges_Durable_2886(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](undirectedConfig)
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngineWithStore(txn.NewStoreWithOptions[string, float64](g, w, parallelEdgeStoreOpts()))
 	seedParallelEdges(t, eng)
 	base := graphDump(t, eng)

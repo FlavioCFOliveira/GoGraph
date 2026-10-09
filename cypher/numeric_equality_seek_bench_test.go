@@ -60,10 +60,6 @@ var equalityBenchPopulations = []int{4000, 16000, 64000}
 // integer i and odd i the float i+0.5 — the same mixed-type population the
 // #1652 range benchmark uses — with the btree index and its numeric companion
 // on (:Person, age). disableSeek selects the scan arm.
-//
-// The graph is a multigraph purely to avoid the engine's non-multigraph warning,
-// which otherwise interleaves with benchmark output; there are no edges, so the
-// choice cannot affect the measurement.
 func newEqualityBenchEngine(tb testing.TB, n int, disableSeek bool) *cypher.Engine {
 	tb.Helper()
 	g := lpg.New[string, float64](adjlist.Config{})

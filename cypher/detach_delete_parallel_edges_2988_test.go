@@ -11,9 +11,7 @@ package cypher_test
 // Every case creates parallel instances of one shape around the Hub, DETACH
 // DELETEs the Hub, reclaims, and compares the raw versioned adjacency — not
 // Cypher, which hid the defect — with a control graph built from the same
-// statements minus every relationship that touches the Hub. The comparison is
-// against a control rather than a literal so the undirected adjacency, which
-// stores each relationship twice, is held to the same oracle.
+// statements minus every relationship that touches the Hub.
 //
 // Layer: short. No goroutines are spawned.
 
@@ -70,14 +68,12 @@ func parallelDetachCases() []parallelDetachCase {
 }
 
 // parallelDetachConfigs are the adjacency shapes the cases run over: the
-// directed multigraph the engine is built for, and the undirected one it warns
-// about but still serves, whose DETACH DELETE removes the mirror arcs in bulk.
+// directed multigraph, the only storage shape (rmp #3072).
 var parallelDetachConfigs = []struct {
 	name string
 	cfg  adjlist.Config
 }{
 	{"directed", adjlist.Config{}},
-	{"undirected", adjlist.Config{}},
 }
 
 // adjacencyArcs reads the committed adjacency of g and returns the arc entries
@@ -244,8 +240,8 @@ func TestDetachDelete_ParallelEdges_Rollback_RestoresEveryInstance(t *testing.T)
 }
 
 // TestDetachDelete_ParallelEdges_NoDangling_WAL runs the reproduction through
-// the WAL-backed engine, checks the live graph, then — on the directed
-// adjacency a pure-WAL recovery rebuilds — recovers and checks the replay.
+// the WAL-backed engine, checks the live graph, then recovers and checks the
+// replay.
 func TestDetachDelete_ParallelEdges_NoDangling_WAL(t *testing.T) {
 	t.Parallel()
 	for _, cf := range parallelDetachConfigs {

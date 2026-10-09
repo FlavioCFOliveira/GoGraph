@@ -45,10 +45,10 @@ func collectRelTypes(t *testing.T, eng *cypher.Engine, query string) []string {
 	return got
 }
 
-// TestMatch_Multigraph_ReverseHop_PerInstanceType pins the #1634 contract:
+// TestMatch_ParallelEdges_ReverseHop_PerInstanceType pins the #1634 contract:
 // the forward hop and the undirected reverse hop over two parallel,
 // distinctly-typed edges both yield {T1, T2}.
-func TestMatch_Multigraph_ReverseHop_PerInstanceType(t *testing.T) {
+func TestMatch_ParallelEdges_ReverseHop_PerInstanceType(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -88,7 +88,7 @@ func TestMatch_Multigraph_ReverseHop_PerInstanceType(t *testing.T) {
 	}
 }
 
-// TestMatch_Multigraph_ParallelSelfLoops_Undirected pins that two
+// TestMatch_ParallelSelfLoops_Undirected pins that two
 // parallel typed self-loops report distinct per-instance types on an
 // undirected match. Self-loops are emitted by the forward pass and
 // deduplicated on the reverse pass (tryRevEdge skips dst == srcID), so
@@ -100,7 +100,7 @@ func TestMatch_Multigraph_ReverseHop_PerInstanceType(t *testing.T) {
 // still collapse type(r) on an undirected hop, because the storage
 // direction probe in buildRelationshipValueFromRow cannot tell which
 // stored direction an emitted edge came from when both directions exist.
-func TestMatch_Multigraph_ParallelSelfLoops_Undirected(t *testing.T) {
+func TestMatch_ParallelSelfLoops_Undirected(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -126,13 +126,13 @@ func TestMatch_Multigraph_ParallelSelfLoops_Undirected(t *testing.T) {
 	}
 }
 
-// TestMerge_Multigraph_DistinctType_CreatesParallelEdge is the #1683
+// TestMerge_ParallelEdges_DistinctType_CreatesParallelEdge is the #1683
 // regression: MERGE of a second, distinctly-typed relationship between an
 // existing pair must CREATE the parallel edge (not bind to the first
 // edge), and each must report its own type. Before the fix, MERGE's match
 // used a type-agnostic HasEdge, so MERGE (a)-[:T2]->(b) bound to the T1
 // edge and no T2 edge was created.
-func TestMerge_Multigraph_DistinctType_CreatesParallelEdge(t *testing.T) {
+func TestMerge_ParallelEdges_DistinctType_CreatesParallelEdge(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -171,11 +171,11 @@ func TestMerge_Multigraph_DistinctType_CreatesParallelEdge(t *testing.T) {
 	}
 }
 
-// TestMerge_Multigraph_Undirected_DistinctType_CreatesParallelEdge covers
+// TestMerge_ParallelEdges_Undirected_DistinctType_CreatesParallelEdge covers
 // the undirected MERGE probe (the reverse-direction match also gained the
 // type check): two distinct-type undirected MERGEs create two edges, and
 // re-MERGE of an existing type is idempotent.
-func TestMerge_Multigraph_Undirected_DistinctType_CreatesParallelEdge(t *testing.T) {
+func TestMerge_ParallelEdges_Undirected_DistinctType_CreatesParallelEdge(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -223,9 +223,9 @@ func equalStrs(a, b []string) bool {
 // reads; VLE and shortestPath path rendering are the sibling ticket #1685.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// seedMultigraph runs each statement to completion against eng, failing the test
+// seedEngine runs each statement to completion against eng, failing the test
 // on any error. It is the shared CREATE/MERGE seeder for the #1684 scenarios.
-func seedMultigraph(t *testing.T, eng *cypher.Engine, stmts ...string) {
+func seedEngine(t *testing.T, eng *cypher.Engine, stmts ...string) {
 	t.Helper()
 	ctx := context.Background()
 	for _, q := range stmts {
@@ -308,17 +308,17 @@ func intVal(t *testing.T, v interface{}) int64 {
 	return int64(iv)
 }
 
-// TestMatch_Multigraph_PerInstanceProperties is the core #1684 regression: two
+// TestMatch_ParallelEdges_PerInstanceProperties is the core #1684 regression: two
 // parallel edges of distinct types AND distinct property values AND distinct key
 // SETS, created by pure CREATE, read back per-instance for the bound r on every
 // single-hop direction — forward, undirected, and opposite-direction.
-func TestMatch_Multigraph_PerInstanceProperties(t *testing.T) {
+func TestMatch_ParallelEdges_PerInstanceProperties(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	// Distinct types, distinct w, and distinct key sets: R1 carries {w}, R2
 	// carries {w, extra}. keys(r) must therefore diverge per row and
 	// `r.extra IS NULL` must be true on R1's row, false on R2's.
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:1})`,
 		`CREATE (b:N {k:2})`,
 		`MATCH (a:N), (b:N) WHERE a.k = 1 AND b.k = 2 CREATE (a)-[:R1 {w:10}]->(b)`,
@@ -407,14 +407,14 @@ func TestMatch_Multigraph_PerInstanceProperties(t *testing.T) {
 	})
 }
 
-// TestMatch_Multigraph_ThreeWayParallel_PerInstanceProperty proves the read is
+// TestMatch_ParallelEdges_ThreeWayParallel_PerInstanceProperty proves the read is
 // genuinely per-HANDLE and not a subtly-wrong "pick first" / "pick last": three
 // parallel edges with three distinct w values must each read their own. A 2-edge
 // test could pass under a first/last rule; a 3-edge test cannot.
-func TestMatch_Multigraph_ThreeWayParallel_PerInstanceProperty(t *testing.T) {
+func TestMatch_ParallelEdges_ThreeWayParallel_PerInstanceProperty(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:1})`,
 		`CREATE (b:N {k:2})`,
 		`MATCH (a:N), (b:N) WHERE a.k = 1 AND b.k = 2 CREATE (a)-[:R1 {w:10}]->(b)`,
@@ -434,15 +434,15 @@ func TestMatch_Multigraph_ThreeWayParallel_PerInstanceProperty(t *testing.T) {
 	}
 }
 
-// TestMatch_Multigraph_ParallelSelfLoops_PerInstanceProperty pins the self-loop
+// TestMatch_ParallelSelfLoops_PerInstanceProperty pins the self-loop
 // axis: two parallel typed self-loops (a)-[:R1{w:10}]->(a) and
 // (a)-[:R2{w:20}]->(a) must each read their own w on an undirected hop. Self-loops
 // are emitted by the forward pass and deduplicated on the reverse pass, so this
 // exercises the forward per-instance property path.
-func TestMatch_Multigraph_ParallelSelfLoops_PerInstanceProperty(t *testing.T) {
+func TestMatch_ParallelSelfLoops_PerInstanceProperty(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:1})`,
 		`MATCH (a:N) WHERE a.k = 1 CREATE (a)-[:R1 {w:10}]->(a)`,
 		`MATCH (a:N) WHERE a.k = 1 CREATE (a)-[:R2 {w:20}]->(a)`,
@@ -460,16 +460,16 @@ func TestMatch_Multigraph_ParallelSelfLoops_PerInstanceProperty(t *testing.T) {
 	}
 }
 
-// TestMatch_Multigraph_MixedHandleSentinel_PerInstanceProperty exercises the
+// TestMatch_ParallelEdges_MixedHandleSentinel_PerInstanceProperty exercises the
 // fallback boundary MID-PAIR: between the same (a,b) one edge is created by
 // CREATE (real handle) and one by MERGE (carries the 0 handle sentinel on the
 // older write path). The real-handle edge must read per-instance while the
 // sentinel edge falls back to the per-pair coalesced map without corrupting the
 // other row's read. Both rows must still surface, each with its own type.
-func TestMatch_Multigraph_MixedHandleSentinel_PerInstanceProperty(t *testing.T) {
+func TestMatch_ParallelEdges_MixedHandleSentinel_PerInstanceProperty(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:1})`,
 		`CREATE (b:N {k:2})`,
 		`MATCH (a:N), (b:N) WHERE a.k = 1 AND b.k = 2 CREATE (a)-[:R1 {w:10}]->(b)`,
@@ -491,14 +491,13 @@ func TestMatch_Multigraph_MixedHandleSentinel_PerInstanceProperty(t *testing.T) 
 	}
 }
 
-// TestMatch_NonMultigraph_SingleEdge_PropertyUnchanged is the fwdHandle==0
-// fallback: a single non-parallel edge in a SIMPLE (non-multigraph) graph reads
-// its property exactly as before. This guards that the per-handle routing does
+// TestMatch_SingleEdge_PropertyUnchanged pins that a single non-parallel edge
+// reads its property exactly as before. This guards that the per-handle routing does
 // not disturb the overwhelming common case.
-func TestMatch_NonMultigraph_SingleEdge_PropertyUnchanged(t *testing.T) {
+func TestMatch_SingleEdge_PropertyUnchanged(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:1})-[:R {w:42}]->(b:N {k:2})`,
 	)
 	for _, q := range []string{
@@ -551,7 +550,7 @@ func scalarValue(t *testing.T, eng *cypher.Engine, query, col string) interface{
 	return val
 }
 
-// TestMatch_Multigraph_PerInstanceProperty_AfterSet is the proof that landing
+// TestMatch_ParallelEdges_PerInstanceProperty_AfterSet is the proof that landing
 // the by-handle SET/REMOVE maintenance (#1686) BEFORE this read-routing (#1684)
 // was the correct sequencing. Before #1686 the by-handle property store was
 // written only at CREATE, so routing the read by-handle returned the STALE
@@ -570,10 +569,10 @@ func scalarValue(t *testing.T, eng *cypher.Engine, query, col string) interface{
 // single-edge pairs) but on PARALLEL edges of one pair, which the TCK does not
 // cover — a single-edge pair makes per-pair and per-handle storage physically
 // indistinguishable, so only this parallel variant witnesses the regression.
-func TestMatch_Multigraph_PerInstanceProperty_AfterSet(t *testing.T) {
+func TestMatch_ParallelEdges_PerInstanceProperty_AfterSet(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:1})`,
 		`CREATE (b:N {k:2})`,
 		`MATCH (a:N), (b:N) WHERE a.k = 1 AND b.k = 2 CREATE (a)-[:R1 {num:1}]->(b)`,
@@ -583,7 +582,7 @@ func TestMatch_Multigraph_PerInstanceProperty_AfterSet(t *testing.T) {
 
 	// SET r.num = r.num + 1 over the three parallel instances. Each row reads its
 	// own prior num and writes its own +1: 1,2,3 -> 2,3,4.
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`MATCH (a:N {k:1})-[r]->(b:N {k:2}) SET r.num = r.num + 1`,
 	)
 
@@ -633,7 +632,7 @@ func TestMatch_Multigraph_PerInstanceProperty_AfterSet(t *testing.T) {
 func TestMatch_Merge_OnMatchSet_PerInstanceProperty(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:A {name:'A', tag:'keep'})`,
 		`CREATE (b:B {name:'B'})`,
 		// CREATE seeds the by-handle store with the edge's own props.
@@ -673,7 +672,7 @@ func TestMatch_Merge_OnMatchSet_PerInstanceProperty(t *testing.T) {
 func TestMatch_Merge_OnCreateSet_ParallelEdge_TargetsNewEdge(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:1})`,
 		`CREATE (b:N {k:2})`,
 		// Pre-existing parallel sibling of a DIFFERENT type, carrying its own prop.
@@ -750,7 +749,7 @@ func TestMatch_GoAPIEdge_PropertiesReadThroughPerPair(t *testing.T) {
 	}
 }
 
-// TestMatch_Multigraph_ZeroPropParallelSibling pins the membership signal's
+// TestMatch_ParallelEdges_ZeroPropParallelSibling pins the membership signal's
 // hardest case (rmp #1684): a Cypher CREATE of two parallel edges of the SAME
 // type where one carries a property and the other carries NONE. The
 // zero-property instance has an EMPTY by-handle property bag but a NON-EMPTY
@@ -759,10 +758,10 @@ func TestMatch_GoAPIEdge_PropertiesReadThroughPerPair(t *testing.T) {
 // the propertied sibling's key. (A naive "by-handle only when the property bag
 // is non-empty" predicate would leak; the type-entry membership marker prevents
 // it.)
-func TestMatch_Multigraph_ZeroPropParallelSibling(t *testing.T) {
+func TestMatch_ParallelEdges_ZeroPropParallelSibling(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (x:X)`,
 		`CREATE (y:Y)`,
 		`MATCH (x:X), (y:Y) CREATE (x)-[:R {k:1}]->(y)`,

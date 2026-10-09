@@ -127,16 +127,16 @@ func runParallelEdgeReopen(t *testing.T, snap bool) {
 	}
 }
 
-// TestMultigraph_ParallelTypedEdges_WAL verifies two distinctly-typed parallel
+// TestRecovery_ParallelTypedEdges_WAL verifies two distinctly-typed parallel
 // edges survive pure WAL-replay recovery as two relationships.
-func TestMultigraph_ParallelTypedEdges_WAL(t *testing.T) {
+func TestRecovery_ParallelTypedEdges_WAL(t *testing.T) {
 	t.Parallel()
 	runParallelEdgeReopen(t, false)
 }
 
-// TestMultigraph_ParallelTypedEdges_Snapshot verifies the same across the
+// TestRecovery_ParallelTypedEdges_Snapshot verifies the same across the
 // self-sufficient snapshot recovery path (snapshot + WAL truncate).
-func TestMultigraph_ParallelTypedEdges_Snapshot(t *testing.T) {
+func TestRecovery_ParallelTypedEdges_Snapshot(t *testing.T) {
 	t.Parallel()
 	runParallelEdgeReopen(t, true)
 }

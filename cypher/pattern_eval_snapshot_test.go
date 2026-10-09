@@ -241,10 +241,9 @@ func TestPatternComprehension_EdgeRemovedAfterSnapshotStaysVisible(t *testing.T)
 // nothing routes through it yet. This asserts the PROPERTY instead: no topology
 // read in pattern_eval.go reaches the unversioned adjacency.
 //
-// Mapper, Directed and Multigraph are deliberately permitted: the mapper is the
-// candidate-set class (it answers which objects to consider, not what they
-// contain, and each candidate is verified against the snapshot afterwards), and
-// the other two are configuration flags that no instant can change.
+// Mapper is deliberately permitted: it is the candidate-set class (it answers
+// which objects to consider, not what they contain, and each candidate is
+// verified against the snapshot afterwards).
 func TestPatternEval_NoRawTopologyReadsRemain(t *testing.T) {
 	t.Parallel()
 	src, err := readSourceFile("pattern_eval.go")

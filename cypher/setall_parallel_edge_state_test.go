@@ -90,7 +90,7 @@ func setallEngines(t *testing.T, fn func(t *testing.T, eng *cypher.Engine)) {
 	})
 	t.Run("WalStore", func(t *testing.T) {
 		t.Parallel()
-		fn(t, walMultigraphEngine(t))
+		fn(t, walParallelEdgeEngine(t))
 	})
 }
 

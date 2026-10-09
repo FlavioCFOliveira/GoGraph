@@ -2016,7 +2016,7 @@ import (
 //     headroom.
 //
 //   - 3896: ratcheted after round 63 — per-CREATE edge label
-//     storage plus Multigraph adjlist in the TCK harness. New
+//     storage plus multigraph adjlist in the TCK harness. New
 //     edgeInstanceLabelShards / edgeInstancePropShards on
 //     lpg.Graph keep per-CREATE-call label and property sets keyed
 //     by the IncEdgeCreateCount-derived 1-based idx. CreateRelationship
@@ -2031,8 +2031,8 @@ import (
 //     multigraph mode so `type(r)` distinguishes parallel edges
 //     created with different types (closes Match2 [6] /
 //     Match7 [29] / MatchWhere1 [11] regressions that surface when
-//     Multigraph is enabled). TCK world now constructs the LPG
-//     with Multigraph: true so parallel CREATEs of the same
+//     multigraph storage is enabled). TCK world now constructs
+//     the LPG as a multigraph so parallel CREATEs of the same
 //     (src, dst) materialise as distinct adjacency entries, and
 //     Merge5 [21] / Match7 [29] / Unwind1 [12] match the
 //     openCypher-expected row counts. 5-run sample stable at

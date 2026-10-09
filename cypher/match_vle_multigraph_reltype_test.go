@@ -64,15 +64,15 @@ func collectSingleHopVLE(t *testing.T, eng *cypher.Engine, query string) []relRo
 	return got
 }
 
-// TestVLE_Multigraph_ReverseHop_PerInstanceType pins the core #1685 contract: a
+// TestVLE_ParallelEdges_ReverseHop_PerInstanceType pins the core #1685 contract: a
 // single-hop variable-length relationship over two parallel typed edges reports
 // each edge's own type on the forward, reverse and undirected passes. Each
 // parallel edge is a distinct relationship under relationship-uniqueness, so the
 // VLE yields one path per edge.
-func TestVLE_Multigraph_ReverseHop_PerInstanceType(t *testing.T) {
+func TestVLE_ParallelEdges_ReverseHop_PerInstanceType(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:1})`,
 		`CREATE (b:N {k:2})`,
 		`MATCH (a:N), (b:N) WHERE a.k = 1 AND b.k = 2 CREATE (a)-[:T1]->(b)`,
@@ -108,14 +108,14 @@ func TestVLE_Multigraph_ReverseHop_PerInstanceType(t *testing.T) {
 	}
 }
 
-// TestVLE_Multigraph_PerInstanceProperty pins the property axis of #1685: two
+// TestVLE_ParallelEdges_PerInstanceProperty pins the property axis of #1685: two
 // parallel edges carrying distinct properties must each surface their OWN
 // property on a reverse / undirected variable-length hop. A coalesced bug would
 // give both paths the same merged w.
-func TestVLE_Multigraph_PerInstanceProperty(t *testing.T) {
+func TestVLE_ParallelEdges_PerInstanceProperty(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:1})`,
 		`CREATE (b:N {k:2})`,
 		`MATCH (a:N), (b:N) WHERE a.k = 1 AND b.k = 2 CREATE (a)-[:R1 {w:10}]->(b)`,
@@ -144,15 +144,15 @@ func TestVLE_Multigraph_PerInstanceProperty(t *testing.T) {
 	}
 }
 
-// TestVLE_Multigraph_ThreeWayParallel_ReverseHop proves the reverse-hop
+// TestVLE_ParallelEdges_ThreeWayParallel_ReverseHop proves the reverse-hop
 // disambiguation is genuinely per-handle and not a "pick first" / "pick last":
 // three parallel edges with distinct types+props must each read their own on an
 // undirected variable-length hop. A 2-edge test could pass under a first/last
 // rule; a 3-edge test cannot.
-func TestVLE_Multigraph_ThreeWayParallel_ReverseHop(t *testing.T) {
+func TestVLE_ParallelEdges_ThreeWayParallel_ReverseHop(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
-	seedMultigraph(t, eng,
+	seedEngine(t, eng,
 		`CREATE (a:N {k:1})`,
 		`CREATE (b:N {k:2})`,
 		`MATCH (a:N), (b:N) WHERE a.k = 1 AND b.k = 2 CREATE (a)-[:R1 {w:10}]->(b)`,

@@ -19,15 +19,10 @@ package server_test
 //     through WITH (CreateRelationship requires integer node IDs, not NodeValue
 //     variables from MATCH). All nodes and edges must therefore be created in a
 //     single CREATE statement using inline Cypher variable references.
-//   - All edges are stored as directed arcs, so this test's server runs its own
-//     dedicated Directed:true engine (see newShapeRoundtripDriver) rather than
-//     the package's shared newEngine(t) helper, which defaults to an undirected
-//     graph. Undirected shapes store each logical edge as two arcs (u→v and
-//     v→u); MATCH ()-[:E]->() counts each directed arc, so edge count ==
-//     Size() for both directed and undirected. Multigraph: true is required by
-//     the Cypher engine's openCypher-conformant write path (a repeated CREATE
-//     never deduplicates); it also matches a directed engine storing two
-//     distinct arcs u→v and v→u as unrelated relationships.
+//   - Every relationship is stored as one directed arc. Undirected shapes are
+//     emitted as two arcs (u→v and v→u), which storage keeps as two unrelated
+//     relationships; MATCH ()-[:E]->() counts each arc, so edge count ==
+//     Size() for both directed and undirected shapes.
 //   - Each test case uses a unique label prefix to avoid cross-case interference.
 //   - Summary counters always return 0 (server does not emit "stats").
 
@@ -50,19 +45,9 @@ import (
 )
 
 // newShapeRoundtripDriver starts a fresh isolated bolt/server.Server backed by
-// a Multigraph: true engine and connects a neo4j-go-driver v5
-// driver to it. Both are cleaned up via t.Cleanup.
-//
-// This test cannot reuse the package's shared newEngine(t) helper (used by
-// newDriverForTest), which builds an undirected, non-multigraph graph: this
-// test always emits explicit directed (->) relationship patterns and computes
-// its expected counts assuming direction-sensitive storage. Over an undirected
-// graph, creating a shape with edges in both directions between the same pair
-// (a directed complete graph, or any "undirected" shape case, which this test
-// deliberately emits as two arcs) makes the second direction collide with the
-// storage-level mirror of the first — an already-connected pair from the
-// (undirected) engine's point of view — which now fails fast with
-// [cypher.ErrParallelEdgeInSimpleGraph] instead of silently no-oping.
+// its own engine and connects a neo4j-go-driver v5 driver to it, so no case
+// shares a graph with the package's other tests. Both are cleaned up via
+// t.Cleanup.
 func newShapeRoundtripDriver(t *testing.T) neo4j.DriverWithContext {
 	t.Helper()
 	g := lpg.New[string, float64](adjlist.Config{})

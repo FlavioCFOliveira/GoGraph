@@ -12,9 +12,9 @@ package cypher_test
 //     recovery does not rebuild, so after a reopen the MERGE matched one row.
 //   - #2940: DELETE of a relationship bound by CREATE or MERGE removed the
 //     pair's first relationship instead of the bound one.
-//   - #2945: REMOVE of a relationship property through the mirror direction (an
-//     undirected pattern walking against storage, or an undirected graph's
-//     mirror slot) targeted the unstored order and removed nothing.
+//   - #2945: REMOVE of a relationship property reached against its stored
+//     direction (an undirected or incoming pattern walking against storage)
+//     targeted the unstored order and removed nothing.
 //   - #2950: DELETE of a path removed every relationship attached to the path's
 //     nodes, not only the path's own, and a bare `DELETE p` was refused even
 //     for a path whose nodes hold no other relationship.
@@ -73,10 +73,9 @@ type relIDStep struct {
 // relIDCase is one scenario: steps run once against the live engine; checks are
 // read-backs run live after the steps and again after each reopen.
 type relIDCase struct {
-	name       string
-	steps      []relIDStep
-	checks     []relIDStep
-	undirected bool
+	name   string
+	steps  []relIDStep
+	checks []relIDStep
 }
 
 // relIDPair is the parallel-pair seed the #2939 and #2940 cases share.
@@ -459,11 +458,10 @@ var relIDCases2951 = []relIDCase{
 }
 
 // relIDMirrorCase builds a #2945 case: one relationship created as
-// (:A)-[:R]->(:B), then stmt reaching it through the mirror direction.
-func relIDMirrorCase(name, stmt string, c wantCounters, want string, undirected bool) relIDCase {
+// (:A)-[:R]->(:B), then stmt reaching it against its stored direction.
+func relIDMirrorCase(name, stmt string, c wantCounters, want string) relIDCase {
 	return relIDCase{
-		name:       name,
-		undirected: undirected,
+		name: name,
 		steps: []relIDStep{
 			{q: "CREATE (:A)-[:R {s: 1, t: 2}]->(:B)"},
 			{q: stmt, counters: &c},
@@ -475,8 +473,8 @@ func relIDMirrorCase(name, stmt string, c wantCounters, want string, undirected 
 	}
 }
 
-// relIDCases2945 cover every relationship-property write through the mirror
-// direction, on a directed and on an undirected graph.
+// relIDCases2945 cover every relationship-property write reached against the
+// relationship's stored direction.
 func relIDCases2945() []relIDCase {
 	type shape struct {
 		name, stmt string
@@ -497,15 +495,9 @@ func relIDCases2945() []relIDCase {
 		{"set-replace-with", "MATCH (:B)-[r:R]-(:A) WITH r SET r = {u: 3}", wantCounters{propsSet: 1, propsRemoved: 2, containsUpdates: true}, "null|null|3"},
 		{"merge-on-match", "MATCH (a:A), (b:B) MERGE (b)-[r:R]-(a) ON MATCH SET r.u = 3 REMOVE r.s", wantCounters{propsSet: 1, propsRemoved: 1, containsUpdates: true}, "null|2|3"},
 	}
-	out := make([]relIDCase, 0, 2*len(shapes))
-	for _, undirected := range []bool{false, true} {
-		graphKind := "directed-graph"
-		if undirected {
-			graphKind = "undirected-graph"
-		}
-		for _, s := range shapes {
-			out = append(out, relIDMirrorCase(graphKind+"/"+s.name, s.stmt, s.c, s.want, undirected))
-		}
+	out := make([]relIDCase, 0, len(shapes))
+	for _, s := range shapes {
+		out = append(out, relIDMirrorCase(s.name, s.stmt, s.c, s.want))
 	}
 	return out
 }
@@ -572,10 +564,6 @@ func joinCols(cols []string) string {
 	return out
 }
 
-func relIDConfig(undirected bool) adjlist.Config {
-	return adjlist.Config{}
-}
-
 // relIDDurable is a WAL-backed engine over a store directory.
 type relIDDurable struct {
 	g   *lpg.Graph[string, float64]
@@ -587,9 +575,8 @@ type relIDDurable struct {
 	cfg adjlist.Config
 }
 
-// newRelIDDurable creates a store directory whose first checkpoint records the
-// graph configuration, so recovery reproduces it (a fresh directory otherwise
-// recovers as a directed multigraph).
+// newRelIDDurable creates a store directory and takes its first checkpoint, so
+// recovery always starts from a snapshot.
 func newRelIDDurable(t *testing.T, cfg adjlist.Config) *relIDDurable {
 	t.Helper()
 	dir := t.TempDir()
@@ -671,7 +658,7 @@ func recoverRelID(t *testing.T, dir string, cfg adjlist.Config) *cypher.Engine {
 // runRelIDCase runs c on the in-memory, graceful-reopen and crash wirings.
 func runRelIDCase(t *testing.T, c relIDCase) {
 	t.Helper()
-	cfg := relIDConfig(c.undirected)
+	cfg := adjlist.Config{}
 	runLive := func(t *testing.T, eng *cypher.Engine) {
 		t.Helper()
 		for _, s := range c.steps {
@@ -847,39 +834,33 @@ var relIDRollbackSeed = withSeed(relIDStep{q: "MATCH (:P {key:'a'})-[r:R]->(:P {
 
 // TestRollback_WriteOnOneParallelInstance_2939_2945 rolls back SET, REMOVE,
 // MERGE and DELETE on one instance of a parallel pair — reached forwards,
-// through the mirror direction and through MERGE — and requires the committed
+// against the stored direction and through MERGE — and requires the committed
 // graph to come back exactly, in memory and after a graceful reopen.
 func TestRollback_WriteOnOneParallelInstance_2939_2945(t *testing.T) {
-	for _, undirected := range []bool{false, true} {
-		cfg := relIDConfig(undirected)
-		name := "directed-graph"
-		if undirected {
-			name = "undirected-graph"
+	cfg := adjlist.Config{}
+	t.Run("memory", func(t *testing.T) {
+		for _, c := range relIDRollbackCases {
+			t.Run(c.stmt, func(t *testing.T) {
+				eng := cypher.NewEngine(lpg.New[string, float64](cfg))
+				for _, s := range relIDRollbackSeed {
+					relIDRun(t, eng, s)
+				}
+				assertRelIDRollback(t, eng, relIDDump(t, eng), c)
+			})
 		}
-		t.Run(name+"/memory", func(t *testing.T) {
-			for _, c := range relIDRollbackCases {
-				t.Run(c.stmt, func(t *testing.T) {
-					eng := cypher.NewEngine(lpg.New[string, float64](cfg))
-					for _, s := range relIDRollbackSeed {
-						relIDRun(t, eng, s)
-					}
-					assertRelIDRollback(t, eng, relIDDump(t, eng), c)
-				})
-			}
-		})
-		t.Run(name+"/wal-graceful-reopen", func(t *testing.T) {
-			d := newRelIDDurable(t, cfg)
-			for _, s := range relIDRollbackSeed {
-				relIDRun(t, d.eng, s)
-			}
-			base := relIDDump(t, d.eng)
-			for _, c := range relIDRollbackCases {
-				assertRelIDRollback(t, d.eng, base, c)
-			}
-			d.closeGracefully(t)
-			if got := relIDDump(t, recoverRelID(t, d.dir, cfg)); !slices.Equal(got, base) {
-				t.Fatalf("after checkpoint + reopen the recovered graph differs from the committed one:\n got  %v\n want %v", got, base)
-			}
-		})
-	}
+	})
+	t.Run("wal-graceful-reopen", func(t *testing.T) {
+		d := newRelIDDurable(t, cfg)
+		for _, s := range relIDRollbackSeed {
+			relIDRun(t, d.eng, s)
+		}
+		base := relIDDump(t, d.eng)
+		for _, c := range relIDRollbackCases {
+			assertRelIDRollback(t, d.eng, base, c)
+		}
+		d.closeGracefully(t)
+		if got := relIDDump(t, recoverRelID(t, d.dir, cfg)); !slices.Equal(got, base) {
+			t.Fatalf("after checkpoint + reopen the recovered graph differs from the committed one:\n got  %v\n want %v", got, base)
+		}
+	})
 }

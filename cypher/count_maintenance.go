@@ -27,8 +27,7 @@ package cypher
 // (EdgeLabelsByHandleID), NOT the per-slot inline label column: the slot column
 // coalesces across parallel edges and is unreliable for parallel edges of
 // differing type (verified empirically). The slot column is used only as the
-// handle-less fallback (simple-graph storage, where at most one edge per pair
-// exists).
+// handle-less fallback (pre-handle storage).
 
 import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
@@ -158,8 +157,8 @@ func countEdgeRemovedByHandle(g *lpg.Graph[string, float64], cs *count.Store, cb
 // countEdgeRemovedFirstSlot enqueues the -1 remove-deltas for the FIRST
 // src→dst adjacency slot — the instance a handle-less [Graph.RemoveEdge]
 // removes. It resolves the removed slot's type via its stable handle when one
-// exists (the multigraph case), falling back to the per-pair label union for
-// handle-less simple-graph storage (at most one edge per pair). Must be called
+// exists, falling back to the per-pair label union for a handle-less slot
+// (pre-handle storage). Must be called
 // before the removal, and only when the edge is present.
 func countEdgeRemovedFirstSlot(g *lpg.Graph[string, float64], cs *count.Store, cbuf *exec.CountBuffer, src, dst string) {
 	if cs == nil {

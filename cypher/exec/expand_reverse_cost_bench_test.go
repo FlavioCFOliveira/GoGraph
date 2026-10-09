@@ -11,7 +11,7 @@ package exec_test
 // The Expand operator is driven over CSR snapshots whose NodeID is the array
 // index (the staticCSR helper of expand_test.go), so the edge list maps
 // one-to-one onto CSR positions. HandlesSlice is nil, which is exactly the
-// production NON-multigraph path: the reverse traversal recovers a canonical
+// handle-less production path: the reverse traversal recovers a canonical
 // edge id through Expand.lookupFwdEdgePos, not the by-handle variant.
 //
 // Findings drive the #2090 anchor-swap policy:

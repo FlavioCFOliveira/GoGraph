@@ -41,9 +41,8 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
-// multigraphEngine builds an engine over a MULTIGRAPH, which parallel relationships
-// require: the default fixture is a simple graph and rejects a second edge between
-// the same pair.
+// multigraphEngine builds an engine over a fresh graph whose fixtures hold
+// parallel relationships between one pair.
 func multigraphEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
 	g := lpg.New[string, float64](adjlist.Config{})

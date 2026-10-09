@@ -3,9 +3,8 @@ package exec
 // rel_instance.go — relationship identity by stable handle.
 //
 // A relationship is identified by its stable per-edge handle, never by its
-// (src, dst) endpoint pair: a multigraph pair can hold several parallel
-// relationships, and an undirected graph stores one relationship under two
-// adjacency orders that share one handle. The helpers below are the single
+// (src, dst) endpoint pair: a pair can hold several parallel relationships.
+// The helpers below are the single
 // place the write operators resolve a relationship instance's own type and
 // properties, its stored endpoint order, and its removal, so MERGE, DELETE,
 // SET and REMOVE all name the instance the read path resolves.
@@ -70,34 +69,27 @@ func containsLabel(labels []string, want string) bool {
 
 // relStoredOrder returns the adjacency order (start, end) under which the
 // relationship instance handle is stored, given its endpoints in either order,
-// and whether handle names a stored instance of the pair at all. On an
-// undirected graph both orders carry the handle; the order holding its
-// metadata is chosen by [relStorageDirection].
+// and whether handle names a stored instance of the pair at all. Storage is
+// directed (rmp #3072), so a handle is held by exactly one order; a self-loop's
+// two orders are the same pair.
 func relStoredOrder(mut GraphMutator, a, b string, handle uint64) (start, end string, ok bool) {
 	if handle == 0 {
 		return a, b, false
 	}
-	fwd, rev := mut.HasEdgeHandle(a, b, handle), mut.HasEdgeHandle(b, a, handle)
-	switch {
-	case fwd && rev:
-		// Both orders carry the handle only on an undirected graph (the
-		// mirror slot) or for a self-loop; the metadata decides.
-		start, end = relStorageDirection(mut, a, b, handle)
-		return start, end, true
-	case fwd:
+	if mut.HasEdgeHandle(a, b, handle) {
 		return a, b, true
-	case rev:
-		return b, a, true
-	default:
-		return a, b, false
 	}
+	if a != b && mut.HasEdgeHandle(b, a, handle) {
+		return b, a, true
+	}
+	return a, b, false
 }
 
 // relValueEntity resolves a post-projection relationship value to the stored
 // instance it names: its endpoints in STORAGE order and its handle (the value's
 // ID since rmp #2317). The value's StartID/EndID are normalised because a value
-// bound through an undirected pattern, or through the mirror slot of an
-// undirected graph, can carry them in traversal order, and every edge mutator
+// bound through an undirected pattern can carry them in traversal order, and
+// every edge mutator
 // is keyed by the stored order (rmp #2945, the value-form twin of #2817).
 func relValueEntity(mut GraphMutator, v expr.RelationshipValue) (entityBinding, bool) {
 	srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
