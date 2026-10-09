@@ -699,7 +699,7 @@ func buildUndirectedKnows(ctx context.Context, g *lpg.Graph[string, float64]) (*
 	if walkErr != nil {
 		return nil, nil, walkErr
 	}
-	return oracle, csr.BuildFromAdjList(oracle).BuildSymmetric(), nil
+	return oracle, csr.BuildSymmetricFromAdjList(oracle), nil
 }
 
 // bfsDistances computes the unweighted hop distance from src to every node of

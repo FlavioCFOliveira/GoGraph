@@ -199,7 +199,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-	c := csr.BuildFromAdjList(gen.adj).BuildSymmetric() // one stored relationship per segment, read undirected
+	c := csr.BuildSymmetricFromAdjList(gen.adj) // one stored relationship per segment, read undirected
 	mapper := gen.adj.Mapper()
 
 	fmt.Fprintf(w, "graph.nodes=%d\n", c.Order())

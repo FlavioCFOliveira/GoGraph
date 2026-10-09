@@ -2,6 +2,7 @@ package csr
 
 import (
 	"math/rand/v2"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -36,6 +37,37 @@ func randomMultigraph(t *testing.T, r *rand.Rand, n int, withHandles, weightless
 	return a
 }
 
+// TestBuildSymmetricFromAdjList_MatchesTwoStep proves the one-pass build is
+// identical, field by field, to BuildFromAdjList(adj).BuildSymmetric()
+// across weighted, weightless, handle-carrying and empty adjacencies.
+func TestBuildSymmetricFromAdjList_MatchesTwoStep(t *testing.T) {
+	t.Parallel()
+	r := rand.New(rand.NewPCG(17, 29)) //nolint:gosec // deterministic test RNG
+	for trial := 0; trial < 200; trial++ {
+		n := 1 + r.IntN(60)
+		withHandles := trial%2 == 0
+		weightless := trial%5 == 0
+		a := randomMultigraph(t, r, n, withHandles, weightless)
+		want := BuildFromAdjList(a).BuildSymmetric()
+		got := BuildSymmetricFromAdjList(a)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("trial %d (n=%d handles=%t weightless=%t): one-pass build differs from the two-step build\ngot  %+v\nwant %+v",
+				trial, n, withHandles, weightless, got, want)
+		}
+		if !got.KnownSymmetric() {
+			t.Fatalf("trial %d: one-pass result is not marked symmetric", trial)
+		}
+	}
+	empty := adjlist.New[int, int64](adjlist.Config{})
+	got, want := BuildSymmetricFromAdjList(empty), BuildFromAdjList(empty).BuildSymmetric()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("empty adjacency: got %+v, want %+v", got, want)
+	}
+	if !got.KnownSymmetric() {
+		t.Fatal("one-pass result of an empty adjacency is not marked symmetric")
+	}
+}
+
 // TestBuildReverse_OfSymmetricIsNotCopied proves BuildReverse of a CSR
 // marked symmetric returns the same snapshot with no allocation, and that
 // the alias is sound: the full transpose of an unmarked copy equals it in
@@ -67,7 +99,7 @@ func TestBuildReverse_OfSymmetricIsNotCopied(t *testing.T) {
 }
 
 // TestKnownSymmetric_OnlyBySymmetricBuilders pins the mark's scope: only
-// BuildSymmetric sets it, a directed build and its transpose do
+// BuildSymmetric and BuildSymmetricFromAdjList set it, a directed build and its transpose do
 // not, and IsSymmetric answers a marked CSR without allocating.
 func TestKnownSymmetric_OnlyBySymmetricBuilders(t *testing.T) {
 	// Not parallel: testing.AllocsPerRun refuses to run in a parallel test.
@@ -85,7 +117,7 @@ func TestKnownSymmetric_OnlyBySymmetricBuilders(t *testing.T) {
 		t.Fatal("FromArrays result is marked symmetric")
 	}
 	sym := dir.BuildSymmetric()
-	if !sym.KnownSymmetric() {
+	if !sym.KnownSymmetric() || !BuildSymmetricFromAdjList(a).KnownSymmetric() {
 		t.Fatal("a symmetric build is not marked symmetric")
 	}
 	if allocs := testing.AllocsPerRun(10, func() {

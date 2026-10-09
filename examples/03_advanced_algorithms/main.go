@@ -192,7 +192,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	// The adjlist stores one directed relationship per edge; BuildSymmetric
 	// projects it to the undirected view (each edge readable from both
 	// endpoints) that the four algorithms are defined on.
-	c := csr.BuildFromAdjList(a).BuildSymmetric()
+	c := csr.BuildSymmetricFromAdjList(a)
 	mapper := a.Mapper()
 
 	fmt.Fprintf(w, "nodes.total=%d\n", c.Order())

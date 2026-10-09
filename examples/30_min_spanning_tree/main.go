@@ -178,7 +178,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-	c := csr.BuildFromAdjList(a).BuildSymmetric()
+	c := csr.BuildSymmetricFromAdjList(a)
 
 	live := c.LiveNodes()
 	fmt.Fprintf(w, "sites.total=%d\n", len(live))

@@ -193,7 +193,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-	c := csr.BuildFromAdjList(a).BuildSymmetric() // one stored relationship per edge, read undirected
+	c := csr.BuildSymmetricFromAdjList(a) // one stored relationship per edge, read undirected
 	mapper := a.Mapper()
 
 	fmt.Fprintf(w, "nodes.total=%d\n", c.Order())
@@ -374,7 +374,7 @@ func reportDisconnected(ctx context.Context, w io.Writer, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("build disconnected: %w", err)
 	}
-	c := csr.BuildFromAdjList(a).BuildSymmetric() // one stored relationship per edge, read undirected
+	c := csr.BuildSymmetricFromAdjList(a) // one stored relationship per edge, read undirected
 	mapper := a.Mapper()
 
 	_, components, err := search.WCC(c)

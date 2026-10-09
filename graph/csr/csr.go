@@ -38,10 +38,10 @@ type CSR[W any] struct {
 	order    uint64         // number of distinct nodes in the snapshot
 	size     uint64         // number of edges in the snapshot
 
-	// symmetric records that [CSR.BuildSymmetric] built the snapshot. It is
-	// set once at construction and never changed, so it needs no
-	// synchronisation. false means "not known to be symmetric", never
-	// "asymmetric".
+	// symmetric records that [CSR.BuildSymmetric] or
+	// [BuildSymmetricFromAdjList] built the snapshot. It is set once at
+	// construction and never changed, so it needs no synchronisation. false
+	// means "not known to be symmetric", never "asymmetric".
 	symmetric bool
 }
 
@@ -812,7 +812,8 @@ func (c *CSR[W]) BuildSymmetric() *CSR[W] {
 }
 
 // KnownSymmetric reports, in O(1), whether c is symmetric by construction:
-// true exactly when c was returned by [CSR.BuildSymmetric]. false does not
+// true exactly when c was returned by [CSR.BuildSymmetric] or
+// [BuildSymmetricFromAdjList]. false does not
 // mean c is asymmetric: a CSR built any other way may still be symmetric, and
 // [CSR.IsSymmetric] decides that.
 //

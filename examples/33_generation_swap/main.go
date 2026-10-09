@@ -238,7 +238,7 @@ func ringCSR(n int) *csr.CSR[struct{}] {
 	for i := 0; i < edges; i++ {
 		_ = a.AddEdge(int64(i), int64((i+1)%n), struct{}{})
 	}
-	return csr.BuildFromAdjList(a).BuildSymmetric()
+	return csr.BuildSymmetricFromAdjList(a)
 }
 
 // pprofLabel is a placeholder hook kept trivial; goroutine labelling is not

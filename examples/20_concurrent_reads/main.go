@@ -232,7 +232,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 		return fmt.Errorf("target node %d not interned", cfg.nodes-1)
 	}
 
-	c := csr.BuildFromAdjList(g).BuildSymmetric() // one stored relationship per edge, read undirected
+	c := csr.BuildSymmetricFromAdjList(g) // one stored relationship per edge, read undirected
 
 	fmt.Fprintf(w, "nodes.count=%d\n", c.Order())
 	fmt.Fprintf(w, "edges.directed=%d\n", c.Size())
@@ -321,7 +321,7 @@ func reportParallelEquivalence(ctx context.Context, w io.Writer, c *csr.CSR[int6
 		if err != nil {
 			return fmt.Errorf("betweenness subgraph: %w", err)
 		}
-		betCSR = csr.BuildFromAdjList(bg).BuildSymmetric()
+		betCSR = csr.BuildSymmetricFromAdjList(bg)
 	}
 	t0 = time.Now()
 	serialBet, err := centrality.BetweennessCtx(ctx, betCSR)
