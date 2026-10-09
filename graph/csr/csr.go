@@ -37,6 +37,12 @@ type CSR[W any] struct {
 	handles  []uint64       // parallel to edges; nil unless the source carries per-slot stable edge handles (see HandlesSlice)
 	order    uint64         // number of distinct nodes in the snapshot
 	size     uint64         // number of edges in the snapshot
+
+	// symmetric records that [CSR.BuildSymmetric] built the snapshot. It is
+	// set once at construction and never changed, so it needs no
+	// synchronisation. false means "not known to be symmetric", never
+	// "asymmetric".
+	symmetric bool
 }
 
 // BuildFromAdjList constructs an immutable CSR snapshot of the
@@ -615,13 +621,19 @@ func (c *CSR[W]) LiveCount() int {
 // it pairs with the forward CSR to support algorithms that require
 // both directions (bidirectional Dijkstra, weakly-connected
 // components, semi-external in-degree queries). On a symmetric CSR
-// (for example one returned by [CSR.BuildSymmetric]) the returned CSR is
-// structurally identical to c.
+// (for example one returned by [CSR.BuildSymmetric]) the reverse is
+// identical to c, column by column.
 //
-// Complexity: O(V + E) time, O(V + E) memory. The returned CSR is
-// independent of c; mutating its slices does not affect c (per the
-// immutable-snapshot contract callers must in any case respect).
+// When c is symmetric by construction ([CSR.KnownSymmetric] reports true)
+// BuildReverse returns c itself: O(1), no allocation. Both are immutable
+// snapshots, so sharing is safe under the CSR's concurrent-read contract.
+//
+// Complexity otherwise: O(V + E) time, O(V + E) memory, and the returned
+// CSR shares no memory with c.
 func (c *CSR[W]) BuildReverse() *CSR[W] {
+	if c.symmetric {
+		return c
+	}
 	maxID := uint64(c.MaxNodeID())
 	if maxID == 0 {
 		return &CSR[W]{vertices: []uint64{0}}
@@ -710,7 +722,9 @@ func (c *CSR[W]) BuildReverse() *CSR[W] {
 //
 // c must be well-formed ([CSR.Validate] returns nil) and is read as directed:
 // calling BuildSymmetric on a snapshot that is already symmetric doubles every
-// non-loop relationship. [CSR.IsSymmetric] returns true on every result.
+// non-loop relationship. Every result is marked symmetric by construction:
+// [CSR.KnownSymmetric] and [CSR.IsSymmetric] return true in O(1), and
+// [CSR.BuildReverse] returns the result itself instead of copying it.
 //
 // Concurrency: BuildSymmetric only reads c, so it is safe to call
 // concurrently with any other reader of c, including other BuildSymmetric
@@ -724,7 +738,7 @@ func (c *CSR[W]) BuildReverse() *CSR[W] {
 // made per arc.
 func (c *CSR[W]) BuildSymmetric() *CSR[W] {
 	if len(c.vertices) < 2 {
-		return &CSR[W]{vertices: []uint64{0}, order: c.order}
+		return &CSR[W]{vertices: []uint64{0}, order: c.order, symmetric: true}
 	}
 	maxID := uint64(len(c.vertices) - 1)
 
@@ -787,14 +801,24 @@ func (c *CSR[W]) BuildSymmetric() *CSR[W] {
 	OrderRuns(verts, edges, weights, handles)
 
 	return &CSR[W]{
-		vertices: verts,
-		edges:    edges,
-		weights:  weights,
-		handles:  handles,
-		order:    c.order,
-		size:     total,
+		vertices:  verts,
+		edges:     edges,
+		weights:   weights,
+		handles:   handles,
+		order:     c.order,
+		size:      total,
+		symmetric: true,
 	}
 }
+
+// KnownSymmetric reports, in O(1), whether c is symmetric by construction:
+// true exactly when c was returned by [CSR.BuildSymmetric]. false does not
+// mean c is asymmetric: a CSR built any other way may still be symmetric, and
+// [CSR.IsSymmetric] decides that.
+//
+// Consumers that need the in-edges of c use it to read c itself as its own
+// transpose instead of building one.
+func (c *CSR[W]) KnownSymmetric() bool { return c.symmetric }
 
 // IsSymmetric reports whether the CSR is symmetric — that is, whether
 // every directed edge (u, v) has a matching reverse edge (v, u). A
@@ -806,8 +830,13 @@ func (c *CSR[W]) BuildSymmetric() *CSR[W] {
 // to reject directed input early with a typed error rather than
 // returning silently-wrong results.
 //
-// Complexity: O(V + E) time, O(E) space (hash set of edge pairs).
+// Complexity: O(1) when c is symmetric by construction
+// ([CSR.KnownSymmetric]); otherwise O(V + E) time, O(E) space (hash set of
+// edge pairs).
 func (c *CSR[W]) IsSymmetric() bool {
+	if c.symmetric {
+		return true
+	}
 	verts := c.vertices
 	edges := c.edges
 	set := make(map[[2]graph.NodeID]struct{}, len(edges))

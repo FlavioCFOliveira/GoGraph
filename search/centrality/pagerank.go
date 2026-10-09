@@ -205,7 +205,7 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 		// extra serial pass that dominates the per-iteration win when the
 		// iteration count is small. The lean structure-only transpose
 		// keeps the one-time O(V+E) cost minimal.
-		revVerts, revEdges := pageRankBuildReverseStructure(verts, edges, n)
+		revVerts, revEdges := pageRankReverseStructure(c, verts, edges, n)
 		if workers > n {
 			workers = n
 		}
@@ -426,7 +426,7 @@ func (st *pageRankState[W]) run(ctx context.Context, c *csr.CSR[W], opts PageRan
 		// structure-only transpose keeps the one-time O(V+E) cost minimal,
 		// and a reused state pays it only on the first parallel run.
 		if !st.revInit {
-			st.revVerts, st.revEdges = pageRankBuildReverseStructure(verts, edges, n)
+			st.revVerts, st.revEdges = pageRankReverseStructure(c, verts, edges, n)
 			st.revInit = true
 		}
 		if workers > n {
@@ -570,6 +570,19 @@ func (p *PageRanker[W]) Run(ctx context.Context, opts PageRankOptions) (ranks []
 		return make([]float64, p.state.n), 0, nil
 	}
 	return p.state.run(ctx, p.c, opts)
+}
+
+// pageRankReverseStructure returns the structure-only reverse-CSR of c
+// (see [pageRankBuildReverseStructure]). A CSR that is symmetric by
+// construction ([csr.CSR.KnownSymmetric]) is its own transpose — its run for
+// v lists v's in-neighbours in increasing source-id order, exactly as the
+// transpose would — so its own offsets and edges are returned without a copy.
+// Both are immutable and only read by the pull SpMV.
+func pageRankReverseStructure[W any](c *csr.CSR[W], verts []uint64, edges []graph.NodeID, n int) (revVerts []uint64, revEdges []graph.NodeID) {
+	if c.KnownSymmetric() {
+		return verts, edges
+	}
+	return pageRankBuildReverseStructure(verts, edges, n)
 }
 
 // pageRankBuildReverseStructure transposes the forward CSR (verts,
