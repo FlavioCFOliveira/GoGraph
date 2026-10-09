@@ -1803,6 +1803,53 @@ func (col *edgePropColumn) slotValue(slot int) (PropertyValue, bool) {
 	}
 }
 
+// anyPresentSlot reports whether keep accepts some present slot of the column
+// below n. It visits the present slots in ascending order, reads presence only —
+// never a value cell, so it allocates nothing — and stops at the first slot keep
+// accepts. Slots at or beyond the column's length are never present.
+func (col *edgePropColumn) anyPresentSlot(n int, keep func(slot int) bool) bool {
+	n = min(n, col.length)
+	if n <= 0 {
+		return false
+	}
+	if col.sparse {
+		for _, s := range col.idx {
+			if int(s) >= n {
+				return false
+			}
+			if keep(int(s)) {
+				return true
+			}
+		}
+		return false
+	}
+	if col.valid == nil {
+		for s := 0; s < n; s++ {
+			if keep(s) {
+				return true
+			}
+		}
+		return false
+	}
+	for w, word := range col.valid {
+		base := w << 6
+		if base >= n {
+			return false
+		}
+		for word != 0 {
+			s := base + bits.TrailingZeros64(word)
+			if s >= n {
+				return false
+			}
+			if keep(s) {
+				return true
+			}
+			word &= word - 1
+		}
+	}
+	return false
+}
+
 // nonEmpty reports whether any slot of the column is present.
 func (col *edgePropColumn) nonEmpty() bool {
 	if col.length == 0 {

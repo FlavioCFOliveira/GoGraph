@@ -490,6 +490,53 @@ func (m *Mapper[N]) Walk(fn func(NodeID, N) bool) {
 	}
 }
 
+// MapperCursor is a resumable position in [Mapper.Walk] order, consumed and
+// advanced by [Mapper.AppendIDs]. The zero value is the start of the walk.
+//
+// A MapperCursor is a plain value: it is not safe for concurrent use by
+// several goroutines, but it holds no lock and no reference into the Mapper,
+// so it may be kept across calls and abandoned at any time.
+type MapperCursor struct {
+	shard uint64
+	intra uint64
+}
+
+// Done reports whether the cursor has passed the last shard, so a further
+// [Mapper.AppendIDs] appends nothing.
+func (c MapperCursor) Done() bool { return c.shard >= mapperShardCount }
+
+// AppendIDs appends to dst the ids of at most max interned values, holes
+// skipped, starting at cur and in exactly [Mapper.Walk] order, and returns the
+// extended slice and the position just after the last id visited. Repeated
+// calls from the zero cursor until [MapperCursor.Done] visit every id Walk
+// would visit, once each, plus any id interned behind the cursor's position
+// while the walk is in progress.
+//
+// Concurrency: safe for concurrent use. Each shard's RLock is held only while
+// that shard's ids are copied into dst, and no caller code runs under any
+// Mapper lock, so — unlike Walk — the caller may re-enter the Mapper between
+// calls. A max of zero or less appends nothing and returns cur unchanged.
+func (m *Mapper[N]) AppendIDs(dst []NodeID, cur MapperCursor, max int) ([]NodeID, MapperCursor) {
+	for max > 0 && cur.shard < mapperShardCount {
+		s := &m.shards[cur.shard]
+		s.mu.RLock()
+		n := uint64(len(s.reverse))
+		for cur.intra < n && max > 0 {
+			if s.holes == nil || !s.isHoleLocked(cur.intra) {
+				dst = append(dst, packNodeID(cur.shard, cur.intra))
+				max--
+			}
+			cur.intra++
+		}
+		s.mu.RUnlock()
+		if cur.intra >= n {
+			cur.shard++
+			cur.intra = 0
+		}
+	}
+	return dst, cur
+}
+
 // Len returns the total number of values currently interned across
 // every shard, holes excluded. The returned count is a consistent snapshot
 // per shard but may not reflect concurrent inserts in other shards.

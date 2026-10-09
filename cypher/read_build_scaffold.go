@@ -81,6 +81,9 @@ func (sc *readBuildScaffold) init(
 	queryReg expr.FunctionRegistry,
 ) (*lpgNodeWalker, *lpgLabelResolver, *subqueryEvaluator, *patternEvaluator, *buildOpts) {
 	sc.walker.g = rv
+	// A pinned snapshot makes every id's visibility fixed for the statement, so
+	// the whole-node scan may stream its ids (rmp #3081); see lpgNodeWalker.stream.
+	sc.walker.stream = rv.Snapshot() != nil
 	sc.labelSrc.g = rv
 	sc.labelSrc.eng = e
 	sc.labelSrc.ctx = ctx

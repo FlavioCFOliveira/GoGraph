@@ -7335,6 +7335,49 @@ type lpgNodeWalker struct {
 	// graph with g.Raw().
 	g      *lpg.ReadView[string, float64]
 	morsel []graph.NodeID // nil = walk the whole graph; non-nil = scan this slice only
+	// stream is set only by the READ build ([readBuildScaffold.init]) and only at
+	// a pinned snapshot (rmp #3081). It lets [exec.AllNodesScan] pull ids in
+	// bounded batches instead of materialising every id in Init. That is sound
+	// only there: node existence is resolved AS OF the snapshot, so whether an id
+	// is visited at Init or later in the drain cannot change the answer, and an id
+	// interned after the snapshot began is born after it and reads as absent. A
+	// write path's view also sees its own statement's creations and deletions as
+	// they happen, so it keeps the Init-time materialisation (stream false).
+	stream bool
+}
+
+// StreamsNodeIDs reports whether [lpgNodeWalker.NextNodeIDs] may be used instead
+// of WalkNodeIDs: a whole-graph walker on the read path at a pinned snapshot.
+func (w *lpgNodeWalker) StreamsNodeIDs() bool {
+	return w.stream && w.morsel == nil && w.g.Snapshot() != nil
+}
+
+// NextNodeIDs appends to dst (up to cap(dst)) the next batch of node ids visible
+// at the walker's snapshot, in WalkNodeIDs order, advancing cur. It returns an
+// empty slice only once the walk is exhausted. Valid only when
+// [lpgNodeWalker.StreamsNodeIDs] is true.
+func (w *lpgNodeWalker) NextNodeIDs(cur *graph.MapperCursor, dst []graph.NodeID) []graph.NodeID {
+	mapper := w.g.AdjList().Mapper()
+	dst = dst[:0]
+	for len(dst) == 0 && !cur.Done() {
+		dst, *cur = mapper.AppendIDs(dst, *cur, cap(dst))
+		k := 0
+		for _, id := range dst {
+			if !w.g.IsTombstoned(id) {
+				dst[k] = id
+				k++
+			}
+		}
+		dst = dst[:k]
+	}
+	return dst
+}
+
+// NodeIDUpperBound returns the number of ids currently interned, holes excluded:
+// an upper bound on what a streamed walk at the snapshot can yield, because every
+// id visible at the snapshot was interned before it began.
+func (w *lpgNodeWalker) NodeIDUpperBound() int {
+	return w.g.AdjList().Mapper().Len()
 }
 
 // LiveOrderHint returns an upper-bound estimate of how many NodeIDs

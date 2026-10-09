@@ -1,6 +1,10 @@
 package lpg
 
-import "github.com/FlavioCFOliveira/GoGraph/graph"
+import (
+	"math/bits"
+
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+)
 
 // This file holds the read-only schema-introspection enumerators:
 // NodeLabelsInUse, RelationshipTypesInUse, and PropertyKeysInUse. They
@@ -155,7 +159,10 @@ func (g *Graph[N, W]) RelationshipTypesInUse() []string {
 // docs/design-write-conflict-detection.md.
 func (g *Graph[N, W]) PropertyKeysInUse() []string {
 	tombstoned := g.tombstoneActive.Load() != 0
-	seen := make(map[PropertyKeyID]struct{})
+	// A bitset over the registry's dense, sequential ids, not a map (rmp #3081):
+	// the column-major edge walk probes it once per (source, column), which made
+	// a map probe the dominant cost of the call once no value was decoded.
+	seen := newPropKeySet(g.pkeys.snap.Load().names)
 
 	for i := range g.nodePropShards {
 		sh := &g.nodePropShards[i]
@@ -167,9 +174,8 @@ func (g *Graph[N, W]) PropertyKeysInUse() []string {
 			if tombstoned && g.IsTombstonedStored(id) {
 				continue
 			}
-			bag.forEach(func(pk PropertyKeyID, _ PropertyValue) {
-				seen[pk] = struct{}{}
-			})
+			// Keys only: the value is never needed here (rmp #3081).
+			bag.forEachKey(seen.add)
 		}
 		sh.mu.RUnlock()
 	}
@@ -178,32 +184,89 @@ func (g *Graph[N, W]) PropertyKeysInUse() []string {
 	// per-pair map. Walk every source's adjacency aux column and record the key
 	// of each present per-slot value whose bearing edge has two live endpoints,
 	// mirroring the inline-label walk in RelationshipTypesInUse.
+	//
+	// The walk is column-major and reads presence only (rmp #3081). A column
+	// carries exactly one key, so once that key is in seen no slot of the column
+	// can add anything and the column is skipped; otherwise the column's present
+	// slots are visited in ascending order and the walk stops at the first one
+	// whose edge is live. No value cell is decoded: the slot-major walk this
+	// replaces built every present value (boxing each string) only to read its
+	// key, which was 84% of the call's CPU and all of its allocation in example
+	// 25. The set recorded is the same: a key is added iff some present slot
+	// below n carrying it has two live endpoints.
+	var (
+		srcID graph.NodeID
+		nbs   []graph.NodeID
+	)
+	live := func(slot int) bool {
+		return g.edgeEndpointLive(edgeKey{src: srcID, dst: nbs[slot]})
+	}
 	maxID := uint64(g.adj.MaxNodeID())
 	for id := uint64(0); id < maxID; id++ {
-		srcID := graph.NodeID(id)
+		srcID = graph.NodeID(id)
 		block := asEdgePropCols(g.adj.LoadEntryAux(srcID))
 		if block == nil {
 			continue
 		}
-		nbs, _ := g.adj.LoadEntry(srcID)
-		n := minInt(len(nbs), block.lenOrZero())
-		for i := 0; i < n; i++ {
-			if !g.edgeEndpointLive(edgeKey{src: srcID, dst: nbs[i]}) {
+		nbs = nil
+		loaded := false
+		for ci := range block.cols {
+			col := &block.cols[ci]
+			if seen.has(col.key) {
 				continue
 			}
-			block.forEachAt(i, func(pk PropertyKeyID, _ PropertyValue) {
-				seen[pk] = struct{}{}
-			})
+			if !loaded {
+				nbs, _ = g.adj.LoadEntry(srcID)
+				loaded = true
+			}
+			n := minInt(len(nbs), block.lenOrZero())
+			if col.anyPresentSlot(n, live) {
+				seen.add(col.key)
+			}
 		}
 	}
 
-	out := make([]string, 0, len(seen))
-	for pk := range seen {
-		if name, ok := g.pkeys.Resolve(pk); ok {
-			out = append(out, name)
+	out := make([]string, 0, seen.n)
+	for w, word := range seen.bits {
+		for word != 0 {
+			pk := PropertyKeyID(w<<6 + bits.TrailingZeros64(word))
+			word &= word - 1
+			if name, ok := g.pkeys.Resolve(pk); ok {
+				out = append(out, name)
+			}
 		}
 	}
 	return out
+}
+
+// propKeySet is a growable bitset of [PropertyKeyID]s. Property-key ids are
+// assigned densely from zero by [PropertyKeyRegistry], so the set is sized by the
+// registry and costs one bit per interned key. Not safe for concurrent use.
+type propKeySet struct {
+	bits []uint64
+	n    int // number of set bits
+}
+
+// newPropKeySet returns an empty set pre-sized for the ids of names.
+func newPropKeySet(names []string) *propKeySet {
+	return &propKeySet{bits: make([]uint64, (len(names)+63)>>6)}
+}
+
+func (s *propKeySet) has(k PropertyKeyID) bool {
+	w := int(k >> 6)
+	return w < len(s.bits) && s.bits[w]&(1<<(k&63)) != 0
+}
+
+func (s *propKeySet) add(k PropertyKeyID) {
+	w := int(k >> 6)
+	if w >= len(s.bits) {
+		// An id interned after the set was sized: grow to cover it.
+		s.bits = append(s.bits, make([]uint64, w+1-len(s.bits))...)
+	}
+	if s.bits[w]&(1<<(k&63)) == 0 {
+		s.bits[w] |= 1 << (k & 63)
+		s.n++
+	}
 }
 
 // resolveLabelIDs turns a deduplicated set of label ids into a
