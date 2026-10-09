@@ -68,28 +68,27 @@ func newShapeRoundtripDriver(t *testing.T) neo4j.DriverWithContext {
 
 // shapeCase describes one round-trip test case.
 type shapeCase struct {
-	name       string
-	shape      shapegen.Shape[int, int64]
-	undirected bool
+	name  string
+	shape shapegen.Shape[int, int64]
 }
 
 // shortShapeCases returns the curated set for the short (n≤200) layer.
 func shortShapeCases() []shapeCase {
 	return []shapeCase{
 		// Family 1 — Degenerate / minimal
-		{name: "Path_n5", shape: shapegen.Path(5), undirected: false},
-		{name: "Path_n10_ud", shape: shapegen.Path(10), undirected: true},
+		{name: "Path_n5", shape: shapegen.Path(5)},
+		{name: "Path_n10_ud", shape: shapegen.Path(10)},
 
 		// Family 2 — Classic
-		{name: "Cycle_n8", shape: shapegen.Cycle(8, true), undirected: false},
-		{name: "Star_n10", shape: shapegen.Star(10, true), undirected: false},
-		{name: "Complete_n6", shape: shapegen.Complete(6, true), undirected: false},
-		{name: "Bipartite_4x4", shape: shapegen.CompleteBipartite(4, 4), undirected: true},
+		{name: "Cycle_n8", shape: shapegen.Cycle(8, true)},
+		{name: "Star_n10", shape: shapegen.Star(10, true)},
+		{name: "Complete_n6", shape: shapegen.Complete(6, true)},
+		{name: "Bipartite_4x4", shape: shapegen.CompleteBipartite(4, 4)},
 
 		// Family 6 — Random (small, reproducible seeds)
-		{name: "ER_n50_p30", shape: shapegen.ErdosRenyiNP(50, 30, 42), undirected: true},
-		{name: "BA_n40_m3", shape: shapegen.BarabasiAlbert(40, 3, 7), undirected: false},
-		{name: "WS_n20_k4_b30", shape: shapegen.WattsStrogatz(20, 4, 30, 99), undirected: false},
+		{name: "ER_n50_p30", shape: shapegen.ErdosRenyiNP(50, 30, 42)},
+		{name: "BA_n40_m3", shape: shapegen.BarabasiAlbert(40, 3, 7)},
+		{name: "WS_n20_k4_b30", shape: shapegen.WattsStrogatz(20, 4, 30, 99)},
 	}
 }
 
@@ -124,11 +123,10 @@ func testShapeRoundtrip(
 
 	adj := g.AdjList()
 	wantNodes := adj.Order()
-	// For undirected shapes the adjlist stores two directed arcs per logical
-	// edge; Neighbours yields all arcs. We count arcs (not logical edges) for
-	// the seed, because we create arcs in the Cypher CREATE statement.
-	// For directed shapes: arcCount == Size().
-	// For undirected shapes: arcCount == Size() * 2 (both directions).
+	// Storage is a directed multigraph: every arc a shape's Build inserts is
+	// one stored relationship, and no arc is mirrored. Neighbours yields every
+	// out-arc, so arcCount == Size() for every shape, and it is the number of
+	// relationships the Cypher CREATE below emits.
 	var arcCount uint64
 
 	// Collect all node integers (internal IDs resolve via mapper).
@@ -181,8 +179,8 @@ func testShapeRoundtrip(
 		fmt.Fprintf(&b, "(v%d:%s {nid:'%d'})", i, label, v)
 	}
 
-	// Edge clauses: emit all arcs as yielded by Neighbours (both directions for
-	// undirected shapes, matching arcCount computed above).
+	// Edge clauses: emit every arc Neighbours yields, one relationship per
+	// arc, matching arcCount computed above.
 	edgeCount := 0
 	for _, u := range nodes {
 		for v := range adj.Neighbours(u) {

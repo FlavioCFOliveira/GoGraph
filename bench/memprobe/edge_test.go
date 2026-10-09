@@ -37,7 +37,7 @@ func probeEnvInt(k string, def int) int {
 // buildEdges builds the same deterministic graph the containerised comparison
 // loads, through the Go API rather than through Cypher, so that the cost
 // measured is the storage structure's and not the query pipeline's.
-func buildEdges(t *testing.T, multigraph, labelled bool, propKey string) any {
+func buildEdges(t *testing.T, labelled bool, propKey string) any {
 	t.Helper()
 	g := lpg.New[string, float64](adjlist.Config{})
 	key := func(i int) string { return "__cx_" + strconv.FormatUint(uint64(i), 16) }
@@ -53,10 +53,11 @@ func buildEdges(t *testing.T, multigraph, labelled bool, propKey string) any {
 				t.Fatalf("AddEdge: %v", err)
 			}
 			if labelled {
-				// SetEdgeLabel returns nothing: the type is recorded in the
-				// adjacency's parallel label column, which cannot fail once
-				// the edge exists.
-				g.SetEdgeLabel(key(i), key(dst), "KNOWS")
+				// The type is recorded in the adjacency's parallel label
+				// column; a failure invalidates the probe.
+				if err := g.SetEdgeLabel(key(i), key(dst), "KNOWS"); err != nil {
+					t.Fatalf("SetEdgeLabel: %v", err)
+				}
 			}
 			if propKey != "" {
 				if err := g.SetEdgeProperty(key(i), key(dst), propKey, lpg.Int64Value(int64(2000+k))); err != nil {
@@ -84,21 +85,12 @@ func TestProbe_EdgeNodesOnly(t *testing.T) {
 
 // TestProbe_EdgesMultigraph measures the untyped adjacency in the shape the
 // Bolt server runs (bench/comparison/ggserver constructs its graph with
-// because openCypher requires two CREATEs between the same
-// pair to produce two distinct relationships).
+// adjlist.Config{}; storage is a directed multigraph, because openCypher
+// requires two CREATEs between the same pair to produce two distinct
+// relationships).
 func TestProbe_EdgesMultigraph(t *testing.T) {
 	measure(t, "edges/multigraph-untyped", probeEdges, func() any {
-		return buildEdges(t, true, false, "")
-	})
-}
-
-// TestProbe_EdgesSimple is the counterfactual: the same edges in a simple
-// graph, where the per-instance and per-handle stores stay empty. The
-// difference between this and the probe above is what parallel-edge support
-// costs per edge.
-func TestProbe_EdgesSimple(t *testing.T) {
-	measure(t, "edges/simple-untyped", probeEdges, func() any {
-		return buildEdges(t, false, false, "")
+		return buildEdges(t, false, "")
 	})
 }
 
@@ -106,7 +98,7 @@ func TestProbe_EdgesSimple(t *testing.T) {
 // carries, exercising the adjacency's parallel label column.
 func TestProbe_EdgesTyped(t *testing.T) {
 	measure(t, "edges/multigraph-typed", probeEdges, func() any {
-		return buildEdges(t, true, true, "")
+		return buildEdges(t, true, "")
 	})
 }
 
@@ -114,7 +106,7 @@ func TestProbe_EdgesTyped(t *testing.T) {
 // columnar edge-property tier landed in sprint 222.
 func TestProbe_EdgesTypedWithProp(t *testing.T) {
 	measure(t, "edges/multigraph-typed+int-prop", probeEdges, func() any {
-		return buildEdges(t, true, true, "since")
+		return buildEdges(t, true, "since")
 	})
 }
 
