@@ -204,57 +204,51 @@ func communityRandomCliqueChain(seed *Seed) communityFixture {
 // --- CSR construction ----------------------------------------------------------
 
 // communityBuildCSR materialises f as an immutable, SYMMETRIC (undirected)
-// CSR[float64]. Community detection operates on undirected graphs, so every
-// undirected edge {A, B} of the fixture is emitted as two directed CSR entries
-// (A -> B and B -> A); the resulting CSR satisfies IsSymmetric, which is the
-// canonical undirected representation the algorithms expect. Node ids are dense
-// in [0, order) and every node of a >= 2 clique has at least one incident edge,
-// so LiveMask is all-true and the partition carries no ghost (-1) slots.
+// CSR[float64]. Community detection operates on undirected graphs, so the
+// fixture's edges are first laid out as a directed CSR (one arc A -> B per
+// undirected edge {A, B}) and then projected through csr.CSR.BuildSymmetric,
+// which adds every mirror arc B -> A; the result satisfies IsSymmetric, which
+// is the canonical undirected representation the algorithms expect. Node ids
+// are dense in [0, order) and every node of a >= 2 clique has at least one
+// incident edge, so LiveMask is all-true and the partition carries no ghost
+// (-1) slots. The fixtures carry no self-loop, so the result holds exactly two
+// arcs per edge.
 //
-// The offsets array is built programmatically via a counting pass over the
-// symmetrised out-degrees followed by a scatter, the way csr.BuildFromAdjList
+// The directed offsets array is built programmatically via a counting pass
+// over the out-degrees followed by a scatter, the way csr.BuildFromAdjList
 // computes ITS offsets, which sidesteps the off-by-one offset bugs that
-// hand-written CSR arrays invite. It does NOT reproduce that build's
-// within-source order: since rmp #2141 BuildFromAdjList orders each run by
-// (destination, handle), and csr.FromArrays below deliberately does not order,
-// so a run here stays in fixture-edge order. Sound for this oracle — the
-// community algorithms treat a source's neighbours as a set — but not for any
-// consumer that binary-searches a run or reads a slot's within-run ordinal.
-// order must be strictly greater than every NodeID that appears in any edge.
+// hand-written CSR arrays invite. BuildSymmetric orders every run of the
+// result by destination, so its within-source order matches what
+// csr.BuildFromAdjList produces. order must be strictly greater than every
+// NodeID that appears in any edge.
 func communityBuildCSR(f communityFixture) *csr.CSR[float64] {
 	order := f.order
-	// Symmetrise: one undirected edge contributes one out-edge to each endpoint.
 	vertices := make([]uint64, order+1)
 	for _, e := range f.edges {
 		vertices[int(e.A)+1]++
-		vertices[int(e.B)+1]++
 	}
 	for i := 1; i <= order; i++ {
 		vertices[i] += vertices[i-1] // prefix sum -> offsets
 	}
-	size := uint64(len(f.edges)) * 2
+	size := uint64(len(f.edges))
 	edges := make([]graph.NodeID, size)
 	cursor := make([]uint64, order)
-	emit := func(src, dst graph.NodeID) {
-		s := int(src)
-		pos := vertices[s] + cursor[s]
-		edges[pos] = dst
+	for _, e := range f.edges {
+		s := int(e.A)
+		edges[vertices[s]+cursor[s]] = e.B
 		cursor[s]++
 	}
-	for _, e := range f.edges {
-		emit(e.A, e.B)
-		emit(e.B, e.A)
-	}
-	// Unit weights (float64 1.0) on every directed slot: the modularity floor
-	// check reads weights through c.Size() as the doubled total edge weight, so
-	// a non-nil weights array keeps the CSR self-describing. The community
-	// algorithms ignore weights (they treat the graph as unweighted), so the
-	// values only matter to this checker's own modularity computation.
+	// Unit weights (float64 1.0) on every arc, carried onto every mirror by
+	// BuildSymmetric: the modularity floor check reads weights through c.Size()
+	// as the doubled total edge weight, so a non-nil weights array keeps the CSR
+	// self-describing. The community algorithms ignore weights (they treat the
+	// graph as unweighted), so the values only matter to this checker's own
+	// modularity computation.
 	weights := make([]float64, size)
 	for i := range weights {
 		weights[i] = 1.0
 	}
-	return csr.FromArrays[float64](vertices, edges, weights, uint64(order), size)
+	return csr.FromArrays[float64](vertices, edges, weights, uint64(order), size).BuildSymmetric()
 }
 
 // --- Partition validity --------------------------------------------------------
