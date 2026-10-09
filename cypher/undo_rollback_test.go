@@ -6,7 +6,7 @@ package cypher_test
 // eagerly written under the visibility barrier. Before the fix, only the WAL
 // transaction and the secondary-index buffer rolled back; the in-memory graph
 // stayed dirty (in-memory-vs-durable divergence) until the process restarted —
-// an Atomicity violation observable by concurrent View readers and the next
+// an Atomicity violation observable by concurrent readers and the next
 // query.
 //
 // These tests drive the PUBLIC Cypher engine and assert the live graph is clean
@@ -28,6 +28,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -63,7 +64,7 @@ func (v *nthSetRejector) Validate(propertyName string, _ lpg.PropertyValue) erro
 func walEngineWithGraph(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64], *wal.Writer, string) {
 	t.Helper()
 	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
+	w, err := wal.OpenWithSyncLatency(filepath.Join(dir, "wal"), synclatency.ForTest(t))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
@@ -85,7 +86,7 @@ func walEngineWithGraph(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float6
 func walMultigraphEngineWithGraph(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64], *wal.Writer, string) {
 	t.Helper()
 	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
+	w, err := wal.OpenWithSyncLatency(filepath.Join(dir, "wal"), synclatency.ForTest(t))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}

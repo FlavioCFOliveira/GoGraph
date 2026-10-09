@@ -698,6 +698,17 @@ func (g *Graph[N, W]) delEdgePropertyByHandleInfo(src, dst N, handle uint64, key
 		g.checkHandlePropConflict(sh, k, handle, tx)
 		return
 	}
+	if !bag.has(pid) {
+		// A bag without the key is nothing to change either, so it takes the same
+		// test and pushes no version (rmp #3009): a version here is a write, which
+		// refused a peer writing another key of this instance and made the durable
+		// path log a removal of nothing. The stored bag may be showing a peer's
+		// uncommitted removal, or a commit tx cannot see; either pushed to this
+		// instance's version chain, whose head the test reads, so such a peer still
+		// refuses tx exactly as the version push would have.
+		g.checkHandlePropConflict(sh, k, handle, tx)
+		return
+	}
 	// Both tiers are stored by value: mutate local copies and either write them
 	// back or drop the entry when the removal emptied it.
 	if !g.pushHandlePropVersion(sh, k, handle, tx) {

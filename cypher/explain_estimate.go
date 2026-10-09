@@ -62,6 +62,10 @@ func estimateAnnotation(e estimate) string {
 	switch e.source {
 	case estExact:
 		return fmt.Sprintf(" (est. rows=%d, exact)", estRows(e.rows))
+	case estBound:
+		// An upper bound read in O(1) under MVCC churn (rmp #3010): rendered with
+		// the approximation marker, never as exact.
+		return fmt.Sprintf(" (est. rows~%d, bound)", estRows(e.rows))
 	case estStats:
 		// A stats estimate without an explicit error term still prints its tag;
 		// callers with the certified error use estimateAnnotationWithError.

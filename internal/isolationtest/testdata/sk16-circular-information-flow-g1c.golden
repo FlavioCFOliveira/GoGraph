@@ -1,0 +1,586 @@
+spec sk16-circular-information-flow-g1c: 2 sessions, 20 permutations
+# SK16, G1c (Turso hermitage_tests.rs:246; MIT, adapted from Hermitage). T1 sets
+# a = 11 and reads b; T2 sets b = 22 and reads a; both commit. Each reads the
+# other's node at its own snapshot (b = 20, a = 10) in every interleaving, never the
+# other's uncommitted write; both commit, the nodes are disjoint (F4, WW09), and the
+# final state is (11, 22).
+
+starting permutation: s1w s1r s1c s2w s2r s2c
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s1w s1r s2w s1c s2r s2c
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s1w s1r s2w s2r s1c s2c
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s1w s1r s2w s2r s2c s1c
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s1w s2w s1r s1c s2r s2c
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s1w s2w s1r s2r s1c s2c
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s1w s2w s1r s2r s2c s1c
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s1w s2w s2r s1r s1c s2c
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s1w s2w s2r s1r s2c s1c
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s1w s2w s2r s2c s1r s1c
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2c: COMMIT
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s1c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s2w s1w s1r s1c s2r s2c
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s2w s1w s1r s2r s1c s2c
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s2w s1w s1r s2r s2c s1c
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s2w s1w s2r s1r s1c s2c
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s2w s1w s2r s1r s2c s1c
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s2w s1w s2r s2c s1r s1c
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2c: COMMIT
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s1c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s2w s2r s1w s1r s1c s2c
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s2w s2r s1w s1r s2c s1c
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s2w s2r s1w s2c s1r s1c
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s2c: COMMIT
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s1c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)
+
+starting permutation: s2w s2r s2c s1w s1r s1c
+step s2w: MATCH (n:H {name:'b'}) SET n.v = 22 RETURN n.v AS b
+b 
+--
+22
+(1 row)
+step s2r: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s1r: MATCH (n:H {name:'b'}) RETURN n.v AS b
+b 
+--
+20
+(1 row)
+step s1c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+11|22
+(1 row)

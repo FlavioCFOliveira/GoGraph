@@ -4,26 +4,23 @@ package lpg
 
 // reentrancy_test.go — task #1286
 //
-// The transaction-visibility barrier (Graph.View / Graph.ApplyAtomically) is
-// backed by a NON-re-entrant sync.RWMutex. A goroutine that already holds the
-// barrier and nests another acquisition deadlocks the whole engine. Production
-// never nests today, but the invariant was unenforced. The guard added in
+// The schema barrier ([Graph.ApplyAtomically], the strong side of the graph's
+// visGate, an [mvcc.Gate]) is NOT re-entrant. A goroutine that already holds it
+// and nests another acquisition deadlocks the whole engine. Production never
+// nests today, but the invariant was unenforced. The guard added in
 // reentrancy_enabled.go converts that silent hang into an immediate, clear panic.
+// Its reader half, and the nestings involving Graph.View, were removed with
+// Graph.View by rmp #2344.
 //
 // These tests prove:
-//  1. each of the four deadlock-prone nestings (reader→reader, reader→writer,
-//     writer→reader, writer→writer) PANICS with the guard message within a
-//     watchdog timeout instead of hanging — and, for the reader-nested cases, a
-//     real writer is parked on ApplyAtomically so the RWMutex nesting is
-//     genuinely deadlock-prone (a nested RLock would block behind the queued
-//     writer, a nested Lock would block behind itself);
+//  1. the writer→writer nesting PANICS with the guard message within a watchdog
+//     timeout instead of hanging, and a panic inside fn clears the writer mark;
 //  2. legitimate non-nested and CONCURRENT different-goroutine use produces NO
 //     false-positive panic, under -race.
 //
 // Layer: short. Race-clean.
 
 import (
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -58,55 +55,6 @@ func runWithWatchdog(t *testing.T, body func()) (recovered any) {
 			"(the re-entrancy guard failed to trip)", reentrancyWatchdog)
 		return nil
 	}
-}
-
-// queueWriter starts a goroutine that calls ApplyAtomically (visMu.Lock) so it
-// QUEUES behind an outer reader that already holds visMu.RLock. With a writer
-// queued, Go's RWMutex stops admitting new readers (writer-starvation
-// avoidance), so a nested View RLock from the outer reader would block behind
-// the queued writer forever — making the reader→reader nesting genuinely
-// deadlock-prone. queueWriter must be called from INSIDE the outer View, after
-// its RLock is held.
-//
-// It returns only settle, which yields the scheduler a few times so the writer
-// goroutine reaches its blocked-on-Lock state before the caller attempts the
-// nested acquisition. settle is best-effort (the guard fires deterministically
-// regardless, so the test never depends on exact timing — settle only makes the
-// "would otherwise deadlock" condition real).
-//
-// Letting the writer proceed and joining it is deferred to t.Cleanup, which runs
-// AFTER the test body has fully unwound and the outer View has released its
-// RLock — so the queued writer can finally acquire Lock and exit. Closing the
-// release channel from inside the still-RLock-holding View closure would
-// deadlock (the join would wait for a writer that cannot acquire Lock until
-// RUnlock, which runs later), hence the cleanup-time join.
-func queueWriter(t *testing.T, g *Graph[string, int64]) (settle func()) {
-	t.Helper()
-	started := make(chan struct{}) // closed just before the writer blocks on Lock
-	hold := make(chan struct{})    // closed at cleanup to let the writer finish
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		close(started)
-		_ = g.ApplyAtomically(func() error {
-			<-hold
-			return nil
-		})
-	}()
-	settle = func() {
-		<-started
-		// Yield so the writer goroutine advances from "started" into the blocked
-		// ApplyAtomically -> visMu.Lock wait, queuing behind the outer RLock.
-		for i := 0; i < 100; i++ {
-			runtime.Gosched()
-		}
-	}
-	t.Cleanup(func() {
-		close(hold)
-		wg.Wait()
-	})
-	return settle
 }
 
 func newReentrancyGraph(t *testing.T) *Graph[string, int64] {
@@ -187,9 +135,9 @@ func TestReentrancyGuard_PanicInFnClearsWriterMark(t *testing.T) {
 }
 
 // TestReentrancyGuard_NoFalsePositive_ConcurrentReadersAndWriter is the
-// regression/sanity test: many concurrent DIFFERENT-goroutine View readers plus
-// a serialised ApplyAtomically writer run cleanly, with no false-positive panic,
-// under -race. Each goroutine also runs many sequential (non-nested) barrier
+// regression/sanity test: many concurrent DIFFERENT-goroutine lock-free readers
+// plus serialised ApplyAtomically writers run cleanly, with no false-positive
+// panic, under -race. Each writer also runs many sequential (non-nested) barrier
 // acquisitions to prove the per-acquisition enter/exit bookkeeping never strands
 // a goroutine id across calls.
 func TestReentrancyGuard_NoFalsePositive_ConcurrentReadersAndWriter(t *testing.T) {
@@ -234,8 +182,8 @@ func TestReentrancyGuard_NoFalsePositive_ConcurrentReadersAndWriter(t *testing.T
 		}()
 	}
 
-	// Readers: concurrent View, each a fresh non-nested acquisition; loop until
-	// every writer finishes so reads and writes overlap for the whole run.
+	// Readers: concurrent lock-free reads; loop until every writer finishes so
+	// reads and writes overlap for the whole run.
 	readersWG.Add(readers)
 	for r := 0; r < readers; r++ {
 		go func() {

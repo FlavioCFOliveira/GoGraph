@@ -39,8 +39,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -154,48 +152,18 @@ func exprScalarToProperty(v expr.Value) (lpg.PropertyValue, error) {
 }
 
 // synthKeyPrefix is the fixed prefix of every synthetic node key produced by
-// [CreateNode.freshNodeKey]. Kept as a constant so the counter-seeding scan in
-// [seedGlobalNodeCounter] and the formatter in [CreateNode.freshNodeKey] cannot
+// [CreateNode.freshNodeKey]. Kept as a constant so the sequence-seeding scan in
+// [maxSynthKeySuffix] and the formatter in [CreateNode.freshNodeKey] cannot
 // drift apart.
 const synthKeyPrefix = "__cx_"
 
 // mergeKeyInfix is the extra segment [Merge.freshNodeKey] inserts between
 // synthKeyPrefix and the hex counter, so merge-created keys take the form
 // "__cx_merge_<hex>" while CreateNode keys are "__cx_<hex>". Both operators
-// draw from the same [globalNodeCounter]; the infix only distinguishes the
-// originating operator. [parseSynthKeySuffix] strips it so the seeding scan
-// advances the shared counter past keys minted by EITHER operator on recovery.
+// draw from the target graph's [lpg.KeySequence]; the infix only distinguishes
+// the originating operator. [parseSynthKeySuffix] strips it so the seeding scan
+// advances the sequence past keys minted by EITHER operator on recovery.
 const mergeKeyInfix = "merge_"
-
-// globalNodeCounter provides a process-wide monotonic source for generated
-// node keys. Using an atomic counter avoids collisions if multiple Engine
-// instances operate on the same graph concurrently. Since rmp #2306 nothing
-// serialises writers — concurrency control is MVCC alone — so the atomic is no
-// longer a safety net but the actual mechanism keeping generated keys distinct.
-//
-// The counter is process-local and resets to zero in every new process. Across
-// process restarts this would produce keys that collide with previously
-// persisted ones from the same graph (Mapper.Intern of an existing key returns
-// the existing NodeID, silently overwriting the original node's properties on
-// the follow-up SetNodeProperty calls). To defend against that, every
-// [CreateNode] operator seeds the counter from the keys already interned in
-// its mutator on first [CreateNode.Init], advancing the counter past the
-// largest existing __cx_<hex> suffix via a CAS loop. The seed runs once per
-// process (gated by [globalNodeCounterSeededOnce]); subsequent CreateNode
-// operators observe the [sync.Once] as already-fired and skip the scan.
-//
-// Process-wide monotonic counter for unique key generation.
-var globalNodeCounter atomic.Uint64
-
-// globalNodeCounterSeededOnce guards the one-shot seed scan triggered by the
-// first [CreateNode.Init] in the process. The seed walks the mutator's
-// interned node keys (O(N) over distinct keys) and CASes
-// [globalNodeCounter] forward to one past the maximum __cx_<hex> suffix found.
-// All later CreateNode.Init calls observe the Once as already-fired and skip
-// the scan, so the cost is amortised across the lifetime of the process.
-//
-// Paired with globalNodeCounter.
-var globalNodeCounterSeededOnce sync.Once
 
 // CreateNode creates a new graph node per input row, sets its labels and
 // properties, and appends the new NodeID as a new column.
@@ -329,19 +297,11 @@ func (op *CreateNode) WithPropsEvalFn(fn PropsEvalFn) *CreateNode {
 	return op
 }
 
-// Init initialises the operator and its child.
-//
-// The first CreateNode.Init in the process also seeds [globalNodeCounter]
-// past the largest synthetic key currently interned in op.mutator, so that
-// node keys generated in this process cannot collide with keys persisted by
-// an earlier process and replayed during WAL / snapshot recovery. The seed
-// is gated by [globalNodeCounterSeededOnce] so the scan runs at most once
-// per process regardless of how many CreateNode operators are created.
+// Init initialises the operator and its child, and seeds the target graph's
+// key sequence once per graph ([seedNodeKeySequence]).
 func (op *CreateNode) Init(ctx context.Context) error {
 	op.ctx = ctx
-	globalNodeCounterSeededOnce.Do(func() {
-		seedGlobalNodeCounter(op.mutator)
-	})
+	seedNodeKeySequence(op.mutator)
 	return op.child.Init(ctx)
 }
 
@@ -438,30 +398,82 @@ func mergeProps(static []propLiteral, fn PropsEvalFn, row Row) ([]propLiteral, e
 	return merged, nil
 }
 
-// freshNodeKey returns a string key that is guaranteed to be unique within the
-// current process by drawing from a global monotonic counter. The key is never
-// visible to Cypher callers; only the NodeID is emitted into the row.
+// freshNodeKey returns a "__cx_<hex>" key that op.mutator's graph does not
+// hold (see [mintNodeKey]). The key is never visible to Cypher callers; only
+// the NodeID is emitted into the row.
 func (op *CreateNode) freshNodeKey() string {
-	n := globalNodeCounter.Add(1)
-	return synthKeyPrefix + strconv.FormatUint(n, 16)
+	return mintNodeKey(op.mutator, "")
 }
 
-// seedGlobalNodeCounter walks every node key already interned in m and
-// advances [globalNodeCounter] past the largest __cx_<hex> suffix found.
-// The advance uses a CAS loop so concurrent advances by other goroutines (or
-// by [CreateNode.freshNodeKey] in this goroutine) never roll the counter
-// backwards.
+// maxMintStep caps the stride [mintNodeKey] grows to while skipping keys the
+// graph already holds.
+const maxMintStep = 1 << 20
+
+// mintNodeKey returns synthKeyPrefix + infix + hex(n) for a value n drawn from
+// the target graph's [lpg.KeySequence] such that the key is not interned in m's
+// graph, live or tombstoned (rmp #3015).
 //
-// Cost is O(N) over the number of distinct keys in m at call time. The
-// caller guarantees seedGlobalNodeCounter runs at most once per process via
-// [globalNodeCounterSeededOnce], so the cost is amortised across the
-// lifetime of the engine. A nil mutator is tolerated (no-op) so the
-// operator stays usable in unit tests that build a CreateNode without a
-// backing mutator.
-func seedGlobalNodeCounter(m GraphMutator) {
+// The sequence belongs to the graph, not to the process, so two graphs in one
+// process mint the same keys for the same history: a simulator that replays one
+// seed twice in a process sees identical keys, hence identical mapper shards and
+// identical WAL id reservations (WAL v2 step 4). Every engine writing one graph
+// shares its sequence, so concurrent statements never draw the same value.
+//
+// The sequence alone keeps keys distinct only among the keys minted from it. A
+// graph may also hold synthetic keys it did not mint since it was loaded — keys
+// recovered from disk past the seed scan, or written through the lpg API — and
+// interning one of those returns the existing node, so a CREATE would silently
+// take over a committed node. mintNodeKey therefore asks the graph, through
+// [GraphMutator.ResolveNodeID] (one read-locked shard lookup, no allocation),
+// whether the candidate is taken. On a hit the stride doubles, so a run of k
+// occupied keys is crossed in O(log k) probes rather than k, and every candidate
+// is still a distinct sequence value: two concurrent statements can never be
+// handed the same key.
+//
+// The guarantee is against keys interned before the probe. A key from outside
+// the sequence interned between the probe and the caller's AddNode — a caller of
+// the lpg API writing a "__cx_" key concurrently — is not excluded; no generated
+// key can race another generated key.
+//
+// A nil m (unit tests that build an operator without a mutator) mints from a
+// fresh sequence with no probe.
+func mintNodeKey(m GraphMutator, infix string) string {
+	if m == nil {
+		var local lpg.KeySequence
+		return synthKeyPrefix + infix + strconv.FormatUint(local.Add(1), 16)
+	}
+	seq := m.KeySequence()
+	step := uint64(1)
+	for {
+		key := synthKeyPrefix + infix + strconv.FormatUint(seq.Add(step), 16)
+		if _, taken := m.ResolveNodeID(key); !taken {
+			return key
+		}
+		if step < maxMintStep {
+			step <<= 1
+		}
+	}
+}
+
+// seedNodeKeySequence starts m's graph's key sequence past the largest
+// __cx_<hex> suffix the graph holds, the first time any CreateNode, Merge or
+// MergePattern operator over that graph is initialised ([lpg.KeySequence.SeedOnce]).
+// Minting for a recovered graph then rarely probes an occupied key; uniqueness
+// does not rest on the seed but on [mintNodeKey]'s probe.
+//
+// Cost is O(N) over the distinct keys in the graph, once per graph. A nil
+// mutator is a no-op, so the operators stay usable in unit tests built without
+// a mutator.
+func seedNodeKeySequence(m GraphMutator) {
 	if m == nil {
 		return
 	}
+	m.KeySequence().SeedOnce(func() uint64 { return maxSynthKeySuffix(m) })
+}
+
+// maxSynthKeySuffix returns the largest synthetic-key suffix interned in m's
+// graph, 0 when there is none.
+func maxSynthKeySuffix(m GraphMutator) uint64 {
 	var maxSeen uint64
 	m.WalkNodeIDs(func(id graph.NodeID) bool {
 		key, ok := m.ResolveNodeLabel(id)
@@ -473,15 +485,7 @@ func seedGlobalNodeCounter(m GraphMutator) {
 		}
 		return true
 	})
-	for {
-		cur := globalNodeCounter.Load()
-		if cur >= maxSeen {
-			return
-		}
-		if globalNodeCounter.CompareAndSwap(cur, maxSeen) {
-			return
-		}
-	}
+	return maxSeen
 }
 
 // parseSynthKeySuffix returns the numeric hex suffix of a synthetic node key
@@ -490,8 +494,8 @@ func seedGlobalNodeCounter(m GraphMutator) {
 // key does not match either synthetic-key pattern, when the suffix is empty,
 // or when the suffix is not a valid hexadecimal uint64.
 //
-// Both operators draw from the same [globalNodeCounter], so the seeding scan
-// must advance the counter past the maximum value found across BOTH key
+// Both operators draw from the graph's [lpg.KeySequence], so the seeding scan
+// must advance the sequence past the maximum value found across BOTH key
 // forms. Recognising the "__cx_merge_<hex>" form is what stops a
 // one-process-per-command consumer from re-minting __cx_merge_1 on every
 // MERGE and silently collapsing distinct nodes across a store reopen.

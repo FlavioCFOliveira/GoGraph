@@ -318,11 +318,10 @@ package sim
 // [ExecMode.Reproducible] is true for this scenario and the report pins
 // [FluentQueryEvidence.Digest]. The digest deliberately folds only MODEL and
 // COUNT quantities — tick, clause id, and the oracle/fluent/Cypher cardinalities
-// of every probe — and never a NodeID or a mapper key. That is not tidiness: the
-// Cypher engine mints node keys from a PROCESS-GLOBAL counter
-// (cypher/exec/create_node.go globalNodeCounter), so `__cx_<hex>` keys and the
-// NodeIDs interned for them are not a function of the seed and would make any
-// digest that folded them irreproducible across runs in the same process.
+// of every probe — and never a NodeID or a mapper key. The Cypher engine mints
+// `__cx_<hex>` keys from the target graph's key sequence (lpg.KeySequence), so
+// keys and NodeIDs follow the graph's history; the digest stays independent of
+// key minting all the same, so a change to how keys are minted cannot move it.
 //
 // Every draw the probes and the churn phase make comes from its own sub-seed
 // ([fluentQueryProbeSeedMix], [fluentQueryChurnSeedMix],

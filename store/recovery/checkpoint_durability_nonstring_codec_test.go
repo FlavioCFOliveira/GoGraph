@@ -2,13 +2,13 @@ package recovery
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -70,17 +70,11 @@ func TestCheckpointDurability_NonStringKeysCodecTruncates(t *testing.T) {
 	}
 	cp.Stop()
 
-	if got := cp.Stats().WALTruncBytes; got == 0 {
-		t.Fatal("WALTruncBytes = 0: the codec-aware checkpoint must truncate the WAL")
-	}
-
-	// The WAL must have been truncated to empty.
-	info, err := os.Stat(walPath)
-	if err != nil {
-		t.Fatalf("stat wal: %v", err)
-	}
-	if info.Size() != 0 {
-		t.Fatalf("WAL size = %d, want 0 (codec snapshot is self-sufficient, WAL truncated)", info.Size())
+	// The codec snapshot is self-sufficient, so the checkpoint records it as
+	// the start of recovery: every frame below its redo position is discarded
+	// from recovery's point of view.
+	if _, ok, err := waltest.CheckpointRecorded(dir); err != nil || !ok {
+		t.Fatalf("the codec-aware checkpoint did not record its snapshot as the start of recovery (err %v)", err)
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal.Close: %v", err)
@@ -97,8 +91,8 @@ func TestCheckpointDurability_NonStringKeysCodecTruncates(t *testing.T) {
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false, want true")
 	}
-	if res.SnapshotSchemaVersion != 3 {
-		t.Errorf("SnapshotSchemaVersion = %d, want 3 (self-sufficient v3 snapshot)", res.SnapshotSchemaVersion)
+	if res.SnapshotSchemaVersion != 4 {
+		t.Errorf("SnapshotSchemaVersion = %d, want 4 (self-sufficient v4 snapshot)", res.SnapshotSchemaVersion)
 	}
 	if res.WALOps != 0 {
 		t.Fatalf("WALOps = %d, want 0 (state must come from the snapshot alone)", res.WALOps)
@@ -170,12 +164,8 @@ func TestCheckpointDurability_UUIDKeysCodecTruncates(t *testing.T) {
 	}
 	cp.Stop()
 
-	info, err := os.Stat(walPath)
-	if err != nil {
-		t.Fatalf("stat wal: %v", err)
-	}
-	if info.Size() != 0 {
-		t.Fatalf("WAL size = %d, want 0 (UUID snapshot is self-sufficient)", info.Size())
+	if _, ok, err := waltest.CheckpointRecorded(dir); err != nil || !ok {
+		t.Fatalf("the UUID checkpoint did not record its self-sufficient snapshot as the start of recovery (err %v)", err)
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal.Close: %v", err)

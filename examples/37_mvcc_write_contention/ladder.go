@@ -46,6 +46,9 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
+	"github.com/FlavioCFOliveira/GoGraph/store"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // ladderConfig is the shape of one ladder run.
@@ -64,6 +67,16 @@ type ladderConfig struct {
 	// rows, when non-empty, restricts the run to the arms with these ids (as in
 	// ladderRows: "L01", "L06", "L10", ...). Empty runs every arm.
 	rows []string
+	// rowOps overrides totalOps for the arms it names. The short layer and the
+	// binary's default set it to the smallest total measured to still detect the
+	// arm's target defect (README.md, "Sizes"); the soak layer and an explicit
+	// -ladder-ops leave it empty.
+	rowOps map[string]int
+	// syncLatency, when non-nil, delays every WAL fsync of the arms' durable
+	// stores (store.Options.SyncLatency), so a run on a RAM drive keeps a real
+	// device's commit window (rmp #3022). The tests set it through
+	// internal/synclatency; the binary leaves it nil.
+	syncLatency *wal.SyncLatency
 }
 
 // minOpsPerWorker is the floor of operations each goroutine performs, so the top
@@ -77,7 +90,30 @@ const minOpsPerWorker = 4
 const lagBudget = retryBudget
 
 func defaultLadderConfig() ladderConfig {
-	return ladderConfig{levels: []int{1, 8, 64}, totalOps: 256, seed: 1}
+	return ladderConfig{levels: []int{1, 8, 64}, totalOps: 256, seed: 1, rowOps: map[string]int{
+		// L13 fails every_caller_succeeds with rmp #2987 reverted at 8 and 64
+		// goroutines at 32 calls (6 of 6 runs); L15 fails no_dangling_edge with rmp
+		// #2988 reverted at every level at 64 operations (9 of 9 runs).
+		"L13": 32,
+		"L15": 64,
+		// The Turso arms (ladder_turso.go), at the totals measured in README.md,
+		// "Turso arms (rmp #3017, #3018)".
+		"IX11": 16,
+		"L21":  4,
+		"L22":  32,
+	}}
+}
+
+// forRow returns the configuration arm id runs with: lc, or a copy with the
+// arm's rowOps total.
+func (c *ladderConfig) forRow(id string) *ladderConfig {
+	n, ok := c.rowOps[id]
+	if !ok {
+		return c
+	}
+	rc := *c
+	rc.totalOps = n
+	return &rc
 }
 
 // opsPerWorker is how many operations each of n goroutines performs.
@@ -176,8 +212,11 @@ func ladderRows() []ladderRow {
 		{id: "L13", run: rowMergeStorm},  // L13, L14, MG11
 		{id: "L15", run: rowHubChurn},    // L15, L16
 		{id: "L17", run: rowParallelCount, once: true},
-		{id: "L18", run: rowAbortHeavy}, // L18
-		{id: "L19", run: rowDDLCycles},  // L19 (DD08 overlap, DD09 drain)
+		{id: "L18", run: rowAbortHeavy},     // L18
+		{id: "L19", run: rowDDLCycles},      // L19 (DD08 overlap, DD09 drain)
+		{id: "IX11", run: rowIX11Load},      // IX11 load arm (ladder_turso.go)
+		{id: "L21", run: rowReclaimReader},  // L21
+		{id: "L22", run: rowBankCheckpoint}, // L22
 	}
 }
 
@@ -208,7 +247,7 @@ func phaseLadder(ctx context.Context, w io.Writer, lc *ladderConfig) (*ladderOut
 			}
 			var err error
 			trace.WithRegion(ctx, fmt.Sprintf("ladder/%s/%d", r.id, level), func() {
-				err = r.run(ctx, lc, out, level)
+				err = r.run(ctx, lc.forRow(r.id), out, level)
 			})
 			if err != nil {
 				return out, fmt.Errorf("ladder %s level %d: %w", r.id, level, err)
@@ -230,18 +269,43 @@ func phaseLadder(ctx context.Context, w io.Writer, lc *ladderConfig) (*ladderOut
 // ---------------------------------------------------------------------------
 // Engines.
 
-// memEngine is an in-memory engine and its graph.
-type memEngine struct {
+// ladderEngine is the engine of one ladder arm: a durable store (store.Open:
+// WAL, durable commit, recovery) in a fresh directory under TMPDIR, its graph,
+// and the Cypher engine over it. Every arm runs on the persisted store, so its
+// writes, reads and traversals take the real persistence path (rmp #2993);
+// pointing TMPDIR at a RAM drive changes only the medium.
+type ladderEngine struct {
+	dir string
+	o   *store.Opened[string, float64]
 	g   *lpg.Graph[string, float64]
 	eng *cypher.Engine
 }
 
-func newMemEngine() *memEngine {
-	g := newGraph()
-	return &memEngine{g: g, eng: cypher.NewEngine(g)}
+// newLadderEngine opens a durable store for one arm, with lat as its fsync
+// latency (nil for none). The row, level and arm name the call site only (see
+// storeDirFor).
+func newLadderEngine(row string, level int, arm string, lat *wal.SyncLatency) (*ladderEngine, error) {
+	dir, err := storeDirFor(row, level, arm)
+	if err != nil {
+		return nil, err
+	}
+	o, err := store.Open[string, float64](dir, store.Options[string, float64]{
+		Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec(),
+		SyncLatency: lat,
+	})
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	return &ladderEngine{dir: dir, o: o, g: o.Graph(), eng: cypher.NewEngineWithOpened(o)}, nil
 }
 
-func (m *memEngine) close() { _ = m.eng.Close() }
+// close closes the store and the engine and removes the store directory.
+func (m *ladderEngine) close() {
+	_ = m.o.Close()
+	_ = m.eng.Close()
+	_ = os.RemoveAll(m.dir)
+}
 
 // cyRunner is the surface shared by cypher.Engine (sessionless) and
 // cypher.Session (the session arm).

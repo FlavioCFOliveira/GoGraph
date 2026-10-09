@@ -5,6 +5,7 @@ package lpg
 // Layer: short.
 
 import (
+	"context"
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
@@ -63,7 +64,7 @@ func TestLabelBitmapAsOf_CorrectsWhenTheSweepLandsDuringTheClone(t *testing.T) {
 	}
 
 	// The sweep lands between the acquire and the post-acquire sample.
-	bm := g.labelBitmapAsOfFiltered(nil, oneLabel(lid),
+	bm, _ := g.labelBitmapAsOfFiltered(context.Background(), nil, oneLabel(lid),
 		func() (*roaring64.Bitmap, bool) {
 			c := g.nodeIdx.Intersect(uint32(lid))
 			g.labelDeltaActive.Store(0)
@@ -134,7 +135,7 @@ func TestLabelBitmapAsOf_SpanningSurvivesTheDeferredClone(t *testing.T) {
 	}
 
 	var acquired *roaring64.Bitmap
-	bm := g.labelBitmapAsOfFiltered(nil, oneLabel(lid),
+	bm, _ := g.labelBitmapAsOfFiltered(context.Background(), nil, oneLabel(lid),
 		func() (*roaring64.Bitmap, bool) {
 			acquired = g.nodeIdx.BitmapShared(uint32(lid))
 			g.labelDeltaActive.Store(0)

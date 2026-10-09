@@ -11,6 +11,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 )
 
 // durabilityKeys lists every check a complete in-process run must have printed.
@@ -26,12 +28,17 @@ var durabilityKeys = []string{
 	"D08.reference.acked_present", "D08.torn.damaged_record_discarded_alone",
 	"D08.garbled.damaged_record_discarded_alone", "D08.garbled.refused_unless_clean",
 	"D13.double_recovery_identical",
-	"D09.checkpoint_ran", "D09.pre_capture.acked_present", "D09.pre_truncate.acked_present",
-	"D09.post_truncate.acked_present", "D09.post_truncate.seek_equals_scan",
+	"D09.checkpoint_ran", "D09.pre_capture.acked_present",
+	"D09.post_checkpoint.acked_present", "D09.post_checkpoint.seek_equals_scan",
 	"D16.snapshot_used", "D16.checkpoint_plus_tail_equals_full_replay",
-	"D09.missing_segment.refused_loudly", "D09.checkpoint_refused_not_quiesced",
+	"D09.missing_segment.refused_loudly",
 	"D04.failure_seen", "D04.post_poison_commit_refused", "D04.failed_not_visible",
 	"D04.reopen.acked_present", "D04.reopen.refused_absent", "D04.recovers_exactly_the_acknowledged",
+	"D17.torn_record_discarded_alone", "D17.epoch1_survives_second_recovery", "D17.epoch2_present",
+	"D18.t1_acked_while_t0_held", "D18.checkpoint_waited", "D18.checkpoint_ran_after_release",
+	"D18.acked_present_after_crash",
+	"D19.a_refused_with_canceled", "D19.a_retry_commits", "D19.c_completes", "D19.no_unexpected_errors",
+	"D19.committed_equals_ok_in_memory", "D19.committed_equals_ok_after_crash", "D19.later_commit_not_blocked",
 }
 
 // runDurability runs phase 7 and holds it to every check and every key.
@@ -56,8 +63,12 @@ func runDurability(t *testing.T, dc *durabilityConfig, keys []string) {
 }
 
 // TestDurability is the short layer: every in-process arm at 8 and 64 writers.
+//
+// The live stores run with injected fsync latency (internal/synclatency,
+// rmp #3022), so the commit window a RAM drive shrinks stays open.
 func TestDurability(t *testing.T) {
 	dc := defaultDurabilityConfig()
+	dc.syncLatency = synclatency.ForTest(t)
 	runDurability(t, &dc, durabilityKeys)
 }
 

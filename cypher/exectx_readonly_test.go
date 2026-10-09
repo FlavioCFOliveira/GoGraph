@@ -5,8 +5,9 @@ package cypher_test
 // acquires NO writer serialisation, NO visibility barrier, and NO WAL
 // transaction: it rejects writing/DDL statements before execution with
 // [cypher.ErrWriteInReadOnlyTx], routes reads through the engine's concurrent
-// read path (per-statement Graph.View snapshot, read-committed across
-// statements), and its Commit/Rollback are teardown-only no-ops.
+// read path at ONE MVCC snapshot pinned when the handle opens (snapshot
+// isolation across its statements, rmp #2307), and its Commit/Rollback are
+// teardown-only no-ops.
 
 import (
 	"context"
@@ -238,7 +239,7 @@ func TestReadTx_CommitRollbackNoOps(t *testing.T) {
 // TestReadTx_ConcurrentReadsDoNotSerialise is the deterministic anti-serialise
 // test. Under the old exclusive-barrier path, an explicit transaction held the
 // visibility barrier for its whole lifetime, so a concurrent autocommit read
-// (Engine.Run takes Graph.View / visMu.RLock) would block until the explicit tx
+// (Engine.Run then took Graph.View / visMu.RLock) would block until the explicit tx
 // finished. A read-only transaction holds no barrier, so a concurrent reader —
 // and many concurrent read-only transactions — proceed without blocking on the
 // open handle.

@@ -38,10 +38,7 @@ func TestWAL_CrashMidFrameHeader(t *testing.T) {
 	}
 
 	// Read the durable bytes.
-	good, err := os.ReadFile(src) //nolint:gosec // t.TempDir-rooted
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
+	good := segmentFrameBytes(t, src)
 
 	// Append 7 bytes — a partial header (HeaderSize = 14 bytes).
 	// These 7 bytes simulate a torn header write: magic bytes only, no
@@ -52,7 +49,7 @@ func TestWAL_CrashMidFrameHeader(t *testing.T) {
 	copy(augmented[len(good):], partialHeader)
 
 	dst := filepath.Join(dir, "torn_header.wal")
-	if err := os.WriteFile(dst, augmented, 0o600); err != nil { //nolint:gosec // testdata
+	if err := os.WriteFile(dst, augmented, 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 

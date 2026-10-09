@@ -1,5 +1,11 @@
 package cypher
 
+import (
+	"context"
+
+	"github.com/RoaringBitmap/roaring/v2/roaring64"
+)
+
 // estimate.go — estimate-provenance infrastructure (#2076, the estimate{rows,
 // source} veto model of docs/optimizer-activation-design.md §2.1).
 //
@@ -37,6 +43,21 @@ const (
 	// approximation marker, so an arbitrarily drifted count was shown as ground
 	// truth.
 	estExact estSource = iota
+	// estBound is an UPPER BOUND that never under-counts: a label's live-node
+	// count read in O(1) as the raw index cardinality plus the MVCC churn the
+	// reclaimer has not yet caught up with ([lpg.Graph.LabelCountBound]). It is
+	// produced only when the exact O(1) count declines because history is live,
+	// and only for decisions that CHOOSE between result-identical plans (rmp
+	// #3010) — never for one whose correctness rests on the number.
+	//
+	// It is trustworthy for that purpose. The planner compares cardinalities,
+	// and every label's bound carries the SAME churn term, so comparing two
+	// bounds compares the raw counts; computing the exact figure instead cost an
+	// O(suspects) correction per label per plan site that the statement could
+	// not cancel. Neo4j plans from the same kind of figure — its counts store,
+	// which ignores transaction state (estimateCountsForNode) — and Memgraph from
+	// the label index's size, an over-estimate under MVCC.
+	estBound
 	// estStats is a histogram- or sample-derived count. Trustworthy enough to
 	// drive a plan decision, though not exact. It is produced by
 	// [statsRangeEstimate] over the equi-depth histograms, and since rmp #2766 it
@@ -60,6 +81,8 @@ func (s estSource) String() string {
 	switch s {
 	case estExact:
 		return "exact"
+	case estBound:
+		return "bound"
 	case estStats:
 		return "stats"
 	case estHeuristic:
@@ -81,11 +104,12 @@ type estimate struct {
 }
 
 // trustworthy reports whether this estimate may drive a non-default physical
-// plan choice. Only estExact and estStats qualify; estHeuristic (unvalidated)
-// and estFallback do not — they force the planner back to today's default plan
-// (docs/optimizer-activation-design.md §2.1).
+// plan choice. estExact, estBound and estStats qualify; estHeuristic
+// (unvalidated) and estFallback do not — they force the planner back to today's
+// default plan (docs/optimizer-activation-design.md §2.1). See [estBound] for why
+// an upper bound qualifies.
 func (e estimate) trustworthy() bool {
-	return e.source == estExact || e.source == estStats
+	return e.source == estExact || e.source == estBound || e.source == estStats
 }
 
 // planStaysDefault is the trustworthiness veto over a candidate decision path.
@@ -126,12 +150,21 @@ type labelBounder interface {
 	ResolveLabelCountBound(name string) (int64, bool)
 }
 
-// labelCardinalityEstimate returns the EXACT live-node count for label as an
-// estExact estimate. It reads the count via [labelCounter.ResolveLabelCount]
-// when the resolver provides it (zero-allocation — no bitmap is built), and
-// otherwise falls back to the cardinality of the label bitmap the resolver
-// returns. Both are exact live-node counts for the query's pinned snapshot, so
-// both are estExact.
+// labelCardinalityEstimate returns the live-node count of label for a decision
+// that only CHOOSES between result-identical plans: EXACT (estExact) when the
+// O(1) exact count answers, otherwise the O(1) upper bound (estBound). It reads
+// [labelCounter.ResolveLabelCount] first, then
+// [labelBounder.ResolveLabelCountBound], and only a resolver offering neither —
+// a test stub — falls back to the cardinality of the label bitmap the resolver
+// returns, which is exact.
+//
+// It never materialises a corrected bitmap for a resolver that offers the bound
+// (rmp #3010). Before, a declined exact count fell through to the bitmap, so
+// planning a statement over a label with heavy uncommitted churn ran a full MVCC
+// correction per label per plan site, which the statement's context could not
+// interrupt: example 37's L17 measured ~86 ms of planning, ~670 ms under the race
+// detector, between a cancellation and the statement's return. A decision whose
+// CORRECTNESS rests on the count must use [labelExactRows] instead.
 //
 // A nil resolver yields an estFallback estimate: with no source the count is
 // not knowable, and the fallback tag makes the trustworthiness veto
@@ -141,10 +174,24 @@ func labelCardinalityEstimate(src labelResolverIface, label string) estimate {
 	if src == nil {
 		return estimate{rows: 0, source: estFallback}
 	}
+	if pc, ok := src.(labelPlanCounter); ok {
+		n, exact := pc.ResolveLabelCountPlan(label)
+		if exact {
+			return estimate{rows: float64(n), source: estExact}
+		}
+		return estimate{rows: float64(n), source: estBound}
+	}
 	if lc, ok := src.(labelCounter); ok {
 		if n, ok := lc.ResolveLabelCount(label); ok {
 			return estimate{rows: float64(n), source: estExact}
 		}
+	}
+	if lb, ok := src.(labelBounder); ok {
+		n, exact := lb.ResolveLabelCountBound(label)
+		if exact {
+			return estimate{rows: float64(n), source: estExact}
+		}
+		return estimate{rows: float64(n), source: estBound}
 	}
 	bm := src.ResolveLabelBitmap(label)
 	if bm == nil {
@@ -153,4 +200,70 @@ func labelCardinalityEstimate(src labelResolverIface, label string) estimate {
 		return estimate{rows: 0, source: estExact}
 	}
 	return estimate{rows: float64(bm.GetCardinality()), source: estExact}
+}
+
+// planExactBacklog is the MVCC history backlog
+// ([lpg.Graph.LabelHistoryBacklog]) up to which a plan-choice label count is
+// computed EXACTLY — by the cancellable snapshot correction — rather than read as
+// the O(1) upper bound (rmp #3010, the hybrid the user chose).
+//
+// The bound adds the WHOLE graph's unreclaimed history to the raw count, so it is
+// inexact after any recent write, not only under heavy uncommitted churn; on a
+// 40-node fixture with nothing open it read 120. Below this backlog the exact
+// count is cheap enough to keep the plans the exact figure has always produced.
+// Measured on Apple M4, RAM drive, 3000 committed nodes plus uncommitted ones in
+// the label (best of 7): the exact count cost 44.7 µs at a backlog of 512, 115.6 µs
+// at 2048, 159.1 µs at 4096, 310 µs at 8192 and 2.32 ms at 65 536 — 35-50 ns per
+// record — and under the race detector 0.68 ms, 1.77 ms, 2.45 ms, 4.54 ms and
+// 34.7 ms. At 4096 a plan pays at most ~0.16 ms (2.5 ms under race) per label, and
+// the statement's memo hands that bitmap to the label's scan, which would have
+// paid it anyway. Above it the cost grows linearly with churn the statement does
+// not control, and the bound takes over.
+const planExactBacklog = 4096
+
+// labelPlanCounter is the plan-choice count a resolver may offer: the label's
+// count and whether it is exact, exact whenever that is cheap
+// ([planExactBacklog]) and otherwise the O(1) upper bound. It never fails: a
+// cancelled exact count falls back to the bound, which is sound for a plan
+// choice, and the cancelled statement then stops before its plan is initialised.
+type labelPlanCounter interface {
+	ResolveLabelCountPlan(name string) (n int64, exact bool)
+}
+
+// labelBitmapContextResolver is the cancellable form of
+// [labelResolverIface.ResolveLabelBitmap]: the same snapshot-corrected bitmap,
+// or the context's error when ctx ends before the correction completes — never
+// a partially corrected bitmap (rmp #3010).
+type labelBitmapContextResolver interface {
+	ResolveLabelBitmapContext(ctx context.Context, name string) (*roaring64.Bitmap, error)
+}
+
+// labelExactRows returns the EXACT live-node count of label for the snapshot the
+// resolver reads at, for a decision whose correctness rests on the number — the
+// index nested-loop join's coverage proof, and the statistics staleness
+// denominator (rmp #2771).
+//
+// It reads the O(1) exact count first. When that declines it counts the
+// corrected bitmap, through the cancellable resolution when the resolver offers
+// one, and returns ctx's error if the statement is cancelled meanwhile.
+func labelExactRows(ctx context.Context, src labelResolverIface, label string) (int64, error) {
+	if lc, ok := src.(labelCounter); ok {
+		if n, ok := lc.ResolveLabelCount(label); ok {
+			return n, nil
+		}
+	}
+	var bm *roaring64.Bitmap
+	if cr, ok := src.(labelBitmapContextResolver); ok {
+		var err error
+		if bm, err = cr.ResolveLabelBitmapContext(ctx, label); err != nil {
+			return 0, err
+		}
+	} else {
+		bm = src.ResolveLabelBitmap(label)
+	}
+	if bm == nil {
+		// An unknown label resolves to the empty bitmap; nil is treated the same.
+		return 0, nil
+	}
+	return int64(bm.GetCardinality()), nil
 }

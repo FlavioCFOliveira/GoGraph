@@ -28,6 +28,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -132,7 +133,7 @@ func runRealCrashDemo(ctx context.Context, w io.Writer, cfg config, crashCommitt
 
 	// Volatile telemetry.
 	fmt.Fprintf(w, "# recovery.elapsed=%s\n", recElapsed.Round(time.Microsecond))
-	fmt.Fprintf(w, "# recovery.wal_bytes_replayed=%s\n", humanBytes(walOffsetBytes(res.WALTailOffset)))
+	fmt.Fprintf(w, "# recovery.wal_bytes_replayed=%s\n", humanBytes(walOffsetBytes(res.WALEnd)))
 	fmt.Fprintf(w, "# recovery.wal_ops=%d\n", res.WALOps)
 	fmt.Fprintf(w, "# recovery.snapshot_hit=%t\n", res.SnapshotHit)
 
@@ -285,24 +286,28 @@ func verifyRecoveredLedger(g *lpg.Graph[string, int64], plan ledgerPlan, cfg con
 	return rec, nil
 }
 
-// appendTornFrame appends a deliberately incomplete WAL frame to walPath: the
-// magic, version, and a payload-length field declaring tornFramePayloadLen
-// bytes, but with the CRC and the payload never written. A wal.Reader stops at
-// this torn tail with wal.ErrTornFrame — the benign crash-after-last-fsync case
-// recovery treats as a clean cut. It opens a fresh fd (the WAL's exclusive lock
-// is on a separate LOCK file, not the data file), so it is safe alongside the
-// still-open store writer.
+// appendTornFrame appends a deliberately incomplete WAL frame to the tail
+// segment of the WAL at walPath: the magic, version, flags and half of a
+// payload-length field, with the rest of the header and the payload never
+// written. A wal.Reader stops at this torn tail with wal.ErrTornFrame — the
+// benign crash-after-last-fsync case recovery treats as a clean cut. It opens a
+// fresh fd (the WAL's exclusive lock is on a separate LOCK file, not the data
+// file), so it is safe alongside the still-open store writer.
 func appendTornFrame(walPath string) error {
-	f, err := os.OpenFile(walPath, os.O_RDWR|os.O_APPEND, 0o600) //nolint:gosec // G304: walPath is the example's own temp WAL file, not user input
+	seg, err := waltest.TailSegmentPath(walPath)
+	if err != nil {
+		return fmt.Errorf("locate WAL tail segment: %w", err)
+	}
+	f, err := os.OpenFile(seg, os.O_RDWR|os.O_APPEND, 0o600) //nolint:gosec // G304: seg is the example's own temp WAL segment, not user input
 	if err != nil {
 		return fmt.Errorf("open WAL for torn append: %w", err)
 	}
-	// magic(4) + version(2) + length(4) = 10 bytes; the CRC(4) and the payload
-	// never follow, so the reader is left short of a full header/frame.
+	// magic(4) + version(2) + flags(2) + 2 of the 4 length bytes = 10 bytes;
+	// the reader is left short of a full header.
 	partial := make([]byte, 10)
 	copy(partial[0:4], wal.Magic[:])
 	binary.LittleEndian.PutUint16(partial[4:6], wal.CurrentVersion)
-	binary.LittleEndian.PutUint32(partial[6:10], tornFramePayloadLen)
+	binary.LittleEndian.PutUint16(partial[8:10], tornFramePayloadLen&0xFFFF)
 	if _, err := f.Write(partial); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("write torn header: %w", err)
@@ -332,7 +337,7 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-// walOffsetBytes converts a WAL byte offset (which is never negative) to the
+// walOffsetBytes converts a WAL end position (which is never negative) to the
 // uint64 humanBytes expects.
 func walOffsetBytes(off int64) uint64 {
 	if off < 0 {

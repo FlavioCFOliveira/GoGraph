@@ -1,0 +1,1 @@
+GoGraph WAL: the prefix of this log was truncated by a checkpoint; recovery requires the snapshot that folded it.

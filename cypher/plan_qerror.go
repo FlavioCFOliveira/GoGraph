@@ -313,6 +313,8 @@ func (e *Engine) observeOperatorQError(op, inner exec.Operator, sink *planEstima
 // maintains while its per-value count goes arbitrarily wrong. An "exact" estimate
 // can still be wrong by any factor for that reason, and this metric remains the only
 // thing in the module able to see it. seedStaleMCVGraph builds exactly that case.
+// [exec.EstimateBound] (rmp #3010) is excluded for the HEURISTIC reason: its error
+// is the MVCC churn in flight, which a statistics refresh cannot reduce.
 func qErrorQualifies(s exec.EstimateSource) bool {
 	return s == exec.EstimateExact || s == exec.EstimateStats
 }

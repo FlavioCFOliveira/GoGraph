@@ -427,6 +427,9 @@ type Graph[N comparable, W any] struct {
 	nodeIdx *label.Index
 	edgeIdx *label.Index
 
+	// keySeq is the graph's synthetic node-key sequence ([Graph.KeySequence]).
+	keySeq KeySequence
+
 	// labelDeltas arms the P0 MVCC spike (rmp #2275); labelDeltaActive mirrors
 	// the number of live label deltas as a lock-free gate, exactly as
 	// tombstoneActive does for the tombstone set.
@@ -595,6 +598,24 @@ type Graph[N comparable, W any] struct {
 	// The cost in production is one nil load and a predictable branch, on a path
 	// that has just taken the label index's read lock.
 	labelCountAsOfWindowProbe func()
+	// labelCountCorrectWindowProbe is a TEST-ONLY seam, nil in production and with
+	// no exported setter, called by [Graph.labelCountAsOfFiltered] immediately
+	// BEFORE it acquires the label image, after [Graph.labelAsOfSample] has taken
+	// its pre-acquire suspect sample (rmp #2776).
+	//
+	// A write driven from here lands after the pre-sample and before the image,
+	// so the image holds it and only the POST-acquire sample can name it. That is
+	// the one interleaving that separates the sound implementation from both
+	// inversions: sampling every suspect before the acquire leaves the write
+	// uncorrected (an over-count), and reading the cardinality from the live index
+	// separately from the image's membership counts it on one side and corrects it
+	// on the other (an under-count). Kept separate from
+	// [Graph.labelCountAsOfWindowProbe] so a test driving one window cannot
+	// re-enter the other.
+	//
+	// The cost in production is one nil load and a predictable branch on the
+	// correction path, which has just walked every suspect shard.
+	labelCountCorrectWindowProbe func()
 	// mvccClock mints commit timestamps and transaction ids from the two
 	// disjoint ranges either side of mvcc.TxIDBase, so one uint64 on a
 	// version's commit record distinguishes in-flight from committed. Shared
@@ -708,8 +729,8 @@ type Graph[N comparable, W any] struct {
 	// tombstoneMu, CLONE the current bitmap, mutate the private clone, and
 	// atomic.Store the new pointer — copy-on-write. The clone cost is
 	// O(tombstones) and paid only on the rare delete/revive, never on a
-	// read. A concurrent lpg.Graph.View reader therefore observes either
-	// the pre- or the post-mutation set, never a torn state; the clone
+	// read. A concurrent reader, which loads the pointer once, therefore
+	// observes either the pre- or the post-mutation set, never a torn state; the clone
 	// deep-copies (copyOnWrite is never enabled), so mutating it cannot
 	// race a reader still holding the previously published bitmap.
 	tombstoneMu sync.Mutex
@@ -881,9 +902,9 @@ type Graph[N comparable, W any] struct {
 	// used to take it shared, so a read never excludes a writer and this lock is
 	// now only a consistent view of what the catalog holders change. A caller that
 	// needs a consistent view of DATA takes a snapshot. The checkpointer's capture
-	// (store/checkpoint) is such a View caller and rests on the store's own
-	// quiesce — RunUnderCommitLock drains in-flight commits to zero — rather than
-	// on this lock; rmp #2310 moves it to a transactional instant. See
+	// (store/checkpoint) is such a caller: it opens an MVCC instant under the
+	// store's commit lock, paired with the WAL's durable offset (rmp #2310), and
+	// does not rest on this lock. See
 	// [Graph.BeginRead] for the reader side that replaced Graph.View, and
 	// docs/isolation-design.md for the full division and the measurement behind it.
 	//
@@ -1402,8 +1423,9 @@ func (g *Graph[N, W]) ApplyVersioned(fn func(WriteTx) error) error {
 //
 // ctx bounds the WAITS only: the call returns ctx's error, wrapping
 // [context.Canceled] or [context.DeadlineExceeded], when ctx is already done on
-// entry or finishes while an attempt is parked behind another bounded
-// transaction or backing off. Every such return happens between attempts, so
+// entry or finishes while an attempt waits for the visibility gate behind a
+// strong holder (rmp #2985), is parked behind another bounded transaction, or is
+// backing off. Every such return happens before an attempt runs apply, so
 // the transaction is aborted, holds nothing, has not run durable, and has handed
 // on any waiters it inherited. ctx does NOT interrupt a running attempt: once
 // apply has run, durable is called and the attempt ends as it decides, so a
@@ -1429,7 +1451,7 @@ func (g *Graph[N, W]) ApplyDurable(ctx context.Context, apply func(WriteTx) erro
 	// woken (see [txWaitTable.yieldToHandoffs]).
 	g.txWait.yieldToHandoffs()
 	for attempt := 0; ; attempt++ {
-		head, retry, err := g.applyDurableOnce(apply, durable, inherited, woken)
+		head, retry, err := g.applyDurableOnce(ctx, apply, durable, inherited, woken)
 		inherited, woken = waitQueue{}, false // entered with the attempt, handed on by its end
 		if !retry {
 			return err
@@ -1472,9 +1494,25 @@ func (g *Graph[N, W]) ApplyDurable(ctx context.Context, apply func(WriteTx) erro
 // woken says a hand-off woke this attempt's caller; the token it owes is retired
 // once apply has run — its claims are then taken, or it was refused — panic
 // included.
-func (g *Graph[N, W]) applyDurableOnce(apply func(WriteTx) error, durable func() error, inherited waitQueue, woken bool) (head uint64, retry bool, err error) {
+//
+// The shared acquisition of the visibility gate is bounded by ctx (rmp #2985): a
+// strong holder — [Graph.ApplyAtomically], [Graph.ApplyAtomicallyTx], or the
+// barrier [Graph.LockBarrier] holds until [Graph.UnlockBarrier], and through them
+// a DDL's registration and backfill — would otherwise hold a durable commit past
+// its deadline for its whole tenure. When ctx finishes first the attempt holds
+// nothing and has run neither apply nor durable; it hands on the queue it
+// inherited and retires the hand-off token it owes, exactly as a waiter that gives
+// up does, and returns ctx's error.
+func (g *Graph[N, W]) applyDurableOnce(ctx context.Context, apply func(WriteTx) error, durable func() error, inherited waitQueue, woken bool) (head uint64, retry bool, err error) {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	visTok := g.visGate.WeakLockAuto()
+	visTok, gerr := g.visGate.WeakLockCtxAuto(ctx)
+	if gerr != nil {
+		g.txWait.handOff(inherited)
+		if woken {
+			g.txWait.handoffDone()
+		}
+		return 0, false, fmt.Errorf("lpg: ApplyDurable: waiting for the visibility gate: %w", gerr)
+	}
 	g.barrier.stampWriter(gid)
 	w := g.beginBoundedWrite()
 	txID := w.txID // w is recycled by finishWriteShared; the id is not
@@ -2515,7 +2553,44 @@ func (g *Graph[N, W]) internEndpoint(n N, tx *writeCtx) graph.NodeID {
 // One atomic load when no life record exists anywhere, which is the steady state
 // of a graph nobody is creating or removing nodes in.
 func (g *Graph[N, W]) existenceNoOpAdmits(id graph.NodeID, tx *writeCtx) bool {
-	if tx == nil || g.nodeLifeActive.Load() == 0 {
+	if tx == nil {
+		return true
+	}
+	// THE HEAD FIRST, THE UNBORN SET LAST (rmp #3029). Withdrawing an aborted
+	// first creation marks the id unborn and THEN deletes its birth record, both
+	// under the life-shard lock, decrements the record count after the unlock, and
+	// flips the tombstone last. Read in this order, every interleaving refuses:
+	// a head read that still finds the record finds it uncommitted or aborted and
+	// conflicts; one that finds it gone — through the shard lock or through the
+	// record count — is ordered after the unborn mark, which the read below then
+	// sees. Reading the unborn set first let a write slip between the two reads
+	// of one withdrawal and find neither.
+	if !g.existenceHeadAdmits(id, tx) {
+		return false
+	}
+	// AN UNBORN ID IS NEVER A NO-OP (WAL v2 step 3, rmp #3029). Every caller
+	// decided BEFORE this call that the key is not "unborn and tombstoned" — the
+	// state in which it would have recreated the node — so an unborn id here
+	// means that decision raced the withdrawal: either the flip is still to come,
+	// and the node is about to vanish, or it landed between the caller's read and
+	// this one, and the node is already dead. Either way the write would build on
+	// a node it does not create, so the commit marker's id annex would not name
+	// it, and recovery refuses such a log (ErrUnboundNodeKey). Testing the
+	// tombstone here as well, as this did before rmp #3029, admitted the second
+	// case. Refused as a conflict: the bounded commit waits and reruns, and the
+	// rerun reads the key unborn and tombstoned and recreates it.
+	if g.unbornN.Load() != 0 && g.inUnborn(id) {
+		_ = tx.conflictErr(mvcc.StoreNodeExistence, mvcc.AbortedTS)
+		return false
+	}
+	return true
+}
+
+// existenceHeadAdmits is the existence-head half of [Graph.existenceNoOpAdmits]:
+// it refuses only on another transaction's uncommitted birth or death. tx is
+// non-nil.
+func (g *Graph[N, W]) existenceHeadAdmits(id graph.NodeID, tx *writeCtx) bool {
+	if g.nodeLifeActive.Load() == 0 {
 		return true
 	}
 	if head := g.nodeLifeHeadFor(id); tx.conflicts(head) {
@@ -2731,10 +2806,14 @@ func (g *Graph[N, W]) reviveInfo(n N, tx *writeCtx) {
 	}
 	// A key whose only creation aborted never existed, so it is not revived,
 	// exactly as a key never interned is not (ACID audit round 6, finding C2):
-	// reviving it made memory hold a node no WAL record creates. Its existence
-	// head is still tested before the no-op verdict, as for every other one.
+	// reviving it made memory hold a node no WAL record creates. Leaving it dead
+	// IS this call's answer for an unborn key, so only its existence head is
+	// tested before the no-op verdict (rmp #3029: the unborn refusal of
+	// [Graph.existenceNoOpAdmits] would refuse it forever).
 	if g.unbornN.Load() != 0 && g.isUnborn(id) {
-		g.existenceNoOpAdmits(id, tx)
+		if tx != nil {
+			g.existenceHeadAdmits(id, tx)
+		}
 		return
 	}
 	g.revive(id, tx)
@@ -3596,7 +3675,10 @@ func (g *Graph[N, W]) removeAllEdgesFromInfo(src N, tx *writeCtx) bool {
 		if err := g.adjVer.admits([2]graph.NodeID{srcID}, 1, tx); err != nil {
 			return false
 		}
-		if len(g.EntryViewAsOf(srcID, &tx.snap).Neighbours) == 0 {
+		// Read after the admit through a view no earlier read of tx has pinned
+		// ([Graph.admittedRead], rmp #3032).
+		var cs Snapshot
+		if len(g.EntryViewAsOf(srcID, g.admittedRead(&cs, tx)).Neighbours) == 0 {
 			return false
 		}
 	}
@@ -5617,12 +5699,22 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, tx *writeCtx) {
 			return
 		}
 	}
-	if bag, ok2 := sh.m[id]; ok2 {
-		// Record the undo only when the label is actually present, for the same
-		// reason as the add path: removing a label the node does not carry changes
-		// nothing, so a delta for it would be a version that never existed. Only the
-		// DELTA is guarded; the conflict test above is not (rmp #2354).
-		if g.labelDeltasEnabled() && bag.has(lid) {
+	if bag, ok2 := sh.m[id]; ok2 && bag.has(lid) {
+		// Everything below — the undo, the bag write and the index removal — runs
+		// only when the label is actually present. Removing a label the node does
+		// not carry changes nothing, so a delta for it would be a version that never
+		// existed. Only the conflict test above is unconditional (rmp #2354).
+		//
+		// THE INDEX REMOVAL IS GUARDED TOO (rmp #2989). A no-op removal claims
+		// nothing in this store, so two of them by two transactions do not
+		// conflict, and neither conflicts with the committed removal whose deferred
+		// entry is still pending. Each used to re-stamp that entry, and
+		// [deferredIdx.shadow] keeps only ONE replaced stamp: the second no-op
+		// overwrote the committed removal's stamp, both no-ops then aborted, and the
+		// withdrawal dropped the key — leaving a node that no longer carries the
+		// label in its bitmap for good. Measured by L06 of
+		// examples/37_mvcc_write_contention as a label count one above the scan.
+		if g.labelDeltasEnabled() {
 			ci, ts := g.deltaStamp(tx.record())
 			sh.pushLabelDelta(id, undoAddLabel, lid, ci, ts, &g.labelDeltaActive, &g.labelChurn)
 			tx.noteSide(sideNodeLabels, uint64(id), 0, 0)

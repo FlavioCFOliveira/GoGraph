@@ -217,6 +217,13 @@ func TestMVCCClockRecovery_StaleInstantFiresTheFloorOracle(t *testing.T) {
 	if err := st.Checkpoint(); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
+	// Discard the folded frames physically: a segmented log keeps the segment
+	// holding them after the checkpoint, and recovery derives the floor from
+	// their markers too, so with them on disk the dropped instant below would be
+	// recovered anyway and the oracle would have nothing to detect.
+	if _, err := st.wlog.Truncate(); err != nil {
+		t.Fatalf("truncate the WAL: %v", err)
+	}
 	captured := rewriteManifestInstant(t, disk, cfg, 0) // drop it, keeping the trailer valid
 	if captured == 0 {
 		t.Fatal("the published manifest recorded no instant: dropping it proves nothing")

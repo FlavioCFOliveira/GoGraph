@@ -54,6 +54,24 @@ type labelResolver interface {
 	ResolveLabelBitmap(name string) *roaring64.Bitmap
 }
 
+// labelResolverContext is the cancellable form of [labelResolver] a resolver may
+// offer: the same bitmap, or ctx's error when the statement is cancelled while
+// the bitmap is being corrected for the reader's snapshot (rmp #3010). That
+// correction is O(uncommitted writes in the label) — tens of milliseconds at
+// 150 000 uncommitted nodes — and Init is where a scan pays it.
+//
+// A resolver returns a non-nil error ONLY for cancellation, and then never a
+// bitmap: a partially corrected bitmap is a wrong answer.
+type labelResolverContext interface {
+	ResolveLabelBitmapContext(ctx context.Context, name string) (*roaring64.Bitmap, error)
+}
+
+// labelsResolverContext is the cancellable form of [LabelIntersectResolver], with
+// the contract of [labelResolverContext].
+type labelsResolverContext interface {
+	ResolveLabelsBitmapContext(ctx context.Context, names []string) (*roaring64.Bitmap, error)
+}
+
 // LabelIntersectResolver resolves a CONJUNCTION of label names to the bitmap of
 // NodeIDs carrying EVERY one of them — the set-at-a-time answer to a multi-label
 // node pattern (#2133).
@@ -135,6 +153,10 @@ func NewNodeByLabelIntersectionScan(labels []string, src LabelIntersectResolver)
 
 // Init resolves the label (or, for the conjunction form, the intersection of the
 // labels) to a bitmap and initialises the iterator.
+//
+// When the resolver offers the cancellable form it is used, and a statement
+// cancelled while the bitmap is corrected returns ctx's error from here rather
+// than after the correction completes (rmp #3010).
 func (op *NodeByLabelScan) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.count = 0
@@ -143,7 +165,19 @@ func (op *NodeByLabelScan) Init(ctx context.Context) error {
 		// Set-at-a-time conjunction: one k-way AND under a single index RLock, so
 		// the whole conjunction is decided against ONE consistent image of the
 		// label index rather than re-checked live per row (#2133).
-		bm = op.isrc.ResolveLabelsBitmap(op.labels)
+		if cr, ok := op.isrc.(labelsResolverContext); ok {
+			var err error
+			if bm, err = cr.ResolveLabelsBitmapContext(ctx, op.labels); err != nil {
+				return err
+			}
+		} else {
+			bm = op.isrc.ResolveLabelsBitmap(op.labels)
+		}
+	} else if cr, ok := op.src.(labelResolverContext); ok {
+		var err error
+		if bm, err = cr.ResolveLabelBitmapContext(ctx, op.label); err != nil {
+			return err
+		}
 	} else {
 		bm = op.src.ResolveLabelBitmap(op.label)
 	}

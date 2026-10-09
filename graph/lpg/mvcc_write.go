@@ -219,6 +219,26 @@ func (g *Graph[N, W]) writerSnapshot() *Snapshot {
 // it: the state it names is recycled on the unwind.
 type WriteTx struct{ w *writeCtx }
 
+// CreatedNodes appends to dst the ids of the nodes this transaction CREATED —
+// ids it interned first, and unborn ids it revived (keys whose only earlier
+// creation aborted) — in creation order, and returns the extended slice. An id
+// whose creation a statement rollback later withdrew is still listed: the key
+// was bound to it, and the durable record must say so (WAL v2 step 3,
+// docs/design-wal-v2.md §5.5). The zero value lists nothing.
+//
+// It must be called while the transaction is still open (before
+// [Graph.EndVersionedTx] or the end of the bracket), because the state behind
+// tx is recycled afterwards. Safe for concurrent use with writes through tx.
+func (tx WriteTx) CreatedNodes(dst []graph.NodeID) []graph.NodeID {
+	if tx.w == nil {
+		return dst
+	}
+	tx.w.createdMu.Lock()
+	dst = append(dst, tx.w.created...)
+	tx.w.createdMu.Unlock()
+	return dst
+}
+
 // Valid reports whether tx names an open write transaction.
 //
 // It is false for the zero value and for a bracket opened on a graph whose

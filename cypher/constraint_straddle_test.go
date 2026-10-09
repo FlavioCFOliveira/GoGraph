@@ -20,6 +20,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -34,7 +35,7 @@ func straddleEngine(t *testing.T, walBacked bool) (*Engine, string, *wal.Writer)
 		return NewEngine(g), "", nil
 	}
 	dir := t.TempDir()
-	wr, err := wal.Open(filepath.Join(dir, "wal"))
+	wr, err := wal.OpenWithSyncLatency(filepath.Join(dir, "wal"), synclatency.ForTest(t))
 	if err != nil {
 		t.Fatal(err)
 	}

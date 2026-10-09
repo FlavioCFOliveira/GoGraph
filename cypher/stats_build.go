@@ -62,18 +62,15 @@ func putStatsNodeRefs(bp *[]statsNodeRef) {
 	statsNodeRefPool.Put(bp)
 }
 
-// RefreshStatisticsLocked is [Engine.RefreshStatistics] for a caller that ALREADY holds
-// the visibility barrier — specifically db.stats.refresh(), which runs inside query
-// execution (#2196).
+// RefreshStatisticsLocked is [Engine.RefreshStatistics] for a caller inside query
+// execution — specifically db.stats.refresh() (#2196).
 //
-// It exists because visMu is a non-re-entrant sync.RWMutex: taking it again from a
-// goroutine already inside Graph.View would DEADLOCK the engine. The re-entrancy guard
-// turns that into a panic, but only in a debug or race build — a production binary would
-// hang. So the barrier-taking and barrier-free entry points must be distinct, and the
-// caller has to pick correctly.
-//
-// Correctness is unchanged: the scan only reads, and the caller's read barrier already
-// pins the consistent snapshot it needs.
+// It exists because query execution used to run inside Graph.View, a non-re-entrant
+// read barrier, so the in-query caller needed an entry point that took no barrier. rmp
+// #2344 removed Graph.View, and neither entry point takes a barrier now: both scan the
+// PRESENT stored state through [Engine.scanStatsLocked], which states why an
+// approximate statistic tolerates that. It also publishes the result and resets the
+// misestimate set, as RefreshStatistics does.
 func (e *Engine) RefreshStatisticsLocked(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -99,10 +96,11 @@ func (e *Engine) RefreshStatisticsLocked(ctx context.Context) error {
 // maintained by a background goroutine, so a caller (a maintenance task, a
 // scheduled job, or a test) drives the rebuild.
 //
-// The scan resolves against one pinned snapshot, so it observes a consistent
-// instant and does not block concurrent writers (which serialise elsewhere). It
-// takes no barrier — see the note on the internal builder below for why wrapping
-// it in the old lpg.Graph.View would not have given the property it claimed.
+// The scan takes no barrier and pins no snapshot: it reads the PRESENT stored state
+// while writers may be mid-apply, and does not block them — see
+// [Engine.scanStatsLocked] for why an approximate statistic tolerates that, and the
+// note on the internal builder below for why wrapping it in the old lpg.Graph.View
+// would not have given the property it claimed.
 //
 // Statistics built here DO change plans, as of rmp #2766. The disjoint-component
 // reorder ([computeReorderSwaps]) reads them to estimate how many rows a filtered
@@ -287,15 +285,13 @@ func finishStatsSnapshot(
 	return out
 }
 
-// scanStatsLocked is the body of the statistics scan, WITHOUT acquiring the visibility
-// barrier: the caller must already hold it (#2196).
+// scanStatsLocked is the body of the statistics scan. It acquires no barrier and pins no
+// snapshot (#2196).
 //
-// The split exists because the scan has two callers with opposite needs.
-// [Engine.RefreshStatistics] is invoked from outside any barrier and must take one, so it
-// wraps this in Graph.View. db.stats.refresh() runs INSIDE query execution and must NOT,
-// because visMu is not re-entrant: a second acquisition from the same goroutine deadlocks
-// the engine. The re-entrancy guard catches that as a panic, but only in a debug/race
-// build; a production binary would simply hang.
+// The split dates from when the scan had two callers with opposite needs:
+// [Engine.RefreshStatistics] wrapped it in Graph.View, and db.stats.refresh(), which runs
+// inside query execution, could not, because Graph.View was not re-entrant. rmp #2344
+// removed Graph.View; both callers now call this directly.
 //
 // # What the in-query caller actually holds (rmp #2290, #2304)
 //

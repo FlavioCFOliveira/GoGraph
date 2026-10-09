@@ -256,6 +256,7 @@ func (g *Graph[N, W]) acquireImplicit() *writeCtx {
 	w.undoing.Store(false)
 	w.commitTS, w.allocRec, w.applier, w.counts = 0, nil, nil, nil
 	w.abandon = false
+	w.created = w.created[:0]
 	return w
 }
 

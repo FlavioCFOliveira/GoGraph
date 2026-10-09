@@ -263,8 +263,9 @@ catalogue.WW02.cypher spec=ww02-stale-snapshot-write permutations=6 steps=30 ok=
 counts `<waiting ...>`, invalid-permutation and never-completed lines, and must be 0
 (GoGraph takes no DML locks, F7); `violations` counts property-check failures. The
 summary lines `catalogue.scenarios`, `catalogue.blocked_steps=0` and
-`catalogue.violations=0` are asserted by `TestRun`; every transcript is asserted
-against its golden by `TestCatalogue`.
+`catalogue.violations=0` are printed by the binary; `TestRun` does not run phase 5
+(rmp #2993): `TestCatalogue` runs the same scenarios through the same runner, checks
+every property, and asserts every transcript against its golden.
 
 ### Harness
 
@@ -389,6 +390,9 @@ GoGraph permits write skew and refuses a write-write conflict.
 | SK12 | `sk12-no-phantom-no-non-repeatable`, `sk12-read-skew-lpg` | both | MY `t/consistent_snapshot`, `select_count_perf`, `innodb-read-view` | Repeated reads equal; no read skew | As expected. The `lpg` arm reads two keys (A5A) and is the negative control's target. |
 | SK13 | `sk13-snapshot-at-begin`, `-lpg` | both | MY `t/consistent_snapshot`; PG `fk-snapshot` | Snapshot at BEGIN | As expected. InnoDB's plain `START TRANSACTION` takes it at the first read. |
 | SK14 | `sk14-fast-path-aggregates` | Cypher | MY `select_count_perf`, `parallel_read`; PG `index-only-bitmapscan` | Fast path = scan, at the snapshot | As expected. |
+| SK15 | `sk15-aborted-read-g1a`, `sk15-intermediate-read-g1b` | Cypher | TU `hermitage_tests.rs:150`, `:200`, `:862` (MIT; from Hermitage) | G1a: T2 reads 10 throughout; T3 reads 10 while T1 is open, after its ROLLBACK before the vacuum drain, and after the drain. G1b: 101 is never read; T3 reads 10 before the commit, 11 after | As expected, in 3 named interleavings each. |
+| SK16 | `sk16-circular-information-flow-g1c` | Cypher | TU `hermitage_tests.rs:246` (MIT; from Hermitage) | Each writer reads the other's node at its snapshot (b = 20, a = 10); both commit; final (11, 22) | As expected, in all 20 interleavings. |
+| SK17 | `sk17-observed-transaction-vanishes-otv` | Cypher | TU `hermitage_tests.rs:295` (MIT; from Hermitage) | T2 refused at its statement; T3 reads (10, 20) at every step; final (12, 18) | As expected. Turso rolls the refused transaction back itself; GoGraph poisons it until ROLLBACK (F8), so the spec scripts the ROLLBACK. |
 | MG01 | `mg01-merge-no-constraint` | Cypher | PG `merge-insert-update` | Both succeed; duplicates when both snapshots precede both commits; one node when serial | As expected: 2 nodes in 18 of 20 interleavings, 1 in the 2 serial ones, where a `BEGIN` follows the other's `COMMIT`. |
 | MG02 | `mg02-unique-merge-winner-commits`, `-winner-rolls-back`, `-autocommit-loser` | Cypher | PG `insert-conflict-do-nothing`, `insert-conflict-do-update`; MY `iodku`, `innodb_replace`, `constraint_check_locks_in_read_committed` | Loser gets a ConstraintViolation, not retriable (F10) | As expected in all three arms. PG waits and then does nothing or updates; InnoDB waits on a shared lock. After the winner rolls back, a new `MERGE` creates the node: no reservation leaks. The autocommit arm is refused too while the winner is open (G6); it matches the node once the winner has committed. |
 | MG03 | `mg03-unique-committed-after-snapshot` | Cypher | PG `insert-conflict-do-nothing-2`, `read-write-unique-2` | `MERGE` cannot see the committed value and gets a ConstraintViolation | As expected. PG REPEATABLE READ raises a serialization failure instead. |
@@ -405,12 +409,13 @@ GoGraph permits write skew and refuses a write-write conflict.
 | IX02 | `ix02-own-write-btree-seek` | Cypher | GoGraph #2814 | Range and prefix seek = scan after own writes | As expected. Negative control below. |
 | IX03 | `ix03-own-write-autocommit` | Cypher | GoGraph #2814 | One autocommit statement counts its own `CREATE` and `SET` | As expected. Negative control below. |
 | IX04 | `ix04-peer-rollback-label-add-hash`, `-btree` | Cypher | GoGraph #2931; MY `index-create-dml-rollback`, `innodb-index-online`; PG `partial-index` | Node indexed under its committed value; seek = scan | As expected. Negative control below. Without a UNIQUE constraint the label add does not conflict with the open property write on the same node, in either order. |
-| IX05 | `ix05-rollback-leaves-no-trace` | Cypher | MY `innodb-index-online`, `index-create-dml-rollback`, `lob_rollback_update`, `innodb_mysql_rbk`; PG `partial-index` | Every seek = scan = pre-state plus the peer's commits | As expected. With a UNIQUE constraint registered (on any label), a label add and a property write on one node conflict ("node constraint"), so the peer route by which #2931 let a rolled-back value into an index cannot occur here; the row does not fail at `43c69dbe` (see the negative control). |
+| IX05 | `ix05-rollback-leaves-no-trace` | Cypher | MY `innodb-index-online`, `index-create-dml-rollback`, `lob_rollback_update`, `innodb_mysql_rbk`; PG `partial-index` | Every seek = scan = pre-state plus the peer's commits | As expected. Since #3008 the per-node constraint stamp is taken only for a write of a label or property key that a constraint names. This row's UNIQUE constraint names `(:K).k` alone, so adding `L` to `m` and writing `m.s` no longer conflict, and the peer's `SET m.s` commits beside s1's open label add (see the golden). The negative control at `43c69dbe` predates #3008, so whether this row now catches #2931 is not measured. |
 | IX06 | `ix06-moved-out-of-index-domain` | Cypher | PG `partial-index`, `partition-key-update-4`; MY `multi_value_index_merge_mvcc` | Pinned reader finds the old values; a new reader the new ones | As expected. |
 | IX07 | `ix07-two-index-predicate-pinned` | Cypher | MY `multi_value_index_merge_mvcc`, `bug32554667` | Pinned reader gains no row | As expected. |
 | IX08 | `ix08-index-created-after-snapshot` | Cypher | PG `drop-index-concurrently-1`, `reindex-concurrently`; MY `innodb-read-view` | Only snapshot rows | As expected; `CREATE INDEX` does not wait for the open read-only transaction. |
 | IX09 | `ix09-label-index-scan-agree` | Cypher | GoGraph #2931 churn; MY `lock_impl_to_expl_case_sensitivity` | Label count = seek = scan at quiescence | As expected. |
 | IX10 | `ix10-parameter-seek-own-write` | Cypher | GoGraph `3fd78c5e` | Parameter seek = literal seek = scan | As expected, for a string and an integer parameter. |
+| IX11 | `ix11-large-indexed-commit-hash`, `-btree` | Cypher | TU `tests.rs:4940`, `:5550` (MIT) | One commit re-values `s` on all 1 100 `:L` nodes (each to its successor's value); a pinned reader and autocommit readers see the old state before the publish and the new one after, seek = scan, never a mix | As expected. The btree arm compares node NAMES (`n5` before, `n4` after): the rewrite leaves every count unchanged. The instant inside the index delivery is covered by the `IX11` ladder arm (phase 6). |
 
 | DD01 | `dd01-create-index-under-open-writer-commit`, `-rollback` | Cypher | PG `multiple-cic`, amcheck `t/002_cic.pl`; MY `innodb-index-online`, `innodb-table-online`, `innodb-index-online-delete`, `bulk_create_index_online`, `index-create-dml-rollback` | Index holds the committed arm, not the rolled-back one; seek = scan | As expected in all 20 interleavings of each arm. **G9 settled:** the backfill reads a committed snapshot (negative control below). |
 | DD02 | `dd02-two-indexes-writer-between` | Cypher | PG `multiple-cic` | Both indexes seek = scan | As expected. |
@@ -483,10 +488,13 @@ revision and run there. The worktree needed one change to compile:
 - **#2931 at `43c69dbe`.** Both IX04 specs fail, 18 property violations and a diff at
   line 59 of permutation `s1w s2l s1rb s1dr s2v s2p` (hash: `want: 1 |1`,
   `got: 0 |1`; btree: `want: 11 |11`, `got: 10 |11`). **IX05 passes there.** A
-  rolled-back transaction writes no index entry of its own, and the peer route #2931
-  took is closed in IX05 by the "node constraint" conflict that any registered UNIQUE
-  constraint brings. The catalogue's §6 named IX05 as a row that catches #2931; it
-  does not, and §6 now names IX04 and says why IX05 does not.
+  rolled-back transaction writes no index entry of its own, and at that revision the
+  peer route #2931 took was closed in IX05 by the "node constraint" conflict that any
+  registered UNIQUE constraint then brought. Since #3008 that conflict is taken only
+  for a label or property key a constraint names, which IX05's `L` and `s` are not,
+  so IX05's peer write now commits. This control has not been re-run since #3008, so
+  whether IX05 now catches #2931 is not measured. The catalogue's §6 named IX05 as a
+  row that catches #2931; it did not at `43c69dbe`, and §6 names IX04 instead.
 
 ### Negative control for G9 (DD01)
 
@@ -519,6 +527,27 @@ permutation "s1d s1c s2e s2c" step dangling: an edge to or from a dead node was 
 
 RI03 (same target) and RI05 also fail, on their goldens: the second appender to a
 shared target is no longer refused. Without the mutant every RI and GG row passes.
+
+### Negative controls for SK15-SK17 and IX11 (rmp #3016, #3017)
+
+Seeded mutants applied with `go test -overlay`, never written to the tree:
+
+- **Dirty read** — `mvcc.Visible` (`graph/mvcc/mvcc.go`) returns true for another
+  transaction's uncommitted or aborted change. SK15 (both arms), SK16 and SK17 fail
+  on their goldens: T2 reads `101|20` while T1 is open (G1a, G1b), each writer reads
+  the other's uncommitted write (G1c), and T2's refused write is no longer refused
+  (OTV).
+- **Aborted version visible only** — `mvcc.Visible` returns true for `AbortedTS`.
+  SK15 G1a does NOT fail: the Cypher ROLLBACK replays its undo log and restores
+  `a = 10` in the present state, so no read resolves through the aborted version.
+  This mutant is detected by no catalogue row; SK15's G1a arm is held by the
+  dirty-read mutant above.
+- **No index proof** — `index.Manager.DescribesSnapshot` (`graph/index/manager.go`)
+  always returns true, so a seek never declines to the scan. Both IX11 arms fail:
+  `seekEqualsScan` reports, for the pinned reader after the commit, `index seek
+  counted 1, scan counted 0` (hash) and `index seek counted [], scan counted ["n500"]`
+  (btree). An earlier btree arm that compared counts (`prefixS('v110')`) did NOT fail
+  against this mutant and was replaced by the name comparison.
 
 ### Defects found
 
@@ -578,7 +607,7 @@ open.
   through `Engine.lockSchemaForDDL`, which waits with `mvcc.Gate.StrongLockCtx` and
   returns the context error holding nothing, before any schema, index, constraint or
   WAL state is touched. `dd06-ddl-bounded-by-context` pins it.
-- **D5 — autocommit `MERGE` under UNIQUE fails callers under concurrency (open, rmp #2987;
+- **D5 — autocommit `MERGE` under UNIQUE fails callers under concurrency (rmp #2987;
   found by phase 6, L13).** F10 and `cypher/merge_race_test.go` state that concurrent autocommit
   `MERGE` under a UNIQUE constraint converges on one node with every caller succeeding.
   Reproduction (in-memory engine, `cypher.NewEngine` over `lpg.New`): `CREATE CONSTRAINT
@@ -588,18 +617,26 @@ open.
   repetitions; one node remains). On a WAL-backed engine the 8×1 shape of the existing
   test passes, but the L13 storm (8 or 64 goroutines, 32 or 4 calls each, 4 keys) fails
   16 of 256 and 74 of 256 callers the same way. One node per key always holds and stays
-  gated. L13 reports `failed_callers` as a metric; rmp #2987 restores the gate
+  gated. **Fixed (rmp #2987):** the MERGE operator marks a UNIQUE refusal of its own
+  pattern key whose holder the statement's snapshot cannot see
+  (`cypher/exec/merge_unique_race.go`), and an autocommit statement so marked is re-run,
+  after waiting for every allocated commit to become visible, on a snapshot that sees the
+  winner (`cypher/merge_unique_retry.go`); the re-run is bounded and context-aware. A
+  statement of an explicit transaction is not re-run (MG11). L13 gates
   `every_caller_succeeds`.
 - **D6 — `DETACH DELETE` of a node with two parallel in-edges from one source leaves one
-  arc behind (open, rmp #2988; found by phase 6, L15).** Reproduction: `CREATE (:Hub {id:1}), (:X
+  arc behind (fixed, rmp #2988; found by phase 6, L15).** Reproduction: `CREATE (:Hub {id:1}), (:X
   {id:53})`; twice `MATCH (x:X {id:53}), (h:Hub {id:1}) CREATE (x)-[:R]->(h)`; `MATCH
   (h:Hub {id:1}) DETACH DELETE h`; `ReclaimNow`. Cypher counts 0 relationships, but at a
   fresh snapshot the live `x` still lists the dead hub in its out-neighbours and the dead
   hub lists `x` as an in-neighbour (the dangling probe counts 2). With one edge, or with
-  one of the two deleted first, the probe counts 0. L15 creates its edges with `MERGE`,
-  so it never builds this shape and keeps measuring hub churn; rmp #2988 adds the
-  parallel-edge shape back.
-- **D7 — the hash and label indexes diverge from the graph under random churn (open,
+  one of the two deleted first, the probe counts 0. The in-edge index names each source
+  once, and DETACH DELETE removed one slot per name. **Fixed (rmp #2988):** the
+  transaction-visible in-neighbour read lists a source once per incoming arc
+  (`inArcSourcesInTx`, `cypher/api.go`), so every parallel instance is removed. L15
+  creates its edges with `CREATE`, so repeated draws of one pair build parallel in-edges,
+  and gates `no_dangling_edge`.
+- **D7 — the hash and label indexes diverge from the graph under random churn (fixed,
   rmp #2989; found by phase 6, L06).** At quiescence, after the L06 workload (label add/remove,
   indexed writes, 30% rollbacks, a UNIQUE set), the equality seek on `(:L).s` misses
   nodes a scan finds — `hash "s3" seek=40 scan=41`, `hash "own-920-0-1" seek=0 scan=1`,
@@ -608,9 +645,20 @@ open.
   coverage-build runs at 64. In-transaction seeks of own writes (L07) never diverged
   (0 of 1 457 at 1024). Reproduction: `go test -tags soak -run TestLadderSoak
   ./examples/37_mvcc_write_contention/` (or `-race -run TestLadder`), or the binary with
-  `-ladder-levels 1024 -ladder-rows L06 -ladder-ops 4096`. L06 reports
-  `seek_scan_mismatches` and `seek_scan_first_mismatches` as metrics; rmp #2989 restores
-  the gate `seek_equals_scan`.
+  `-ladder-levels 1024 -ladder-rows L06 -ladder-ops 4096`. Four causes. A write that
+  changes nothing — a `SET` to the stored value, a `REMOVE` of an absent label — conflicts
+  with no concurrent writer, yet its commit applied its own index payload after a peer's
+  commit had changed the node: the `SET` re-indexed the value the node had given up, the
+  `REMOVE` deleted the peer's entry. The old value of an indexed write was read from the
+  graph's present, which can still hold a rolled-back peer's value, so the committed value
+  was never deleted. And a `REMOVE` of an absent label re-stamped the deferred label-bitmap
+  removal of a committed one; two such transactions aborting dropped it, and the node stayed
+  in the label scan. Last, the undo of a `SET n:L` was decided by a probe taken outside the
+  label store's lock: when a peer restored the label in between, the add changed nothing, yet
+  its rollback removed the label and its bitmap entry, and only the bag got the label back
+  when the abort was withdrawn. The engine now enqueues an index change, and records a label
+  undo, only for a write that wrote a version; reads the old value through the writing
+  transaction's view; and an absent label defers no removal. L06 gates `seek_equals_scan`.
 - **D4 — a Cypher `DELETE` of a relationship another transaction removed is a silent
   no-op (fixed, rmp #2986).** Reproduction: `CREATE (a:N {name:'a'})-[:R {id:1}]->(b:N {name:'b'}),
   (a)-[:R {id:2}]->(b), (a)-[:R {id:3}]->(a)`; T1 and T2 `BeginTx`; T1
@@ -630,6 +678,22 @@ open.
   so a peer's removal records the conflict, while a removal this transaction already
   made finds the claim held and removes nothing. `cypher/rel_delete_peer_conflict_test.go`
   pins it on both engines, and `gg06-delete-same-edge-instance` is now in the catalogue.
+- **D8 — two committed `CREATE`s could name one node (rmp #3015, fixed; catalogue
+  GG07, gated by phase 8).** A `CREATE` or `MERGE` gives each new node a hidden key
+  drawn from a process-wide counter that was seeded once per process, from the first
+  graph a write operator ran against. A graph whose keys another process minted — a
+  second store opened in the same process, or a store recovered from disk and loaded
+  into memory — holds keys at and above the counter, and interning one returned the
+  existing node, so the `CREATE` overwrote it. Reproduction: one process writes store B
+  with 20 `CREATE`s and exits; a fresh process runs one `CREATE` in an empty store A,
+  opens B and runs 3 `CREATE`s. B still holds 20 nodes, and three of the first ones carry
+  the new nodes' properties. The same counter re-minted, after a reopen, the key of a
+  deleted node whose key was the largest in the store, so its `id()` named a new node.
+  **Fixed:** every key is minted by `mintNodeKey` (`cypher/exec/create_node.go`), which
+  rejects a key the target graph already holds, live or deleted
+  (`GraphMutator.ResolveNodeID`), and doubles its stride over a run of held keys.
+  `cypher/node_key_mint_3015_test.go` pins it for `CREATE`, `MERGE` and a `MERGE`
+  pattern, in memory and over a reopened store.
 
 ### Gaps pinned
 
@@ -688,6 +752,17 @@ layer (`ladder_soak_test.go`, `-tags soak`, `TestLadderSoak`) runs 256 and 1024 
 self-conflict streak gate. The binary runs the phase after phase 5 with
 `-ladder-levels` (default `1,8,64`), `-ladder-ops`, `-ladder-rows` and `-ladder-soak`.
 
+Every arm runs on the durable store (`store.Open`: WAL, durable commit, recovery) in its
+own directory under `TMPDIR`, removed when the arm ends (rmp #2993). Pointing `TMPDIR` at a
+RAM drive changes only the medium. Because a RAM drive shrinks an fsync to microseconds,
+and with it the window between a commit's timestamp and its visibility, `TestLadder` and
+`TestLadderSoak` open every arm's store with an injected fsync latency drawn uniformly
+from 1-5 ms (`store.Options.SyncLatency`, set through `internal/synclatency`; rmp #3022).
+`GOGRAPH_FSYNC_LATENCY=off` disables it, and `GOGRAPH_FSYNC_LATENCY_SEED=<n>` replays the
+seed a failing test logs. The binary runs without it. The short layer and the binary's default run 256
+operations per arm and level, except L13 (32) and L15 (64); see "Sizes" below.
+`-ladder-ops` or `-ladder-soak` applies one total to every arm.
+
 ### Arms
 
 | Arm | Rows | Workload | Gates (bare `ladder.<arm> level=<n> <check>=true` lines) |
@@ -695,16 +770,19 @@ self-conflict streak gate. The binary runs the phase after phase 5 with
 | `L01` | L01, L02, L03 | Bank transfers (`BeginTx`, two reads, two writes, a `Log` insert; 10% rolled back) and read transactions (`BeginReadTx` or read-only `BeginTx`) that read every account and the `Log` count twice; one doctors write-skew round per goroutine, two transactions interleaved by the goroutine itself. Every attempt is recorded with `internal/anomaly` (aborts as aborted) and the history checked at `SnapshotIsolation` | `history_clean` (0 forbidden, not truncated), `write_skew_permitted` (G2-item in `Report.Permitted`), `repeatable_reads`, `no_phantoms`, `conservation` |
 | `L04.<arm>` | L04 | Hot counter, `SET c.n = c.n + 1` with retries, session and sessionless arms | Final value = acknowledged increments |
 | `L05` | L05 | One transaction over 16 hot nodes against single-node writers | Sum = acknowledged; the large transaction's success rate and refused streak are reported (G3: no fairness mechanism) |
-| `L06` | L06, L07 | Label add/remove, hash- and btree-indexed writes, UNIQUE writes, 30% rollbacks; 1 in 5 statements writes a fresh value and seeks it inside its transaction | No duplicate UNIQUE value; in-transaction seek = scan = 1. Seek = scan at quiescence (hash index, btree range and prefix, label scan, count store, UNIQUE backing index) is a reported metric until rmp #2989 (D7) |
+| `L06` | L06, L07 | Label add/remove, hash- and btree-indexed writes, UNIQUE writes, 30% rollbacks; 1 in 5 statements writes a fresh value and seeks it inside its transaction | No duplicate UNIQUE value; in-transaction seek = scan = 1. Seek = scan at quiescence for the hash index, btree range and prefix, label scan, count store and UNIQUE backing index (`seek_equals_scan`, gated since rmp #2989, D7). The btree index's CONTENT (`Lookup` cardinality per value) = a scan (`btree_index_equals_scan`, rmp #2995): the btree seek/scan pairs cannot fail, because the range seek is planned only with >= 64 labelled nodes and <= 10% selectivity and keeps the full predicate as a residual filter. Before the UNIQUE constraint is declared, one #2989 interleaving is CONSTRUCTED on two nodes the churn never draws (a no-op `SET` committed over a peer's commit, `noop_set_over_peer_committed`), so the btree gate does not depend on the churn producing it |
 | `L08` | L08 | A read transaction held while writers leave 3 x `Bound` versions | `retention_shown` (Total > Bound while held), repeatable read, reclaimed after release |
 | `L09` | L09 (soak) | 1 032 read transactions held while the graph churns | `UnregisteredSnapshots` > 0, every read correct, released after close |
 | `L10.<arm>`, `L20.<arm>` | L10, L20 | WAL-backed store (`store.Open`), disjoint writers, a checkpointer triggered back to back | Final = acknowledged; session arm 0 self-conflicts; checkpoints ran; commit tail during a checkpoint below `hangBudget`; storage size before and after |
-| `L11.<arm>` | L11, L12 | In-memory disjoint writers, session and sessionless | Session arm 0 self-conflicts (and so 0 conflicts) |
-| `L13`, `L13.memory`, `MG11`, `L14` | L13, MG11, L14 | `MERGE` storms on 4 keys: autocommit under UNIQUE (WAL-backed and in-memory), explicit under UNIQUE, autocommit without a constraint | One node per key under UNIQUE; every failure typed; L14 every caller succeeds, duplicates counted. L13's "every caller succeeds" is a reported metric (`failed_callers`) until rmp #2987 (D5) |
-| `L15`, `L16` | L15, L16 | Edge `MERGE`/delete on hubs and `DETACH DELETE` + recreate of hubs; read transactions repeat a one-hop and a `*1..3` traversal | No dangling arc at quiescence; repeated traversals identical |
+| `L11.<arm>` | L11, L12 | Disjoint writers, no checkpointer, session and sessionless | Session arm 0 self-conflicts (and so 0 conflicts) |
+| `L13`, `MG11`, `L14` | L13, MG11, L14 | `MERGE` storms on 4 keys: autocommit under UNIQUE, explicit under UNIQUE, autocommit without a constraint | One node per key under UNIQUE; every failure typed; L13 and L14 every caller succeeds (D5), L14 duplicates counted |
+| `L15`, `L16` | L15, L16 | Edge `CREATE` (parallel edges)/delete on hubs and `DETACH DELETE` + recreate of hubs; read transactions repeat a one-hop and a `*1..3` traversal. After the churn, two interleavings are CONSTRUCTED once on nodes the churn never draws (rmp #3007): a `DETACH DELETE` whose snapshot predates a committed arc, run after a third transaction appended to the hub and rolled back (rmp #2997); and a read transaction that reads before and after a hub is created after its snapshot and a `DETACH DELETE` of it is rolled back (rmp #3001) | No dangling arc at quiescence; repeated traversals identical; the stale `DETACH DELETE` refused with a serialization conflict (`stale_detach_refused`); the read transaction never sees the young hub (`young_node_stays_invisible`) |
 | `L17` | L17 | 8 transactions hold 16 000 (soak: 150 000) uncommitted nodes; counts; a 9 M-row statement cancelled after 2 ms | Count = committed only; cancelled statement returns `context.Canceled` within 1 s |
 | `L18` | L18 | Property writes, edge creates and `DETACH DELETE`s, 50% rolled back | Total <= Bound after quiescence; 0 dangling arcs; every hub writable by a lone writer |
 | `L19` | L19, DD08, DD09 | `CREATE`/`DROP INDEX` cycles and an overlapping `CREATE INDEX` on the same object while writers churn and the vacuum is swept in a loop | Seek = scan; every DDL refusal classified (`already_exists`); DDL latency below `hangBudget`; no writer starved |
+| `IX11` | IX11 (Turso `tests.rs:4940`, `:5550`, MIT) | One writer re-values the hash-indexed `s` and the btree-indexed `b` of all 64 `:L` nodes in one autocommit statement, generation after generation; every goroutine opens read transactions at every instant, the index delivery included, reads the generation its snapshot holds and seeks the current and the next generation's value of one node through each index | `seeks_planned_as_index`, `commits_overlapped_reads`, `never_mixed` (one generation per snapshot), `seek_equals_scan` |
+| `L21` | L21 (Turso `shuttle_mvcc.rs:749`, `tests.rs:792`, MIT) | One writer `SET n.v = i` in a loop; a goroutine calls `ReclaimNow` without pause; every goroutine opens read transactions that read `n` three times, 2 ms apart | `reclaimed_during_reads`, `node_seen_exactly_once`, `value_committed_by_start` (between the value acknowledged before BEGIN and the value attempted after it), `repeatable`, and the sampler's `watermark_regressions_zero`, `horizon_stale_leaves_zero` |
+| `L22`, `L22.crash` | L22 (Turso `tests.rs:5403`, `:18953`, MIT) | Bank transfers (two accounts per goroutine, at least 8; each also creates a `:Tr` node) on the durable store while `RunCheckpoint` runs back to back; read transactions repeat `sum` and `count` three times, 1 ms apart; half-way, after a checkpoint, a crash image is copied between checkpoints under the commit lock and recovered | `checkpoints_ran`, `snapshots_pinned_across_reads`, `snapshot_total_and_count_constant`, `crash_image_after_checkpoint`; after recovery `snapshot_used`, `total_and_count_unchanged`, `acked_present` |
 
 Every sampled arm also runs a sampler on `lpg.MVCCStats` every 500 µs and gates
 `WatermarkRegressions = 0` and `HorizonStaleLeaves = 0` at every sample, `WithinCeiling()`
@@ -762,6 +840,59 @@ tests (`graph/mvcc/publish_convoy_test.go`) cover its regression.
   with this workload; the deterministic catch remains `graph/mvcc/publish_convoy_test.go`.
 - **Long-reader retention, shown.** `retention_shown` holds at every level: with the reader
   open, Total reached 12 288 against Bound 4 096 (64 goroutines), and fell to 0 after release.
+
+### Sizes (rmp #2993)
+
+Each arm's short-layer size is the smallest measured to still fail with its target defect
+restored. Detection was measured on the durable store under `-race`, by building the
+example with `go build -overlay` over a copy of the engine file with the fix reversed
+(`git diff <fix>^ <fix>` applied in reverse to the current file), seeds 1-5:
+
+| Gate | Target defect (fix reverted) | Total ops, old → new | Detection at the new size | Wall clock, 1+8+64, old → new |
+|---|---|---|---|---|
+| `L13` `every_caller_succeeds` | rmp #2987 (`fe8864b0`) | 256 → 32 | 6 of 6 runs at 8 and at 64 goroutines (10 of 10 at 256) | 0.47 s → 0.13 s |
+| `L15` `no_dangling_edge` | rmp #2988 (`9d0d315e`) | 256 → 64 | 9 of 9 runs at every level (8 of 9 at 32, so 32 was rejected) | 0.71 s → 0.50 s |
+| `L06` `btree_index_equals_scan` | rmp #2989 (`8999e4b4`), the property-write and the whole fix | 256 (kept) | 15 of 15 at 1, 8 and 64 for both reverts, at 32, 64, 128 and 256: the interleaving is constructed | — |
+| `L06` `seek_equals_scan` | rmp #2989, the whole fix | 256 (kept) | at 64 goroutines only: 2 of 5 at 128, 1 of 5 at 64, 0 of 5 at 32, so not reduced | — |
+| `L15` `stale_detach_refused`, `no_dangling_edge` | rmp #2997 (`32efbe73`) | 64 | 9 of 9 at 1, 8 and 64 goroutines: the interleaving is constructed | — |
+| `L16` `young_node_stays_invisible` | rmp #2999/#3001 (`676a6b94`) | 64 | 9 of 9 at 1, 8 and 64 goroutines: the interleaving is constructed | — |
+| `TestRun` phase 5 (catalogue) | rmp #2986 (`8f933554`) | the whole catalogue → not run | with the fix reverted, `TestCatalogue` fails (`GG06/gg06-delete-same-edge-instance`) while `TestRun` with phase 5 passed: phase 5 added no detection | 28.7 s → 0 s |
+| `TestDurability` checkpoint arm (D09, D16) | rmp #2990 and #2991 (`828f1661`) | 384 → 24 transactions | 24 of 24 runs fail (seeds 1-3 at 192, 96, 48 and 24, writers 8 and 64): `D09.missing_segment refused_loudly`, `D09 capture_not_refused` (since WAL v2 step 1 the refusal no longer exists and `D09 checkpoint_ran` gates the first attempt); at 64 writers the 4-per-writer floor keeps 256 | 4.4 s + 8.7 s → 0.25 s + 2.3 s |
+
+#### Turso arms (rmp #3017, #3018)
+
+The Turso arms have no historical fix to revert, so each is sized against a seeded
+mutant applied with `go test -overlay` (never written to the tree), under `-race`,
+with the injected fsync latency, levels 1, 8 and 64, three runs per size:
+
+| Gate | Seeded mutant | Total ops | Detection | Green |
+|---|---|---|---|---|
+| `IX11` `seek_equals_scan` | `index.Manager.DescribesSnapshot` always true (the seek never declines to the scan) | 16 | 3 of 3 runs at every level; at 4, level 1 runs too few commits to overlap a read (`commits_overlapped_reads` fails). Since rmp #3061 the btree arm's read of the next generation's key, absent from the reader's snapshot, is planned as a seek, not a label scan, so both btree reads compare a seek with a scan; re-measured: 3 of 3 runs at every level | 3 of 3 |
+| `L21` `value_committed_by_start`, `repeatable` | `Horizon.Oldest` returns its fallback without scanning the readers (reclaim past the watermark) | 4 (the 4-per-goroutine floor) | 3 of 3 runs at every level (`repeatable`; `value_committed_by_start` at 8 and 64 in every run) | 3 of 3 |
+| `L22.crash` `acked_present`, `total_and_count_unchanged` | `Checkpointer.awaitCommitQuiescence` returns at once (checkpoint capture skew: the durable-but-unpublished window is not waited out) | 32 | 5 of 5 runs fail at one level or more, never at the same levels every run (for example `1 of 174 acknowledged transfers missing`, `recovered sum=12802`); at 16, 2 of 3 | 3 of 3 |
+
+`IX11` runs 64 nodes because of the planner, not the delivery: at 32 and 48 nodes the
+parameterised btree prefix seek is planned as a label scan, and
+`seeks_planned_as_index` fails.
+
+At the soak layer's 256 and 1 024 goroutines (4 096 operations) the three arms passed
+3 of 3 runs. The first soak run of `L22` caught the arm's OWN defect: a transfer
+that exhausted its retry budget was logged as acknowledged, and `acked_present`
+reported 21 of 2 178 (256) and 576 of 2 706 (1 024) "acknowledged" transfers missing,
+against 33 and 865 unrecovered. Only a transfer whose commit returned nil is logged
+now, and unrecovered transfers are telemetry, as in every other arm.
+
+Not reduced, because no defect was available to prove that a smaller size still detects:
+L01, L04, L05, L08, L10, L11, L17, L18, L19, and the abandon and fsync arms of phase 7
+(the D14 seam proves only `acked_present`). The churn of L15 and L16 — `no_dangling_edge`
+by chance and `traversal_repeatable` — detects neither rmp #2997 nor rmp #2999 reverted:
+0 of 15 runs at 1, 8 and 64 goroutines and 0 of 4 at 256 and 1 024 (4 096 operations).
+Both are detected only by the constructed interleavings above.
+
+Phases 1 to 3 and 5 run on the in-memory engine: they drive `lpg.Graph.ApplyVersioned`
+and `lpg.Session` directly (phase 5 also `cypher.NewEngineWithOptions`), which the
+durable store does not route through its WAL, so they cannot be moved to `store.Open`
+without changing what they measure. Phase 4 restarts a WAL-backed store under `TMPDIR`.
 
 ### Coverage
 
@@ -827,19 +958,52 @@ are verdicts, and `# durability.<row> level=<n> ...` lines are telemetry.
 | D01 | `D01`, `D01.durable`, `D01.written` | In-process crash image at half of 384 transactions, 8 and 64 writers | `acked_present`, `refused_absent`, `writers_running_at_crash`, `no_unexpected_errors`, `acknowledged_seen` |
 | D02 | `D02.run0`..`run4` (soak) | `kill -9` of a child with 32 writers, an open transaction and a checkpointer triggered back to back; killed after 100 + 60 x run acknowledgements. Every `A` line the child wrote after its commit returned nil is owed | Same gates as D01 on the killed directory |
 | D03 | `D03`, `D01.durable`, `D01.written` | Crash points: after append and before fsync (bytes beyond the durable offset, durable image), after fsync and before acknowledgement (durable but unacknowledged), and bytes written but not yet fsynced (written image) | In-doubt transactions whole or absent (`whole_or_absent`); counts reported as `durable_but_unacknowledged` and `appended_not_durable_or_in_flight` |
-| D04 | `D04`, `D04.reopen` | WAL over `internal/testfs` with fsyncs failing after 12 successes, which discards the unsynced suffix | `failure_seen`, `post_poison_commit_refused`, `failed_not_visible` (live engine), `recovers_exactly_the_acknowledged`, and every image gate on the reopened directory |
+| D04 | `D04`, `D04.reopen` | Tail WAL segment over `internal/testfs` with fsyncs failing after 12 successes, which discards the unsynced suffix | `failure_seen`, `post_poison_commit_refused`, `failed_not_visible` (live engine), `recovers_exactly_the_acknowledged`, and every image gate on the reopened directory |
 | D05 | every image | Three-statement transactions in flight at the crash | `whole_or_absent`, `counters_conserved` |
 | D06 | `D01.*`, `D02.*` | One transaction left open across the crash (the kill child reopens it every 5 ms) | `open_absent` |
 | D07 | every image | Clock read with the "before" count; new session; new commit | `clock_not_rewound`, `new_session_sees_acked`, `post_recovery_commit_is_new` |
 | D08 | `D08.reference`, `D08.torn`, `D08.garbled` | The durable image with its last frame cut by 3 bytes, or with its last byte inverted | `damaged_record_discarded_alone`: against the undamaged image, at most one transaction is lost, none is gained and none is partial. The garbled image must be opened for writing exactly when recovery reports it clean (`refused_unless_clean`) |
-| D09 | `D09`, `D09.pre_capture`, `D09.pre_truncate`, `D09.post_truncate` | The run's first successful checkpoint under load, imaged before the capture, after the snapshot is published and before the WAL prefix is truncated, and after the truncation | `checkpoint_ran` and every image gate at each phase. The kill runs add crashes at random checkpoint points |
+| D09 | `D09`, `D09.pre_capture`, `D09.post_checkpoint`, `D09.missing_segment` | One checkpoint under load, with no retry, imaged under the commit lock before the capture and after the checkpoint returns (its segment unlink takes no commit lock, so there is no image between the control-file write and the unlink); the post-checkpoint image is then recovered without its snapshot directory | `checkpoint_ran` (the single attempt succeeds), every image gate at each phase, and `missing_segment.refused_loudly` (recovery returns `recovery.ErrMissingSnapshot` and is not clean). The kill runs add crashes at random checkpoint points |
 | D10 | every fully opened image | Seek = scan for every attempted id on `:D(id)` and `:E(id)`, on `:L(id)`, and on the `:D`/`:E` count store | `seek_equals_scan`, `unique_holds` |
 | D11 | `D11`, `D01.*` | `CREATE`/`DROP INDEX cyc_g` and `CREATE`/`DROP CONSTRAINT cyc_e` cycled during the abandon arm | `ddl_ran`; after recovery, seek = scan on `cyc_g` when it is present (`seek_equals_scan`); no duplicate `:E(id)` while `cyc_e` is present (`unique_holds`) |
 | D12 | `D01.*` | Four transactions, each with one 1 MiB string | `blobs_identical` |
-| D13 | `D13` | The torn image: recovery interrupted (context cancelled at 0 µs to 2 ms), then opened for writing (which repairs the torn tail) and closed, then recovered again | `recovery_interrupted`, `double_recovery_identical` |
+| D13 | `D13` | The torn image: recovery interrupted inside the WAL replay (a context that reports cancellation from its second check, so at the first replayed frame; structural, rmp #3000), then opened for writing (which repairs the torn tail) and closed, then recovered again | `recovery_interrupted`, `double_recovery_identical` |
 | D14 | `D14` | Negative control: the seam cuts the durable image at the last WAL frame carrying an acknowledged transaction's tag. Off by default (`durabilityConfig.dropLastAcked`) | `TestDurabilityNegativeControl`: `acked_present` must fail |
 | D15 | `D01.*`, `D02.*` | Transactions ordered by the WAL offset of their tag | `wal_tags_seen`, `no_hole`: no acknowledged transaction is absent below a recovered one |
-| D16 | `D16` | The pre-truncate image recovered with its snapshot, and without it (a full WAL replay) | `snapshot_used`, `checkpoint_plus_tail_equals_full_replay` (identical state fingerprints) |
+| D16 | `D16` | The pre-truncate image recovered with its snapshot, and without it and its WAL prefix marker (a full WAL replay) | `snapshot_used`, `checkpoint_plus_tail_equals_full_replay` (identical state fingerprints) |
+| D17 | `D17` (Turso `tests.rs:2751`, `logical_log.rs:4741`, MIT) | Epoch 1: 2 commits per writer; crash image with the last WAL frame torn by 3 bytes; the image opened for writing; epoch 2: 2 commits per writer; second crash image; recovery | `torn_record_discarded_alone` (the tear loses at most one acknowledged commit), `epoch1_survives_second_recovery`, `epoch2_present` (the second recovery does not stop at the first epoch's torn bytes) |
+| D18 | `D18` (Turso `tests.rs:3302`, MIT) | 2 commits per writer; T0 reserves a commit instant with `lpg.Graph.AllocateCommitTS` on the store's graph and does not publish it (H2); T1 commits; `RunCheckpoint` starts and T0 is held 50 ms; T0 released; crash image after the checkpoint; recovery | `t1_acked_while_t0_held`, `checkpoint_waited` (not finished and nothing truncated while T0 was held), `checkpoint_ran_after_release`, `acked_present_after_crash` (snapshot used) |
+| D19 | `D19` (Turso `group_commit_tests.rs:378`, `tests.rs:14581`, `shuttle_mvcc.rs:349`, MIT) | `txn.Tx.CommitCtx` with its context cancelled (a) before the call, then retried; (b) at a random point within twice the fsync latency; (c) after it returned; 2 rounds per writer; crash image; recovery | `a_refused_with_canceled`, `a_retry_commits`, `c_completes`, `no_unexpected_errors`, `committed_equals_ok_in_memory` and `committed_equals_ok_after_crash` (no ghost, no lost commit), `later_commit_not_blocked` |
+
+**D18 and seam H2.** `AllocateCommitTS` cannot hold a commit inside `store/txn` between
+its fsync and its publish: `Tx.CommitCtx` runs `lpg.Graph.ApplyDurable`, whose durable
+step fsyncs with commit timestamp 0 and publishes when the apply bracket ends, with no
+caller-visible point between them. The Cypher engine's commit (`Tx.CommitWALOnly` plus an
+lpg bracket) allocates through `AllocateCommitTS` after its fsync, but exposes no hook
+to hold it there. D18 therefore holds the window directly on the store's graph: an
+allocated, unpublished instant is exactly what `AwaitCommitQuiescence` waits for,
+whatever path allocated it. T0 writes nothing, so nothing outside the WAL reaches the
+snapshot. The other D18 branch — a T0 never released fails the checkpoint without
+truncating — is not exercised: its bound (`commitQuiesceTimeout`) is 30 s.
+
+**D19 (b) in practice.** In the measured runs every phase-(b) commit returned OK
+(`b_cancelled=0`): the apply takes its claims within microseconds, so a cancellation
+drawn across the fsync lands after them, where `CommitCtx` no longer consults its
+context. Phase (a) is the cancellation-before-claims path.
+
+### Negative controls (D17-D19, rmp #3019)
+
+Seeded faults applied with `go test -overlay`, never written to the tree, at 8 and 64
+writers:
+
+- **D17** — `wal.Open` keeps the torn tail (`store/wal/writer.go`, the
+  `ErrTornFrame` truncation skipped): `epoch2_present` fails at both levels.
+- **D18** — `Checkpointer.awaitCommitQuiescence` returns at once: `checkpoint_waited`
+  and `acked_present_after_crash` fail at both levels (T1, durable below the
+  watermark and invisible behind T0, is missing from the snapshot).
+- **D19** — `Tx.CommitCtx` reports a completed commit as cancelled when its context is
+  done by then (a ghost commit): `committed_equals_ok_in_memory` and
+  `committed_equals_ok_after_crash` fail at both levels, 3 of 3 runs.
 
 ### Negative control (D14)
 
@@ -852,28 +1016,43 @@ reader.
 
 ### Defects found
 
-Both are reported as metrics, not gated.
+Both were found by this phase, are fixed, and are now gated.
 
-- **D09 — a lost snapshot directory is not detected after a WAL prefix truncation.**
-  After a checkpoint truncates the WAL prefix it folded, removing `snapshot/` leaves a
-  directory that recovery opens with a nil error and `IsClean() = true`. The commits in
-  the truncated prefix are missing: 130 acknowledged commits at both 8 and 64 writers.
-  PostgreSQL refuses to start when a needed WAL segment is missing
-  (`050_redo_segment_missing`). Reproduction: `store.Open`; commit; `checkpoint.New(...)`
-  wired with `WithCommitSerialiser(o.Store().RunUnderCommitLock)` and the codecs, then
-  `RunCheckpoint()`; close; `rm -r <dir>/snapshot`; `recovery.Open(dir)` returns a nil
-  error, the result is clean, and the folded commits are absent. Expected: an error, or
-  `IsClean() = false`. Reported as `# durability.D09.missing_segment ... refused_loudly`.
-- **D09 — a checkpoint capture is refused under explicit-transaction load.**
-  `RunCheckpoint`, wired with `RunUnderCommitLock` while writers run three-statement
-  explicit transactions, intermittently returns `snapshot.ErrCaptureNotQuiesced`. One
-  observed message was: "capture instant taken while a write transaction was open:
-  shard 98 drops node 2402 (interned, not visible at instant 132) but keeps node 2658
-  above it". It occurred on the first attempt at 8 writers in one run, and 3 times in 4
-  attempts at 64 writers under `-race`. `docs/isolation-design.md` states that the drain
-  leaves no interned-but-uncommitted id. The refusal publishes and truncates nothing, so
-  durability holds, but checkpoints can stall. The root cause has not been established.
-  The arm retries, and reports `checkpoint_attempts` and `checkpoint_refused_not_quiesced`.
+- **D09 — a lost snapshot directory was not detected after a WAL prefix truncation
+  (rmp #2990, fixed).** After a checkpoint truncated the WAL prefix it folded, removing
+  `snapshot/` left a directory that recovery opened with a nil error and
+  `IsClean() = true`; the commits in the truncated prefix were missing: 130
+  acknowledged commits at both 8 and 64 writers. PostgreSQL refuses to start when a
+  needed WAL segment is missing (`050_redo_segment_missing`). Reproduction:
+  `store.Open`; commit; `checkpoint.New(...)` wired with
+  `WithCommitSerialiser(o.Store().RunUnderCommitLock)` and the codecs, then
+  `RunCheckpoint()`; close; `rm -r <dir>/snapshot`; `recovery.Open(dir)`. The fix made
+  a marker file (`wal.PrefixTruncatedMarkerPath`) durable before the first discard of
+  history; since the segmented WAL (docs/design-wal-v2.md) the same record is the WAL
+  control file's prefix-truncated flag, written before any segment is unlinked.
+  Recovery refuses a directory that records a truncated prefix but holds no snapshot
+  with `recovery.ErrMissingSnapshot`; `store.Open` refuses it with `store.ErrUncleanRecovery`.
+  Gated as `durability.D09.missing_segment ... refused_loudly`.
+- **D09 — a checkpoint capture was refused under explicit-transaction load
+  (rmp #2991, fixed).** `RunCheckpoint`, wired with `RunUnderCommitLock` while writers
+  run three-statement explicit transactions, intermittently returned
+  `snapshot.ErrCaptureNotQuiesced`. One observed message was: "capture instant taken
+  while a write transaction was open: shard 98 drops node 2402 (interned, not visible at
+  instant 132) but keeps node 2658 above it". It occurred on the first attempt at 8
+  writers in one run, and 3 times in 4 attempts at 64 writers under `-race`. The
+  capture walks the mapper after the commit lock is released; an id interned after the
+  instant by a transaction that then rolled back lost its birth record when the abort
+  was withdrawn, so it read as interned before the instant and was kept above a dropped
+  id. The checkpointer now opens its instant with `lpg.Graph.BeginCaptureRead`, which
+  reads the mapper watermark just after the instant, and the capture keeps exactly the
+  per-shard prefix the watermark names. The drain does not stop every interning: an id
+  the watermark covered but that was not visible at the instant was then captured as a
+  tombstone with its key, which WAL replay did not revive when its transaction created
+  the node through an edge alone (`docs/design-wal-v2.md` risk 7, confirmed). The arm
+  makes one attempt, with no retry, gated by `checkpoint_ran`. WAL v2
+  step 1 then retired the refusal itself: the capture carries only the ids ever born as
+  of its instant, every other assigned id is a hole, and recovery accepts holes
+  (`docs/design-wal-v2.md` §3).
 
 ### Observed, by contract
 
@@ -892,7 +1071,83 @@ go run ./examples/37_mvcc_write_contention -ladder-levels "" -durability-levels 
 ```
 
 Every image and every derived copy is created under `TMPDIR` and removed at the end of
-its arm.
+its arm. `TestDurability` opens the live stores of the in-process arms (D01, D09) with the
+same injected fsync latency as the ladder (1-5 ms, `GOGRAPH_FSYNC_LATENCY=off` to disable,
+`GOGRAPH_FSYNC_LATENCY_SEED` to replay; rmp #3022); the binary and the kill -9 child run
+without it.
+
+## Phase 8 — node identity across processes (GG07, rmp #3015)
+
+Catalogue row GG07: node identity under concurrent `CREATE`, rollback and store reopen
+(`identity.go`). A `CREATE` gets a hidden node key from a counter that is process-wide,
+so the scenario needs fresh processes: every workload runs in a child — this binary
+with `-identity-child`, or the test binary re-executed — whose counter starts at zero,
+as a restarted application's would. The stores are persisted (`store.Open`) under
+`TMPDIR`.
+
+### Workload
+
+8 concurrent sessions, 6 explicit transactions each; each transaction runs one
+`CREATE (n:P:T_<tag> {tag, s, i})`, and the odd ones are rolled back. The committed
+`CREATE`s whose transaction number is a multiple of four are then deleted.
+
+### Arms
+
+- **reopen** — child 1 writes store R; child 2 reopens R and runs the workload again.
+- **two_stores** — child 1 writes store B; child 2 runs one `CREATE` in a fresh store A,
+  then opens B and runs the workload on A and B at the same time.
+- **memory** — child 2 runs one `CREATE` in a fresh in-memory graph, then recovers B
+  into a second in-memory graph (`recovery.Open`, read-only) and runs the workload on
+  both at the same time. It checks both graphs itself, because they end with it.
+
+Each arm makes its collision certain rather than likely. A seeding child runs four
+committed anchor `CREATE`s before its sessions, so keys 1 to 4 of its store are live,
+and the first `CREATE` on the second graph after the one-shot seed draws key 2. The
+seeding child also commits and then deletes one last `CREATE`, so the largest key of
+its store belongs to a deleted node.
+
+### Gates
+
+Every acknowledged `CREATE` reports the hidden key, `id()` and `elementId()` it was
+given, read in the process that committed it. The parent reopens each persisted store
+and gates, for every arm:
+
+| Check | Holds when |
+|---|---|
+| `exercised` | the store has commits, rollbacks and deletes |
+| `keys_distinct` | no hidden key was given to two acknowledged `CREATE`s over the store's history, deleted nodes included |
+| `acked_ids_distinct_in_process` | no `id()` or `elementId()` was given to two acknowledged `CREATE`s of one process |
+| `acked_present_once` | every acknowledged, undeleted `CREATE` is present exactly once |
+| `nothing_else_present` | no other node is present (rolled-back and deleted nodes absent) |
+| `no_merged_identity` | every node has only its own two labels and three properties |
+| `ids_distinct` | the live nodes' `id()` and `elementId()` values are all distinct |
+
+With the fix reverted (`go test -overlay` over `cypher/exec/create_node.go`, `merge.go`
+and `merge_pattern.go`), `keys_distinct` failed in every arm, and `acked_present_once`,
+`nothing_else_present` and `no_merged_identity` failed in two_stores and memory, in 5
+of 5 runs. With the fix, the gate passed in 30 of 30 runs. The defect is D8 under
+phase 5's "Defects found".
+
+### Gated since WAL v2 step 3
+
+`ids_reused_across_processes` and `ids_moved_across_processes` compare `id()` and
+`elementId()` across processes: an id given to `CREATE`s in two different processes,
+and a live node whose id differs from the one its `CREATE` returned. Before WAL v2 step 3
+(rmp #3021 A) they were reported, not gated: `id()` was not stable across a reopen when
+rolled-back `CREATE`s preceded committed ones in a mapper shard, because a rolled-back
+`CREATE` kept its position in the process that ran it while recovery appended only
+committed keys. In one probe, 62 of 200 committed nodes came back with a different
+`id()`. Every commit marker now names the exact id of each node its transaction created,
+recovery places each key at that id, and both are gates at 0.
+
+### Running
+
+```
+go test -race -run '^TestIdentity$' ./examples/37_mvcc_write_contention/
+go run ./examples/37_mvcc_write_contention -ladder-levels "" -durability-levels ""
+```
+
+The binary runs phase 8 unless `-skip-identity` is set.
 
 ## Status
 

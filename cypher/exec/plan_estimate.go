@@ -100,6 +100,11 @@ const (
 	// EstimateHeuristic is a principled formula over real inputs (1/NDV × N). It
 	// renders with the approximation marker.
 	EstimateHeuristic
+	// EstimateBound is an UPPER BOUND that never under-counts — a label's raw
+	// index cardinality plus the MVCC churn not yet reclaimed — which the planner
+	// reads in O(1) instead of an exact count that would need an MVCC correction
+	// (rmp #3010). It renders with the approximation marker.
+	EstimateBound
 )
 
 // Known reports whether the source designates an estimate at all.
@@ -121,6 +126,8 @@ func (s EstimateSource) String() string {
 		return "stats"
 	case EstimateHeuristic:
 		return "heuristic"
+	case EstimateBound:
+		return "bound"
 	case EstimateAbsent:
 		return ""
 	default:
@@ -148,7 +155,8 @@ const EstRowsUnknown = "-"
 // EstRowsCell renders one operator's estimate for a fixed-width table cell:
 //
 //   - "42"  — an exact, maintained count ([EstimateExact]).
-//   - "~42" — an approximation ([EstimateStats] or [EstimateHeuristic]). The tilde
+//   - "~42" — an approximation ([EstimateStats], [EstimateHeuristic] or
+//     [EstimateBound]). The tilde
 //     is the marker [cypher.Engine.ExplainTable] already uses, and the same one
 //     [EstRowsAnnotation] carries into the indented tree.
 //   - "-"   — no estimate ([EstimateAbsent] / [EstRowsUnknown]).

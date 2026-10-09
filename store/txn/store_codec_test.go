@@ -45,6 +45,9 @@ func TestNewStoreWithCodec_EmitsV3(t *testing.T) {
 	defer func() { _ = r.Close() }()
 	var kinds []byte
 	if err := r.Replay(func(f wal.Frame) error {
+		if len(f.Payload) > 0 && f.Payload[0] == wal.ControlRecordTag {
+			return nil // a node id reservation (WAL v2 step 4), not a transaction frame
+		}
 		if len(f.Payload) < 2 {
 			t.Fatalf("payload too short: %d", len(f.Payload))
 		}

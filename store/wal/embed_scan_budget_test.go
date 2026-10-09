@@ -40,7 +40,7 @@ func TestEmbedsValidFrame_AdversarialTailIsBounded(t *testing.T) {
 	// Lay candidates every HeaderSize bytes only where end (= off+HeaderSize+plen)
 	// still fits in buf, so each is an in-range candidate the scan must CRC.
 	for off := 0; off+HeaderSize+int(plen) <= n; off += HeaderSize {
-		putCandidateHeader(buf, off, CurrentVersion, plen, wrongCRC)
+		putCandidateHeader(buf, off, LegacyVersion, plen, wrongCRC)
 	}
 
 	start := time.Now()
@@ -87,8 +87,8 @@ func TestEmbedsValidFrame_GenuineEmbeddedFrameDetected(t *testing.T) {
 	for i := range buf {
 		buf[i] = 0x5A
 	}
-	crc := crc32Header(CurrentVersion, uint32(len(payload)), payload)
-	putCandidateHeader(buf, off, CurrentVersion, uint32(len(payload)), crc)
+	crc := crc32Header(LegacyVersion, uint32(len(payload)), payload)
+	putCandidateHeader(buf, off, LegacyVersion, uint32(len(payload)), crc)
 	copy(buf[off+HeaderSize:], payload)
 
 	if !embedsValidFrame(buf) {

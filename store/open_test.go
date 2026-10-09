@@ -37,6 +37,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -197,48 +198,32 @@ func buildCommittedWAL(t *testing.T, dir string, keys ...string) {
 func injectUndecodableBodyInCommittedTxn(t *testing.T, dir string, txnSeq uint64) {
 	t.Helper()
 	walPath := filepath.Join(dir, "wal")
-	raw, err := os.ReadFile(walPath) //nolint:gosec // path under t.TempDir
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	var frames []wal.Frame
 	injected := false
-	r := bytes.NewReader(raw)
-	for {
-		f, derr := wal.Decode(r)
-		if derr != nil {
-			break
-		}
+	err := waltest.RewriteFrames(walPath, func(_ int, f *wal.Frame) bool {
 		op, oerr := recovery.Decode(f.Payload)
 		if oerr != nil {
 			t.Fatalf("recovery.Decode: %v", oerr)
 		}
 		if !injected && op.Version == txn.OpRecordV3 && op.TxnSeq == txnSeq && op.Kind != txn.OpCommit {
-			f.Payload = append([]byte(nil), f.Payload[:10]...)
+			f.Payload = f.Payload[:10]
 			injected = true
 		}
-		frames = append(frames, f)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("rewrite WAL: %v", err)
 	}
 	if !injected {
 		t.Fatalf("no data frame of transaction %d in %s", txnSeq, walPath)
-	}
-	var out bytes.Buffer
-	for i := range frames {
-		if _, err := wal.Encode(&out, frames[i]); err != nil {
-			t.Fatalf("wal.Encode(frame %d): %v", i, err)
-		}
-	}
-	if err := os.WriteFile(walPath, out.Bytes(), 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
 	}
 }
 
 // readWAL returns dir/wal's bytes.
 func readWAL(t *testing.T, dir string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(dir, "wal")) //nolint:gosec // path under t.TempDir
+	b, err := waltest.LogImage(filepath.Join(dir, "wal"))
 	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+		t.Fatalf("read WAL image: %v", err)
 	}
 	return b
 }
@@ -313,13 +298,21 @@ func TestOpen_FailStopCorruption_Refused(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	buildCommittedWAL(t, dir, "a", "b", "c")
-	raw := readWAL(t, dir)
 	// Flip one byte inside the first frame's payload: its CRC no longer
 	// matches and every later frame is unreachable.
-	raw[20] ^= 0xFF
-	if err := os.WriteFile(filepath.Join(dir, "wal"), raw, 0o600); err != nil {
+	locs, err := waltest.LocateFrames(filepath.Join(dir, "wal"))
+	if err != nil || len(locs) == 0 {
+		t.Fatalf("locate WAL frames: %v (%d frames)", err, len(locs))
+	}
+	seg, err := os.ReadFile(locs[0].Path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	seg[locs[0].Offset+wal.HeaderSizeV2] ^= 0xFF
+	if err := os.WriteFile(locs[0].Path, seg, 0o600); err != nil { //nolint:gosec // G703: path under t.TempDir
 		t.Fatalf("WriteFile: %v", err)
 	}
+	raw := readWAL(t, dir)
 	o, err := store.Open(dir, openOptions())
 	if err == nil {
 		_ = o.Close()
@@ -489,8 +482,8 @@ func TestOpen_SIGKILLReopenAppend_LosesNothingAcknowledged(t *testing.T) {
 		t.Fatalf("%d of %d acknowledged commits lost", lost, len(acked))
 	}
 	requireStrictlyIncreasing(t, walCommitSeqs(t, dir))
-	t.Logf("%d cycles, %d acknowledged commits, all recovered; WALTailOffset=%d",
-		cycles, len(acked), o.Recovery().WALTailOffset)
+	t.Logf("%d cycles, %d acknowledged commits, all recovered; WALEnd=%d",
+		cycles, len(acked), o.Recovery().WALEnd)
 }
 
 // ─── AllowUnclean: read-only open ───────────────────────────────────────────
@@ -501,26 +494,28 @@ func TestOpen_SIGKILLReopenAppend_LosesNothingAcknowledged(t *testing.T) {
 // fail-stop [wal.ErrCRCMismatch] and keeps every transaction before txnSeq.
 func corruptCRCInTxn(t *testing.T, dir string, txnSeq uint64) {
 	t.Helper()
-	raw := readWAL(t, dir)
-	r := bytes.NewReader(raw)
-	for {
-		f, derr := wal.Decode(r)
-		if derr != nil {
-			t.Fatalf("no data frame of transaction %d in the WAL", txnSeq)
-		}
-		op, oerr := recovery.Decode(f.Payload)
+	locs, err := waltest.LocateFrames(filepath.Join(dir, "wal"))
+	if err != nil {
+		t.Fatalf("locate WAL frames: %v", err)
+	}
+	for _, l := range locs {
+		op, oerr := recovery.Decode(l.Frame.Payload)
 		if oerr != nil {
 			t.Fatalf("recovery.Decode: %v", oerr)
 		}
 		if op.Version == txn.OpRecordV3 && op.TxnSeq == txnSeq && op.Kind != txn.OpCommit {
-			end := len(raw) - r.Len()
-			raw[end-1] ^= 0xFF
-			break
+			raw, err := os.ReadFile(l.Path)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			raw[l.Offset+l.Size-1] ^= 0xFF
+			if err := os.WriteFile(l.Path, raw, 0o600); err != nil { //nolint:gosec // G703: path under t.TempDir
+				t.Fatalf("WriteFile: %v", err)
+			}
+			return
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "wal"), raw, 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+	t.Fatalf("no data frame of transaction %d in the WAL", txnSeq)
 }
 
 // uncleanShapes are the two not-clean outcomes, each built over the keys

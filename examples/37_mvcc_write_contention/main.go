@@ -26,6 +26,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"runtime"
 	"sort"
 	"strconv"
@@ -55,11 +56,19 @@ type config struct {
 	// needed, which is why this is a fraction and not a flag.
 	hotPct int
 	seed   uint64
+	// skipCatalogue skips phase 5, the scenario catalogue (catalogue.go). The
+	// binary runs it; the short-layer TestRun skips it because TestCatalogue runs
+	// the same scenarios through the same runner and also diffs every transcript
+	// against its golden.
+	skipCatalogue bool
 	// ladder is phase 6, the concurrency ladder (ladder.go). Zero levels skip it.
 	ladder ladderConfig
 	// durability is phase 7, durability across a crash (durability.go). Zero
 	// levels and zero kill runs skip it.
 	durability durabilityConfig
+	// identity is phase 8, GG07: node identity across processes (identity.go).
+	// A nil childCmd skips it.
+	identity identityConfig
 }
 
 func defaultConfig() config {
@@ -108,7 +117,7 @@ func main() {
 	levels := flag.String("ladder-levels", "1,8,64",
 		"phase 6: comma-separated goroutine counts of the concurrency ladder; empty skips the phase")
 	flag.IntVar(&cfg.ladder.totalOps, "ladder-ops", cfg.ladder.totalOps,
-		"phase 6: operations per arm and level, shared among its goroutines")
+		"phase 6: operations per arm and level, shared among its goroutines; set, it also replaces the smaller default totals of L13 and L15")
 	rows := flag.String("ladder-rows", "",
 		"phase 6: comma-separated arm ids to run (L01,L04,L05,L06,L08,L09,L10,L11,L13,L15,L17,L18,L19); empty runs all")
 	flag.BoolVar(&cfg.ladder.soak, "ladder-soak", false,
@@ -116,7 +125,7 @@ func main() {
 	durLevels := flag.String("durability-levels", "8,64",
 		"phase 7: comma-separated writer counts of the in-process crash arms; empty skips them")
 	flag.IntVar(&cfg.durability.totalTxns, "durability-txns", cfg.durability.totalTxns,
-		"phase 7: transactions per arm and level, shared among its writers; the crash lands at half")
+		"phase 7: transactions per arm and level, shared among its writers; the crash lands at half; set, it also replaces the smaller default total of the checkpoint arm")
 	flag.IntVar(&cfg.durability.killRuns, "durability-kill-runs", 0,
 		"phase 7: kill -9 runs of a child process (D02); 0 skips them")
 	flag.IntVar(&cfg.durability.killLevel, "durability-kill-level", cfg.durability.killLevel,
@@ -124,8 +133,25 @@ func main() {
 	childDir := flag.String("durability-child-dir", "",
 		"INTERNAL: run as the phase-7 kill child against this store directory, until killed")
 	childLevel := flag.Int("durability-child-level", 8, "INTERNAL: writer count of the phase-7 kill child")
+	idChild := flag.String("identity-child", "",
+		"INTERNAL: run as a phase-8 (GG07) child with this spec")
+	skipIdentity := flag.Bool("skip-identity", false, "skip phase 8, node identity across processes (GG07)")
 	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
+
+	if *idChild != "" {
+		if err := runIdentityChild(context.Background(), *idChild, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "identity child: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if !*skipIdentity {
+		cfg.identity.childCmd = func(ctx context.Context, spec string) *exec.Cmd {
+			// os.Args[0] is this example's own binary; the arguments are fixed flags.
+			return exec.CommandContext(ctx, os.Args[0], "-identity-child", spec) //nolint:gosec // G204: the example's own binary, fixed flags
+		}
+	}
 
 	if *childDir != "" {
 		if err := runDurabilityChild(context.Background(), *childDir, *childLevel, os.Stdout); err != nil {
@@ -154,6 +180,14 @@ func main() {
 		}
 	}
 	cfg.ladder.seed = cfg.seed
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "ladder-ops" || f.Name == "ladder-soak" {
+			cfg.ladder.rowOps = nil // an explicit size, or the soak shape, applies to every arm
+		}
+		if f.Name == "durability-txns" {
+			cfg.durability.checkpointTxns = 0 // an explicit size applies to every arm
+		}
+	})
 	if err := cfg.validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
@@ -191,8 +225,10 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 		return err
 	}
 	// PHASE 5 — the deterministic scenario catalogue (catalogue.go).
-	if err := phaseCatalogue(ctx, w); err != nil {
-		return err
+	if !cfg.skipCatalogue {
+		if err := phaseCatalogue(ctx, w); err != nil {
+			return err
+		}
 	}
 	// PHASE 6 — the concurrency ladder (ladder.go).
 	if len(cfg.ladder.levels) > 0 {
@@ -212,6 +248,17 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 		}
 		if f := out.failed(); len(f) > 0 {
 			return fmt.Errorf("durability: %d checks failed:\n%s", len(f), strings.Join(f, "\n"))
+		}
+	}
+
+	// PHASE 8 — node identity across processes, GG07 (identity.go).
+	if cfg.identity.childCmd != nil {
+		out, err := phaseIdentity(ctx, w, &cfg.identity)
+		if err != nil {
+			return err
+		}
+		if f := out.failed(); len(f) > 0 {
+			return fmt.Errorf("identity: %d checks failed:\n%s", len(f), strings.Join(f, "\n"))
 		}
 	}
 

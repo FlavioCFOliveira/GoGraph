@@ -38,6 +38,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -122,7 +123,7 @@ func TestAutocommitWrite_HonoursDeadlineBehindHeldSchemaGate(t *testing.T) {
 				} else {
 					dir = t.TempDir()
 					var err error
-					w, err = wal.Open(filepath.Join(dir, "wal"))
+					w, err = wal.OpenWithSyncLatency(filepath.Join(dir, "wal"), synclatency.ForTest(t))
 					if err != nil {
 						t.Fatalf("wal.Open: %v", err)
 					}

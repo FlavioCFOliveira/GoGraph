@@ -25,8 +25,8 @@ import (
 // shard.
 //
 // The non-blocking checkpoint runs these collectors in its lock-free phase 2
-// (store/checkpoint/checkpoint.go), holding neither the commit lock nor
-// Graph.View, so a concurrent committer that interns a brand-new node/label/
+// (store/checkpoint/checkpoint.go), holding neither the commit lock nor any
+// graph barrier, so a concurrent committer that interns a brand-new node/label/
 // property key on a shard a collector is walking triggers the deadlock — observed
 // in example 17 at 50k accounts / 1M transfers (audit 2026-06-21, reproduced
 // 3/3). The pre-existing checkpoint stall test commits a node with no labels or

@@ -304,9 +304,13 @@ scenario. A green `go test ./...` therefore says nothing about crash safety.
 
 The breakpoints compiled into production packages are
 `checkpoint.p2-snapshot-published-pre-truncate` (`store/checkpoint`),
-`checkpoint.truncprefix.tmp-written-pre-rename`,
-`checkpoint.truncprefix.post-rename-pre-dirfsync`,
-`checkpoint.truncprefix.post-rename-pre-bookkeeping`,
+`checkpoint.control-tmp-pre-rename`, `checkpoint.control-renamed-pre-dirfsync`,
+`checkpoint.unlink-partial`, `checkpoint.unlink-done-pre-dirfsync`,
+`checkpoint.legacy-stub-renamed-pre-dirfsync`,
+`wal.control.tmp-written-pre-rename`, `wal.control.renamed-pre-dirfsync`,
+`wal.segment.spare-created-pre-dirfsync`,
+`wal.migrate.control-written-pre-seal`, `wal.migrate.sealed-pre-first-v2-frame`,
+`wal.rollover.old-flushed-pre-fsync`, `wal.rollover.switched-pre-first-frame`,
 `wal.appendrun.frame-emitted`, `wal.sync.pre-datasync` (`store/wal`),
 `recovery.snapshot-promote-post-rename-pre-fsync` (`store/recovery`) and
 `mvcc.commit.post-fsync-pre-publish` (`cypher`).
@@ -339,10 +343,13 @@ and is false when the deadline elapsed instead — that case sets `Out.TimedOut`
 | Scenario | Breakpoint site | Description |
 |---|---|---|
 | `wal.mid-frame` | helper | Writes one complete WAL frame, appends a partial second-frame header, then SIGKILL; `wal.Reader` must report `ErrTornFrame` |
-| `checkpoint.p2-snapshot-published-pre-truncate` | `store/checkpoint` | Commits an int64-keyed workload, then drives a codec-aware checkpoint that crashes after the self-sufficient snapshot is published and durable but before the WAL prefix is truncated; recovery rebuilds state from the snapshot plus the still-intact WAL |
-| `checkpoint.truncprefix.tmp-written-pre-rename` | `store/wal` | Crash inside `wal.Writer.TruncatePrefix`, after the replacement WAL is written to its temp name but before the rename |
-| `checkpoint.truncprefix.post-rename-pre-dirfsync` | `store/wal` | Same truncate, crashing after the rename but before the parent-directory fsync |
-| `checkpoint.truncprefix.post-rename-pre-bookkeeping` | `store/wal` | Same truncate, crashing after the rename is durable but before the writer updates its own offset bookkeeping |
+| `checkpoint.p2-snapshot-published-pre-truncate` | `store/checkpoint` | Commits an int64-keyed workload, then drives a codec-aware checkpoint that crashes after the self-sufficient snapshot is published and recorded in the WAL control file but before any segment is unlinked; recovery rebuilds state from the snapshot and replays nothing below its redo position |
+| `checkpoint.control-tmp-pre-rename`, `checkpoint.control-renamed-pre-dirfsync` | `store/wal` | A checkpoint of a three-segment log (1 MiB segments) crashes inside its control-file write: before the rename, or after it and before the directory fsync |
+| `checkpoint.unlink-partial`, `checkpoint.unlink-done-pre-dirfsync` | `store/wal` | The same checkpoint crashes after unlinking the first of the segments below the oldest retained position, or after every unlink and before the directory fsync |
+| `checkpoint.legacy-stub-renamed-pre-dirfsync` | `store/wal` | A migrated legacy store's checkpoint crashes after renaming the seal stub over the legacy file, before the directory fsync |
+| `wal.control.tmp-written-pre-rename`, `wal.control.renamed-pre-dirfsync`, `wal.segment.spare-created-pre-dirfsync` | `store/wal` | The first open of an empty directory crashes while creating the control file or the first segment |
+| `wal.migrate.control-written-pre-seal`, `wal.migrate.sealed-pre-first-v2-frame` | `store/wal` | The first writable open of a legacy single-file store crashes inside its migration |
+| `wal.rollover.old-flushed-pre-fsync`, `wal.rollover.switched-pre-first-frame` | `store/wal` | 256 concurrent committers on 1 MiB segments with a seeded fsync latency (`GOGRAPH_CRASH_SEGMENT`, `GOGRAPH_CRASH_SYNCLAT`) crash inside a segment rollover; every acknowledged commit must survive whole |
 | `recovery.snapshot-promote-post-rename-pre-fsync` | `store/recovery` | Stages the interrupted-publish state (the live snapshot archived to `snapshot.bak`) and drives `recovery.Open`, which crashes after promoting `.bak` back onto the live snapshot name via rename but before the parent-directory fsync; a second recovery must still observe the promoted snapshot — guards A1-F4 (#1454) |
 | `constraint.drop.post-wal-sync` | helper | Commits a durable `CREATE CONSTRAINT` (UNIQUE) and a node, then a durable `DROP CONSTRAINT` frame, and crashes after the fsync; recovery must show the constraint and its backing index gone together, with no torn intermediate (#1556) |
 | `edgehandle.setprop.post-wal-sync` | helper | Two parallel edges over one ordered `(src, dst)` pair; a durable `OpSetEdgePropertyByHandle` touches the first handle only, then SIGKILL. Recovery must show the property on that handle alone, the sibling untouched, and still exactly two parallel edges (#1686) |

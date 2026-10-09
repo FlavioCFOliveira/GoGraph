@@ -25,7 +25,6 @@ package cypher
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -58,13 +57,12 @@ func walEngine(t *testing.T) (*Engine, *wal.Writer, string) {
 // plus how many OpCommit markers carried none.
 func walCommitTimestamps(t *testing.T, path string) (found []uint64, absent int) {
 	t.Helper()
-	f, err := os.Open(path) //nolint:gosec // test-owned temp path
+	rd, err := wal.OpenReader(path)
 	if err != nil {
 		t.Fatalf("open wal: %v", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = rd.Close() }()
 
-	rd := wal.NewReader(f, nil)
 	for fr := range rd.Frames() {
 		op, derr := recovery.Decode(fr.Payload)
 		if derr != nil || op.Kind != txn.OpCommit {

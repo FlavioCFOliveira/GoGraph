@@ -63,6 +63,9 @@ type readBuildScaffold struct {
 	subEval  subqueryEvaluator
 	patEval  patternEvaluator
 	bopts    buildOpts
+	// memo is the label resolver's per-statement bitmap memo (rmp #3011), held
+	// here so it costs no allocation of its own. See [labelBitmapMemo].
+	memo labelBitmapMemo
 }
 
 // init wires the scaffold for one execution against the read view rv, and
@@ -80,6 +83,12 @@ func (sc *readBuildScaffold) init(
 	sc.walker.g = rv
 	sc.labelSrc.g = rv
 	sc.labelSrc.eng = e
+	sc.labelSrc.ctx = ctx
+	// Only at a pinned snapshot does every resolution of a label describe the
+	// same instant; a present-time view (a rendering build) re-resolves.
+	if rv.Snapshot() != nil {
+		sc.labelSrc.memo = &sc.memo
+	}
 	sc.subEval.init(&sc.walker, &sc.labelSrc, queryReg, rv)
 	sc.patEval.init(rv, e.maxCollectItems)
 	// A bare pattern predicate reaches EvalPattern with no registry, so the

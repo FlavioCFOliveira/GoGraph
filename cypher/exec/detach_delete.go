@@ -10,8 +10,10 @@ package exec
 //
 // Outgoing edges are removed in bulk via graphMutator.RemoveAllEdgesFrom.
 // Incoming edges are enumerated in the transaction's own view via
-// [inNeighboursInTx] (rmp #2884). Each incoming edge is removed with
-// graphMutator.RemoveEdge before the node itself is cleaned up.
+// [inNeighboursInTx] (rmp #2884), one entry per incoming arc. Each incoming
+// edge is removed with graphMutator.RemoveEdge, which takes out one slot per
+// call, so a source with k parallel arcs is listed k times (rmp #2988), before
+// the node itself is cleaned up.
 //
 // Snapshot before mutate: outgoing and incoming neighbour lists are
 // captured into local slices before the removal loop begins so that the

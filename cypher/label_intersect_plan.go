@@ -182,7 +182,9 @@ func pickLabelIntersection(
 		return "", nil, false
 	}
 
-	// Trustworthiness veto: every candidate's cardinality must be exact (#2076).
+	// Trustworthiness veto: every candidate's cardinality must be trustworthy
+	// (#2076) — exact, or under MVCC churn the O(1) upper bound, which carries the
+	// same churn term for every label and so preserves their order (rmp #3010).
 	var estBuf [maxLabels]estimate
 	ests := estBuf[:len(names)]
 	for i, n := range names {
@@ -298,6 +300,10 @@ type labelCardinalitySource interface {
 // the gate went on to DECLINE. A gate must cost less than the decision it informs,
 // so the count now comes from label.Index.IntersectCardinality, which runs against
 // the live bitmaps under one read-lock.
+//
+// Under MVCC churn the figure is an UPPER BOUND rather than the exact size (rmp
+// #3010, [lpg.Graph.LabelsCountBound]); it carries the same churn term as the
+// per-label bound it is compared with, so the gate compares raw counts.
 //
 // For three or more labels there is no k-way cardinality primitive, so the pairwise
 // count over the two SMALLEST labels is used. That is sound because it is an UPPER

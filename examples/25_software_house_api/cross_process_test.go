@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/testbin"
 )
 
 // These tests build the server binary and drive it as a real OS process,
@@ -28,11 +31,11 @@ type serverProc struct {
 
 func buildServerBinary(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "shapi")
-	cmd := exec.Command("go", "build", "-o", bin, ".") //nolint:gosec // G204: fixed argv — "go build" with a literal flag and an output path under this test's temp dir.
-	cmd.Dir = "."
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Skipf("go build skipped: %v\n%s", err, out)
+	// The binary and the build's work files stay on disk, outside TMPDIR and
+	// GOTMPDIR (internal/testbin, rmp #3028).
+	bin := filepath.Join(testbin.TempDir(t), "shapi")
+	if _, stderr, err := testbin.Go(context.Background(), ".", "build", "-o", bin, "."); err != nil {
+		t.Skipf("go build skipped: %v\n%s", err, stderr)
 	}
 	return bin
 }

@@ -37,12 +37,19 @@ package cypher
 // ready, across the apply. See [lpg.CommitApplier] for why that yields exactly
 // the committed state.
 //
+// # Effects, not requests (rmp #2989)
+//
 // The change payloads themselves (the OLD and NEW property values) are not read
-// here and did not need to change: the old value is captured before the write,
-// and a write that succeeds has, by the node-level write-write conflict rule
-// (graph/lpg/mvcc_node_conflict.go), no other transaction's pending or
-// newer-committed write on that node — so what the capture read is the committed
-// value the write replaces.
+// here; they are right because of what is enqueued. A node label or property
+// change is enqueued only when its write wrote a version
+// ([lpgMutatorAdapter.effectMark]): a write that changes nothing claims nothing,
+// so its change could reach the fan-out after a peer's commit had changed the
+// node, and re-index a value the node no longer carried or delete the peer's
+// entry. A write that does write a version has, by the node-level write-write
+// conflict rule (graph/lpg/mvcc_node_conflict.go), no other transaction's
+// pending or newer-committed write on that node, so the value its own view holds
+// before the write — which is where the OLD value is read ([indexOldValue]) — is
+// the committed value it replaces.
 //
 // # The zero-cost path
 //
@@ -267,6 +274,31 @@ func (s *commitNodeState) NodeEligible(id graph.NodeID, labelID uint32) bool {
 	ok := s.g.NodeExistsAsOf(id, s.snap) && s.g.HasNodeLabelIDAsOf(id, lpg.LabelID(labelID), s.snap)
 	s.remember(commitMemoEntry{node: id, coord: labelID, ok: ok})
 	return ok
+}
+
+// indexOldValue returns the value of n's property key that a write about to be
+// made by the transaction wtx replaces, for the OldValue of the index change the
+// write enqueues into buf; ok is false when there is none. capture is false when
+// the caller knows the change can reach no index — it captures exactly when the
+// pre-image was captured before rmp #2989 (an active undo recorder, an index
+// fan-out, a statistics collector) and, in addition, while an index is being
+// built, whose log replays the change and deletes the old value it carries. An
+// index registered later in the transaction still receives the change at commit,
+// which is why an active undo recorder is enough on its own.
+//
+// It reads through the TRANSACTION's view — its snapshot plus its own writes —
+// and not the graph's present (rmp #2989). The present also holds other
+// transactions' eager, uncommitted values, and one that is being rolled back can
+// still be there when this write succeeds: the bound index then deleted that
+// dying value instead of the committed one, and the committed value stayed in
+// the index beside the new one for good. A write that succeeds has no newer
+// committed or pending write on the node to step over, so the value its own
+// view holds is the one it replaces.
+func indexOldValue(g *lpg.Graph[string, float64], wtx lpg.WriteTx, buf *exec.IndexBuffer, capture bool, n, key string) (lpg.PropertyValue, bool) {
+	if buf == nil || (!capture && !g.IndexManager().Active()) {
+		return lpg.PropertyValue{}, false
+	}
+	return g.WriterViewOf(wtx).GetNodeProperty(n, key)
 }
 
 // armIndexCommit decides how the buffered changes of the transaction wtx reach

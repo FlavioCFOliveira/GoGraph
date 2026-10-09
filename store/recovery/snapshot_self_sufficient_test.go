@@ -13,7 +13,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
-	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestRecovery_V3Snapshot_WALAbsent_SelfSufficient is the regression
@@ -33,10 +32,8 @@ func TestRecovery_V3Snapshot_WALAbsent_SelfSufficient(t *testing.T) {
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal")
 
-	w, err := wal.Open(walPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A single-file log: this test damages or erases it as one file.
+	w := openSingleFileWAL(t, walPath)
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
@@ -184,10 +181,8 @@ func TestRecovery_V3Snapshot_RoundTripByteStable(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal")
-	w, err := wal.Open(walPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A single-file log: this test damages or erases it as one file.
+	w := openSingleFileWAL(t, walPath)
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	for _, e := range []struct{ s, d string }{
@@ -299,10 +294,8 @@ func TestRecovery_V3Snapshot_WALReplayAfterSnapshot(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal")
-	w, err := wal.Open(walPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A single-file log: this test damages or erases it as one file.
+	w := openSingleFileWAL(t, walPath)
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	store := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),

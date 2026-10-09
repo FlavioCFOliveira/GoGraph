@@ -1276,12 +1276,16 @@ func (d *SimDisk) wouldExceedLocked(oldLen, newLen int64) bool {
 // returns a handle positioned per the flags: at end when os.O_APPEND is set, at
 // zero otherwise. When os.O_TRUNC is set the file's contents are discarded. It
 // returns an error wrapping fs.ErrNotExist when the file is absent and
-// os.O_CREATE is not set.
+// os.O_CREATE is not set, and one wrapping fs.ErrExist when os.O_CREATE and
+// os.O_EXCL are both set and the file exists.
 func (d *SimDisk) OpenFile(path string, flag int) (*SimFileHandle, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	f, ok := d.files[path]
+	if ok && flag&os.O_CREATE != 0 && flag&os.O_EXCL != 0 {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrExist}
+	}
 	if !ok {
 		if flag&os.O_CREATE == 0 {
 			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
@@ -2546,11 +2550,11 @@ func (d *SimDisk) ArmDirSyncFaultForPath(dir string) {
 // fsync, one shared body, one fire count — differing only in being keyed on the
 // exact childPath rather than on the directory, so it targets a specific fsync
 // robustly where several fsyncs of the SAME parent directory occur in one
-// operation (see the field docs on [SimDisk]). It models the post-rename
-// parent-directory fsync failing inside [wal.Writer.TruncatePrefix]: that
-// failure must poison the WAL writer (store/wal/writer.go poisonAfterRename)
-// while the on-disk suffix-only WAL — and any snapshot published before it —
-// stays intact and recoverable. It draws nothing from the [Seed], so arming
+// operation (see the field docs on [SimDisk]). It models, for example, the
+// post-rename parent-directory fsync of the WAL control file failing inside a
+// checkpoint ([wal.Writer.MarkCheckpoint]): that failure must fail the
+// checkpoint while the log — and any snapshot published before it — stays
+// intact and recoverable. It draws nothing from the [Seed], so arming
 // never perturbs the reproducible fault stream, and must be called from the
 // controlling goroutine before the operation that will trigger it.
 func (d *SimDisk) ArmParentDirSyncFaultForPath(childPath string) {

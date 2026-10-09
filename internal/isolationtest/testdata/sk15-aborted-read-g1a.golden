@@ -1,0 +1,127 @@
+spec sk15-aborted-read-g1a: 3 sessions, 3 permutations
+# SK15, G1a arm (Turso hermitage_tests.rs:150, :862; MIT, adapted from Hermitage).
+# T1 sets a = 101 and ROLLS BACK; the vacuum is drained after (H1). T2, open since
+# before T1's write, reads (10, 20) before and after the rollback. T3's autocommit
+# reads see a = 10 while T1 is open, after the rollback but before the drain (the
+# aborted head is still in the chain, F5), and after the drain: an aborted version
+# is another transaction's uncommitted work to every reader.
+
+starting permutation: s1u s2r1 s1rb s2r2 s2c s3r1 s1dr s3r2 s3r3
+step s1u: MATCH (n:H {name:'a'}) SET n.v = 101 RETURN n.v AS a
+a  
+---
+101
+(1 row)
+step s2r1: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s1rb: ROLLBACK
+step s2r2: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s2c: COMMIT
+step s3r1: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1dr: <vacuum drain>
+step s3r2: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s3r3: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+
+starting permutation: s1u s3r1 s2r1 s1rb s3r2 s2r2 s1dr s3r3 s2c
+step s1u: MATCH (n:H {name:'a'}) SET n.v = 101 RETURN n.v AS a
+a  
+---
+101
+(1 row)
+step s3r1: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2r1: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s1rb: ROLLBACK
+step s3r2: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2r2: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s1dr: <vacuum drain>
+step s3r3: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+
+starting permutation: s2r1 s1u s3r1 s1rb s3r2 s1dr s3r3 s2r2 s2c
+step s2r1: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s1u: MATCH (n:H {name:'a'}) SET n.v = 101 RETURN n.v AS a
+a  
+---
+101
+(1 row)
+step s3r1: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1rb: ROLLBACK
+step s3r2: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s1dr: <vacuum drain>
+step s3r3: MATCH (n:H {name:'a'}) RETURN n.v AS a
+a 
+--
+10
+(1 row)
+step s2r2: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s2c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)

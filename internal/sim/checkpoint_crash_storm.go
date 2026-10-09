@@ -47,10 +47,12 @@ package sim
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
+	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 )
 
 // ScenarioCheckpointCrashStorm is the catalogue key of the crash-during-
@@ -477,6 +479,17 @@ func runCheckpointStormCycle(
 	}
 
 	st2, err := OpenSimStore(env.disk, env.cfg)
+	if errors.Is(err, recovery.ErrMissingSnapshot) {
+		// Recovery REFUSED the image: the WAL control file records a truncated
+		// prefix and no snapshot covers it. Nothing was recovered, so every
+		// commit the lost snapshot folded is reported missing by the durability
+		// oracle — the refusal is the fail-stop that makes the loss visible
+		// instead of a shorter, clean history.
+		cyc.liveAfterReopen = env.disk.Exists(env.snapDir + "/manifest.json")
+		cyc.bakAfterReopen = env.disk.Exists(env.snapDir + ".bak/manifest.json")
+		out = checkpointStormCycleResult{ConcurrentResult: res}
+		return cyc, out, nil
+	}
 	if err != nil {
 		return cyc, out, fmt.Errorf("reopen after crash: %w", err)
 	}

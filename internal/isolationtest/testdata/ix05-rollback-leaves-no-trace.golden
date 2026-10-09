@@ -88,7 +88,10 @@ k
 "taken"
 (1 row)
 step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
-ERROR: serialization conflict
+s     
+------
+"peer"
+(1 row)
 step s1rb: ROLLBACK
 step s1dr: <vacuum drain>
 step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
@@ -149,7 +152,10 @@ k
 "taken"
 (1 row)
 step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
-ERROR: serialization conflict
+s     
+------
+"peer"
+(1 row)
 step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
 ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "taken" already exists
 step s1rb: ROLLBACK
@@ -202,7 +208,10 @@ s
 "lab"
 (1 row)
 step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
-ERROR: serialization conflict
+s     
+------
+"peer"
+(1 row)
 step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
 k      
 -------
@@ -263,7 +272,10 @@ s
 "lab"
 (1 row)
 step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
-ERROR: serialization conflict
+s     
+------
+"peer"
+(1 row)
 step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
 k      
 -------
@@ -321,7 +333,10 @@ s
 "lab"
 (1 row)
 step s2w: MATCH (m:M {name:'m'}) SET m.s = 'peer' RETURN m.s AS s
-ERROR: serialization conflict
+s     
+------
+"peer"
+(1 row)
 step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
 k      
 -------
@@ -384,7 +399,10 @@ s
 "lab"
 (1 row)
 step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
-ERROR: serialization conflict
+k      
+-------
+"taken"
+(1 row)
 step s1rb: ROLLBACK
 step s1dr: <vacuum drain>
 step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
@@ -445,12 +463,12 @@ s
 "lab"
 (1 row)
 step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
-ERROR: serialization conflict
-step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
 k      
 -------
 "taken"
 (1 row)
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "taken" already exists
 step s1rb: ROLLBACK
 step s1dr: <vacuum drain>
 final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
@@ -486,7 +504,7 @@ seek|scan
 final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
 seek|scan
 ----+----
-1   |1   
+0   |0   
 (1 row)
 
 starting permutation: s1p s2w s1l s2u s1c s1rb s1dr
@@ -511,7 +529,7 @@ k
 "taken"
 (1 row)
 step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
-ERROR: serialization conflict
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "taken" already exists
 step s1rb: ROLLBACK
 step s1dr: <vacuum drain>
 final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
@@ -572,7 +590,7 @@ s
 "lab"
 (1 row)
 step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
-ERROR: serialization conflict
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "taken" already exists
 step s1rb: ROLLBACK
 step s1dr: <vacuum drain>
 final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
@@ -628,7 +646,10 @@ s
 "lab"
 (1 row)
 step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
-ERROR: serialization conflict
+k      
+-------
+"taken"
+(1 row)
 step s1rb: ROLLBACK
 step s1dr: <vacuum drain>
 step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
@@ -689,12 +710,12 @@ s
 "lab"
 (1 row)
 step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
-ERROR: serialization conflict
-step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
 k      
 -------
 "taken"
 (1 row)
+step s2u: CREATE (k:K {k:'taken'}) RETURN k.k AS k
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "taken" already exists
 step s1rb: ROLLBACK
 step s1dr: <vacuum drain>
 final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
@@ -730,7 +751,7 @@ seek|scan
 final ftaken: MATCH (n:K {k:'taken'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'taken' RETURN seek, count(m) AS scan
 seek|scan
 ----+----
-1   |1   
+0   |0   
 (1 row)
 
 starting permutation: s2w s1p s1l s2u s1c s1rb s1dr
@@ -755,7 +776,7 @@ k
 "taken"
 (1 row)
 step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
-ERROR: serialization conflict
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "taken" already exists
 step s1rb: ROLLBACK
 step s1dr: <vacuum drain>
 final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
@@ -816,7 +837,7 @@ s
 "lab"
 (1 row)
 step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
-ERROR: serialization conflict
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "taken" already exists
 step s1rb: ROLLBACK
 step s1dr: <vacuum drain>
 final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
@@ -877,7 +898,7 @@ s
 "lab"
 (1 row)
 step s1c: CREATE (:L {name:'c1', s:'created'}), (k:K {k:'taken'}) RETURN k.k AS k
-ERROR: serialization conflict
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "taken" already exists
 step s1rb: ROLLBACK
 step s1dr: <vacuum drain>
 final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan

@@ -303,6 +303,31 @@ func (g *Graph[N, W]) delEdgePropertyInfo(src, dst N, key string, tx *writeCtx) 
 	if !ok {
 		return
 	}
+	// A removal that finds the key on no slot of the pair changes nothing, so it
+	// takes no claim (rmp #3006): a claim is a write stamp on src's WHOLE entry,
+	// and taking one for an absent key refused every concurrent writer of src —
+	// another arc, another pair's property — over a change that never happened,
+	// spent a commit-record version, and so made the durable path log a removal.
+	//
+	// The STORED entry is the cheap filter: a key absent from it is absent from
+	// every view. It may, though, be showing another transaction's uncommitted
+	// removal, or a commit tx cannot see, so "nothing to do" is the verdict only
+	// once src's adjacency stamps admit tx and the key is absent from what tx
+	// SEES — the rule [Graph.removeAllEdgesFromInfo] applies (ACID audit round 6,
+	// finding C1). A peer that wrote the key after tx's snapshot, committed or
+	// not, left a stamp admits refuses; the refusal is recorded on tx and dooms
+	// it, exactly as the claim's would have.
+	if tx != nil && !edgeKeyOnPair(g.EntryViewAsOf(srcID, nil), dstID, keyID) {
+		if g.adjVer.admits([2]graph.NodeID{srcID}, 1, tx) != nil {
+			return
+		}
+		// Read after the admit through a view no earlier read of tx has pinned
+		// ([Graph.admittedRead], rmp #3032).
+		var cs Snapshot
+		if !edgeKeyOnPair(g.EntryViewAsOf(srcID, g.admittedRead(&cs, tx)), dstID, keyID) {
+			return
+		}
+	}
 	// Claimed like every write that rebuilds the entry; see
 	// [Graph.setEdgePropertyInfo]. A refusal is recorded on tx and dooms it.
 	if g.adjVer.noteExclusive(srcID, tx) != nil {
@@ -331,6 +356,23 @@ func (g *Graph[N, W]) delEdgePropertyInfo(src, dst N, key string, tx *writeCtx) 
 	})
 	// The refusal is recorded on tx; this primitive returns nothing.
 	_ = adjErr(tx, err)
+}
+
+// edgeKeyOnPair reports whether keyID is present on any slot of entry v whose
+// neighbour is dstID — exactly the slots [Graph.delEdgePropertyInfo] would
+// clear. It reads only the validity bitmaps and allocates nothing.
+func edgeKeyOnPair[W any](v adjlist.EntryView[W], dstID graph.NodeID, keyID PropertyKeyID) bool {
+	block := asEdgePropCols(v.Aux)
+	if block == nil {
+		return false
+	}
+	nbs := v.Neighbours
+	for i := range minInt(len(nbs), block.lenOrZero()) {
+		if nbs[i] == dstID && block.keyPresentAt(keyID, i) {
+			return true
+		}
+	}
+	return false
 }
 
 // EdgeProperties returns a snapshot of every property currently

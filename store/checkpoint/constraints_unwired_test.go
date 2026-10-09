@@ -31,6 +31,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -110,6 +111,9 @@ func TestCheckpointer_ConstraintsPresent_SpecsUnwired_SkipsTruncation(t *testing
 	// surfaced via the metric.
 	if got := cp.Stats().WALTruncBytes; got != 0 {
 		t.Fatalf("WAL was truncated (WALTruncBytes = %d) despite an un-persisted constraint — #1464 fail-safe did not engage; constraints would be lost on reopen", got)
+	}
+	if _, ok, _ := waltest.CheckpointRecorded(dir); ok {
+		t.Fatal("the control file records the snapshot as the start of recovery despite an un-persisted constraint — #1464")
 	}
 	if got := mb.count("store.checkpoint.truncate_skipped_not_self_sufficient"); got != 1 {
 		t.Fatalf("truncate-skipped metric = %d, want 1 — the degraded mode was not surfaced", got)

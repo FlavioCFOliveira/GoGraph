@@ -534,7 +534,7 @@ func buildSnapshotCorruptionFixture(ctx context.Context, seed uint64) (*snapshot
 			return nil, fmt.Errorf("sim: snapshot-corruption fixture published no %s: the component's arm would be vacuous", comp.file)
 		}
 	}
-	if fx.walBytes, err = disk.ReadFile(walPathFor(cfg.dir)); err != nil {
+	if fx.walBytes, err = simWALLogImage(disk, walPathFor(cfg.dir)); err != nil {
 		return nil, fmt.Errorf("sim: snapshot-corruption read WAL image: %w", err)
 	}
 	return fx, nil
@@ -672,7 +672,7 @@ func runSnapshotCorruptionArm(
 		fail("the durable image changed across a REFUSED reopen of a corrupted %s: recovery half-applied something before failing",
 			comp.file)
 	}
-	walNow, err := fx.disk.ReadFile(walPathFor(fx.dir))
+	walNow, err := simWALLogImage(fx.disk, walPathFor(fx.dir))
 	if err != nil {
 		return arm, vs, fmt.Errorf("read WAL after %s arm: %w", comp.file, err)
 	}

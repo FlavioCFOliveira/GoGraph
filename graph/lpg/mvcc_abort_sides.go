@@ -225,7 +225,7 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 	if g.nodeLifeActive.Load() == 0 {
 		return 0
 	}
-	var lw lifeWithdrawal
+	lw := lifeWithdrawal{markUnborn: g.markUnborn}
 	for i := range g.nodeLifeShards {
 		sh := &g.nodeLifeShards[i]
 		sh.mu.Lock()
@@ -278,7 +278,7 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 // marked aborted (ACID audit round 6, finding M1). A node entered more than once
 // is withdrawn by its first visit.
 func (g *Graph[N, W]) reclaimAbortedLifeOf(ids []graph.NodeID) int {
-	var lw lifeWithdrawal
+	lw := lifeWithdrawal{markUnborn: g.markUnborn}
 	for _, id := range ids {
 		sh := g.nodeLifeShardFor(id)
 		sh.mu.Lock()
@@ -301,6 +301,12 @@ func (g *Graph[N, W]) reclaimAbortedLifeOf(ids []graph.NodeID) int {
 // tombstone bitmap, the unborn set and the churn gate, for
 // [Graph.finishLifeWithdrawal] to settle outside the shard locks.
 type lifeWithdrawal struct {
+	// markUnborn marks an id unborn. [lifeWithdrawal.withdrawLocked] calls it
+	// UNDER the life-shard lock, before it deletes the aborted birth record, so
+	// [Graph.NodeBornAsOf] never sees an aborted first creation as neither
+	// recorded nor unborn (WAL v2 step 1, design risk 6). The lock order is
+	// life shard, then unbornMu, which is a leaf lock.
+	markUnborn  func(graph.NodeID)
 	toTombstone []lifeTombstone
 	toRevive    []graph.NodeID
 	released    []LabelID
@@ -349,31 +355,62 @@ func (lw *lifeWithdrawal) withdrawLocked(sh *nodeLifeShard, id graph.NodeID) {
 	diedAborted := hasDied && died.at() == mvcc.AbortedTS
 	switch {
 	case bornAborted && diedAborted:
-		delete(sh.born, id)
-		delete(sh.died, id)
-		lw.released = append(lw.released, sh.takeChurnHeld(true, id)...)
-		lw.released = append(lw.released, sh.takeChurnHeld(false, id)...)
-		lw.freed += 2
-		if aliveBefore(born, died) {
+		revive := aliveBefore(born, died)
+		if !revive && born.unbornBefore {
+			lw.markUnborn(id)
+		}
+		lw.withdrawRecordLocked(sh, true, id, born)
+		lw.withdrawRecordLocked(sh, false, id, died)
+		if revive {
 			lw.toRevive = append(lw.toRevive, id)
 		} else {
 			lw.toTombstone = append(lw.toTombstone, lifeTombstone{id: id, unborn: born.unbornBefore})
 		}
 	case bornAborted:
-		delete(sh.born, id)
-		lw.released = append(lw.released, sh.takeChurnHeld(true, id)...)
-		lw.freed++
+		if !born.wasAlive && born.unbornBefore {
+			lw.markUnborn(id)
+		}
+		lw.withdrawRecordLocked(sh, true, id, born)
 		if born.wasAlive {
 			lw.toRevive = append(lw.toRevive, id)
 			return
 		}
 		lw.toTombstone = append(lw.toTombstone, lifeTombstone{id: id, unborn: born.unbornBefore})
 	case diedAborted:
-		delete(sh.died, id)
-		lw.released = append(lw.released, sh.takeChurnHeld(false, id)...)
-		lw.freed++
+		lw.withdrawRecordLocked(sh, false, id, died)
 		lw.toRevive = append(lw.toRevive, id)
 	}
+}
+
+// withdrawRecordLocked withdraws st, id's aborted birth (alive) or death record,
+// by putting back the record it displaced (rmp #3001), and deletes the slot only
+// when it displaced nothing. A displaced record that is itself aborted is
+// stepped over.
+//
+// Deleting unconditionally lost the displaced commit: a reader older than it fell
+// back to the present tombstone bitmap, so a node created after a read
+// transaction began reappeared in it once a DETACH DELETE of that node rolled
+// back (the undo's revival is a birth that displaces the committed one).
+//
+// A restored record keeps the churn holds the withdrawn one took, which name the
+// node's labels as the restored record's own did: a hold outliving its reason
+// only over-counts, the safe direction. The caller holds sh's write lock.
+func (lw *lifeWithdrawal) withdrawRecordLocked(sh *nodeLifeShard, alive bool, id graph.NodeID, st lifeStamp) {
+	m := sh.died
+	if alive {
+		m = sh.born
+	}
+	r := st.displaced
+	for r != nil && r.at() == mvcc.AbortedTS {
+		r = r.displaced
+	}
+	if r != nil {
+		m[id] = *r
+		return
+	}
+	delete(m, id)
+	lw.released = append(lw.released, sh.takeChurnHeld(alive, id)...)
+	lw.freed++
 }
 
 // finishLifeWithdrawal applies what lw accumulated — the bitmap flips, the
@@ -388,7 +425,9 @@ func (g *Graph[N, W]) finishLifeWithdrawal(lw *lifeWithdrawal) int {
 		if t.unborn {
 			// The node existed only by the aborted transaction's creation:
 			// a first birth, or a create-then-delete pair (rmp #2947, see
-			// [Graph.unborn]).
+			// [Graph.unborn]). withdrawLocked already marked it under the life-
+			// shard lock (WAL v2 step 1); marking is idempotent, and repeating it
+			// here keeps the set right for any withdrawal built without the hook.
 			g.markUnborn(t.id)
 		}
 	}
@@ -471,35 +510,37 @@ func (av *adjVersions) clearAbortedOf(ids []graph.NodeID) (freed int) {
 		sh := av.shard(id)
 		sh.mu.Lock()
 		freed += sh.clearAbortedLocked(id)
-		if len(sh.d) == 0 {
-			sh.d = nil
-		}
+		sh.releaseIfEmptyLocked()
 		sh.mu.Unlock()
 	}
 	return freed
 }
 
 // clearAbortedLocked clears the aborted sides of id's stamps, dropping the entry
-// when both are aborted, and reports whether it dropped it. The caller holds
-// the shard lock.
+// when both are aborted and it keeps no displaced commit, and reports whether it
+// dropped it. The caller holds the shard lock.
+//
+// A cleared side does not take the commit it displaced with it: that commit was
+// folded into floorTS when the aborted write overwrote it ([adjStamps.set]), so
+// the entry stays, floor alone, until the watermark passes it (rmp #2997).
 func (sh *adjVersionShard) clearAbortedLocked(id graph.NodeID) int {
 	e := sh.d[id]
 	if e == nil {
 		return 0
 	}
-	a := adjEffective(e.appendInfo, e.appendTS)
-	x := adjEffective(e.exclusiveInfo, e.exclusiveTS)
-	if a == mvcc.AbortedTS && x == mvcc.AbortedTS {
+	a := stampTS(e.appendInfo)
+	x := stampTS(e.exclusiveInfo)
+	if a == mvcc.AbortedTS && x == mvcc.AbortedTS && e.floorTS == 0 {
 		delete(sh.d, id)
 		return 1
 	}
 	// One side aborted and the other live: clear only the aborted side, so the
 	// live one keeps refusing what it must.
 	if a == mvcc.AbortedTS {
-		e.appendInfo, e.appendTS = nil, 0
+		e.appendInfo = nil
 	}
 	if x == mvcc.AbortedTS {
-		e.exclusiveInfo, e.exclusiveTS = nil, 0
+		e.exclusiveInfo = nil
 	}
 	return 0
 }
@@ -518,9 +559,7 @@ func (av *adjVersions) clearAborted() (freed int) {
 		for id := range sh.d {
 			freed += sh.clearAbortedLocked(id)
 		}
-		if len(sh.d) == 0 {
-			sh.d = nil
-		}
+		sh.releaseIfEmptyLocked()
 		sh.mu.Unlock()
 	}
 	return freed

@@ -175,6 +175,35 @@ benchstat /tmp/boltlab/bench.txt
 Use **`-repetitions 10` or more** for any run whose numbers will be compared:
 `benchstat` needs at least six samples before it reports a confidence interval.
 
+### Host limit: the listen queue (`somaxconn`)
+
+The rungs of **256 and 1024** connections need a host listen queue at least as
+long as the rung. Connection mode dials every connection before the first query
+(see "The two client dimensions"), so up to N connection attempts wait in the
+kernel's accept queue at once. Go sizes a listener's backlog from the host
+setting, so the setting is the limit: on macOS the default
+`kern.ipc.somaxconn=128` makes the kernel reset connections past the 128th, and
+the 256 and 1024 rungs fail (found in rmp #2841). The 1, 8 and 64 rungs fit under
+the default.
+
+Before running a 256 or 1024 rung, raise the setting to at least the rung, for
+example on macOS:
+
+```bash
+sysctl kern.ipc.somaxconn            # read the current value
+sudo sysctl -w kern.ipc.somaxconn=2048
+```
+
+On Linux the corresponding setting is `net.core.somaxconn`. The change is a host
+setting, not part of the example; it lasts until the next reboot on macOS.
+
+| Rung (connections) | Needs `somaxconn` ≥ rung |
+|---|---|
+| 1, 8, 64 | no (fits the default 128) |
+| 256 | yes |
+| 1024 | yes |
+| saturation (`-connections 256 -max-connections 128`) | yes: all 256 offered connections must reach the server for it to refuse 128 of them |
+
 ## Flags
 
 ### Scale and shape

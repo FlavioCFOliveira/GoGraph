@@ -73,7 +73,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -433,7 +432,7 @@ func txnOversizeWALImage(disk *SimDisk, path string) ([]byte, error) {
 	if !disk.Exists(path) {
 		return nil, nil
 	}
-	b, err := disk.ReadFile(path)
+	b, err := simWALFrameImage(disk, path, disk.ReadFile)
 	if err != nil {
 		return nil, fmt.Errorf("sim: txn-oversize read WAL image: %w", err)
 	}
@@ -808,11 +807,10 @@ func txnOversizeReplay(
 	ctx context.Context, disk *SimDisk, path string, scfg simStoreConfig, capOps int,
 ) (recovery.ReplayResult, *lpg.Graph[string, float64], error) {
 	g := lpg.New[string, float64](scfg.graphConfig)
-	rh, err := disk.OpenFile(path, os.O_RDONLY)
+	reader, err := wal.OpenLogFS(simLogFS{disk: disk}, path)
 	if err != nil {
 		return recovery.ReplayResult{}, g, fmt.Errorf("sim: txn-oversize open crafted WAL: %w", err)
 	}
-	reader := wal.NewReader(rh, rh)
 	res, rerr := recovery.ReplayWAL[string, float64](
 		ctx, reader, g, txn.NewStringCodec(), txn.NewFloat64WeightCodec(),
 		resolveSimMaxTxnOps(capOps),

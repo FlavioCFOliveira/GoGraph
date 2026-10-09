@@ -750,10 +750,10 @@ func (r *boltTxTerminateRunner) runAutocommit(query string) error {
 	return clearTxReadDeadline(r.honest)
 }
 
-// walCounters reads the live WAL frame/byte counters.
+// walCounters reads the live WAL transaction frame/byte counters
+// ([simTxnWALCounters]).
 func (r *boltTxTerminateRunner) walCounters() (frames, bytes uint64) {
-	s := r.st.WAL().Stats()
-	return s.Frames, s.Bytes
+	return simTxnWALCounters(r.st.WAL())
 }
 
 // notePeak folds one listing size into the running maximum.

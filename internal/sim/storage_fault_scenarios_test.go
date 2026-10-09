@@ -10,6 +10,7 @@ import (
 
 	"go.uber.org/goleak"
 
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/csrfile"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -124,15 +125,29 @@ func TestST5_BenignTornTailIsNotCorruption(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	image, err := disk.ReadFile(walPath)
+	// The log's frames live in its segments; walPath itself holds only the
+	// seal stub. Tear the last frame of the newest segment holding frames.
+	ents, err := disk.ReadDir(wal.SegmentDir(walPath))
 	if err != nil {
-		t.Fatalf("read WAL: %v", err)
+		t.Fatalf("list WAL segments: %v", err)
 	}
-	if len(image) < 4 {
-		t.Fatalf("WAL image too small: %d bytes", len(image))
+	var tailSeg string
+	var image []byte
+	for _, e := range ents {
+		p := wal.SegmentDir(walPath) + "/" + e.Name()
+		b, err := disk.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read WAL segment: %v", err)
+		}
+		if len(b) > waltest.SegmentHeaderSize {
+			tailSeg, image = p, b
+		}
+	}
+	if tailSeg == "" {
+		t.Fatal("no WAL segment holds a frame")
 	}
 	// Truncate a few bytes off the end so the last frame is torn (incomplete).
-	h, err := disk.OpenFile(walPath, os.O_RDWR)
+	h, err := disk.OpenFile(tailSeg, os.O_RDWR)
 	if err != nil {
 		t.Fatalf("open WAL rw: %v", err)
 	}

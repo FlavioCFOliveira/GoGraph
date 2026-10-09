@@ -283,6 +283,8 @@ func toPlanEstimate(e estimate, _ string, ok bool) exec.PlanEstimate {
 		return exec.PlanEstimate{Rows: estRows(e.rows), Source: exec.EstimateStats}
 	case estHeuristic:
 		return exec.PlanEstimate{Rows: estRows(e.rows), Source: exec.EstimateHeuristic}
+	case estBound:
+		return exec.PlanEstimate{Rows: estRows(e.rows), Source: exec.EstimateBound}
 	default: // estFallback — absent, dirty or stale statistic.
 		return exec.PlanEstimate{}
 	}

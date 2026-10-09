@@ -22,7 +22,6 @@ package recovery_test
 import (
 	"context"
 	"encoding/binary"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -30,6 +29,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -85,16 +85,10 @@ func writeAndClose(t *testing.T, dir string, n, keyBase int) (walPath string, la
 // does with an orphaned marker anyway, so it perturbs nothing but the maximum.
 func appendCommitMarker(t *testing.T, path string, txnSeq, commitTS uint64) {
 	t.Helper()
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // test-owned temp path
-	if err != nil {
-		t.Fatalf("open wal for append: %v", err)
-	}
-	defer func() { _ = f.Close() }()
-
 	payload := []byte{txn.OpRecordV3, byte(txn.OpCommit)}
 	payload = binary.LittleEndian.AppendUint64(payload, txnSeq)
 	payload = binary.LittleEndian.AppendUint64(payload, commitTS)
-	if _, err := wal.Encode(f, wal.Frame{Payload: payload}); err != nil {
+	if err := waltest.AppendFrame(path, payload); err != nil {
 		t.Fatalf("append commit marker: %v", err)
 	}
 }

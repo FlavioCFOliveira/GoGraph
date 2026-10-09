@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -226,7 +227,7 @@ func TestConstraintStraddle_R4D_RefusedStraddlerIsNotReplayed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wr2, err := wal.Open(filepath.Join(dir, "wal"))
+			wr2, err := wal.OpenWithSyncLatency(filepath.Join(dir, "wal"), synclatency.ForTest(t))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -1,0 +1,401 @@
+package checkpoint
+
+// capture_aborted_intern_test.go — rmp #2991: a checkpoint capture refused
+// itself with snapshot.ErrCaptureNotQuiesced while no transaction was open at
+// its instant.
+//
+// Layer: short.
+//
+// # The interleaving
+//
+// Phase 1 opens the MVCC instant inside the commit serialiser's drain; phase 1b
+// walks the mapper with the lock RELEASED, while writers intern, commit and
+// abort. Two writers acting in that window, on keys of ONE mapper shard:
+//
+//   - L interns the lower slot and commits after the instant: its birth record
+//     is not visible at the instant, so the walk drops L;
+//   - H interns the next slot and aborts: the abort withdraws H's first-birth
+//     record, and an id with no record read as "interned in every reader's
+//     past", so the walk kept H above the dropped L.
+//
+// A kept id above a dropped one is the intra-index hole the capture refuses.
+// The interleaving is constructed in a wrapping snapshot backend, immediately
+// before the real capture, so it happens on every run.
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
+	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
+)
+
+// interleavingBackend is the production snapshot backend with one hook run
+// before the capture, in phase 1b: the instant is open and the commit lock is
+// released.
+type interleavingBackend struct {
+	osSnapshotBackend[string, int64]
+	beforeCapture func()
+}
+
+func (b interleavingBackend) CaptureGraph(cs *csr.CSR[int64], g *lpg.Graph[string, int64],
+	codec txn.Codec[string], wcodec txn.WeightCodec[int64], at *lpg.Snapshot) (*snapshot.Capture[int64], error) {
+	b.beforeCapture()
+	return b.osSnapshotBackend.CaptureGraph(cs, g, codec, wcodec, at)
+}
+
+// sameShardPair returns two keys that intern into the same mapper shard, found
+// by probing a throwaway mapper: placement is a pure function of the key.
+func sameShardPair(t *testing.T) (string, string) {
+	t.Helper()
+	m := graph.NewMapper[string]()
+	seen := make(map[uint64]string)
+	for i := range 100000 {
+		k := fmt.Sprintf("abort-intern-%06d", i)
+		s := graph.MapperShardOf(m.Intern(k))
+		if prev, ok := seen[s]; ok {
+			return prev, k
+		}
+		seen[s] = k
+	}
+	t.Fatal("no two probe keys landed in the same mapper shard")
+	return "", ""
+}
+
+// TestCheckpoint_CaptureIgnoresAbortedInternAfterInstant drives the interleaving
+// above and asserts the checkpoint succeeds, its snapshot loads, and recovery
+// holds exactly the durable state: the seed commit, L (committed after the
+// instant, so replayed from the WAL suffix), and never H.
+func TestCheckpoint_CaptureIgnoresAbortedInternAfterInstant(t *testing.T) {
+	t.Parallel()
+	keyL, keyH := sameShardPair(t)
+	dir, g, st, w, cp := newPairStore(t)
+	defer func() { _ = w.Close() }()
+
+	// A committed node before the instant, so the image is not empty.
+	seed := st.Begin()
+	if err := seed.AddNode("seed"); err != nil {
+		t.Fatalf("seed AddNode: %v", err)
+	}
+	if err := seed.Commit(); err != nil {
+		t.Fatalf("seed Commit: %v", err)
+	}
+
+	var hookRan bool
+	cp.snap = interleavingBackend{beforeCapture: func() {
+		hookRan = true
+		// L: interned first, committed after the instant, durably.
+		tx := st.Begin()
+		if err := tx.AddNode(keyL); err != nil {
+			t.Errorf("L AddNode: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Errorf("L Commit: %v", err)
+		}
+		// H: interned next in the same shard, then rolled back: the record is
+		// aborted and its first-birth record withdrawn.
+		htx := g.BeginVersionedTx()
+		if err := g.Writer(htx).AddNode(keyH); err != nil {
+			t.Errorf("H AddNode: %v", err)
+		}
+		htx.Abandon()
+		g.EndVersionedTx(htx)
+		idL, okL := g.AdjList().Mapper().Lookup(keyL)
+		idH, okH := g.AdjList().Mapper().Lookup(keyH)
+		if !okL || !okH || graph.MapperShardOf(idL) != graph.MapperShardOf(idH) || idL >= idH {
+			t.Errorf("premise lost: L=%d(%v) H=%d(%v) must share a shard with L below H",
+				uint64(idL), okL, uint64(idH), okH)
+		}
+	}}
+
+	if err := cp.RunCheckpoint(); err != nil {
+		t.Fatalf("RunCheckpoint: %v", err)
+	}
+	if !hookRan {
+		t.Fatal("the interleaving hook never ran: the capture was not reached")
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("wal.Close: %v", err)
+	}
+
+	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec: txn.NewStringCodec(), WeightCodec: txn.NewInt64WeightCodec(),
+	})
+	if err != nil || !res.IsClean() || !res.SnapshotHit {
+		t.Fatalf("recovery: err=%v clean=%v snapshotHit=%v", err, res.IsClean(), res.SnapshotHit)
+	}
+	rg := res.Graph
+	alive := func(k string) bool {
+		id, ok := rg.AdjList().Mapper().Lookup(k)
+		return ok && rg.NodeExistsAsOf(id, nil)
+	}
+	for _, k := range []string{"seed", keyL} {
+		if !alive(k) {
+			t.Errorf("committed node %q missing after recovery", k)
+		}
+	}
+	if alive(keyH) {
+		t.Errorf("aborted node %q is alive after recovery", keyH)
+	}
+}
+
+// TestCheckpoint_CaptureTombstonesKeyOfTxnOpenAtInstant pins the case the commit
+// serialiser's drain does NOT exclude (storage audit F4): an lpg write transaction
+// is not a registered store writer, so a key it interned can be open, uncommitted,
+// at the capture instant.
+//
+// X is interned by a BeginVersionedTx left open across the instant; Y is interned
+// above X in the same shard and committed before the instant. Y is captured alive.
+// X was never born at the instant, so since WAL v2 step 1 it is a HOLE in the image
+// (before it, it was written as a tombstone with its key; the test name keeps that
+// history). After the instant the open transaction is abandoned and X is created
+// through txn.Store with a property, so its frames follow the checkpoint's WAL
+// watermark. Recovery must be clean and hold the seed, Y, and X with its property:
+// replaying X's creation creates it anew.
+//
+// Before rmp #2991 a plain BeginRead snapshot dropped X and kept Y above it, which
+// the now-retired snapshot.ErrCaptureNotQuiesced refused.
+func TestCheckpoint_CaptureTombstonesKeyOfTxnOpenAtInstant(t *testing.T) {
+	t.Parallel()
+	keyX, keyY := sameShardPair(t)
+	dir, g, st, w, cp := newPairStore(t)
+	defer func() { _ = w.Close() }()
+
+	commit := func(key string, fn func(tx *txn.Tx[string, int64]) error) {
+		t.Helper()
+		tx := st.Begin()
+		if err := fn(tx); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("%s: %v", key, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("%s Commit: %v", key, err)
+		}
+	}
+	commit("seed", func(tx *txn.Tx[string, int64]) error { return tx.AddNode("seed") })
+
+	// X: interned by an lpg write transaction that stays OPEN across the instant.
+	htx := g.BeginVersionedTx()
+	ended := false
+	defer func() {
+		if !ended {
+			htx.Abandon()
+			g.EndVersionedTx(htx)
+		}
+	}()
+	if err := g.Writer(htx).AddNode(keyX); err != nil {
+		t.Fatalf("X AddNode: %v", err)
+	}
+	// Y: interned above X in the same shard, committed before the instant.
+	commit(keyY, func(tx *txn.Tx[string, int64]) error { return tx.AddNode(keyY) })
+	idX, okX := g.AdjList().Mapper().Lookup(keyX)
+	idY, okY := g.AdjList().Mapper().Lookup(keyY)
+	if !okX || !okY || graph.MapperShardOf(idX) != graph.MapperShardOf(idY) || idX >= idY {
+		t.Fatalf("premise lost: X=%d(%v) Y=%d(%v) must share a shard with X below Y",
+			uint64(idX), okX, uint64(idY), okY)
+	}
+
+	var hookRan bool
+	cp.snap = interleavingBackend{beforeCapture: func() {
+		hookRan = true
+		htx.Abandon()
+		g.EndVersionedTx(htx)
+		ended = true
+		commit(keyX, func(tx *txn.Tx[string, int64]) error {
+			if err := tx.AddNode(keyX); err != nil {
+				return err
+			}
+			return tx.SetNodeProperty(keyX, "p", lpg.StringValue("after-instant"))
+		})
+	}}
+
+	if err := cp.RunCheckpoint(); err != nil {
+		t.Fatalf("RunCheckpoint: %v", err)
+	}
+	if !hookRan {
+		t.Fatal("the interleaving hook never ran: the capture was not reached")
+	}
+	if _, ok, err := waltest.CheckpointRecorded(dir); err != nil || !ok {
+		t.Fatalf("the checkpoint did not record its snapshot as the start of recovery (err %v): Y and the seed were not folded "+
+			"into the snapshot, so the test cannot show the snapshot carries them", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("wal.Close: %v", err)
+	}
+
+	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec: txn.NewStringCodec(), WeightCodec: txn.NewInt64WeightCodec(),
+	})
+	if err != nil || !res.IsClean() || !res.SnapshotHit {
+		t.Fatalf("recovery: err=%v clean=%v snapshotHit=%v", err, res.IsClean(), res.SnapshotHit)
+	}
+	rg := res.Graph
+	for _, k := range []string{"seed", keyY, keyX} {
+		id, ok := rg.AdjList().Mapper().Lookup(k)
+		if !ok || !rg.NodeExistsAsOf(id, nil) {
+			t.Errorf("node %q not alive after recovery (interned %v)", k, ok)
+		}
+	}
+	v, ok := rg.GetNodeProperty(keyX, "p")
+	if s, _ := v.String(); !ok || s != "after-instant" {
+		t.Errorf("X property p = %v (present %v), want \"after-instant\"", v, ok)
+	}
+}
+
+// TestCheckpoint_PrefixMarkerOnlyForSelfSufficientSnapshot pins the storage
+// audit's F4 on rmp #3002: the control record means "history requires a
+// snapshot", so a checkpoint whose snapshot is not self-sufficient — an int-keyed
+// store with no mapper codec, which never truncates — writes no marker. The arm
+// with a mapper codec is the control: the same workload then writes it.
+func TestCheckpoint_PrefixMarkerOnlyForSelfSufficientSnapshot(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		codec      bool
+		wantMarker bool
+	}{
+		{"no mapper codec: not self-sufficient", false, false},
+		{"control: mapper codec", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			w, err := wal.Open(filepath.Join(dir, "wal"))
+			if err != nil {
+				t.Fatalf("wal.Open: %v", err)
+			}
+			defer func() { _ = w.Close() }()
+			g := lpg.New[int, int64](adjlist.Config{Directed: true})
+			st := txn.NewStoreWithOptions[int, int64](g, w, txn.Options[int, int64]{
+				Codec: txn.NewIntCodec(), WeightCodec: txn.NewInt64WeightCodec(),
+			})
+			opts := []Option[int, int64]{WithCommitSerialiser[int, int64](st.RunUnderCommitLock)}
+			if tc.codec {
+				opts = append(opts, WithMapperCodec[int, int64](txn.NewIntCodec()))
+			}
+			var unused sync.Mutex
+			cp := New[int, int64](Config{Dir: dir}, g, w, &unused, opts...)
+			tx := st.Begin()
+			if err := tx.AddNode(1); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+			if err := cp.RunCheckpoint(); err != nil {
+				t.Fatalf("RunCheckpoint: %v", err)
+			}
+			// The control record of a segmented log is its prefix-truncated
+			// flag: set only by a checkpoint whose snapshot stands alone.
+			log, err := wal.OpenLog(filepath.Join(dir, "wal"))
+			if err != nil {
+				t.Fatalf("wal.OpenLog: %v", err)
+			}
+			ctl, _ := log.Control()
+			if got := ctl.Flags&wal.ControlPrefixTruncated != 0; got != tc.wantMarker {
+				t.Fatalf("control file prefix-truncated = %v, want %v", got, tc.wantMarker)
+			}
+			if _, err := os.Stat(wal.PrefixTruncatedMarkerPath(filepath.Join(dir, "wal"))); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("a segmented store wrote the legacy prefix marker (stat: %v)", err)
+			}
+		})
+	}
+}
+
+// TestCheckpoint_KeyInternedAtInstantRevivedByAddEdgeOnly is the finding test of
+// docs/design-wal-v2.md §11 item 7, kept as the regression guard of WAL v2 step 1.
+// A transaction interns K and is still open at the capture instant. K is then
+// created after the WAL watermark through AddEdge alone — the only record the
+// Cypher adapter emits for an endpoint it creates — so the WAL suffix holds no
+// AddNode for K. Recovery must agree with the live graph on whether K exists.
+//
+// Before step 1 the capture wrote K as a tombstone with its key, replay's AddEdge
+// does not revive a removed node, and recovery held K dead with a live edge onto
+// it while the live graph held it alive: 3 of 3 runs failed with "live alive=true
+// edge=true, recovered alive=false edge=true". K is now a hole, which replay
+// creates anew.
+func TestCheckpoint_KeyInternedAtInstantRevivedByAddEdgeOnly(t *testing.T) {
+	t.Parallel()
+	keyK, keyY := sameShardPair(t)
+	dir, g, st, w, cp := newPairStore(t)
+	defer func() { _ = w.Close() }()
+
+	commit := func(what string, fn func(tx *txn.Tx[string, int64]) error) {
+		t.Helper()
+		tx := st.Begin()
+		if err := fn(tx); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("%s: %v", what, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("%s Commit: %v", what, err)
+		}
+	}
+	commit("seed", func(tx *txn.Tx[string, int64]) error { return tx.AddNode("seed") })
+
+	// K: interned by a transaction left open across the instant.
+	htx := g.BeginVersionedTx()
+	ended := false
+	defer func() {
+		if !ended {
+			htx.Abandon()
+			g.EndVersionedTx(htx)
+		}
+	}()
+	if err := g.Writer(htx).AddNode(keyK); err != nil {
+		t.Fatalf("K AddNode: %v", err)
+	}
+	// Y above K in the same shard, committed before the instant, so the capture's
+	// membership for K is not decided by being the shard's last id.
+	commit("Y", func(tx *txn.Tx[string, int64]) error { return tx.AddNode(keyY) })
+
+	cp.snap = interleavingBackend{beforeCapture: func() {
+		htx.Abandon()
+		g.EndVersionedTx(htx)
+		ended = true
+		// K created after the instant through an edge only: no AddNode record.
+		commit("K edge", func(tx *txn.Tx[string, int64]) error { return tx.AddEdge(keyK, "seed", 1) })
+	}}
+	if err := cp.RunCheckpoint(); err != nil {
+		t.Fatalf("RunCheckpoint: %v", err)
+	}
+	if _, ok, err := waltest.CheckpointRecorded(dir); err != nil || !ok {
+		t.Fatalf("the checkpoint did not record its snapshot (err %v): the snapshot is not what recovery starts from", err)
+	}
+	alive := func(gr *lpg.Graph[string, int64]) bool {
+		id, ok := gr.AdjList().Mapper().Lookup(keyK)
+		return ok && gr.NodeExistsAsOf(id, nil)
+	}
+	live := alive(g)
+	liveEdge := g.AdjList().HasEdge(keyK, "seed")
+	if err := w.Close(); err != nil {
+		t.Fatalf("wal.Close: %v", err)
+	}
+
+	res, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec: txn.NewStringCodec(), WeightCodec: txn.NewInt64WeightCodec(),
+	})
+	if err != nil || !res.IsClean() || !res.SnapshotHit {
+		t.Fatalf("recovery: err=%v clean=%v snapshotHit=%v", err, res.IsClean(), res.SnapshotHit)
+	}
+	rec := alive(res.Graph)
+	recEdge := res.Graph.AdjList().HasEdge(keyK, "seed")
+	if !live || !liveEdge {
+		t.Fatalf("premise: live graph K alive=%v edge=%v, want both true", live, liveEdge)
+	}
+	if rec != live || recEdge != liveEdge {
+		t.Errorf("K diverges after recovery: live alive=%v edge=%v, recovered alive=%v edge=%v",
+			live, liveEdge, rec, recEdge)
+	}
+}

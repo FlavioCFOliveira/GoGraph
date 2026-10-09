@@ -507,11 +507,11 @@ func TestWALLifecycle_TruncateAndPoisonContract(t *testing.T) {
 	if r.SyncBufferedAfterPoison != nil {
 		t.Errorf("SyncBuffered on a poisoned writer returned %v; measured contract is nil", r.SyncBufferedAfterPoison)
 	}
-	if r.TruncateOnPoisonedErr != nil {
-		t.Errorf("Truncate on a poisoned writer returned %v; measured contract is a successful empty", r.TruncateOnPoisonedErr)
+	if !r.TruncateOnPoisonedIsSticky {
+		t.Errorf("Truncate on a poisoned writer returned %v; the documented contract is the identical sticky error", r.TruncateOnPoisonedErr)
 	}
 	if r.StillPoisonedAfterTruncate == nil {
-		t.Error("the writer stopped being poisoned after Truncate: the fail-stop is what makes the successful truncate safe")
+		t.Error("the writer stopped being poisoned after Truncate")
 	}
 	if !errors.Is(r.PoisonedReported, wal.ErrDurabilityFailed) {
 		t.Errorf("Poisoned() reported %v, which does not carry wal.ErrDurabilityFailed", r.PoisonedReported)
@@ -546,7 +546,7 @@ func TestWALLifecycle_GateDetectsEachDefect(t *testing.T) {
 		{
 			name:    "Truncate leaves a non-empty file",
 			doctor:  func(r *WALLifecycleResult) { r.ImageAfterTruncate = 14 },
-			wantMsg: "both must be zero",
+			wantMsg: "every frame was discarded",
 		},
 		{
 			name:    "Truncate resets the lifetime counters",
@@ -554,9 +554,9 @@ func TestWALLifecycle_GateDetectsEachDefect(t *testing.T) {
 			wantMsg: "documented as not reset",
 		},
 		{
-			name:    "the post-truncate append does not restart at zero",
+			name:    "the post-truncate append does not continue at the truncate's position",
 			doctor:  func(r *WALLifecycleResult) { r.PostTruncateMark += 30 },
-			wantMsg: "freshly-empty file",
+			wantMsg: "written at the truncate's position",
 		},
 		{
 			name:    "the truncate did not discard the previous WAL",
@@ -605,8 +605,8 @@ func TestWALLifecycle_GateDetectsEachDefect(t *testing.T) {
 		},
 		{
 			name:    "Truncate on a poisoned writer changed behaviour",
-			doctor:  func(r *WALLifecycleResult) { r.TruncateOnPoisonedErr = wal.ErrDurabilityFailed },
-			wantMsg: "documented behaviour is a successful empty",
+			doctor:  func(r *WALLifecycleResult) { r.TruncateOnPoisonedIsSticky = false },
+			wantMsg: "documented behaviour is the identical sticky error",
 		},
 		{
 			name:    "a closed writer no longer reports ErrWriterClosed",

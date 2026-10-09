@@ -1318,12 +1318,17 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	// storage-format change: only the hash def is persisted, and
 	// registerRecoveredIndexes re-derives the companion from it.
 	//
-	// The two registrations are NOT wrapped in one visibility barrier, and do not
-	// need to be: the companion is internal and purely an optimisation, so a
-	// reader that observes only one of the pair is still correct. Seeing only the
-	// hash index makes a numeric seek decline and fall back to scan+filter; seeing
-	// only the backfilled companion makes the seek return the right rows. Neither
-	// order can produce a wrong answer.
+	// The two registrations are NOT wrapped in the visibility barrier the btree
+	// path takes (rmp #2703), and need not be. The hazard that barrier answers is
+	// a WRITER's commit-time fan-out landing between the backfill scan and the
+	// registration, or between the two registrations, and being missed for good
+	// by an index whose scan predates it (rmp #2739). Here the build log closes
+	// both windows instead: [index.Manager.ApplyBatchInState] records every
+	// delivery into the builds in flight under the same shared hold of the
+	// manager's lock as the delivery itself, and [index.Manager.FinishBuild]
+	// replays that recording into each index and registers the pair under one
+	// exclusive hold, below. Gated by
+	// TestHashIndexBuild_ExplicitCommitBetweenBackfillAndRegistration_2739.
 	numName := numericBTreeName(p.Label, p.Property)
 	numIdx, _ := newBoundNodeBTreeIndexNumeric(e.g.ReadAt(nil), p.Label, p.Property)
 	if numIdx != nil {

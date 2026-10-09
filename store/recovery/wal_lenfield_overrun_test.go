@@ -52,7 +52,7 @@ func TestRecovery_MidWALLengthOverrun_IsHardError(t *testing.T) {
 	// file (so io.ReadFull hits EOF) but below maxFrameSize (so the too-large
 	// guard does not trip first). Adding the whole remaining file length is a
 	// guaranteed over-declaration.
-	lenOff := frameStart + 6
+	lenOff := frameStart + 8 // the length field of a wal.CurrentVersion header
 	binary.LittleEndian.PutUint32(data[lenOff:lenOff+4], uint32(len(data)))
 	if err := os.WriteFile(walPath, data, 0o600); err != nil { //nolint:gosec // path under t.TempDir
 		t.Fatalf("write corrupt WAL: %v", err)

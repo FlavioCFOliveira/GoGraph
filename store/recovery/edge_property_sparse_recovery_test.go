@@ -25,7 +25,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
-	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 const sparseRecoveryDegree = 60 // high enough that a ~50%-fill column is sparse
@@ -40,10 +39,8 @@ const sparseRecoveryDegree = 60 // high enough that a ~50%-fill column is sparse
 // any WAL prefix is a strict subset of the final state (additive-only).
 func writeSparseEdgePropertyWorkload(t *testing.T, dir string) string {
 	t.Helper()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A single-file log: this test damages or erases it as one file.
+	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),

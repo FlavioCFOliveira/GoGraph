@@ -103,6 +103,12 @@ type Options[N comparable, W any] struct {
 	// corruption (an I/O error, a cancelled ctx) is returned whatever this
 	// says, and a clean recovery opens for writing whatever this says.
 	AllowUnclean bool
+	// SyncLatency, when non-nil, delays every WAL data fsync and directory fsync
+	// of the opened store by a seeded random duration ([wal.SyncLatency]). It is
+	// a TESTING instrument that restores a real device's fsync window on a RAM
+	// drive (rmp #3022); leave it nil in production, where it costs one
+	// nil-pointer test per fsync.
+	SyncLatency *wal.SyncLatency
 }
 
 // Opened is a durable store directory opened for reading and writing by [Open]
@@ -276,7 +282,7 @@ func openCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 		}
 		return openReadOnly(res, opts), nil
 	}
-	wlog, err := wal.Open(filepath.Join(dir, walFileName))
+	wlog, err := wal.OpenWithSyncLatency(filepath.Join(dir, walFileName), opts.SyncLatency)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %q: wal: %w", dir, err)
 	}
@@ -286,7 +292,18 @@ func openCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 		ResumeTxnSeq: opts.ResumeTxnSeq,
 	}, opts.MaxTxnOps)
 	closeOpts := make([]Option, 0, 1+len(opts.CloseOptions))
-	closeOpts = append(closeOpts, WithQuiesce(st.RunUnderCommitLock))
+	// The quiesce also closes the store's id reservations (WAL v2 step 4): with
+	// writers drained, the exact per-shard id marks are appended just before the
+	// WAL's final flush and fsync, so a clean restart wastes no node id.
+	closeOpts = append(closeOpts, WithQuiesce(func(fn func() error) error {
+		return st.RunUnderCommitLock(func() error {
+			idErr := st.Close()
+			if err := fn(); err != nil {
+				return err
+			}
+			return idErr
+		})
+	}))
 	closeOpts = append(closeOpts, opts.CloseOptions...)
 	return &Opened[N, W]{
 		DB:     New(wlog, closeOpts...),

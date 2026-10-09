@@ -44,7 +44,7 @@ func TestDecode_RejectsOversizedFrameBeforeAllocation(t *testing.T) {
 	// A header claiming a payload one byte past the ceiling. The reader
 	// supplies only the header; if Decode honoured the (huge) length it
 	// would attempt to read a payload and trip oneByteReader's guard.
-	head := makeHeader(CurrentVersion, maxFrameSize+1)
+	head := makeHeader(LegacyVersion, maxFrameSize+1)
 	r := &oneByteReader{data: head, t: t}
 	_, err := Decode(r)
 	if !errors.Is(err, ErrFrameTooLarge) {
@@ -57,7 +57,7 @@ func TestDecode_RejectsMaxUint32LengthBeforeAllocation(t *testing.T) {
 	// The pathological worst case: the length field is the maximum a
 	// uint32 can hold (~4 GiB). Decode must reject it via the cap, never
 	// allocating, never reading the payload.
-	head := makeHeader(CurrentVersion, 0xFFFFFFFF)
+	head := makeHeader(LegacyVersion, 0xFFFFFFFF)
 	r := &oneByteReader{data: head, t: t}
 	_, err := Decode(r)
 	if !errors.Is(err, ErrFrameTooLarge) {
@@ -71,7 +71,7 @@ func TestDecode_AcceptsFrameAtCeilingBoundary(t *testing.T) {
 	// must pass the cap. We do not supply the (1 GiB) payload, so Decode
 	// proceeds to read it and stops at ErrTornFrame — proving the cap let
 	// the frame through rather than rejecting it as ErrFrameTooLarge.
-	head := makeHeader(CurrentVersion, maxFrameSize)
+	head := makeHeader(LegacyVersion, maxFrameSize)
 	_, err := Decode(bytes.NewReader(head))
 	if errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("Decode at-ceiling frame rejected by cap; want it to pass the cap")

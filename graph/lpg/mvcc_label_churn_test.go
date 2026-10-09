@@ -21,6 +21,7 @@ package lpg
 //     raise site turn the test red.
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"sync"
@@ -312,7 +313,7 @@ func (g *Graph[N, W]) labelBitmapUngated(lid LabelID, s *Snapshot) *roaring64.Bi
 	pre := g.suspectNodes()
 	bm := g.nodeIdx.Intersect(uint32(lid))
 	pre = append(pre, g.suspectNodes()...)
-	g.correctBitmapOver(bm, s, func(bag labelBag) bool { return bag.has(lid) }, pre)
+	_ = g.correctBitmapOver(context.Background(), bm, s, func(bag labelBag) bool { return bag.has(lid) }, pre)
 	return bm
 }
 

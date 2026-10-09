@@ -58,6 +58,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -355,7 +356,7 @@ func runOneWrite(ctx context.Context, e *Engine, arm string) error {
 func TestSchemaGate_DDLDoesNotHoldTheGateAcrossWriterAdmission(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	wr, err := wal.Open(filepath.Join(dir, "wal"))
+	wr, err := wal.OpenWithSyncLatency(filepath.Join(dir, "wal"), synclatency.ForTest(t))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}

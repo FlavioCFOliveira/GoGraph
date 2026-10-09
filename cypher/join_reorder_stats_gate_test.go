@@ -136,7 +136,7 @@ func TestReorderComponentCardinality_DeclinesAnUnsupportedOperator(t *testing.T)
 		"nil child": nil,
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, ok := reorderComponentCardinality(plan, bareLabelResolver{}, nil, 10)
+			got, ok, _ := reorderComponentCardinality(context.Background(), plan, bareLabelResolver{}, nil, 10)
 			if ok {
 				t.Fatalf("admitted %s as a component: %+v", name, got)
 			}
@@ -154,7 +154,7 @@ func TestReorderComponentCardinality_ApplyTakesTheWeakerProvenance(t *testing.T)
 		Outer: &ir.AllNodesScan{NodeVar: "a"},
 		Inner: &ir.NodeByLabelScan{NodeVar: "b", Label: "B"},
 	}
-	got, ok := reorderComponentCardinality(ap, nil, nil, 10)
+	got, ok, _ := reorderComponentCardinality(context.Background(), ap, nil, nil, 10)
 	if !ok {
 		t.Fatal("an Apply of two bare scans must be a component")
 	}
@@ -181,7 +181,7 @@ func TestReorderComponentCardinality_ApplyDeclinesACertifiedArm(t *testing.T) {
 
 	rangeArm := ir.NewSelectionExpr("(a.x > 1980)", rangePredOn("a", "x", 1980),
 		&ir.NodeByLabelScan{NodeVar: "a", Label: "A"})
-	solo, ok := reorderComponentCardinality(rangeArm, src, nil, 2050)
+	solo, ok, _ := reorderComponentCardinality(context.Background(), rangeArm, src, nil, 2050)
 	if !ok {
 		t.Fatal("a range-filtered label scan must be a component on its own")
 	}
@@ -194,7 +194,7 @@ func TestReorderComponentCardinality_ApplyDeclinesACertifiedArm(t *testing.T) {
 	}
 
 	ap := &ir.Apply{Outer: &ir.NodeByLabelScan{NodeVar: "b", Label: "B"}, Inner: rangeArm}
-	if _, ok := reorderComponentCardinality(ap, src, nil, 2050); ok {
+	if _, ok, _ := reorderComponentCardinality(context.Background(), ap, src, nil, 2050); ok {
 		t.Fatal("composed an interval-carrying arm into an Apply component")
 	}
 }
@@ -214,11 +214,11 @@ func TestReorderFilteredRows_CertifiedErrorIsScaledByTheLabelCount(t *testing.T)
 	}
 
 	eq := ir.NewSelectionExpr("(a.x = 7)", eqPredOn("a", "x", 7), scan)
-	if _, err := reorderFilteredRows(eq, scan, src, nil, drain); err != 0 {
+	if _, err, _ := reorderFilteredRows(context.Background(), eq, scan, src, nil, drain); err != 0 {
 		t.Fatalf("equality rowsErr = %g, want 0 (an MCV count is exact)", err)
 	}
 	rg := ir.NewSelectionExpr("(a.x > 1980)", rangePredOn("a", "x", 1980), scan)
-	_, rgErr := reorderFilteredRows(rg, scan, src, nil, drain)
+	_, rgErr, _ := reorderFilteredRows(context.Background(), rg, scan, src, nil, drain)
 	// delta is at least 1/B, so the row error is at least N/B.
 	if want := float64(nA) / float64(statsHistogramBuckets); rgErr < want {
 		t.Fatalf("range rowsErr = %g, want at least N/B = %g", rgErr, want)
@@ -233,7 +233,7 @@ func TestReorderFilteredRows_NonStatsResolverIsInert(t *testing.T) {
 	scan := &ir.NodeByLabelScan{NodeVar: "a", Label: "A"}
 	sel := ir.NewSelectionExpr("(a.x = 1)", eqPredOn("a", "x", 1), scan)
 	src := bareLabelResolver{counts: map[string]uint64{"A": 500}}
-	got, ok := reorderComponentCardinality(sel, src, nil, 500)
+	got, ok, _ := reorderComponentCardinality(context.Background(), sel, src, nil, 500)
 	if !ok {
 		t.Fatal("the shape is a component regardless of the resolver")
 	}
@@ -345,7 +345,7 @@ func TestComputeReorderSwaps_DeclinesANonComponentArm(t *testing.T) {
 		Outer: &ir.NodeByLabelScan{NodeVar: "b", Label: "B"},
 		Inner: ir.NewArgument([]string{"a"}), // not a component
 	}
-	if swaps := computeReorderSwaps([]*ir.Apply{inner}, src, nil, 100); len(swaps) != 0 {
+	if swaps, _ := computeReorderSwaps(context.Background(), []*ir.Apply{inner}, src, nil, 100); len(swaps) != 0 {
 		t.Fatalf("promoted a non-component arm whose zero-value estimate reads as an "+
 			"exact zero: %v", swaps)
 	}
@@ -353,7 +353,7 @@ func TestComputeReorderSwaps_DeclinesANonComponentArm(t *testing.T) {
 		Outer: ir.NewArgument([]string{"a"}),
 		Inner: &ir.NodeByLabelScan{NodeVar: "b", Label: "B"},
 	}
-	if swaps := computeReorderSwaps([]*ir.Apply{outer}, src, nil, 100); len(swaps) != 0 {
+	if swaps, _ := computeReorderSwaps(context.Background(), []*ir.Apply{outer}, src, nil, 100); len(swaps) != 0 {
 		t.Fatalf("swapped a candidate with a non-component outer arm: %v", swaps)
 	}
 }

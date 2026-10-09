@@ -54,7 +54,7 @@ func Example() {
 	fmt.Printf("label strings=%d\n", len(loaded.Labels.Strings))
 
 	// Output:
-	// manifest version=3
+	// manifest version=4
 	// csr edges=1
 	// label strings=1
 }

@@ -38,7 +38,7 @@ func TestMapper_LoadFrom_Extended_Int64(t *testing.T) {
 	entries := collectEntries(src)
 
 	dst := NewMapper[int64]()
-	if err := dst.LoadFrom(entries); err != nil {
+	if err := dst.LoadFrom(entries, nil); err != nil {
 		t.Fatalf("LoadFrom: %v", err)
 	}
 	if got := dst.Len(); got != n {
@@ -82,7 +82,7 @@ func TestMapper_LoadFrom_Extended_UUID(t *testing.T) {
 	entries := collectEntries(src)
 
 	dst := NewMapper[[16]byte]()
-	if err := dst.LoadFrom(entries); err != nil {
+	if err := dst.LoadFrom(entries, nil); err != nil {
 		t.Fatalf("LoadFrom: %v", err)
 	}
 	if got := dst.Len(); got != n {

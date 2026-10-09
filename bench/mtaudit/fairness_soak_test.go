@@ -13,12 +13,16 @@ package mtaudit_test
 //
 // # What is being measured
 //
-// `Engine.Run` holds the graph read barrier ([lpg.Graph.View], an RLock on
-// visMu) across BUILD and DRAIN, so a long analytical query holds it for its
-// whole duration. A write takes the same barrier EXCLUSIVELY
-// ([lpg.Graph.ApplyAtomically]). Go's sync.RWMutex prefers a waiting writer, so
-// once the writer queues behind the long read, every short reader arriving
-// after it parks until the long read finishes and the write completes.
+// When this was written, `Engine.Run` held the graph read barrier
+// (lpg.Graph.View, an RLock on visMu) across BUILD and DRAIN, so a long
+// analytical query held it for its whole duration, and a write took the same
+// barrier EXCLUSIVELY. Go's sync.RWMutex prefers a waiting writer, so once the
+// writer queued behind the long read, every short reader arriving after it
+// parked until the long read finished and the write completed. That mechanism
+// is gone: `Engine.Run` reads through an MVCC snapshot and takes no barrier
+// (rmp #2290; rmp #2344 removed lpg.Graph.View), and an ordinary write holds
+// the graph's schema barrier SHARED ([lpg.Graph.ApplyVersioned]), so neither
+// waits on the other. The four cells below measure whether a collapse remains.
 //
 // The signature of that mechanism is that each ingredient alone is harmless and
 // only the COMBINATION collapses, which is why this test measures all four
@@ -46,25 +50,27 @@ package mtaudit_test
 // exclusive barrier is load-bearing, and it therefore applies UNIQUE-grade
 // exclusion to its most common operation.
 //
-// # THIS TEST IS EXPECTED TO FAIL UNTIL rmp #2274 PHASE P4 LANDS
+// # THIS TEST IS EXPECTED TO PASS: the defect is fixed (rmp #2274)
 //
-// It is red on purpose, and it is red because the module has the defect it
-// describes — not because it is broken, not because the machine is loaded, and
-// not because someone forgot to finish it. Do not bisect it, do not soften the
-// thresholds, and do not skip it. The decided fix is per-object MVCC
-// (docs/design-mvcc-delta-chains.md); P4 of that programme retires the read
-// barrier from Engine.Run, and this test turning green is that phase's
-// acceptance criterion.
+// It was red on purpose while the module had the defect it describes: measured
+// red at 51.5× (1 reader) and 61.2× (8 readers) on 2026-07-31, with worst
+// short-read latencies of 1m36.7s and 1m36.9s, and registered as a KNOWN RED
+// gate in docs/certification-2026-07-31.md. The fix was per-object MVCC
+// (docs/design-mvcc-delta-chains.md), whose P4 phase retired the read barrier
+// from Engine.Run; this test turning green was that phase's acceptance
+// criterion.
 //
-// Measured red at 51.5× (1 reader) and 61.2× (8 readers) on 2026-07-31, with
-// worst short-read latencies of 1m36.7s and 1m36.9s.
+// Measured green on 2026-08-01 (docs/certification-mvcc-2026-08-01.md, "#2274
+// re-verified"): collapse 1.91× (1 reader) and 2.07× (8 readers) against the
+// 4.0× tolerance, with a worst short-read latency of about 7 ms during a
+// 1m42s long read. The residual ~2× is the long read occupying a core, not
+// blocking. Run it without -race and with no competing load: the race detector
+// distorts the latency it measures, and peer load can manufacture a failure.
 //
-// It is in the SOAK layer, which `make ci` does not run, so it does not block
-// the local gate or a release; the soak layer is a periodic reliability
-// exercise. That is deliberate — but it is also exactly how rmp #2256 stayed
-// red and unnoticed for roughly 260 sprints, so this failure is registered in
-// docs/certification-2026-07-31.md as a KNOWN RED gate with its rmp id rather
-// than left to be rediscovered.
+// A failure is therefore a regression, not a known state. Do not soften the
+// thresholds and do not skip it. It is in the SOAK layer, which `make ci` does
+// not run, so it does not block the local gate or a release; the soak layer is
+// a periodic reliability exercise.
 
 import (
 	"context"

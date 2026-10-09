@@ -20,7 +20,7 @@ import (
 // index, so the gap this file guards bites only a user who explicitly asked for
 // a btree on a string property — reasonable when the same property also serves
 // range predicates (rmp #2231).
-func newBtreeStringEngine(t *testing.T, n int, extra ...map[string]any) *cypher.Engine {
+func newBtreeStringEngine(t testing.TB, n int, extra ...map[string]any) *cypher.Engine {
 	t.Helper()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	g.SetIndexManager(index.NewManager())
@@ -138,6 +138,33 @@ func TestBTreeStringEq_UsesTheIndex(t *testing.T) {
 	if !strings.Contains(plan, "Filter") {
 		t.Errorf("the range seek's residual Filter must be retained so the seek can only "+
 			"narrow what is examined, never change what is admitted:\n%s", plan)
+	}
+}
+
+// TestBTreeStringEq_AbsentValueSeeks pins rmp #3061: an equality whose value is
+// absent from a btree-only index seeks the index and returns zero rows, for a
+// parameter and for a literal alike. Before the fix the selectivity gate declined
+// an empty range and the plan scanned the whole label: 1.39 ms and 20 071
+// allocs/op at 20 000 nodes, against 3.6 us and 82 allocs/op for the seek.
+func TestBTreeStringEq_AbsentValueSeeks(t *testing.T) {
+	t.Parallel()
+	eng := newBtreeStringEngine(t, 2000)
+	params, err := cypher.BindParams(map[string]any{"k": "absent"})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	for _, q := range []string{
+		"MATCH (a:K) WHERE a.sk = $k RETURN a.sk AS k",
+		"MATCH (a:K) WHERE a.sk = 'absent' RETURN a.sk AS k",
+	} {
+		prof, err := eng.Profile(context.Background(), q, params)
+		if err != nil {
+			t.Fatalf("Profile %q: %v", q, err)
+		}
+		if !strings.Contains(prof, `NodeByIndexRangeScan [range="absent".."absent"] (rows=0,`) {
+			t.Errorf("%q: an absent value must seek the btree and return zero rows, "+
+				"not scan the label:\n%s", q, prof)
+		}
 	}
 }
 

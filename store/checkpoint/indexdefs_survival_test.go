@@ -32,6 +32,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
@@ -108,8 +109,8 @@ func TestCheckpointer_IndexSurvivesCheckpoint_WithIndexSpecs(t *testing.T) {
 	// without exercising the snapshot indexdefs.bin path. This assertion FAILS on
 	// pre-fix code: without indexdefs.bin the phase-3 self-sufficiency re-check
 	// refused to truncate.
-	if got := cp.Stats().WALTruncBytes; got == 0 {
-		t.Fatalf("checkpoint did not truncate the WAL (WALTruncBytes = 0); the indexdefs.bin path is not exercised — #1755")
+	if _, ok, err := waltest.CheckpointRecorded(dir); err != nil || !ok {
+		t.Fatalf("the checkpoint did not record its snapshot as the start of recovery; the indexdefs.bin path is not exercised — #1755"+" (control record: err %v)", err)
 	}
 	// Component-level pin: the snapshot must carry the durable index def set.
 	if !manifestHasIndexDefs(t, filepath.Join(dir, "snapshot")) {

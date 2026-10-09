@@ -695,10 +695,20 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	// Pre-set cs and cbuf to the engine's count store and the handle's SHARED count
 	// buffer so every statement's count deltas accumulate together and the handle
 	// flushes them once at Commit (#2082), mirroring the shared index buffer.
+	//
+	// The statement's update counters are armed exactly as on the autocommit path
+	// (rmp #3004): a statement inside an explicit transaction reports its own write
+	// effects, which Bolt carries as the RUN's `stats` and the driver turns into
+	// ResultSummary.Counters() before the transaction commits. They point at the
+	// adapter's inline store, so arming them costs no allocation.
 	if tx.walTx != nil {
-		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched, stampCon: tx.stampCon, cbuf: tx.cbuf, eng: tx.eng, conTxn: tx.conTxn}
+		wa := &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched, stampCon: tx.stampCon, cbuf: tx.cbuf, eng: tx.eng, conTxn: tx.conTxn}
+		wa.counters = &wa.countersStore
+		mutator = wa
 	} else {
-		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched, stampCon: tx.stampCon, cbuf: tx.cbuf, eng: tx.eng, conTxn: tx.conTxn}
+		la := &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched, stampCon: tx.stampCon, cbuf: tx.cbuf, eng: tx.eng, conTxn: tx.conTxn}
+		la.counters = &la.countersStore
+		mutator = la
 	}
 
 	// One statement, one SHARED hold on the schema barrier, carrying THIS handle's
@@ -919,6 +929,9 @@ func (tx *ExplicitTx) Commit() (err error) {
 			// clock from the WAL (rmp #2309). release() publishes it afterwards, so
 			// the allocate → encode → fsync → publish order holds and
 			// durable-then-visible is preserved.
+			// The commit marker names the exact ids this transaction created (WAL
+			// v2 step 3); tx.wtx is still open here.
+			tx.walTx.AttachWriteTx(tx.wtx)
 			if werr := tx.walTx.CommitWALOnly(tx.eng.g.AllocateCommitTS(tx.wtx)); werr != nil {
 				cmetrics.IncCounter("cypher.ExplicitTx.wal.commitErrors", 1)
 				walErr = werr

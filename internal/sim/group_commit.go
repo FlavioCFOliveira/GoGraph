@@ -496,12 +496,12 @@ func groupCommitFrame(tag byte) []byte {
 // discarded the whole failed suffix without touching what was acknowledged
 // before it.
 func groupCommitRecoveredFrames(disk *SimDisk) (prior, group int, err error) {
-	rh, err := disk.OpenFile(groupCommitFailAllPath, 0)
+	log, err := wal.OpenLogFS(simLogFS{disk: disk}, groupCommitFailAllPath)
 	if err != nil {
 		return 0, 0, fmt.Errorf("open for read: %w", err)
 	}
-	defer func() { _ = rh.Close() }()
-	r := wal.NewReader(rh, rh)
+	defer func() { _ = log.Close() }()
+	r := log
 	for f := range r.Frames() {
 		if len(f.Payload) == 0 {
 			continue

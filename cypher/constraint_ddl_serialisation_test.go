@@ -40,6 +40,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/internal/testfs"
 	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
@@ -163,7 +164,7 @@ func TestCreateConstraint_ConcurrentDuplicate_WALBacked(t *testing.T) {
 	testlayers.RequireSoak(t) // concurrency stress → soak layer (short-layer per-package budget, #1460)
 	t.Parallel()
 	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
+	w, err := wal.OpenWithSyncLatency(filepath.Join(dir, "wal"), synclatency.ForTest(t))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}

@@ -15,7 +15,9 @@ package lpg
 // Graph.View — 1.65 us serial against 3.6 ns for the bare RWMutex pair — with a
 // 64 B allocation per call, and read throughput HALVING from 1 to 10 cores
 // because runtime.Stack serialises callers on the runtime's process-global
-// debuglock. BenchmarkBarrier_ViewParallel is the scaling half of that claim.
+// debuglock. rmp #2344 removed Graph.View together with its benchmarks
+// (BenchmarkBarrier_View, BenchmarkBarrier_ViewParallel); what remains here is
+// the bare RWMutex floor and the write side, BenchmarkBarrier_ApplyAtomically.
 //
 // Layer: short (bench; skipped unless -bench is set).
 
@@ -26,30 +28,28 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
-// BenchmarkBarrier_BareRWMutex is the floor for BenchmarkBarrier_View: the
-// RLock/RUnlock pair alone, on a mutex nothing else touches. In a released build
-// Graph.View must sit on top of this and no higher, which is the acceptance
-// bar for rmp #2168.
+// BenchmarkBarrier_BareRWMutex is the RLock/RUnlock pair alone, on a mutex
+// nothing else touches. It was the floor for BenchmarkBarrier_View, the
+// acceptance bar for rmp #2168 (a released Graph.View was to sit on top of it
+// and no higher); rmp #2344 removed Graph.View and that benchmark.
 //
-// It is also the diagnostic for whatever anti-scaling survives at 10 cores:
-// sync.RWMutex admits concurrent readers but every RLock increments one shared
-// counter, so an empty critical section degenerates into cache-line ping-pong
-// on that word. When this benchmark and BenchmarkBarrier_ViewParallel degrade
-// together, the residual belongs to the RWMutex, not to anything the barrier
-// adds — which is the case the lock-free snapshot work (#1671/#2051) addresses
-// and this task does not.
+// It also shows the anti-scaling of a shared RWMutex at 10 cores: sync.RWMutex
+// admits concurrent readers but every RLock increments one shared counter, so an
+// empty critical section degenerates into cache-line ping-pong on that word.
+// The schema barrier is an [mvcc.Gate], not a sync.RWMutex, for that reason
+// (rmp #2337).
 func BenchmarkBarrier_BareRWMutex(b *testing.B) {
 	var mu sync.RWMutex
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		mu.RLock()
-		mu.RUnlock() //nolint:gocritic,staticcheck // the empty critical section IS the measurement: this is the floor Graph.View is compared against
+		mu.RUnlock() //nolint:gocritic,staticcheck // the empty critical section IS the measurement: the bare RWMutex floor
 	}
 }
 
-// BenchmarkBarrier_BareRWMutexParallel is the parallel floor, to be compared
-// with BenchmarkBarrier_ViewParallel at the same -cpu setting.
+// BenchmarkBarrier_BareRWMutexParallel is the parallel floor. Its counterpart,
+// BenchmarkBarrier_ViewParallel, was removed with Graph.View by rmp #2344.
 func BenchmarkBarrier_BareRWMutexParallel(b *testing.B) {
 	var mu sync.RWMutex
 	b.ReportAllocs()
@@ -57,7 +57,7 @@ func BenchmarkBarrier_BareRWMutexParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			mu.RLock()
-			mu.RUnlock() //nolint:gocritic,staticcheck // the empty critical section IS the measurement: this is the floor Graph.View is compared against
+			mu.RUnlock() //nolint:gocritic,staticcheck // the empty critical section IS the measurement: the bare RWMutex floor
 		}
 	})
 }

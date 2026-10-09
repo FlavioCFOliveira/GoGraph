@@ -602,7 +602,7 @@ func RunDBTeardown(ctx context.Context, cfg DBTeardownConfig) (DBTeardownEvidenc
 
 	walPath := walPathFor(env.cfg.dir)
 	if env.disk.Exists(walPath) {
-		image, rerr := env.disk.ReadFile(walPath)
+		image, rerr := simWALFrameImage(env.disk, walPath, env.disk.ReadFile)
 		if rerr != nil {
 			return ev, fmt.Errorf("sim: db-teardown read WAL image: %w", rerr)
 		}

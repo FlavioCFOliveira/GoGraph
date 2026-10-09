@@ -223,10 +223,10 @@ func TestBoltTxRegistry_QuotaChurn(t *testing.T) {
 //
 // # Why two arrangements, and why the first one alone would have been a lie
 //
-// list() ranges a Go map — whose iteration order is randomised — and then
-// insertion-sorts the result by StartedAt, swapping only on a strict Before
-// (bolt/server/txregistry.go:188-194). The cost therefore depends entirely on
-// whether the entries' instants are DISTINCT:
+// list() ranges a Go map — whose iteration order is randomised — and then sorts
+// the result by StartedAt. Until rmp #2562 that sort was an insertion sort,
+// swapping only on a strict Before, so its cost depended entirely on whether the
+// entries' instants were DISTINCT:
 //
 //   - when every entry shares one instant the inner condition is never true, so
 //     the sort makes ZERO swaps and degenerates to a linear scan;
@@ -242,18 +242,33 @@ func TestBoltTxRegistry_QuotaChurn(t *testing.T) {
 // measures the sort, and a production server, whose clock is real, is always in
 // it.
 //
-// MEASURED on this machine, one Transactions() call, no -race:
+// MEASURED on this machine before rmp #2562, one Transactions() call, no -race:
 //
-//	open   same-instant        distinct-instants
+//	open   same-instant       distinct-instants
 //	   8   326ns   (40ns/e)    314ns    (39ns/e)
 //	  64   2.954µs (46ns/e)    11.839µs (184ns/e)
 //	 256   8.628µs (33ns/e)    143.153µs (559ns/e)
 //	 512   16.74µs (32ns/e)    599.715µs (1.171µs/e)
 //
 // The same-instant column is flat per entry; the distinct-instants column rises
-// linearly per entry, i.e. the call is QUADRATIC in the number of open
-// transactions, and 256 -> 512 costs 4.19x for twice the input. Recorded here and
-// left alone: fixing it is not this task's scope.
+// linearly per entry, i.e. the call was QUADRATIC in the number of open
+// transactions, and 256 -> 512 cost 4.19x for twice the input.
+//
+// rmp #2562 replaced the insertion sort with an O(n log n) sort of entry pointers.
+// MEASURED after it, same machine, no -race:
+//
+//	open   same-instant        distinct-instants
+//	   8   274ns   (34ns/e)    261ns    (32ns/e)
+//	  64   3.25µs  (50ns/e)    3.059µs  (47ns/e)
+//	 256   9.022µs (35ns/e)    16.801µs (65ns/e)
+//	 512   17.47µs (34ns/e)    42.769µs (83ns/e)
+//	1024   35.53µs (34ns/e)    92.18µs  (90ns/e)
+//
+// The distinct-instants per-entry cost now grows logarithmically, not linearly.
+// The per-size cost of list() itself is benchmarked with benchstat by
+// BenchmarkTxRegistryList in bolt/server; this arm keeps measuring the call end to
+// end through the wire, now up to 1024 open transactions — the default
+// Options.MaxConnections.
 func TestBoltTxRegistry_ListingCostAtScale(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -262,7 +277,7 @@ func TestBoltTxRegistry_ListingCostAtScale(t *testing.T) {
 		if stagger {
 			arrangement = "distinct-instants"
 		}
-		for _, n := range []int{8, 64, 256, 512} {
+		for _, n := range []int{8, 64, 256, 512, 1024} {
 			t.Run(fmt.Sprintf("%s/open=%d", arrangement, n), func(t *testing.T) {
 				per := measureTxListCost(t, n, stagger)
 				t.Logf("Transactions() over %d open transactions (%s): %s per call (%s per entry)",

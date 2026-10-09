@@ -15,9 +15,14 @@ package main
 //
 // Run: go test -tags soak -run TestLadderSoak ./examples/37_mvcc_write_contention/
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
+)
 
 func TestLadderSoak(t *testing.T) {
-	lc := ladderConfig{levels: []int{256, 1024}, totalOps: 4096, soak: true, seed: 1}
+	lc := ladderConfig{levels: []int{256, 1024}, totalOps: 4096, soak: true, seed: 1,
+		syncLatency: synclatency.ForTest(t)}
 	runLadder(t, &lc)
 }

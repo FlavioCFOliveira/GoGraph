@@ -563,11 +563,11 @@ func (op *MergePattern) WithLeadingClause(leading bool) *MergePattern {
 	return op
 }
 
-// Init initialises the operator and its child. The first MergePattern.Init
-// (or [CreateNode.Init] / [Merge.Init]) in the process also seeds
-// [globalNodeCounter], exactly as those operators do, so fresh-node keys
-// minted here cannot collide with __cx_merge_<hex> keys replayed from an
-// earlier process during WAL / snapshot recovery.
+// Init initialises the operator and its child, and seeds the target graph's key
+// sequence once per graph ([seedNodeKeySequence]), exactly as [CreateNode.Init]
+// and [Merge.Init] do. Fresh-node keys minted here are kept clear of
+// __cx_merge_<hex> keys replayed from an earlier process by [mintNodeKey]
+// (rmp #3015), not by the seed.
 func (op *MergePattern) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.matched = nil
@@ -575,9 +575,7 @@ func (op *MergePattern) Init(ctx context.Context) error {
 	op.created = false
 	op.done = false
 	op.firedOnce = false
-	globalNodeCounterSeededOnce.Do(func() {
-		seedGlobalNodeCounter(op.mutator)
-	})
+	seedNodeKeySequence(op.mutator)
 	return op.child.Init(ctx)
 }
 
@@ -1032,7 +1030,8 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 			// before this loop, so the reservation sees the full label set.
 			if err := op.mutator.SetNodeProperty(key, p.key, p.value); err != nil {
 				if isConstraintViolation(err) {
-					return nil, err
+					// Marked when it is the concurrent-MERGE creation race (rmp #2987).
+					return nil, classifyMergeUniqueViolation(op.ctx, op.mutator, op.labelSrc, nil, n.labels, p, err)
 				}
 				return nil, fmt.Errorf("SetNodeProperty %q.%s: %w", n.varName, p.key, err)
 			}
@@ -1096,10 +1095,10 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 // freshNodeKey mints a synthetic node key from the same process-wide counter
 // [CreateNode]/[Merge] use, with the same "merge_" infix so the
 // [parseSynthKeySuffix] recovery re-seed scan recognises it without any
-// changes there.
+// changes there, and that op.mutator's graph does not hold (see
+// [mintNodeKey]).
 func (op *MergePattern) freshNodeKey() string {
-	n := globalNodeCounter.Add(1)
-	return synthKeyPrefix + mergeKeyInfix + fmt.Sprintf("%x", n)
+	return mintNodeKey(op.mutator, mergeKeyInfix)
 }
 
 // emitRow extends childRow with every chain position's binding (fresh

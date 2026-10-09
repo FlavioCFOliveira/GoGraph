@@ -777,13 +777,18 @@ func TestRegressionRowsForgivesOrderButNotMultiset(t *testing.T) {
 	// observe no reorder however long it ran. Each arm of the table opens its own
 	// store, so a store per iteration is also the faithful exercise.
 	//
-	// At a measured per-store reorder rate near one half, 40 stores put the odds
-	// of drawing a single order below 2^-38.
+	// The order follows the mapper shards the two nodes' keys hash to. Those keys
+	// used to come from a process-global counter, which is what varied the order
+	// between stores; they now come from each graph's own key sequence, so the
+	// test varies it deliberately: store i starts its sequence at i, and the 40
+	// stores' key pairs land in different shard pairs.
 	const iterations = 40
 	rawOrders := map[string]int{}
 	rendered := map[string]int{}
 	for i := 0; i < iterations; i++ {
-		eng := regressionStore(t).Engine()
+		st := regressionStore(t)
+		st.Graph().KeySequence().Add(uint64(i))
+		eng := st.Engine()
 		seeder := eng.NewSession()
 		mustExecCommit(t, seeder, "CREATE (n:Person {name:'x', age:1})", nil)
 		mustExecCommit(t, seeder, "CREATE (n:Person {name:'y', age:2})", nil)

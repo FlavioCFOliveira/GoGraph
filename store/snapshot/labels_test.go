@@ -69,10 +69,10 @@ func TestLabels_Roundtrip(t *testing.T) {
 	if loaded.Manifest.Version != ManifestVersion {
 		t.Fatalf("Manifest.Version = %d, want %d", loaded.Manifest.Version, ManifestVersion)
 	}
-	// String-keyed graphs emit a v3 snapshot: csr.bin + labels.bin +
-	// properties.bin + mapper.bin.
-	if got := len(loaded.Manifest.Files); got != 4 {
-		t.Fatalf("Manifest.Files = %d, want 4 (csr.bin + labels.bin + properties.bin + mapper.bin)", got)
+	// String-keyed graphs emit a v4 snapshot: csr.bin + labels.bin +
+	// properties.bin + mapper.bin + nodeids.bin.
+	if got := len(loaded.Manifest.Files); got != 5 {
+		t.Fatalf("Manifest.Files = %d, want 5 (csr.bin + labels.bin + properties.bin + mapper.bin + nodeids.bin)", got)
 	}
 
 	// Materialise the readback into a fresh LPG with the same

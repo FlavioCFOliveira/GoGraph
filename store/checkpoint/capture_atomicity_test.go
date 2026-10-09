@@ -16,9 +16,11 @@ package checkpoint
 // TRANSACTION, a state no serial schedule could produce, made durable in the
 // artefact a crash recovery replays.
 //
-// THE FIX: phase 1 now captures every graph-derived component into an atomic
-// in-memory image ([snapshot.Capture]) inside the same Graph.View, and phase 2
-// publishes those bytes without touching the graph. Publishing stays lock-free.
+// THE FIX: every graph-derived component is captured into an atomic in-memory
+// image ([snapshot.Capture]) at ONE instant, and phase 2 publishes those bytes
+// without touching the graph. Publishing stays lock-free. The instant was first
+// held by the commit lock plus Graph.View; it is now an MVCC snapshot opened
+// under the commit lock (rmp #2310), and rmp #2344 removed Graph.View.
 //
 // These tests assert the invariant on the ARTEFACT with a hand-computed
 // ABSOLUTE oracle — each transaction contributes exactly 2 nodes and 1 edge, so

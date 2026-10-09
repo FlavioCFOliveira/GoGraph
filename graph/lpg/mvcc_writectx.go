@@ -53,6 +53,7 @@ package lpg
 // exclusive bracket, through [Graph.direct]. See graph/lpg/direct_tx.go.
 
 import (
+	"sync"
 	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -115,6 +116,14 @@ type writeCtx struct {
 	// acceptance instrument. It is read once per version actually recorded,
 	// never on a read path.
 	conflict atomic.Pointer[mvcc.Conflict]
+	// created lists the node ids this transaction CREATED: ids first interned by
+	// it, and unborn ids it revived (a key whose only earlier creation aborted).
+	// It is the source of the commit marker's id annex (WAL v2 step 3,
+	// docs/design-wal-v2.md §5.5), read by [WriteTx.CreatedNodes] before the
+	// state is recycled. Guarded by createdMu because several goroutines may
+	// write through one transaction.
+	createdMu sync.Mutex
+	created   []graph.NodeID
 	// undoing marks the transaction as replaying its PHYSICAL undo log, during
 	// which its writes are withdrawals of its own work rather than new updates —
 	// so the doomed shortcut in [writeCtx.conflicts] must not refuse them
@@ -314,6 +323,7 @@ func (g *Graph[N, W]) acquireWriteCtx(startTS, txID uint64) *writeCtx {
 	w.allocRec = nil
 	w.applier = nil
 	w.abandon = false
+	w.created = w.created[:0]
 	return w
 }
 
@@ -519,4 +529,14 @@ func (s *nodePropShard) headStamp(id graph.NodeID) uint64 {
 		return d.info.TS()
 	}
 	return d.ts
+}
+
+// noteCreated records that this transaction created node id (WAL v2 step 3).
+func (w *writeCtx) noteCreated(id graph.NodeID) {
+	if w == nil {
+		return
+	}
+	w.createdMu.Lock()
+	w.created = append(w.created, id)
+	w.createdMu.Unlock()
 }

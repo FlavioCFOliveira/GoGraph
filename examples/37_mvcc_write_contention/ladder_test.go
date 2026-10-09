@@ -9,6 +9,8 @@ import (
 	"bytes"
 	"context"
 	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 )
 
 // samplerKeys are the frontier and growth counters every sampled arm emits.
@@ -27,9 +29,9 @@ var txKeys = []string{"commits_per_sec", "refused_attempts", "longest_retry_stre
 func requiredKeys(lc *ladderConfig) []string {
 	sampled := []string{"L01", "L04.sessionless", "L04.session", "L05", "L06", "L08",
 		"L10.sessionless", "L10.session", "L11.sessionless", "L11.session",
-		"L13", "L13.memory", "MG11", "L14", "L15", "L18", "L19"}
+		"L13", "MG11", "L14", "L15", "L18", "L19", "IX11", "L21"}
 	writers := []string{"L01", "L04.sessionless", "L04.session", "L05", "L06", "L08",
-		"L10.sessionless", "L10.session", "L11.sessionless", "L11.session", "L15", "L18", "L19"}
+		"L10.sessionless", "L10.session", "L11.sessionless", "L11.session", "L15", "L18", "L19", "L22"}
 	var keys []string
 	for _, r := range sampled {
 		for _, k := range samplerKeys {
@@ -46,11 +48,15 @@ func requiredKeys(lc *ladderConfig) []string {
 	}
 	keys = append(keys,
 		"L01.forbidden", "L01.permitted_g2_item", "L02.write_skew_permitted", "L03.repeatable_reads",
-		"L05.large_longest_refused_streak", "L06.seek_scan_mismatches", "L06.seek_scan_first_mismatches", "L07.own_seek_equals_scan",
+		"L05.large_longest_refused_streak", "L06.seek_scan_mismatches", "L06.seek_scan_first_mismatches", "L06.seek_equals_scan", "L06.btree_index_equals_scan", "L06.noop_set_over_peer_committed", "L06.btree_value_mismatches", "L07.own_seek_equals_scan",
 		"L08.versions_held", "L08.retention_shown", "L10.sessionless.store_bytes_after",
-		"L10.sessionless.commit_p99_during_checkpoint", "L13.duplicates", "L13.memory.failed_callers", "L14.duplicates",
-		"L15.dangling_arcs", "L16.traversal_repeatable", "L17.cancel_return_lag", "L18.dangling_arcs",
-		"L19.ddl_max_latency", "mem.heap_alloc_bytes")
+		"L10.sessionless.commit_p99_during_checkpoint", "L13.duplicates", "L13.failed_callers", "L14.duplicates",
+		"L15.dangling_arcs", "L15.stale_detach_refused", "L16.traversal_repeatable", "L16.young_node_stays_invisible", "L17.cancel_return_lag", "L18.dangling_arcs",
+		"L19.ddl_max_latency", "mem.heap_alloc_bytes",
+		"IX11.seeks_planned_as_index", "IX11.commits_overlapped_reads", "IX11.never_mixed", "IX11.seek_equals_scan",
+		"L21.reclaimed_during_reads", "L21.node_seen_exactly_once", "L21.value_committed_by_start", "L21.repeatable",
+		"L22.checkpoints_ran", "L22.snapshot_total_and_count_constant", "L22.crash_image_after_checkpoint",
+		"L22.crash.snapshot_used", "L22.crash.total_and_count_unchanged", "L22.crash.acked_present")
 	if lc.soak {
 		keys = append(keys, "L09.unregistered_snapshots", "L09.past_capacity_unregistered",
 			"L10.sessionless.self_streak_below_budget", "L11.sessionless.self_streak_below_budget")
@@ -82,7 +88,11 @@ func runLadder(t *testing.T, lc *ladderConfig) {
 }
 
 // TestLadder is the short layer: 1, 8 and 64 goroutines.
+//
+// The durable stores run with injected fsync latency (internal/synclatency,
+// rmp #3022), so the commit window a RAM drive shrinks stays open.
 func TestLadder(t *testing.T) {
 	lc := defaultLadderConfig()
+	lc.syncLatency = synclatency.ForTest(t)
 	runLadder(t, &lc)
 }

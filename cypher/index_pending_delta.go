@@ -90,6 +90,12 @@ type pendingIndexDelta struct {
 	//     printed string or a run-time-evaluated expression — CREATE, MERGE,
 	//     `SET n += …`, DELETE and DETACH DELETE. See [pendingIndexDelta.addPlanWrites].
 	all bool
+	// buffered is the cross-statement half alone (the changes earlier statements
+	// left unflushed), or nil when there are none. ownLeaf is the statement's sole
+	// seek leaf, which is judged against buffered only (rmp #3056). Both are set
+	// only by [mutatorIndexDelta]; see [pendingIndexDelta.forSeekFrom].
+	buffered *pendingIndexDelta
+	ownLeaf  *ir.Selection
 }
 
 // newPendingIndexDelta summarises buf into the coordinates a property index may
@@ -222,7 +228,9 @@ func (d *pendingIndexDelta) addLabel(name string) {
 //
 //	MATCH (n:Person {email: $e}) SET n.lastSeen = $t
 //
-// writes `lastSeen` and seeks on `email`, so the seek survives.
+// writes `lastSeen` and seeks on `email`, so the seek survives. A statement that
+// writes the property it seeks on, `MATCH (n:Acct {email: $old}) SET n.email = $new`,
+// keeps its seek through [soleSeekLeaf] instead (rmp #3056).
 //
 // The rest carry their property map as an opaque printed string
 // ([ir.CreateNode.Properties]) or as an AST that may hold row-driven expressions
@@ -341,13 +349,99 @@ func mutatorIndexDelta(m exec.GraphMutator, plan ir.LogicalPlan) *pendingIndexDe
 	if mgr := g.IndexManager(); mgr == nil || mgr.Count() == 0 {
 		return nil
 	}
-	d := newPendingIndexDelta(buf, g)
-	if d == nil {
-		d = &pendingIndexDelta{}
+	buffered := newPendingIndexDelta(buf, g)
+	var own pendingIndexDelta
+	own.addPlanWrites(plan)
+	if own.empty() {
+		return buffered
 	}
-	d.addPlanWrites(plan)
-	if !d.all && d.props == nil && d.labels == nil {
-		return nil
+	d := &own
+	if buffered != nil {
+		// Union into a fresh value: the buffered half must stay intact, because
+		// it is what the exempt leaf is judged against.
+		d = &pendingIndexDelta{all: own.all || buffered.all}
+		for _, half := range [2]*pendingIndexDelta{buffered, &own} {
+			for p := range half.props {
+				d.addProp(p)
+			}
+			for l := range half.labels {
+				d.addLabel(l)
+			}
+		}
 	}
+	d.buffered = buffered
+	d.ownLeaf = soleSeekLeaf(plan)
 	return d
+}
+
+// empty reports whether d records no coordinate at all.
+func (d *pendingIndexDelta) empty() bool {
+	return !d.all && d.props == nil && d.labels == nil
+}
+
+// forSeekFrom returns the delta an equality seek replacing sel must respect.
+//
+// For the statement's sole seek leaf ([soleSeekLeaf]) that is the buffered half
+// alone: the statement's own writes cannot reach that seek. For every other
+// Selection it is the whole delta. A nil receiver returns nil.
+func (d *pendingIndexDelta) forSeekFrom(sel *ir.Selection) *pendingIndexDelta {
+	if d == nil || sel == nil || sel != d.ownLeaf {
+		return d
+	}
+	return d.buffered
+}
+
+// soleSeekLeaf returns the Selection over a labelled scan that is the ONLY leaf
+// of plan, reached from the root through operators that each initialise their
+// single child exactly once ([initOnceChild]); it returns nil for any other plan
+// shape (rmp #3056).
+//
+// # Why the statement's own writes cannot make that seek stale
+//
+// The equality seek drains its whole posting list in Init
+// (cypher/exec/scan_index_hash.go), and the root's Init runs before the first row
+// flows (exec.Run, cypher/exec/produce_results.go). With every operator above it
+// initialising its child once, the lookup completes before any operator of this
+// statement writes, so it reads exactly what the index held when the statement
+// started. Writes left by EARLIER statements are still unflushed at that point,
+// which is why the buffered half of the delta keeps blocking it.
+//
+// The rows are also those the scan and filter would return. Each allowed operator
+// writes only the entity of the current row, and in this chain the only entity
+// bound is the leaf's node, so no write reaches a node the leaf has not yet
+// emitted.
+func soleSeekLeaf(plan ir.LogicalPlan) *ir.Selection {
+	for plan != nil {
+		if sel, ok := plan.(*ir.Selection); ok {
+			if _, scan := sel.Child.(*ir.NodeByLabelScan); scan {
+				return sel
+			}
+			return nil
+		}
+		child, ok := initOnceChild(plan)
+		if !ok {
+			return nil
+		}
+		plan = child
+	}
+	return nil
+}
+
+// initOnceChild returns the single child of plan when plan is an operator whose
+// physical form initialises that child exactly once and writes only the current
+// row's entity. Every other operator reports false, which excludes the plan from
+// [soleSeekLeaf]'s narrowing. TestSoleSeekLeaf_InitOnceChildOperators drives each
+// case's physical operator and checks the set of cases against this switch.
+func initOnceChild(plan ir.LogicalPlan) (ir.LogicalPlan, bool) {
+	switch p := plan.(type) {
+	case *ir.SetProperty:
+		return p.Child, true
+	case *ir.RemoveProperty:
+		return p.Child, true
+	case *ir.SetLabels:
+		return p.Child, true
+	case *ir.RemoveLabels:
+		return p.Child, true
+	}
+	return nil, false
 }

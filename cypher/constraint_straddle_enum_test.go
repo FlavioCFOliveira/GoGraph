@@ -92,6 +92,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/store"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -481,7 +482,7 @@ func straddleCaseEngine(t *testing.T, walBacked bool) (*Engine, func()) {
 	if !walBacked {
 		return NewEngine(g), func() {}
 	}
-	wr, err := wal.Open(filepath.Join(t.TempDir(), "wal"))
+	wr, err := wal.OpenWithSyncLatency(filepath.Join(t.TempDir(), "wal"), synclatency.ForTest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
