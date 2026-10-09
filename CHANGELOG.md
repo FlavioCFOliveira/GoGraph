@@ -23,6 +23,14 @@ interface the old type satisfies (`recovery.ReplayWAL`), so **71 re-signings and
 source-incompatible.** Under [docs/semver.md](docs/semver.md) a `0.y.z` release absorbs breaking
 changes in the MINOR digit.
 
+### Security
+
+- **Toolchain pinned to `go1.27.2`** (`go.mod` `toolchain` directive, was `go1.27.0`). The
+  vulnerability database of 2026-10-08 lists 13 standard-library vulnerabilities in `go1.27.1`,
+  9 reachable from GoGraph (`net/http`, `crypto/tls`, `net/textproto`, `mime/multipart`), from
+  GO-2026-6599 to GO-2026-6617. With `go1.27.2`, `make vulncheck` (govulncheck v1.8.0, source mode,
+  symbol level, 140 packages) reports none.
+
 ### Changed — BREAKING: WAL v2 on-disk format
 
 - **The write-ahead log is segmented, position-chained and bound to its store (rmp #3020,
