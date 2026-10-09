@@ -103,7 +103,7 @@ func TestDurableEdgeInstanceWrites_SurviveRecoveryAndLeaveNoOrdinalEntry(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: sh.multi})
+			g := lpg.New[string, float64](adjlist.Config{})
 			opts := txn.Options[string, float64]{Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec()}
 			eng := cypher.NewEngineWithStore(txn.NewStoreWithOptions[string, float64](g, w, opts))
 			for _, q := range sh.qs {

@@ -35,7 +35,7 @@ var ErrStoreClosed = errors.New("data store is closed")
 // pair. The same config writes the initial empty snapshot and is the shape
 // recovery reconstructs on open.
 func lpgConfig() adjlist.Config {
-	return adjlist.Config{Directed: true, Multigraph: true}
+	return adjlist.Config{}
 }
 
 // dataDirPaths returns the canonical WAL file and snapshot directory

@@ -51,7 +51,7 @@ func TestHotShard_WriteStorm(t *testing.T) {
 	}
 
 	// ── Reference build (single-threaded) ─────────────────────────────────
-	ref := adjlist.New[string, int64](adjlist.Config{Directed: true, Multigraph: false})
+	ref := adjlist.New[string, int64](adjlist.Config{})
 	for _, p := range pairs {
 		if err := ref.AddEdge(p.src, p.dst, 1); err != nil {
 			t.Fatalf("ref.AddEdge %q→%q: %v", p.src, p.dst, err)
@@ -78,7 +78,7 @@ func TestHotShard_WriteStorm(t *testing.T) {
 	})
 
 	// ── Concurrent storm ──────────────────────────────────────────────────
-	storm := adjlist.New[string, int64](adjlist.Config{Directed: true, Multigraph: false})
+	storm := adjlist.New[string, int64](adjlist.Config{})
 	var contentionCount atomic.Int64
 
 	var wg sync.WaitGroup

@@ -213,7 +213,7 @@ func runRung(ctx context.Context, w io.Writer, cfg *config) error {
 	// edge between an existing node pair. Weightless drops the per-node edge-weight
 	// column: Cypher has no edge-weight concept, so the []float64 holds no
 	// information (every relationship is recorded with the zero weight).
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true, Weightless: true})
+	g := lpg.New[string, float64](adjlist.Config{Weightless: true})
 	eng := cypher.NewEngine(g)
 	stats, err := seed(ctx, g, cfg)
 	if err != nil {

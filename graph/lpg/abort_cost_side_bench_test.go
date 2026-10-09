@@ -38,7 +38,7 @@ func BenchmarkAbortCostSideHistory(b *testing.B) {
 	}
 	for _, sh := range shapes {
 		b.Run(sh.name, func(b *testing.B) {
-			g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := New[string, float64](adjlist.Config{})
 			defer func() { _ = g.Close() }()
 			_ = g.AddNode("n")
 			// The reader is taken BEFORE the history is written, so every version

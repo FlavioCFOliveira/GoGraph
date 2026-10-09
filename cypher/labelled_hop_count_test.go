@@ -248,7 +248,7 @@ func TestLabelledHopCount_TombstonedFarNode(t *testing.T) {
 // count SLOTS rather than distinct neighbours.
 func TestLabelledHopCount_ParallelEdges(t *testing.T) {
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := NewEngine(g)
 	mustRun(t, eng, "CREATE (:P {id: 0})")
@@ -313,7 +313,7 @@ func TestLabelledHopCount_IneligibleShapes(t *testing.T) {
 func TestLabelledHopCount_ShortCircuits(t *testing.T) {
 
 	const degree = 5000
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	if err := g.AddNode("hub"); err != nil {
 		t.Fatalf("AddNode: %v", err)
@@ -399,7 +399,7 @@ func countLabelProbes(t *testing.T, g *lpg.Graph[string, float64], sh *labelledH
 // carrying :Marked.
 func mutableHopFixture(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := NewEngine(g)
 	mustRun(t, eng, "CREATE (:P {id: 0})")

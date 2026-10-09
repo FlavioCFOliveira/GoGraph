@@ -75,7 +75,7 @@ func assertColumnarMatchesFallback(t *testing.T, g *lpg.Graph[string, float64], 
 // values.
 func gInt(t *testing.T, vals ...int64) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i, v := range vals {
 		k := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(k); err != nil {
@@ -111,7 +111,7 @@ func TestColumnarAggGrouping_HazardCases(t *testing.T) {
 	})
 
 	t.Run("integer 1 groups with float 1.0", func(t *testing.T) {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		mustNode(t, g, "a", lpg.Int64Value(1))
 		mustNode(t, g, "b", lpg.Float64Value(1.0))
 		mustNode(t, g, "c", lpg.Int64Value(1))
@@ -125,7 +125,7 @@ func TestColumnarAggGrouping_HazardCases(t *testing.T) {
 	})
 
 	t.Run("NaN groups with NaN", func(t *testing.T) {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		mustNode(t, g, "a", lpg.Float64Value(math.NaN()))
 		mustNode(t, g, "b", lpg.Float64Value(math.NaN()))
 		mustNode(t, g, "c", lpg.Float64Value(math.NaN()))
@@ -139,7 +139,7 @@ func TestColumnarAggGrouping_HazardCases(t *testing.T) {
 	})
 
 	t.Run("negative zero groups with positive zero", func(t *testing.T) {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		mustNode(t, g, "a", lpg.Float64Value(math.Copysign(0, -1)))
 		mustNode(t, g, "b", lpg.Float64Value(0.0))
 		mustNode(t, g, "c", lpg.Float64Value(math.Copysign(0, -1)))
@@ -151,7 +151,7 @@ func TestColumnarAggGrouping_HazardCases(t *testing.T) {
 
 	t.Run("null keys group together", func(t *testing.T) {
 		// Nodes without property "g" → n.g is null → all one group.
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		for _, k := range []string{"a", "b", "c"} {
 			if err := g.AddNode(k); err != nil {
 				t.Fatalf("AddNode: %v", err)
@@ -167,7 +167,7 @@ func TestColumnarAggGrouping_HazardCases(t *testing.T) {
 	})
 
 	t.Run("mixed null and non-null keys", func(t *testing.T) {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		mustNode(t, g, "a", lpg.Int64Value(7))
 		if err := g.AddNode("b"); err != nil { // null key
 			t.Fatalf("AddNode: %v", err)
@@ -187,7 +187,7 @@ func TestColumnarAggGrouping_HazardCases(t *testing.T) {
 		// cross-type comparator (whose exactness is a separate, pre-existing concern);
 		// the columnar path must AGREE with the boxed fallback whatever that comparator
 		// decides. Differential only — the absolute grouping here is not asserted.
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		mustNode(t, g, "a", lpg.Int64Value(big))
 		mustNode(t, g, "b", lpg.Int64Value(big+1))
 		mustNode(t, g, "c", lpg.Float64Value(float64(big)))
@@ -196,7 +196,7 @@ func TestColumnarAggGrouping_HazardCases(t *testing.T) {
 	})
 
 	t.Run("string keys", func(t *testing.T) {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		mustNode(t, g, "a", lpg.StringValue("x"))
 		mustNode(t, g, "b", lpg.StringValue("y"))
 		mustNode(t, g, "c", lpg.StringValue("x"))
@@ -207,7 +207,7 @@ func TestColumnarAggGrouping_HazardCases(t *testing.T) {
 	})
 
 	t.Run("bool keys", func(t *testing.T) {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		mustNode(t, g, "a", lpg.BoolValue(true))
 		mustNode(t, g, "b", lpg.BoolValue(false))
 		mustNode(t, g, "c", lpg.BoolValue(true))
@@ -221,7 +221,7 @@ func TestColumnarAggGrouping_HazardCases(t *testing.T) {
 
 func TestColumnarAggGrouping_AggregateSemantics(t *testing.T) {
 	// Nodes: g in {0,1,2}, value v = i, so per group we can check every aggregate.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < 30; i++ {
 		k := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(k); err != nil {
@@ -268,7 +268,7 @@ func TestColumnarAggGrouping_CrossBatchTypeChange(t *testing.T) {
 	// comparator (cross-type numeric) route through the same equivalence the boxed
 	// path uses.
 	const per = 4200
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < per; i++ {
 		k := fmt.Sprintf("i%05d", i)
 		if err := g.AddNode(k); err != nil {

@@ -39,7 +39,7 @@ func framedManifest(t *testing.T) []byte {
 		Order:       3,
 		Size:        2,
 		CommitTS:    20,
-		GraphConfig: &GraphConfig{Directed: true, Multigraph: true},
+		GraphConfig: &GraphConfig{},
 		Files: []FileEntry{
 			{Name: CSRFile, Size: 2122, CRC32C: 276024788},
 			{Name: LabelsFile, Size: 64, CRC32C: 99},

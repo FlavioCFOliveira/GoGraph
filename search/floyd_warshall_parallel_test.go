@@ -39,7 +39,7 @@ func apspBitEqual[W Weight](t *testing.T, want, got *APSP[W]) {
 // with positive int64 weights, dense enough to cross floydParallelMinDim.
 func buildRandomDirectedInt64(t testing.TB, n, edgesPerNode int, seed uint64) *csr.CSR[int64] {
 	t.Helper()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	r := rand.New(rand.NewPCG(seed, seed*2+1)) //nolint:gosec // deterministic test RNG
 	for i := 0; i < n*edgesPerNode; i++ {
 		if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1)); err != nil {
@@ -101,7 +101,7 @@ func TestFloydWarshallParallel_BitEqualSerial_Random(t *testing.T) {
 func TestFloydWarshallParallel_FloatBitEqualSerial(t *testing.T) {
 	t.Parallel()
 	const n = 160
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	r := rand.New(rand.NewPCG(424242, 99)) //nolint:gosec // deterministic test RNG
 	for i := 0; i < n*5; i++ {
 		w := r.Float64()*9 + 0.0009765625 // exact-ish positive floats
@@ -153,7 +153,7 @@ func TestFloydWarshallParallel_NegCycle(t *testing.T) {
 // fires on the parallel path exactly as on the serial path.
 func TestFloydWarshallParallel_NaNRejected(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, math.NaN()); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestFloydWarshallParallel_Cancellation(t *testing.T) {
 // the host's physical core count.
 func benchFWDenseGraph(b *testing.B) *csr.CSR[int64] {
 	const n = 512
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	r := rand.New(rand.NewPCG(11, 13)) //nolint:gosec // deterministic benchmark RNG
 	for i := 0; i < n*n/4; i++ {
 		if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1)); err != nil {

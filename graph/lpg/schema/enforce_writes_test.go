@@ -15,7 +15,7 @@ import (
 func TestSchema_EnforceWrites(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[int, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int, int64](adjlist.Config{})
 
 	// Add nodes up-front; each subtest uses its own node ID to avoid
 	// shared-state races between parallel subtests.
@@ -117,7 +117,7 @@ func TestSchema_EnforceWrites(t *testing.T) {
 func TestSchema_EnforceEdgeWrites(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[int, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int, int64](adjlist.Config{})
 	// Add three independent edges, each used by a separate subtest.
 	for _, e := range [][2]int{{1, 2}, {3, 4}, {5, 6}} {
 		if err := g.AddEdge(e[0], e[1], 0); err != nil {

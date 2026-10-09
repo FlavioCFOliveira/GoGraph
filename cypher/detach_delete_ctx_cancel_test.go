@@ -50,7 +50,7 @@ func (c *cancelAfterNErr) Err() error {
 // and returns the engine. The graph is store-less and in-memory.
 func seedHub(t *testing.T, leaves int) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	q := fmt.Sprintf(
 		`CREATE (h:Hub {id: 0}) WITH h UNWIND range(1, %d) AS i CREATE (h)-[:R]->(:Leaf {id: i})`,

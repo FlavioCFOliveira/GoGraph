@@ -573,7 +573,7 @@ func joinCols(cols []string) string {
 }
 
 func relIDConfig(undirected bool) adjlist.Config {
-	return adjlist.Config{Directed: !undirected, Multigraph: true}
+	return adjlist.Config{}
 }
 
 // relIDDurable is a WAL-backed engine over a store directory.
@@ -659,10 +659,6 @@ func recoverRelID(t *testing.T, dir string, cfg adjlist.Config) *cypher.Engine {
 	res, err := recovery.Open[string, float64](dir, parallelEdgeRecOpts())
 	if err != nil {
 		t.Fatalf("recovery.Open: %v", err)
-	}
-	if res.Graph.AdjList().Directed() != cfg.Directed || res.Graph.AdjList().Multigraph() != cfg.Multigraph {
-		t.Fatalf("recovered graph directed=%v multigraph=%v, want directed=%v multigraph=%v",
-			res.Graph.AdjList().Directed(), res.Graph.AdjList().Multigraph(), cfg.Directed, cfg.Multigraph)
 	}
 	w, err := wal.Open(filepath.Join(dir, "wal"))
 	if err != nil {

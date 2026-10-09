@@ -36,7 +36,7 @@ func TestPageRank_LDBCSf10_Soak(t *testing.T) {
 	testlayers.RequireSoak(t)
 
 	path := filepath.Join(t.TempDir(), "ldbc_sf10_pr.csr")
-	loader := bulk.New(bulk.Options{OutputPath: path, Directed: true})
+	loader := bulk.New(bulk.Options{OutputPath: path})
 	ldbc.Synthetic(context.Background(), 500_000, 5_000_000, loader)
 	if _, _, err := loader.Finalise(); err != nil {
 		t.Fatalf("loader.Finalise: %v", err)

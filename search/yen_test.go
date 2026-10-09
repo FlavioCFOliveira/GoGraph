@@ -42,7 +42,7 @@ func TestYenKShortest_WeightedMultigraph_MinParallelEdge(t *testing.T) {
 	t.Parallel()
 	// The expensive 0->1 edge (100) is inserted first so it lands first in
 	// CSR order; the cheap parallel 0->1 edge (1) is what a shortest-path
-	// search uses. Requires Multigraph:true to retain both parallel edges.
+	// search uses. The multigraph retains both parallel edges.
 	c, a := buildWeightedCSRCfg(t, []weightedEdge{
 		{0, 1, 100}, // first CSR occurrence of the (0,1) pair
 		{0, 1, 1},   // minimum-weight parallel edge
@@ -50,7 +50,7 @@ func TestYenKShortest_WeightedMultigraph_MinParallelEdge(t *testing.T) {
 		{2, 3, 1},
 		{1, 3, 1},
 		{0, 3, 50},
-	}, adjlist.Config{Directed: true, Multigraph: true})
+	}, adjlist.Config{})
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(3)
 
@@ -91,7 +91,7 @@ func TestYenKShortest_WeightedMultigraph_DeepRootHop(t *testing.T) {
 		{3, 5, 1},
 		{5, 4, 5},
 		{0, 4, 20},
-	}, adjlist.Config{Directed: true, Multigraph: true})
+	}, adjlist.Config{})
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(4)
 
@@ -133,7 +133,7 @@ func TestYen_KZero(t *testing.T) {
 // to 0 on int32 and silently corrupted unreachable distances.
 func TestYenKShortest_Int32WeightsNoOverflow(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int32](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int32](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 3); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestYenKShortest_Int32WeightsNoOverflow(t *testing.T) {
 // any sentinel comparison.
 func TestYenKShortest_UnreachableReturnsNil(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestYenKShortest_UnreachableReturnsNil(t *testing.T) {
 // regression budget of <10% of v1.0 allocations; we report
 // ReportAllocs() so the regression is visible in benchstat output.
 func BenchmarkYen_K100(b *testing.B) {
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	const n = 256
 	r := rand.New(rand.NewPCG(7, 13)) //nolint:gosec // deterministic benchmark RNG
 	for i := 0; i < 4*n; i++ {

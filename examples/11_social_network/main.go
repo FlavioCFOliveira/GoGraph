@@ -246,7 +246,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 
 	base := readMem()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: false})
+	g := lpg.New[string, int64](adjlist.Config{})
 	stats, err := build(ctx, g, cfg)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)

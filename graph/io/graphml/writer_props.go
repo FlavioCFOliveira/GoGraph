@@ -404,10 +404,7 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		}
 	}
 
-	dir := "directed"
-	if !a.Directed() {
-		dir = "undirected"
-	}
+	const dir = "directed"
 	graphStart := xml.StartElement{
 		Name: xml.Name{Local: "graph"},
 		Attr: []xml.Attr{
@@ -697,7 +694,7 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*
 		added     int
 	)
 	err := streamGraphMLFirstGraph(ctx, dec,
-		func(keys []keyDecl, directed bool) error {
+		func(keys []keyDecl) error {
 			// Index <key> declarations by id so data elements resolve in O(1);
 			// track the weight key separately. Keys precede <graph> per the
 			// GraphML spec and this package's writer, so the index is complete
@@ -707,7 +704,7 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*
 				keyIndex[k.ID] = k
 			}
 			weightKey = findWeightKey(keys)
-			g = lpg.New[string, int64](adjlist.Config{Directed: directed})
+			g = lpg.New[string, int64](adjlist.Config{})
 			return nil
 		},
 		func(n *nodeElement) error {
@@ -774,7 +771,7 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*
 	// No <graph> element: an empty directed graph (matches the prior
 	// len(doc.Graphs) == 0 behaviour).
 	if g == nil {
-		return lpg.New[string, int64](adjlist.Config{Directed: true}), 0, nil
+		return lpg.New[string, int64](adjlist.Config{}), 0, nil
 	}
 	return g, added, nil
 }

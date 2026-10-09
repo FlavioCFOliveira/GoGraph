@@ -35,7 +35,7 @@ func equalSet(a, b []string) bool {
 // empty slice from every enumerator.
 func TestInUseEnumerators_Empty(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 
 	for _, tc := range []struct {
 		name string
@@ -59,7 +59,7 @@ func TestInUseEnumerators_Empty(t *testing.T) {
 // properties.
 func buildSampleGraph(t *testing.T) *lpg.Graph[string, int64] {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 
 	for _, n := range []string{"a", "b", "c"} {
 		if err := g.AddNode(n); err != nil {
@@ -184,7 +184,7 @@ func TestInUseEnumerators_TombstoneFiltering(t *testing.T) {
 // (both endpoints must be live).
 func TestInUseEnumerators_EdgeRetiredWhenEndpointRemoved(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	mustAddEdge(t, g, "x", "y")
 	if err := g.SetEdgeLabel("x", "y", "LINK"); err != nil {
 		t.Fatal(err)
@@ -214,7 +214,7 @@ func TestInUseEnumerators_EdgeRetiredWhenEndpointRemoved(t *testing.T) {
 // assertion on results — only that the run is race-clean.
 func TestInUseEnumerators_Concurrency(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[int, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int, int64](adjlist.Config{})
 
 	const (
 		writers  = 4

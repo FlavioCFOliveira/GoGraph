@@ -18,7 +18,7 @@ func TestLeiden_RingOfCliques(t *testing.T) {
 		totalNodes = numCliques * cliqueSize
 	)
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 
 	// Intra-clique edges: complete graph within each clique.
 	for ci := 0; ci < numCliques; ci++ {
@@ -42,7 +42,7 @@ func TestLeiden_RingOfCliques(t *testing.T) {
 		}
 	}
 
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	p := Leiden(c, DefaultLeidenOptions())
 
 	if p.NumCommunities != numCliques {

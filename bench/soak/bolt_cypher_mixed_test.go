@@ -57,7 +57,7 @@ func runBoltCypherMixed(t *testing.T, nConns int, dur time.Duration) {
 	t.Helper()
 
 	// ── Build graph + engine ──────────────────────────────────────────────────
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// Seed 20 nodes so MATCH count(n) returns a non-trivial result.

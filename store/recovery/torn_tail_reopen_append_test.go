@@ -51,7 +51,7 @@ func TestRecovery_TornTailTruncatedOnReopenForAppend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open (first): %v", err)
 	}
-	g1 := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g1 := lpg.New[string, int64](adjlist.Config{})
 	s1 := txn.NewStoreWithOptions[string, int64](g1, w1, opts)
 	tx1 := s1.Begin()
 	if err := tx1.AddNode("a"); err != nil {

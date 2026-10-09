@@ -63,7 +63,7 @@ func TestBuildReverse_RunsAreNeighbourAndHandleOrdered_2151(t *testing.T) {
 		arcs       = 160
 	)
 	for iter := 0; iter < iterations; iter++ {
-		adj := adjlist.New[int, float64](adjlist.Config{Directed: true, Multigraph: true})
+		adj := adjlist.New[int, float64](adjlist.Config{})
 		for i := 0; i < nodes; i++ {
 			if err := adj.AddNode(i); err != nil {
 				t.Fatalf("AddNode(%d): %v", i, err)
@@ -93,7 +93,7 @@ func TestBuildReverse_RunsAreNeighbourAndHandleOrdered_2151(t *testing.T) {
 // edges at all (an empty run, which every probe must treat as a miss rather than
 // walking into the next node's slots), and a graph of one node.
 func TestBuildReverse_SelfLoopsAndSingletonsStayOrdered_2151(t *testing.T) {
-	adj := adjlist.New[int, float64](adjlist.Config{Directed: true, Multigraph: true})
+	adj := adjlist.New[int, float64](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		if err := adj.AddNode(i); err != nil {
 			t.Fatalf("AddNode(%d): %v", i, err)

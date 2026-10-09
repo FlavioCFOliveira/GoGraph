@@ -44,7 +44,7 @@ import (
 // instant and the adjacency at another folds an edge whose endpoints it never
 // recorded, or endpoints whose edge it lost.
 func TestCapture_IsOneInstantWhileWritersCommit(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	// A base population, so the capture has real work to do and the writers below have
@@ -212,7 +212,7 @@ func TestCapture_IsOneInstantWhileWritersCommit(t *testing.T) {
 // negative control that passes intermittently is indistinguishable from one that is
 // asserting nothing.
 func TestCapture_ReadingThePresentIsDetectedByTheOracle(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	s := g.NewSession()

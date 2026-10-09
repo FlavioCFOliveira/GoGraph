@@ -13,12 +13,12 @@ import (
 // with its mapper. It is the canonical fixture for showing a
 // community detector separating two densely-knit groups.
 func buildTwoTriangles() (*csr.CSR[struct{}], *adjlist.AdjList[int, struct{}]) {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for _, e := range [][2]int{{0, 1}, {1, 2}, {0, 2}, {3, 4}, {4, 5}, {3, 5}} {
 		_ = a.AddEdge(e[0], e[1], struct{}{})
 	}
 	_ = a.AddEdge(2, 3, struct{}{}) // the single inter-group bridge
-	return csr.BuildFromAdjList(a), a
+	return csr.BuildFromAdjList(a).BuildSymmetric(), a
 }
 
 // sameCommunity reports whether every listed user value shares one

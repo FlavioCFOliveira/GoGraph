@@ -35,7 +35,7 @@ type mlNode struct {
 // deterministic tie-break) by ordering the labels they present.
 func buildMinLabelGraph(t *testing.T, nodes []mlNode) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range nodes {
 		key := fmt.Sprintf("n%d", n.k)
 		if err := g.AddNode(key); err != nil {

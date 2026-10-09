@@ -92,8 +92,6 @@ type config struct {
 	typeCol     string
 	weightCol   string
 	labelCols   []string
-	undirected  bool
-	simpleGraph bool
 	stringProps bool
 }
 
@@ -116,8 +114,6 @@ func run(args []string, out io.Writer) error {
 
 	start := time.Now()
 	res, err := bulkimport.ImportInto[int64](context.Background(), cfg.store, bulkimport.Options{
-		Directed:    !cfg.undirected,
-		Multigraph:  !cfg.simpleGraph,
 		ExpectNodes: len(nodes),
 	}, nodes, edges)
 	if err != nil {
@@ -147,8 +143,6 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.dstCol, "dst", "dst", "edges column holding the target key")
 	fs.StringVar(&cfg.typeCol, "type", "type", "edges column holding the relationship type")
 	fs.StringVar(&cfg.weightCol, "weight", "weight", "edges column holding an integer weight")
-	fs.BoolVar(&cfg.undirected, "undirected", false, "build an undirected graph (openCypher requires directed)")
-	fs.BoolVar(&cfg.simpleGraph, "simple", false, "reject parallel edges (openCypher's model is a multigraph)")
 	fs.BoolVar(&cfg.stringProps, "string-props", false, "store every property as a string, with no type inference")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err

@@ -51,7 +51,7 @@ func TestWriterRefusesOversizeStringTableEntry(t *testing.T) {
 			name: "properties.bin/key",
 			write: func(t *testing.T, w io.Writer) error {
 				t.Helper()
-				g := lpg.New[string, int64](adjlist.Config{Directed: true})
+				g := lpg.New[string, int64](adjlist.Config{})
 				if err := g.AddNode("n"); err != nil {
 					t.Fatalf("AddNode: %v", err)
 				}
@@ -66,7 +66,7 @@ func TestWriterRefusesOversizeStringTableEntry(t *testing.T) {
 			name: "labels.bin/name",
 			write: func(t *testing.T, w io.Writer) error {
 				t.Helper()
-				g := lpg.New[string, int64](adjlist.Config{Directed: true})
+				g := lpg.New[string, int64](adjlist.Config{})
 				if err := g.AddNode("n"); err != nil {
 					t.Fatalf("AddNode: %v", err)
 				}
@@ -288,7 +288,7 @@ func TestCapBoundaryStillWrites(t *testing.T) {
 		if err := checkSnapshotStringLen("property key", maxStringTableLen); err != nil {
 			t.Fatalf("an entry of exactly maxStringTableLen (%d) must be accepted: %v", maxStringTableLen, err)
 		}
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		if err := g.AddNode("n"); err != nil {
 			t.Fatalf("AddNode: %v", err)
 		}
@@ -375,7 +375,7 @@ func craftEdgeHandleRecordWithLabelCount(labelCount int) []byte {
 // writeAndTruncate is ever called. The checkpoint fails loudly, the WAL is
 // retained, and the committed data stays recoverable.
 func TestCaptureRefusesUnreadableSnapshot(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("n"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestCaptureRefusesUnreadableSnapshot(t *testing.T) {
 
 	// Control: the SAME graph with an in-cap key captures normally, so the guard
 	// bounds rather than blocks.
-	g2 := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g2 := lpg.New[string, float64](adjlist.Config{})
 	if err := g2.AddNode("n"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestFixedWriterSnapshotRoundTrips(t *testing.T) {
 	atCapKey := strings.Repeat("k", lpg.MaxTokenLen)
 	atCapLabel := strings.Repeat("L", lpg.MaxTokenLen)
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("alice", "bob", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

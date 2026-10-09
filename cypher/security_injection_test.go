@@ -82,7 +82,7 @@ func secCypherCountNodes(t *testing.T, eng *cypher.Engine) int64 {
 // node materialised).
 func TestSec_Cypher_ParamPropertyValue_StaysData(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	for i, payload := range secCypherInjectionStrings {
@@ -127,7 +127,7 @@ func TestSec_Cypher_ParamPropertyValue_StaysData(t *testing.T) {
 // label.
 func TestSec_Cypher_ParamCannotInjectLabel(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	payload := `Admin {pwned:true}) DELETE n //`

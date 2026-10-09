@@ -327,7 +327,7 @@ func buildAndPersist(ctx context.Context, dir string, cfg config, _ io.Writer) (
 	if err != nil {
 		return genResult{}, fmt.Errorf("wal.Open: %w", err)
 	}
-	g := lpg.New[int64, float64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[int64, float64](g, wl, txn.Options[int64, float64]{
 		Codec:       txn.NewInt64Codec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

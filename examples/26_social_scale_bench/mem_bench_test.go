@@ -42,7 +42,7 @@ func BenchmarkBuild(b *testing.B) {
 		// by relationship type / edge properties, so the per-edge weight column
 		// is dead memory and dropped. The heap profile thus reflects the real
 		// resident shape the example runs against.
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Weightless: true})
+		g := lpg.New[string, float64](adjlist.Config{Weightless: true})
 		if _, err := build(context.Background(), g, cfg, nil); err != nil {
 			b.Fatal(err)
 		}

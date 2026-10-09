@@ -46,7 +46,7 @@ func TestWALEngine_OpenWriteCloseIsFDFlat(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			st := txn.NewStoreWithOptions[string, float64](lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}), wr, opts)
+			st := txn.NewStoreWithOptions[string, float64](lpg.New[string, float64](adjlist.Config{}), wr, opts)
 			db := store.New(wr, store.WithQuiesce(st.RunUnderCommitLock))
 			if err := straddleRun(NewEngineWithStore(st), `CREATE (:L {s: 'v'})`); err != nil {
 				t.Fatal(err)

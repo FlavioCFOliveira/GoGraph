@@ -55,8 +55,8 @@ func TestPropRemove_RelationshipShapesOnEveryConfiguration(t *testing.T) {
 		tRel string // pattern T binds r through
 		pRel string // pattern P binds r through
 	}{
-		{"directed-simple", adjlist.Config{Directed: true, Multigraph: false}, `(:A)-[r:R]->(:B)`, `(:A)-[r:R]->(:B)`},
-		{"undirected", adjlist.Config{Directed: false, Multigraph: true}, `(:A)-[r:R]-(:B)`, `(:A)-[r:R]-(:B)`},
+		{"directed-simple", adjlist.Config{}, `(:A)-[r:R]->(:B)`, `(:A)-[r:R]->(:B)`},
+		{"undirected", adjlist.Config{}, `(:A)-[r:R]-(:B)`, `(:A)-[r:R]-(:B)`},
 	}
 	type shape struct {
 		name, setup, tOp, pOp, check, want string

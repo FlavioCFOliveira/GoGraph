@@ -462,7 +462,7 @@ func buildNetwork(ctx context.Context, cfg config) (*network, time.Duration, err
 
 	coords := randomCoords(cfg)
 
-	adj := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	adj := adjlist.New[int, int64](adjlist.Config{})
 	uf := newUnionFind(cfg.nodes)
 
 	// k-NN edges, made symmetric. For each node, link to its k nearest

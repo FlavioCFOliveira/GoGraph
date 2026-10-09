@@ -52,7 +52,7 @@ func recIsNull(v interface{}) bool {
 // TestShortestPath_BasicChain checks a single shortest path over a simple
 // directed chain a→b→c→d.
 func TestShortestPath_BasicChain(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:0})`,
@@ -82,7 +82,7 @@ func TestShortestPath_BasicChain(t *testing.T) {
 // TestShortestPath_NoPath_Match verifies that an unreachable pair under MATCH
 // eliminates the row.
 func TestShortestPath_NoPath_Match(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:0})`,
@@ -99,7 +99,7 @@ func TestShortestPath_NoPath_Match(t *testing.T) {
 // TestShortestPath_NoPath_OptionalMatch verifies that an unreachable pair under
 // OPTIONAL MATCH keeps the row with p = null.
 func TestShortestPath_NoPath_OptionalMatch(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:0})`,
@@ -119,7 +119,7 @@ func TestShortestPath_NoPath_OptionalMatch(t *testing.T) {
 // minimum-length path over a diamond a→b→d, a→c→d.
 func TestAllShortestPaths_Ties(t *testing.T) {
 	// Diamond a→b→d, a→c→d (no direct a→d edge): two length-2 shortest paths.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:0})`,
@@ -147,7 +147,7 @@ func TestAllShortestPaths_Ties(t *testing.T) {
 // TestShortestPath_Undirected checks an undirected shortestPath traverses
 // against storage direction.
 func TestShortestPath_Undirected(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:0})`,
@@ -175,7 +175,7 @@ func TestShortestPath_Undirected(t *testing.T) {
 
 // TestShortestPath_TypeFilter checks the relationship-type disjunction filter.
 func TestShortestPath_TypeFilter(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:0})`,
@@ -212,7 +212,7 @@ func TestShortestPath_TypeFilter(t *testing.T) {
 // reported type must be one of the real types (T1 or T2), and the property read
 // must track it.
 func TestShortestPath_MultigraphPerInstanceType(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:1})`,
@@ -260,7 +260,7 @@ func TestShortestPath_MultigraphPerInstanceType(t *testing.T) {
 // TestShortestPath_ZeroLength checks src == dst with a 0 lower bound yields a
 // zero-length path.
 func TestShortestPath_ZeroLength(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng, `CREATE (a:N {k:0})`)
 	rows := runShortest(t, eng,

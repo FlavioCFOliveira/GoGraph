@@ -244,7 +244,7 @@ func BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree(b *testing.B) {
 func BenchmarkBuildReverse_vs_E(b *testing.B) {
 	for _, E := range []int{10000, 100000, 1000000} {
 		n := E
-		adj := adjlist.New[int, float64](adjlist.Config{Directed: true})
+		adj := adjlist.New[int, float64](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			_ = adj.AddNode(i)
 		}

@@ -92,7 +92,7 @@ func TestOpen_SnapshotPresentNoWAL(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	// Lay down a valid empty snapshot under dir/snapshot.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	a := g.AdjList()
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
@@ -234,7 +234,7 @@ func TestOpen_ContextCancelledMidReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Append enough valid frames that the >=4096 checkpoint can fire.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	for i := 0; i < 4500; i++ {
 		tx := store.Begin()

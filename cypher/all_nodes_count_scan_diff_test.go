@@ -108,7 +108,7 @@ func TestAllNodesCountPushdown_AboveThresholdDefersToParallel(t *testing.T) {
 // full scan after deletions: WalkNodeIDs skips tombstones, so LiveOrder() equals
 // the number of rows a bare scan emits.
 func TestAllNodesCountPushdown_Tombstones(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	const total = 80
 	for i := 0; i < total; i++ {
 		k := fmt.Sprintf("n%d", i)

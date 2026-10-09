@@ -46,7 +46,7 @@ import (
 // the same pair.
 func multigraphEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	return cypher.NewEngine(g)
 }

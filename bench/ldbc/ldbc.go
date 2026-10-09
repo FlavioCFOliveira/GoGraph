@@ -77,7 +77,7 @@ func Run(ctx context.Context, spec Spec) (Report, error) {
 	if spec.BulkOutFile != "" {
 		out = spec.BulkOutFile
 	}
-	loader := bulk.New(bulk.Options{OutputPath: out, Directed: true, Multigraph: false})
+	loader := bulk.New(bulk.Options{OutputPath: out})
 	Synthetic(ctx, v, e, loader)
 	if _, _, err := loader.Finalise(); err != nil {
 		return Report{}, err

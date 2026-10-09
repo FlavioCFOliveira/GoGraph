@@ -62,7 +62,7 @@ func mustExec(t *testing.T, eng *cypher.Engine, q string) {
 // All names are unique so a query can identify each edge by its endpoints.
 func newRelPresenceGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	mustExec(t, eng, `CREATE (a:P {name:'alice'})-[:FRIEND {since:2020}]->(b:P {name:'bob'})`)
 	mustExec(t, eng, `CREATE (c:P {name:'carol'})-[:FRIEND]->(d:P {name:'dave'})`)
@@ -190,7 +190,7 @@ func TestRelPresence_BothDirections(t *testing.T) {
 // must be FALSE for it — exactly what EdgeHasProperty's kind gate reports, and
 // exactly what the value path (lpgPropToExpr -> Null) would evaluate.
 func TestRelPresence_NullMappingKindReadsAbsent(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	mustExec(t, eng, `CREATE (a:P {name:'x'})-[:R]->(b:P {name:'y'})`)
 	// Set a PropTime and a PropBytes property through the lpg public API; both
@@ -233,7 +233,7 @@ func TestRelPresence_NullMappingKindReadsAbsent(t *testing.T) {
 // matched row reports present. This pins the cross-slot coalescing scan that
 // EdgeHasProperty shares with EdgeProperties (C9).
 func TestRelPresence_ParallelEdgesDateKind(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	mustExec(t, eng, `CREATE (a:P {name:'a'}), (b:P {name:'b'})`)
 	mustExec(t, eng, `MATCH (a:P {name:'a'}),(b:P {name:'b'}) CREATE (a)-[:R {since:1}]->(b)`)
@@ -314,7 +314,7 @@ func TestRelPresence_NotAndComposed(t *testing.T) {
 // variables, each carrying an IS [NOT] NULL presence check, in one predicate
 // (cypher-expert review anchor, #1638).
 func TestRelPresence_TwoRelVarsComposed(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	// a -[since]-> b -[no since]-> c : satisfies r1 IS NOT NULL AND r2 IS NULL.
 	mustExec(t, eng, `CREATE (a:P {name:'a'})-[:FRIEND {since:2020}]->(b:P {name:'b'})-[:FRIEND]->(c:P {name:'c'})`)
@@ -333,7 +333,7 @@ func TestRelPresence_TwoRelVarsComposed(t *testing.T) {
 // non-escaping WHERE predicate only; the escaping projection takes the value
 // path, so r.weight is the stored value, not a presence placeholder.
 func TestRelPresence_MixedDifferentKeys(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	mustExec(t, eng, `CREATE (a:P {name:'a'})-[:FRIEND {since:2020, weight:5}]->(b:P {name:'b'})`)
 	mustExec(t, eng, `CREATE (c:P {name:'c'})-[:FRIEND {weight:9}]->(d:P {name:'d'})`) // since absent

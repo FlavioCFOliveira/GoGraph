@@ -39,7 +39,7 @@ func TestCheckpoint_SnapshotDuringWrites(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	// Use a typed-codec store with no WeightCodec so every zero-weight
 	// AddEdge writes an OpAddEdge frame (not OpAddEdgeWeighted), which
 	// recovery.Open replays with the string codec.

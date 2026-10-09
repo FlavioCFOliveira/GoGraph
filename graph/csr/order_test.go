@@ -247,7 +247,7 @@ func TestOrderRuns_NoAllocationBelowCutoff(t *testing.T) {
 // RunsOrdered agrees.
 func TestBuildFromAdjList_RunsOrdered(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	// Insert each source's neighbours in DESCENDING destination order so the
 	// build must actually reorder, and add parallel edges with distinct handles.
 	for src := 1; src <= 40; src++ {
@@ -290,7 +290,7 @@ func TestBuildFromAdjList_RunsOrdered(t *testing.T) {
 // the reverse side: doing so would break buildRevToFwd's ordinal pairing.
 func TestBuildReverse_InheritsOrdering(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	// Parallel edges inserted with DESCENDING handles, so the forward ordering
 	// has to move them and the reverse must reflect the moved order.
 	for src := 1; src <= 12; src++ {

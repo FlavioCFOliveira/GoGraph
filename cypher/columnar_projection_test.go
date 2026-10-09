@@ -83,7 +83,7 @@ func drainScalarProjection(t *testing.T, g *lpg.Graph[string, float64], query st
 // "val" = v, or no such property when set is false.
 func singleValGraph(t *testing.T, v lpg.PropertyValue, set bool) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("n0"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestColumnarProjection_ByteIdentity_Scalars(t *testing.T) {
 // byte-identical over the shared scan order.
 func TestColumnarProjection_ByteIdentity_Heterogeneous(t *testing.T) {
 	build := func() *lpg.Graph[string, float64] {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		add := func(key string, v lpg.PropertyValue, set bool) {
 			if err := g.AddNode(key); err != nil {
 				t.Fatalf("AddNode(%s): %v", key, err)

@@ -38,7 +38,7 @@ func TestBarrierGuard_ZeroSizedInProductionBuild(t *testing.T) {
 // TestBarrierGuard_ApplyAtomicallyAllocatesNothing is the write-side companion:
 // the guard's writer stamp and clear must cost nothing either.
 func TestBarrierGuard_ApplyAtomicallyAllocatesNothing(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	_ = g.ApplyAtomically(func() error { return nil })
 
 	got := testing.AllocsPerRun(200, func() {
@@ -56,7 +56,7 @@ func TestBarrierGuard_ApplyAtomicallyAllocatesNothing(t *testing.T) {
 // Removing the guard must not have changed how the barrier admits the writer.
 func TestBarrierGuard_ConcurrentReadersAndWriterUnaffected(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

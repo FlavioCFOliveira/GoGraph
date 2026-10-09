@@ -133,7 +133,8 @@ const implicitStartTS = mvcc.TxIDBase - 1
 // for a particular peer: it is exhausted only by sustained saturation of one
 // object, which is then answered with the typed refusal rather than an unbounded
 // wait. 50 ms was measured too short: under the race detector, twenty-four direct
-// writers on four undirected pairs starved one writer past it
+// writers on four pairs starved one writer past it, in a measurement taken while
+// graphs could still be undirected and every such write held two entries
 // (TestDirectEdge_OppositeDirectionsDoNotDeadlock, which expects no refusal when
 // no explicit transaction is open).
 const directWaitBudget = time.Second

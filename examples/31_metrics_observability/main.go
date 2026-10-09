@@ -320,7 +320,7 @@ const checkEvery = 4096
 // {latency_ms}]->(:SERVICE) edges. Multigraph is enabled so the write
 // transaction's CREATE follows openCypher semantics.
 func buildLPG(ctx context.Context, calls []call, cfg config) (*lpg.Graph[string, float64], error) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < cfg.services; i++ {
 		if i%checkEvery == 0 {
 			if err := ctx.Err(); err != nil {
@@ -369,7 +369,7 @@ func buildLPG(ctx context.Context, calls []call, cfg config) (*lpg.Graph[string,
 // structure feeds both the CSV round-trip and, via csr.BuildFromAdjList,
 // the Dijkstra shortest-latency query.
 func buildAdjList(ctx context.Context, calls []call, cfg config) (*adjlist.AdjList[string, int64], error) {
-	adj := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	adj := adjlist.New[string, int64](adjlist.Config{})
 	for i := 0; i < cfg.services; i++ {
 		if err := adj.AddNode(svcName(i)); err != nil {
 			return nil, fmt.Errorf("AddNode %s: %w", svcName(i), err)
@@ -1064,7 +1064,6 @@ func countReachable(adj *adjlist.AdjList[string, int64], dist *search.Distances[
 // whether the read-back edge count equals the written edge count.
 func csvRoundTrip(ctx context.Context, adj *adjlist.AdjList[string, int64]) (bool, error) {
 	opts := csv.DefaultOptions()
-	opts.Directed = true
 
 	var buf bytes.Buffer
 	written, err := csv.WriteCtx(ctx, &buf, adj, opts)

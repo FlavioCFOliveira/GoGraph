@@ -8,7 +8,8 @@ package search
 // bound lo == n/2 for n in {3, 4, 16, 17}.
 //
 // shapegen.Cycle(n, false) produces an undirected C_n. Diameter
-// expects a symmetric (undirected) CSR, so directed=false is required.
+// expects a symmetric (undirected) CSR, so the test projects it with
+// csr.CSR.BuildSymmetric.
 //
 // The existing TestDiameter_Cycle in diameter_test.go covers the hand-
 // built C_5; this file covers the shapegen-based fixture with different
@@ -38,7 +39,7 @@ func TestDiameter_Cn_Shapegen(t *testing.T) {
 				t.Fatalf("Cycle(%d).Build: %v", n, err)
 			}
 
-			c := csr.BuildFromAdjList(g.AdjList())
+			c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 			lo, hi, exact := Diameter(c)
 
 			want := n / 2

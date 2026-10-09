@@ -24,7 +24,7 @@ import (
 // same pattern leaves exactly one node in the graph.
 func TestMerge_TwiceIsIdempotent(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -39,7 +39,7 @@ func TestMerge_TwiceIsIdempotent(t *testing.T) {
 // assignment is applied.
 func TestMerge_OnMatchSet(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -60,7 +60,7 @@ func TestMerge_OnMatchSet(t *testing.T) {
 // via assertCount: the created node is visible after MERGE ON CREATE SET.
 func TestMerge_OnCreateSetProperty(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -75,7 +75,7 @@ func TestMerge_OnCreateSetProperty(t *testing.T) {
 // MERGE matches the entire pattern, not a primary-key subset.
 func TestMerge_PartialPropertyMatchCreatesNew(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

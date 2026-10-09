@@ -29,8 +29,8 @@ func TestNewEngine_WarnsOnUndirectedBackend(t *testing.T) {
 	var buf bytes.Buffer
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 
-	// Directed:false, Multigraph:true → isolates the directedness warning.
-	g := lpg.New[string, float64](adjlist.Config{Directed: false, Multigraph: true})
+	// Multigraph:true → isolates the directedness warning.
+	g := lpg.New[string, float64](adjlist.Config{})
 	_ = cypher.NewEngine(g)
 
 	out := buf.String()
@@ -46,8 +46,8 @@ func TestNewEngine_NoDirectednessWarnOnDirectedBackend(t *testing.T) {
 	var buf bytes.Buffer
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 
-	// Directed:true, Multigraph:true → no warning of either kind.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	// Multigraph:true → no warning of either kind.
+	g := lpg.New[string, float64](adjlist.Config{})
 	_ = cypher.NewEngine(g)
 
 	if out := buf.String(); strings.Contains(out, "non-directed") {

@@ -15,7 +15,7 @@ import (
 // that just need a non-empty payload to publish.
 func buildTinyCSR(tb testing.TB) *csr.CSR[struct{}] {
 	tb.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		tb.Fatalf("AddEdge: %v", err)
 	}

@@ -15,7 +15,7 @@ import (
 )
 
 func buildCSR(edges int) *csr.CSR[float64] {
-	a := adjlist.New[int64, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int64, float64](adjlist.Config{})
 	n := int64(edges/4 + 1)
 	for i := int64(0); i < n; i++ {
 		_ = a.AddNode(i)

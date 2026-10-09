@@ -86,7 +86,7 @@ const profileCorpusNodes = 420
 // making any single query large.
 func profileCorpusGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < profileCorpusNodes; i++ {
 		k := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(k); err != nil {

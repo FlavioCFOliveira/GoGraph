@@ -10,7 +10,7 @@ import (
 
 func TestPrimMST_CLRS(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	type ueg struct {
 		u, v int
 		w    int64
@@ -30,7 +30,7 @@ func TestPrimMST_CLRS(t *testing.T) {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ := a.Mapper().Lookup(0)
 	_, _, total, err := PrimMST(c, src)
 	if err != nil {
@@ -50,7 +50,7 @@ func TestPrimMST_VsKruskal(t *testing.T) {
 	r := rand.New(rand.NewPCG(157, 163)) //nolint:gosec // deterministic
 	for seed := 0; seed < 10; seed++ {
 		const n = 32
-		a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+		a := adjlist.New[int, int64](adjlist.Config{})
 		// Spanning chain so the graph is guaranteed connected.
 		for i := 0; i < n-1; i++ {
 			if err := a.AddEdge(i, i+1, int64(r.IntN(50)+1)); err != nil {
@@ -62,7 +62,7 @@ func TestPrimMST_VsKruskal(t *testing.T) {
 				t.Fatalf("AddEdge: %v", err)
 			}
 		}
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		src, _ := a.Mapper().Lookup(0)
 		_, _, primTotal, err := PrimMST(c, src)
 		if err != nil {
@@ -80,14 +80,14 @@ func TestPrimMST_VsKruskal(t *testing.T) {
 
 func BenchmarkPrimMST_RandomGraph(b *testing.B) {
 	const n = 4096
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	r := rand.New(rand.NewPCG(167, 173)) //nolint:gosec // deterministic
 	for i := 0; i < 4*n; i++ {
 		if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1)); err != nil {
 			b.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ := a.Mapper().Lookup(0)
 	b.ReportAllocs()
 	b.ResetTimer()

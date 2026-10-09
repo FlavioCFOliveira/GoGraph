@@ -61,7 +61,7 @@ func TestPprofCapture(t *testing.T) {
 
 	// ── Background workload (ensures CPU profiles are non-trivial) ────────────
 	const graphN = 512
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	rng := rand.New(rand.NewPCG(23, 29)) //nolint:gosec // deterministic
 	for i := range graphN {
 		if err := a.AddNode(i); err != nil {

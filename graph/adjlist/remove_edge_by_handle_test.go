@@ -10,7 +10,7 @@ import "testing"
 // with its original handle preserved.
 func TestAdjList_RemoveEdgeByHandle_DirectedMultigraph(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdgeH("a", "b", 1, 10); err != nil {
 		t.Fatalf("AddEdgeH h10: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestAdjList_RemoveEdgeByHandle_DirectedMultigraph(t *testing.T) {
 // slot is a no-op that returns false and leaves the edge counter unchanged.
 func TestAdjList_RemoveEdgeByHandle_NoMatch(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdgeH("a", "b", 1, 10); err != nil {
 		t.Fatalf("AddEdgeH: %v", err)
 	}
@@ -62,34 +62,5 @@ func TestAdjList_RemoveEdgeByHandle_NoMatch(t *testing.T) {
 	}
 	if got := a.Size(); got != 1 {
 		t.Fatalf("Size = %d, want 1 (no-ops must not decrement)", got)
-	}
-}
-
-// TestAdjList_RemoveEdgeByHandle_UndirectedMirror confirms both directions of an
-// undirected parallel edge are retired by the same handle.
-func TestAdjList_RemoveEdgeByHandle_UndirectedMirror(t *testing.T) {
-	t.Parallel()
-	a := New[string, int](Config{Directed: false, Multigraph: true})
-	if err := a.AddEdgeH("a", "b", 1, 10); err != nil {
-		t.Fatalf("AddEdgeH h10: %v", err)
-	}
-	if err := a.AddEdgeH("a", "b", 2, 20); err != nil {
-		t.Fatalf("AddEdgeH h20: %v", err)
-	}
-	if !must(t).B(a.RemoveEdgeByHandle("a", "b", 20)) {
-		t.Fatal("RemoveEdgeByHandle(20) returned false, want true")
-	}
-	// One logical undirected edge removed: size decremented once.
-	if got := a.Size(); got != 1 {
-		t.Fatalf("Size = %d, want 1", got)
-	}
-	// The surviving handle-10 edge is present in both directions.
-	if !a.HasEdge("a", "b") || !a.HasEdge("b", "a") {
-		t.Fatal("surviving undirected edge must be present in both directions")
-	}
-	srcID, _ := a.Mapper().Lookup("b")
-	nbs, _, handles := a.LoadEntryH(srcID)
-	if len(nbs) != 1 || handles[0] != 10 {
-		t.Fatalf("mirror b->a slot: neighbours=%v handles=%v, want single slot handle 10", nbs, handles)
 	}
 }

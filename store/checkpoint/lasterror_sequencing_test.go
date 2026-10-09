@@ -51,7 +51,7 @@ func newLastErrorCheckpointer(t *testing.T) *Checkpointer[string, int64] {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	var mu sync.Mutex
 	return New(Config{Dir: dir, MaxAge: 0}, g, w, &mu)
 }

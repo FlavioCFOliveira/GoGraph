@@ -43,7 +43,7 @@ var (
 // newMultigraphEngine builds a directed multigraph engine (the openCypher
 // storage model) with the given per-relabel OUT recount budget.
 func newMultigraphEngine(budget int) (*Engine, *lpg.Graph[string, float64]) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return NewEngineWithOptions(g, EngineOptions{MaxLabelRecountEdges: budget}), g
 }
 

@@ -50,7 +50,7 @@ func encodeAllRecords(t *testing.T, res *cypher.Result, boltMajor uint8) []byte 
 
 func TestColumnarProjection_BoltWireByteIdentity(t *testing.T) {
 	build := func() *lpg.Graph[string, float64] {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		add := func(key string, v lpg.PropertyValue, set bool) {
 			if err := g.AddNode(key); err != nil {
 				t.Fatalf("AddNode(%s): %v", key, err)

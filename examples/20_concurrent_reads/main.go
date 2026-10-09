@@ -576,7 +576,7 @@ const ctxCheckEvery = 4
 // [1, weightMax]. The build honours ctx cancellation on a periodic check.
 func generate(ctx context.Context, cfg config) (*adjlist.AdjList[int, int64], error) {
 	rng := newRNG(cfg.seed)
-	g := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	g := adjlist.New[int, int64](adjlist.Config{})
 
 	// repeated holds each node once per incident edge endpoint, so a
 	// uniform index into it samples a node with probability proportional

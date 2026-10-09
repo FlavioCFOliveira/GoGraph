@@ -37,7 +37,7 @@ import (
 //
 // The generator constructs the underlying [adjlist.Config] from the
 // caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, and
-// forces cfg.Directed=false and cfg.Multigraph=false: the geometric
+// stores each undirected edge as ONE directed arc, in the orientation the generator enumerates it: the geometric
 // model is an undirected simple graph (no parallel edges, no self-
 // loops) by definition. The "no self-loop" invariant holds because
 // the pair iteration ranges over i < j only; the "no parallel edge"
@@ -110,8 +110,7 @@ func (s rggBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
 // ||p_i - p_j||_2 is at most radius := radiusPercent / 100.0
 // (Gilbert, "Random plane networks", J. SIAM 9(4), 1961; Penrose,
 // "Random Geometric Graphs", Oxford University Press, 2003). The
-// graph is undirected and simple (no parallel edges, no self-loops);
-// cfg.Directed and cfg.Multigraph are overridden to false.
+// graph is undirected and simple (no parallel edges, no self-loops); each edge is stored as one directed arc.
 //
 // # Coordinate properties
 //
@@ -188,8 +187,6 @@ func RGG(n, radiusPercent, dim int, seed uint64) Shape[int, int64] {
 			{Name: "dim", Min: 2, Max: 3, Default: 2},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildRGG(g, n, radiusPercent, dim, seed)
 		},

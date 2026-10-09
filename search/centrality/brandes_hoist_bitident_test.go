@@ -33,13 +33,20 @@ func TestBrandesDistanceHoist_BitIdentical(t *testing.T) {
 	t.Parallel()
 
 	build := func(directed bool, edges [][2]int) *csr.CSR[struct{}] {
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: directed})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		for _, e := range edges {
 			if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
 				t.Fatalf("AddEdge(%d,%d): %v", e[0], e[1], err)
 			}
 		}
-		return csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a)
+		if !directed {
+			c = c.BuildSymmetric()
+		}
+		if !directed {
+			c = c.BuildSymmetric()
+		}
+		return c
 	}
 
 	cases := []struct {
@@ -124,7 +131,7 @@ func TestBrandesDistanceHoist_BitIdentical_MultigraphFuzz(t *testing.T) {
 				const n = 40
 				//nolint:gosec // G404: math/rand/v2 PCG seeded from the test's own parameter; this test asserts a reproducible shape, which a CSPRNG would destroy.
 				r := rand.New(rand.NewPCG(seed, seed*2246822519))
-				a := adjlist.New[int, struct{}](adjlist.Config{Directed: directed})
+				a := adjlist.New[int, struct{}](adjlist.Config{})
 				// Deliberately dense in duplicates: 8n edges over n
 				// vertices draws the same (u,v) pair many times, and
 				// u == v often.
@@ -132,6 +139,9 @@ func TestBrandesDistanceHoist_BitIdentical_MultigraphFuzz(t *testing.T) {
 					_ = a.AddEdge(r.IntN(n), r.IntN(n), struct{}{})
 				}
 				c := csr.BuildFromAdjList(a)
+				if !directed {
+					c = c.BuildSymmetric()
+				}
 				want := betweennessLegacy(c)
 				got := Betweenness(c)
 				if idx, ok := bitsEqual(want, got); !ok {

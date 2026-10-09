@@ -38,9 +38,8 @@ const patternMotifEvery = 45
 
 // createFollows models [tmplCreateFollows]: a FOLLOWS edge between the Person
 // nodes named $a and $b. Like createKnows it is a committed no-effect result
-// when either endpoint is missing (the MATCH yields no rows). The writer never
-// re-CREATEs an existing (src,dst) FOLLOWS edge; the guard below keeps the
-// model single-instance even if a caller did.
+// when either endpoint is missing (the MATCH yields no rows); otherwise it adds
+// a new relationship, even between a pair that already has one.
 func (o *GraphOracle) createFollows(params map[string]any) OracleResult {
 	a, okA := paramString(params, "a")
 	b, okB := paramString(params, "b")
@@ -52,11 +51,7 @@ func (o *GraphOracle) createFollows(params map[string]any) OracleResult {
 	if !srcOK || !dstOK {
 		return OracleResult{Committed: true} // MATCH found nothing; no edge created.
 	}
-	k := edgeKey{src: srcID, dst: dstID, label: "FOLLOWS"}
-	if _, exists := o.edges[k]; exists {
-		return OracleResult{Committed: true} // simple-graph re-CREATE is a no-op.
-	}
-	o.edges[k] = &EdgeState{SrcID: srcID, DstID: dstID, Label: "FOLLOWS", Properties: map[string]any{}}
+	o.edges[o.newInstKey(srcID, dstID, "FOLLOWS")] = &EdgeState{SrcID: srcID, DstID: dstID, Label: "FOLLOWS", Properties: map[string]any{}}
 	return OracleResult{Committed: true, EdgesCreated: 1}
 }
 
@@ -419,7 +414,6 @@ func patternShapesScenario() Scenario {
 		DefaultSeed: 0x9A77E121,
 		MaxTicks:    500,
 		Workload:    patternShapesWorkload,
-		Multigraph:  true,
 		Crash:       CrashConfig{Enabled: true, CrashProb: 1.0 / 90.0, StabilityWindow: 25},
 		run:         runPatternShapes,
 	}

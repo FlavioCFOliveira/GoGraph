@@ -31,7 +31,7 @@ import (
 func refusedRemoveEngines3003() map[string]func(t *testing.T) *Engine {
 	return map[string]func(t *testing.T) *Engine{
 		"memory": func(t *testing.T) *Engine {
-			eng := NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+			eng := NewEngine(lpg.New[string, float64](adjlist.Config{}))
 			t.Cleanup(func() { _ = eng.Close() })
 			return eng
 		},
@@ -40,7 +40,7 @@ func refusedRemoveEngines3003() map[string]func(t *testing.T) *Engine {
 			if err != nil {
 				t.Fatalf("wal.Open: %v", err)
 			}
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			eng := NewEngineWithStore(txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 				Codec:       txn.NewStringCodec(),
 				WeightCodec: txn.NewFloat64WeightCodec(),

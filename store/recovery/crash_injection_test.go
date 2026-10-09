@@ -308,7 +308,7 @@ func writeMonotonicWorkload(t *testing.T, dir string) []walCheckpoint {
 	// A single-file log: these tests damage it by byte offset (see
 	// frameBoundaries).
 	w := openSingleFileWAL(t, walPath)
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -434,7 +434,7 @@ func writeFullWorkload(t *testing.T, dir string) string {
 	// A single-file log: these tests damage it by byte offset (see
 	// frameBoundaries).
 	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -700,7 +700,7 @@ func TestIsPrefixOf_RejectsEmptyAndNonPrefix(t *testing.T) {
 // one.
 func TestGraphFingerprint_LivenessGate(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("alice", "bob", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -757,7 +757,7 @@ func TestGraphFingerprint_LivenessGate(t *testing.T) {
 func TestGraphFingerprint_ParallelSlotAssignment(t *testing.T) {
 	t.Parallel()
 	build := func(firstLabel, secondLabel, firstProp, secondProp string) string {
-		g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		h1, err := g.AddEdgeH("a", "b", 10)
 		if err != nil {
 			t.Fatalf("AddEdgeH: %v", err)
@@ -850,7 +850,7 @@ func TestCrashInjection_ParallelEdgeSlotIdentitySurvivesRecovery(t *testing.T) {
 	dir := t.TempDir()
 	// A single-file log: this test damages or erases it as one file.
 	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -1176,7 +1176,7 @@ func TestCrashInjection_SnapshotThenCrashInWAL(t *testing.T) {
 
 	// A single-file log: this test damages or erases it as one file.
 	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -1326,7 +1326,7 @@ func TestCrashInjection_PropertyReplay_AllKinds(t *testing.T) {
 	dir := t.TempDir()
 	// A single-file log: this test damages or erases it as one file.
 	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -1533,8 +1533,8 @@ func TestCrashInjection_ApplyOpCodec_PropertyShortBuffers(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Decode payload error: %v", err)
 			}
-			g := lpg.New[string, int64](adjlist.Config{Directed: true})
-			ok := applyOpCodec(g, &op, codec, wcodec, nil)
+			g := lpg.New[string, int64](adjlist.Config{})
+			ok := applyOpCodec(g, &op, codec, wcodec, nil, nil)
 			if ok {
 				t.Fatalf("applyOpCodec accepted malformed payload %q", tc.name)
 			}
@@ -1572,8 +1572,8 @@ func TestCrashInjection_ApplyOpCodec_AddNodeAndRemoveNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	if !applyOpCodec(g, &op, codec, wcodec, nil) {
+	g := lpg.New[string, int64](adjlist.Config{})
+	if !applyOpCodec(g, &op, codec, wcodec, nil, nil) {
 		t.Fatal("AddNode must apply")
 	}
 	if _, ok := g.AdjList().Mapper().Lookup("alice"); !ok {
@@ -1593,7 +1593,7 @@ func TestCrashInjection_ApplyOpCodec_AddNodeAndRemoveNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !applyOpCodec(g, &op2, codec, wcodec, nil) {
+	if !applyOpCodec(g, &op2, codec, wcodec, nil, nil) {
 		t.Fatal("RemoveNode must apply")
 	}
 	if g.HasNodeLabel("alice", "A") {
@@ -1612,7 +1612,7 @@ func TestCrashInjection_ApplyOpCodec_RemoveEdgeRoundTrip(t *testing.T) {
 	t.Parallel()
 	codec := txn.NewStringCodec()
 	wcodec := txn.NewInt64WeightCodec()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AdjList().AddEdge("alice", "bob", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -1625,7 +1625,7 @@ func TestCrashInjection_ApplyOpCodec_RemoveEdgeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !applyOpCodec(g, &op, codec, wcodec, nil) {
+	if !applyOpCodec(g, &op, codec, wcodec, nil, nil) {
 		t.Fatal("RemoveEdge must apply")
 	}
 	if g.AdjList().HasEdge("alice", "bob") {
@@ -1640,7 +1640,7 @@ func TestCrashInjection_ApplyOpCodec_RemoveNodeLabelRoundTrip(t *testing.T) {
 	t.Parallel()
 	codec := txn.NewStringCodec()
 	wcodec := txn.NewInt64WeightCodec()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.SetNodeLabel("alice", "Tmp"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
@@ -1654,7 +1654,7 @@ func TestCrashInjection_ApplyOpCodec_RemoveNodeLabelRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !applyOpCodec(g, &op, codec, wcodec, nil) {
+	if !applyOpCodec(g, &op, codec, wcodec, nil, nil) {
 		t.Fatal("RemoveNodeLabel must apply")
 	}
 	if g.HasNodeLabel("alice", "Tmp") {
@@ -1670,7 +1670,7 @@ func TestCrashInjection_ApplyOpCodec_DelPropertiesRoundTrip(t *testing.T) {
 	t.Parallel()
 	codec := txn.NewStringCodec()
 	wcodec := txn.NewInt64WeightCodec()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AdjList().AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -1698,7 +1698,7 @@ func TestCrashInjection_ApplyOpCodec_DelPropertiesRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !applyOpCodec(g, &op, codec, wcodec, nil) {
+		if !applyOpCodec(g, &op, codec, wcodec, nil, nil) {
 			t.Fatalf("del op must apply")
 		}
 	}
@@ -1725,7 +1725,7 @@ func TestCrashInjection_MixedSnapshotV1V2(t *testing.T) {
 	dir := t.TempDir()
 	// A single-file log: this test damages or erases it as one file.
 	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -1762,8 +1762,8 @@ func TestCrashInjection_MixedSnapshotV1V2(t *testing.T) {
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false on v1 snapshot")
 	}
-	if res.SnapshotSchemaVersion != 1 {
-		t.Fatalf("SnapshotSchemaVersion = %d, want 1", res.SnapshotSchemaVersion)
+	if res.SnapshotSchemaVersion != snapshot.ManifestVersion {
+		t.Fatalf("SnapshotSchemaVersion = %d, want %d", res.SnapshotSchemaVersion, snapshot.ManifestVersion)
 	}
 	if res.SnapshotProperties != 0 {
 		t.Fatalf("v1 snapshot must not contribute properties; got %d", res.SnapshotProperties)

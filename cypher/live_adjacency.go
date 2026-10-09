@@ -575,7 +575,7 @@ func traversalAdjacencySource(
 	bopts *buildOpts, g *lpg.ReadView[string, float64], relTypes []string, dir exec.Direction,
 ) exec.AdjacencySource {
 	if dir == exec.DirOut && bopts != nil && bopts.liveTopo != nil && g != nil &&
-		viewCarriesOwnWrites(g) && g.AdjList().Directed() && bopts.liveTopo.bind(g) {
+		viewCarriesOwnWrites(g) && bopts.liveTopo.bind(g) {
 		src := &liveOutSource{log: bopts.liveTopo, bopts: bopts, g: g, relTypes: relTypes}
 		return func() (exec.CSRAdjacency, exec.CSRAdjacency, exec.RelTypeAdmit) {
 			return src, nil, exec.RelTypeAdmit{}

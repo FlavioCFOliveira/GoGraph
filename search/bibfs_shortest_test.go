@@ -88,7 +88,7 @@ func TestBiBFS_TwoDisjointPaths(t *testing.T) {
 
 	build := func(t *testing.T, longFirst bool) (*csr.CSR[struct{}], graph.NodeID, graph.NodeID) {
 		t.Helper()
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		// Key namespace:
 		//   src=0, dst=100
 		//   short path (4 edges): 0 — 1 — 2 — 3 — 100
@@ -100,7 +100,7 @@ func TestBiBFS_TwoDisjointPaths(t *testing.T) {
 			addPath(t, a, 0, 1, 2, 3, 100)
 			addPath(t, a, 0, 11, 12, 13, 14, 100)
 		}
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		src, ok := a.Mapper().Lookup(0)
 		if !ok {
 			t.Fatalf("src key 0 not in mapper")
@@ -134,7 +134,7 @@ func TestBiBFS_AsymmetricDiamond(t *testing.T) {
 
 	build := func(t *testing.T, longFirst bool) (*csr.CSR[struct{}], graph.NodeID, graph.NodeID) {
 		t.Helper()
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		// Diamond:
 		//   src=0, dst=10
 		//   short arm (2 edges): 0 — 1 — 10
@@ -146,7 +146,7 @@ func TestBiBFS_AsymmetricDiamond(t *testing.T) {
 			addPath(t, a, 0, 1, 10)
 			addPath(t, a, 0, 21, 22, 10)
 		}
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		src, ok := a.Mapper().Lookup(0)
 		if !ok {
 			t.Fatalf("src key 0 not in mapper")
@@ -196,7 +196,7 @@ func TestBiBFS_LadderParallelRungs(t *testing.T) {
 
 	build := func(t *testing.T, longestFirst bool) (*csr.CSR[struct{}], graph.NodeID, graph.NodeID) {
 		t.Helper()
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		// Rung key namespaces are widely separated so the integer
 		// keys map to NodeIDs in the order we insert edges.
 		rungA := []int{srcK, 110, 120, dstK}           // 3 edges
@@ -215,7 +215,7 @@ func TestBiBFS_LadderParallelRungs(t *testing.T) {
 			addPath(t, a, rungB...)
 			addPath(t, a, rungD...)
 		}
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		src, ok := a.Mapper().Lookup(srcK)
 		if !ok {
 			t.Fatalf("src key %d not in mapper", srcK)

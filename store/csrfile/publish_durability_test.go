@@ -22,7 +22,7 @@ import (
 // nodes — already exists for the determinism test; this variant takes a
 // size and string node keys.)
 func buildPathCSRN(n int) (*csr.CSR[int64], error) {
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := 0; i < n-1; i++ {
 		if err := a.AddEdge(strconv.Itoa(i), strconv.Itoa(i+1), int64(i)); err != nil {
 			return nil, err

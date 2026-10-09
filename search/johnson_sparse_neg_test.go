@@ -43,7 +43,7 @@ var layeredNegEdges = []weightedEdge{
 func TestJohnsonAPSP_SparseNegatives(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	// Intern all 8 vertices explicitly so BellmanFord has a defined
 	// NodeID for every vertex regardless of edge coverage.
 	for i := 0; i < 8; i++ {

@@ -30,7 +30,7 @@ import (
 // with two non-nil node columns.
 func TestCreateReturn_TwoNodes(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	_ = g
@@ -55,7 +55,7 @@ func TestCreateReturn_TwoNodes(t *testing.T) {
 // two property projections emits one row with both columns populated.
 func TestSetReturn_TwoProperties(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	_ = g
@@ -91,7 +91,7 @@ func TestSetReturn_TwoProperties(t *testing.T) {
 // nodes explicitly created.
 func TestCreateReturn_CountAfter(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	_ = g

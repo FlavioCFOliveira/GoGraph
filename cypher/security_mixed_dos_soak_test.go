@@ -72,7 +72,7 @@ func TestSec_Cypher_MixedDoSWorkload(t *testing.T) {
 	t.Cleanup(func() { debug.SetMemoryLimit(prevLimit) })
 
 	// A single shared engine over a small VLE chain, exercised concurrently.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	secCypherBuildChain(t, eng, 8) // 8-edge chain for the VLE workload
 

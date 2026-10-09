@@ -34,7 +34,7 @@ func slotID(tb testing.TB, a *AdjList[string, int], v string) graph.NodeID {
 // extra memory.
 func TestAdjList_Labels_NilUntilSet(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestAdjList_Labels_NilUntilSet(t *testing.T) {
 // it back, slot-aligned with neighbours.
 func TestAdjList_SetEdgeLabelSlot_Basic(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestAdjList_SetEdgeLabelSlot_Basic(t *testing.T) {
 // appended slots default to the 0 "no label" sentinel.
 func TestAdjList_Labels_AlignedAcrossGrowth(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	dsts := []string{"b", "c", "d", "e", "f", "g"}
 	for i, d := range dsts {
 		if err := a.AddEdge("a", d, i); err != nil {
@@ -110,7 +110,7 @@ func TestAdjList_Labels_AlignedAcrossGrowth(t *testing.T) {
 // different label untouched.
 func TestAdjList_ClearEdgeLabelSlotValue_TargetsValue(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge #1: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestAdjList_ClearEdgeLabelSlotValue_TargetsValue(t *testing.T) {
 // keep their original label.
 func TestAdjList_Labels_CompactedOnRemove(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	for i := 0; i < 3; i++ {
 		if err := a.AddEdge("a", "b", i); err != nil {
 			t.Fatalf("AddEdge #%d: %v", i, err)
@@ -172,7 +172,7 @@ func TestAdjList_Labels_CompactedOnRemove(t *testing.T) {
 // stay slot-aligned with neighbours.
 func TestAdjList_AddEdgeLabeled_FusedWrite(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	// A label-free edge first: the column stays nil (opt-in preserved).
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge a->b: %v", err)
@@ -214,7 +214,7 @@ func TestAdjList_AddEdgeLabeled_FusedWrite(t *testing.T) {
 // first edge for a node carries its fused label on slot 0.
 func TestAdjList_AddEdgeLabeled_FirstSlot(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdgeLabeled("a", "b", 1, 5); err != nil {
 		t.Fatalf("AddEdgeLabeled: %v", err)
 	}
@@ -224,51 +224,11 @@ func TestAdjList_AddEdgeLabeled_FirstSlot(t *testing.T) {
 	}
 }
 
-// TestAdjList_AddEdgeLabeled_Undirected verifies an undirected fused labelled
-// edge stamps the SAME label on both directions, matching AddEdgeH's mirror
-// contract.
-func TestAdjList_AddEdgeLabeled_Undirected(t *testing.T) {
-	t.Parallel()
-	a := New[string, int](Config{Directed: false})
-	if err := a.AddEdgeLabeled("a", "b", 1, 3); err != nil {
-		t.Fatalf("AddEdgeLabeled: %v", err)
-	}
-	fwd := labelsOf(t, a, "a")
-	rev := labelsOf(t, a, "b")
-	if len(fwd) != 1 || fwd[0] != 3 {
-		t.Fatalf("forward labels = %v, want [3]", fwd)
-	}
-	if len(rev) != 1 || rev[0] != 3 {
-		t.Fatalf("mirror labels = %v, want [3]", rev)
-	}
-}
-
-// TestAdjList_AddEdgeLabeled_SimpleGraphDuplicate verifies the simple-graph
-// collapse: a duplicate (src,dst) is a no-op and the existing slot keeps its
-// original label (the fused label of the duplicate is ignored).
-func TestAdjList_AddEdgeLabeled_SimpleGraphDuplicate(t *testing.T) {
-	t.Parallel()
-	a := New[string, int](Config{Directed: true}) // simple graph
-	if err := a.AddEdgeLabeled("a", "b", 1, 11); err != nil {
-		t.Fatalf("AddEdgeLabeled #1: %v", err)
-	}
-	if err := a.AddEdgeLabeled("a", "b", 1, 22); err != nil {
-		t.Fatalf("AddEdgeLabeled #2 (dup): %v", err)
-	}
-	labs := labelsOf(t, a, "a")
-	if len(labs) != 1 || labs[0] != 11 {
-		t.Fatalf("after duplicate labels = %v, want [11] (dup label 22 ignored)", labs)
-	}
-	if got := a.Size(); got != 1 {
-		t.Fatalf("Size = %d, want 1 (duplicate not counted)", got)
-	}
-}
-
 // TestAdjList_AddEdgeLabeledH_FusedBoth verifies the doubly-fused path stamps
 // BOTH a handle and a label onto the new slot at insertion time.
 func TestAdjList_AddEdgeLabeledH_FusedBoth(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdgeLabeledH("a", "b", 1, 100, 4); err != nil {
 		t.Fatalf("AddEdgeLabeledH #1: %v", err)
 	}
@@ -308,7 +268,7 @@ func TestAdjList_AddEdgeLabeledH_FusedBoth(t *testing.T) {
 // can index against a published neighbour is a value it actually wrote.
 func TestAdjList_AddEdgeLabeled_RaceWithReaders(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdgeLabeled("a", "b", 0, 1); err != nil {
 		t.Fatalf("seed AddEdgeLabeled: %v", err)
 	}
@@ -358,7 +318,7 @@ func TestAdjList_AddEdgeLabeled_RaceWithReaders(t *testing.T) {
 // existing index must never observe a torn entry. Run under -race.
 func TestAdjList_SetEdgeLabelSlot_RaceWithReaders(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	const deg = 64
 	for i := 0; i < deg; i++ {
 		if err := a.AddEdge("a", "b", i); err != nil {
@@ -418,7 +378,7 @@ func TestAdjList_SetEdgeLabelSlot_RaceWithReaders(t *testing.T) {
 // per-slot-vs-batch re-label benchmarks and the batch correctness test.
 func hubGraph(tb testing.TB, deg int) (*AdjList[string, int], graph.NodeID, []graph.NodeID) {
 	tb.Helper()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	dsts := make([]graph.NodeID, deg)
 	for i := 0; i < deg; i++ {
 		dst := fmt.Sprintf("n%d", i)
@@ -488,7 +448,7 @@ func TestAdjList_SetEdgeLabelSlots_Batch(t *testing.T) {
 // neighbour when parallel edges share a destination.
 func TestAdjList_SetEdgeLabelSlots_FirstSlotMultigraph(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	const parallel = 4
 	for i := 0; i < parallel; i++ {
 		if err := a.AddEdge("a", "b", i); err != nil {

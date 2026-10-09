@@ -48,7 +48,7 @@ func TestVacuousRunIsNotAnEngineDeviation(t *testing.T) {
 			name: "IndexSeekResults on an empty graph",
 			fire: func(t *testing.T) []Violation {
 				t.Helper()
-				g := lpg.New[string, float64](adjlist.Config{Directed: true})
+				g := lpg.New[string, float64](adjlist.Config{})
 				empty := NewEngineAdapter(cypher.NewEngine(g))
 				k := fixedSeekResults()
 				if v := k.Check(1, empty); len(v) != 0 {

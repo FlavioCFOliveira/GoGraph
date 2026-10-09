@@ -20,7 +20,7 @@ func TestPageRank_Dangling(t *testing.T) {
 	const nNonSink = 140 // nodes 0..139: have outgoing edges
 	const nSink = 60     // nodes 140..199: dangling (no outgoing edges)
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	r := rand.New(rand.NewPCG(42, 43)) //nolint:gosec // deterministic
 
 	// Non-sink nodes each get ~3 random outgoing edges.

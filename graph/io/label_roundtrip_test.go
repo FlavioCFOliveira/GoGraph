@@ -18,7 +18,7 @@ import (
 
 func labelledGraph(t *testing.T) *lpg.Graph[string, int64] {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, k := range []string{"alice", "bob", "carol"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode %s: %v", k, err)
@@ -60,7 +60,7 @@ func TestJSONL_NodeLabelsRoundTrip_1793(t *testing.T) {
 	if _, err := jsonl.WriteWithProps(&buf, labelledGraph(t)); err != nil {
 		t.Fatalf("WriteWithProps: %v", err)
 	}
-	g2, _, err := jsonl.ReadWithProps(&buf, adjlist.Config{Directed: true})
+	g2, _, err := jsonl.ReadWithProps(&buf, adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadWithProps: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestGraphML_NodeLabelsRoundTrip_1793(t *testing.T) {
 func TestLabelLessOutputUnchanged_1793(t *testing.T) {
 	// A graph with no labels must not emit any label encoding (byte-stable,
 	// back-compatible output).
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	_ = g.AddNode("x")
 	_ = g.AddNode("y")
 	_ = g.AddEdge("x", "y", 1)

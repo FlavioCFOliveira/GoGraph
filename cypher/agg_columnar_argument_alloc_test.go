@@ -49,7 +49,7 @@ const maxAllocsPerRow = 3.0
 // aggregate argument) and int64 `g` (a 7-value grouping key).
 func seedAllocGateGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < allocGateRows; i++ {
 		k := "n" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

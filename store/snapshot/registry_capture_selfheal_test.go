@@ -25,7 +25,7 @@ import (
 // independent: the "concurrent" intern is applied explicitly between the two.
 func TestSnapshotRegistryCapture_LabelSelfHeals(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.SetNodeLabel("alice", "Person"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestSnapshotRegistryCapture_LabelSelfHeals(t *testing.T) {
 // counterpart of the label self-heal test above.
 func TestSnapshotRegistryCapture_PropertyKeySelfHeals(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.SetNodeProperty("alice", "name", lpg.StringValue("a")); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}

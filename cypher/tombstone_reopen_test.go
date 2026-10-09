@@ -91,7 +91,7 @@ func TestCypher_DeleteSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
-	g1 := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g1 := lpg.New[string, float64](adjlist.Config{})
 	runCypherCheckpointClose(t, dir, g1, w1, `CREATE (a:Spec {key:'auth'})`)
 
 	// open 2: MATCH (n) DETACH DELETE n
@@ -144,7 +144,7 @@ func TestCypher_DeleteThenRecreateAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
-	g1 := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g1 := lpg.New[string, float64](adjlist.Config{})
 	runCypherCheckpointClose(t, dir, g1, w1, `CREATE (a:Spec {key:'auth'})`)
 
 	res2, err := recovery.Open[string, float64](dir, tombRecOpts())

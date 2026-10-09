@@ -6,7 +6,7 @@ package cypher_test
 // openCypher's data model is a multigraph: every CREATE adds a relationship,
 // including a second relationship between a node pair that is already
 // connected. Before this fix, constructing the engine over the documented
-// default configuration (adjlist.Config{Directed: true}, i.e. Multigraph:
+// default configuration (adjlist.Config{}, i.e. Multigraph:
 // false) made a second CREATE between an existing pair return success while
 // silently storing nothing — the edge simply vanished, an Atomicity/Durability
 // concern from the caller's perspective and a conformance violation of the
@@ -76,7 +76,7 @@ func countScalar(t *testing.T, eng *cypher.Engine, query string) int64 {
 // between an already-connected pair fails loudly instead of silently no-oping.
 func TestCypher_ParallelEdge_SimpleGraph_DistinctType_Fails(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	if err := drainQuery(t, eng, `CREATE (a:X {k:'a'}), (b:X {k:'b'})`); err != nil {
@@ -108,7 +108,7 @@ func TestCypher_ParallelEdge_SimpleGraph_DistinctType_Fails(t *testing.T) {
 // for a same-typed parallel edge (the audit's second repro case).
 func TestCypher_ParallelEdge_SimpleGraph_SameType_Fails(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	if err := drainQuery(t, eng, `CREATE (a:Y {k:'a'}), (b:Y {k:'b'})`); err != nil {
@@ -133,7 +133,7 @@ func TestCypher_ParallelEdge_SimpleGraph_SameType_Fails(t *testing.T) {
 // edge in the same statement must leave NEITHER visible afterwards.
 func TestCypher_ParallelEdge_SimpleGraph_NoPartialMutation(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	if err := drainQuery(t, eng, `CREATE (a:P {k:'a'}), (b:P {k:'b'}), (c:P {k:'c'})`); err != nil {
@@ -164,7 +164,7 @@ func TestCypher_ParallelEdge_SimpleGraph_NoPartialMutation(t *testing.T) {
 // a same-typed parallel edge are stored and independently readable.
 func TestCypher_ParallelEdge_Multigraph_Succeeds(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	for _, q := range []string{
@@ -191,7 +191,7 @@ func TestCypher_ParallelEdge_Multigraph_Succeeds(t *testing.T) {
 // already-connected pair — the same silent-drop hazard as a plain CREATE.
 func TestCypher_ParallelEdge_MERGE_SimpleGraph_Fails(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	if err := drainQuery(t, eng, `CREATE (a:M {k:'a'})-[:R]->(b:M {k:'b'})`); err != nil {
@@ -240,7 +240,7 @@ func TestCypher_ParallelEdge_SimpleGraph_WAL_FailsCleanly(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, walGuardStoreOpts())
 	eng := cypher.NewEngineWithStore(store)
 
@@ -278,7 +278,7 @@ func TestCypher_ParallelEdge_Multigraph_WAL_Durable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
-	g1 := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g1 := lpg.New[string, float64](adjlist.Config{})
 	store1 := txn.NewStoreWithOptions[string, float64](g1, w1, walGuardStoreOpts())
 	eng1 := cypher.NewEngineWithStore(store1)
 

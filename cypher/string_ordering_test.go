@@ -38,7 +38,7 @@ func TestStringOrdering_IsCodePointOrder(t *testing.T) {
 	// U+FB01.
 	want := []string{"Z", "a", "e", "z", "é", "ﬁ", "😀"}
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	for _, v := range seed {
@@ -114,7 +114,7 @@ func TestStringOrdering_SupplementaryPlaneBoundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			eng := cypher.NewEngine(g)
 			ctx := context.Background()
 			// Seed hi first, so the expected order is not the insertion order.

@@ -557,10 +557,12 @@ func weightsByteLen(wsize uint8, nE uint64, maxBytes int64, byteBudget uint64) (
 }
 
 // WriteSnapshotCSR is the legacy high-level helper that lays a
-// snapshot directory containing a v1 manifest plus the CSR. It is
+// snapshot directory containing a CSR-only manifest plus the CSR. It is
 // retained for backward compatibility: callers that also need LPG
-// label durability must use [WriteSnapshotFull] which writes a v2
-// manifest with both csr.bin and labels.bin. Atomic publication is
+// label durability must use [WriteSnapshotFull], which also writes
+// labels.bin and properties.bin. The manifest is stamped at
+// [ManifestVersion], like every manifest this build writes, so a build
+// that predates it refuses the directory. Atomic publication is
 // achieved by assembling the snapshot under dir + ".tmp" and
 // renaming it to dir on success.
 func WriteSnapshotCSR[W any](dir string, c *csr.CSR[W]) error {
@@ -630,7 +632,7 @@ func writeSnapshotCSRCtxWith[W any](ctx context.Context, fsys fileSystem, dir st
 	}
 
 	m := Manifest{
-		Version:   manifestVersionLegacy,
+		Version:   ManifestVersion,
 		CreatedAt: time.Now().UTC(),
 		Order:     c.Order(),
 		Size:      c.Size(),

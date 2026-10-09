@@ -82,7 +82,7 @@ func TestRelAccessors_AgreeAfterSet(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
-				g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: mg})
+				g := lpg.New[string, float64](adjlist.Config{})
 				eng := cypher.NewEngine(g)
 				seed := fmt.Sprintf(`CREATE (a:T {key:'s'})-[e:R%s]->(b:T {key:'t'})`, tc.createRel)
 				if _, err := runEntityProp(eng, seed); err != nil {
@@ -142,7 +142,7 @@ func TestRelAccessors_AgreeAfterSet(t *testing.T) {
 // query and a later row of another sees a contradiction.
 func TestRelAccessors_SecondPairIsTwoRows(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	if _, err := runEntityProp(eng, `CREATE (a:T {key:'s'})-[e:R]->(b:T {key:'t'})`); err != nil {
 		t.Fatalf("seed: %v", err)

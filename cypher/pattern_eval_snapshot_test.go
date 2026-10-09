@@ -53,7 +53,7 @@ func countOccurrences(s, sub string) int { return strings.Count(s, sub) }
 // evaluator rather than about key resolution.
 func snapPatternGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode %s: %v", k, err)

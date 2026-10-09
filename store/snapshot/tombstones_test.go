@@ -24,7 +24,7 @@ import (
 // set is {b} and the tombstone set is {id(a), id(c)}.
 func buildTombstoneGraph(t *testing.T) *lpg.Graph[string, int64] {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, k := range []string{"a", "b", "c"} {
 		if err := g.SetNodeLabel(k, "Spec"); err != nil {
 			t.Fatalf("SetNodeLabel(%q): %v", k, err)
@@ -157,7 +157,7 @@ func TestSnapshot_TombstonesRoundTrip(t *testing.T) {
 	}
 
 	// Apply into a fresh graph the way recovery does (no WAL).
-	fresh := lpg.New[string, int64](adjlist.Config{Directed: true})
+	fresh := lpg.New[string, int64](adjlist.Config{})
 	if err := ApplyMapperToGraph(fresh, loaded.Mapper); err != nil {
 		t.Fatalf("ApplyMapperToGraph: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestSnapshot_TombstonesRoundTrip(t *testing.T) {
 func TestSnapshot_BackCompat_NoTombstonesComponent(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "snapshot")
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.SetNodeLabel("x", "Spec"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}

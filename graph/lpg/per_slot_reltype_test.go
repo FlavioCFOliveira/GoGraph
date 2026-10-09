@@ -21,7 +21,7 @@ import (
 // perSlotGraph returns a directed multigraph with nodes a, b, c and no edges.
 func perSlotGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b", "c"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode(%q): %v", k, err)

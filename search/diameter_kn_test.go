@@ -8,7 +8,8 @@ package search
 // Diameter(c) returns lo == 1 for n in {2, 16, 128}.
 //
 // shapegen.Complete(n, false) produces an undirected K_n. Diameter
-// expects a symmetric (undirected) CSR, so directed=false is required.
+// expects a symmetric (undirected) CSR, so the test projects it with
+// csr.CSR.BuildSymmetric.
 //
 // Acceptance criteria:
 //   - lo == 1 for every tested n.
@@ -34,7 +35,7 @@ func TestDiameter_Kn_Shapegen(t *testing.T) {
 				t.Fatalf("Complete(%d).Build: %v", n, err)
 			}
 
-			c := csr.BuildFromAdjList(g.AdjList())
+			c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 			lo, hi, exact := Diameter(c)
 
 			const want = 1

@@ -276,7 +276,7 @@ func TestCheckpoint_PrefixMarkerOnlyForSelfSufficientSnapshot(t *testing.T) {
 				t.Fatalf("wal.Open: %v", err)
 			}
 			defer func() { _ = w.Close() }()
-			g := lpg.New[int, int64](adjlist.Config{Directed: true})
+			g := lpg.New[int, int64](adjlist.Config{})
 			st := txn.NewStoreWithOptions[int, int64](g, w, txn.Options[int, int64]{
 				Codec: txn.NewIntCodec(), WeightCodec: txn.NewInt64WeightCodec(),
 			})

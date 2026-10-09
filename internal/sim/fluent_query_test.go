@@ -779,7 +779,7 @@ func TestFluentQuery_SubstratePreconditionFires(t *testing.T) {
 
 	t.Run("two live nodes carrying the same name", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		for _, key := range []string{"k1", "k2"} {
 			if err := g.AddNode(key); err != nil {
 				t.Fatalf("AddNode(%q): %v", key, err)

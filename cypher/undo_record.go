@@ -545,7 +545,6 @@ func (m mutationUndo) captureRemovedEdgeByHandle(src, dst string, handle uint64)
 // weight); every Cypher relationship is created with the zero weight, so the
 // re-added instance's weight is exact for the engine's only caller.
 func (m mutationUndo) captureRemovedEdgeH(src, dst string, handle uint64) removedEdgePreimage {
-	src, dst = m.creationOrientation(src, dst, handle)
 	pre := removedEdgePreimage{src: src, dst: dst}
 	if !m.wv.Graph().HasEdgeAsOf(src, dst, nil) {
 		return pre
@@ -566,47 +565,6 @@ func (m mutationUndo) captureRemovedEdgeH(src, dst string, handle uint64) remove
 		pre.handleProps = m.wv.Graph().EdgePropertiesByHandleAsOf(src, dst, handle, nil)
 	}
 	return pre
-}
-
-// creationOrientation returns the endpoint order under which the relationship
-// identified by handle keeps its metadata, so its removal pre-image is captured
-// — and its inverse re-adds it — in that order (rmp #2886).
-//
-// On an undirected graph one relationship occupies two adjacency slots that
-// share one handle: the slot it was created as (a→b) and its mirror (b→a). Its
-// type, per-pair label set, per-handle labels and properties, property cells
-// and CREATE counter are all stored under the creation order only; the mirror
-// carries the handle and nothing else. Every removal of the relationship's last
-// slot between the pair clears BOTH orders ([lpg.Graph.RemoveAllEdgesFrom],
-// [lpg.Graph.RemoveEdge], [lpg.Graph.RemoveEdgeByHandle]). A removal reached
-// through the mirror — DETACH DELETE of the relationship's END node, whose
-// entry lists the mirror, or a DELETE of a relationship bound through its
-// mirror slot — used to capture the empty mirror order, so the rollback
-// re-added the relationship reversed and without its type or properties: a
-// committed relationship damaged by a rolled-back transaction.
-//
-// The creation order is the one holding the handle's relationship-type record,
-// which Cypher CREATE and MERGE write for every relationship. The order is kept
-// as given when the graph is directed, the relationship is a self-loop (one
-// slot), there is no handle, or the record is not held by the reversed order —
-// in particular for a column-typed slot, which has no record in either order.
-func (m mutationUndo) creationOrientation(src, dst string, handle uint64) (string, string) {
-	g := m.wv.Graph()
-	if handle == 0 || src == dst || g.AdjList().Directed() {
-		return src, dst
-	}
-	srcID, ok := g.AdjList().Mapper().Lookup(src)
-	if !ok {
-		return src, dst
-	}
-	dstID, ok := g.AdjList().Mapper().Lookup(dst)
-	if !ok {
-		return src, dst
-	}
-	if g.HasEdgeHandleLabelRecordByIDAsOf(srcID, dstID, handle, nil) || !g.HasEdgeHandleLabelRecordByIDAsOf(dstID, srcID, handle, nil) {
-		return src, dst
-	}
-	return dst, src
 }
 
 // recordRemoveEdge records the inverse of removing edge (src, dst) from the

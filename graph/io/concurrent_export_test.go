@@ -133,7 +133,7 @@ func TestExporters_ConcurrentNodeCreationDoesNotPanic(t *testing.T) {
 
 	for i, e := range exporters {
 		t.Run(e.name, func(t *testing.T) {
-			g := lpg.New[string, int64](adjlist.Config{Directed: true})
+			g := lpg.New[string, int64](adjlist.Config{})
 			for j, k := range pad {
 				if err := g.AddNode(k); err != nil {
 					t.Fatalf("AddNode %s: %v", k, err)

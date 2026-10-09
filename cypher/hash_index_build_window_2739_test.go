@@ -58,7 +58,7 @@ func hashWindowEngine(t *testing.T, persisted bool) *Engine {
 		})
 		e = NewEngineWithOpened(o)
 	} else {
-		e = NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+		e = NewEngine(lpg.New[string, float64](adjlist.Config{}))
 	}
 	e.parallelBackfillEnabled = false
 	execStatement(t, e, `UNWIND range(0, 31) AS i CREATE (:L {s: 'seed-' + toString(i)})`)

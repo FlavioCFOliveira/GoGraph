@@ -29,7 +29,7 @@ import (
 // leading-tombstone layout of "h" is what makes a wrongly charged cap visible.
 func degreeCapFixture(t *testing.T, dead, live int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	add := func(key, label string) {
 		if err := g.AddNode(key); err != nil {

@@ -49,7 +49,7 @@ func TestCtxCancel_BFS_MidRun(t *testing.T) {
 	// Build the chain: node i → node i+1 for i in [0, nodes-1).
 	// Use raw adjlist.New rather than shapegen to avoid shapegen's per-shape
 	// node-count limits.
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < nodes-1; i++ {
 		if err := a.AddEdge(i, i+1, 1); err != nil {
 			t.Fatalf("AddEdge %d→%d: %v", i, i+1, err)

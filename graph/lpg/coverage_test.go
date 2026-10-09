@@ -11,7 +11,7 @@ import (
 // TestGraph_EdgeLabels_Coverage covers EdgeLabels including the nil paths.
 func TestGraph_EdgeLabels_Coverage(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 
 	// Unknown src → nil.
 	if got := g.EdgeLabels("x", "y"); got != nil {

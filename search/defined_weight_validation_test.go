@@ -29,7 +29,7 @@ type namedInt int64     // a defined integer weight type (underlying int64)
 // the pre-fix code (silently returned a NaN distance / no error).
 func TestDefinedFloatWeight_NaNRejected(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, namedFloat](adjlist.Config{Directed: true})
+	a := adjlist.New[int, namedFloat](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 1.0); err != nil {
 		t.Fatalf("AddEdge(0->1): %v", err)
 	}
@@ -52,7 +52,7 @@ func TestDefinedFloatWeight_NaNRejected(t *testing.T) {
 // TestDefinedFloatWeight_InfRejected: the same for +Inf.
 func TestDefinedFloatWeight_InfRejected(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, namedFloat](adjlist.Config{Directed: true})
+	a := adjlist.New[int, namedFloat](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 1.0); err != nil {
 		t.Fatalf("AddEdge(0->1): %v", err)
 	}
@@ -72,7 +72,7 @@ func TestDefinedFloatWeight_InfRejected(t *testing.T) {
 // completion on a valid graph.
 func TestDefinedIntWeight_SkipsGate(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, namedInt](adjlist.Config{Directed: true})
+	a := adjlist.New[int, namedInt](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 5); err != nil {
 		t.Fatalf("AddEdge(0->1): %v", err)
 	}

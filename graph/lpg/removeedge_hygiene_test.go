@@ -36,7 +36,7 @@ func assertEdgeClean(t *testing.T, g *lpg.Graph[int, int64], a, b int, when stri
 func TestRemoveEdge_ClearsSidecarStores(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[int, int64](adjlist.Config{Directed: true, Multigraph: false})
+	g := lpg.New[int, int64](adjlist.Config{})
 
 	const (
 		a   = 1

@@ -106,7 +106,7 @@ func assertRows(t *testing.T, label string, got, want []string) {
 // newReciprocalEngine builds the in-memory multigraph fixture.
 func newReciprocalEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSeed(t, eng, reciprocalSeed)
 	return eng
@@ -163,7 +163,7 @@ func TestReciprocalRelBinding_Undirected(t *testing.T) {
 // edges occupy different pairs — so the defect reproduced identically, and the
 // fix must hold without multigraph semantics.
 func TestReciprocalRelBinding_Simple(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSeed(t, eng, reciprocalSeed)
 	for _, tc := range []struct {
@@ -193,7 +193,7 @@ func TestReciprocalRelBinding_DurableStore(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -297,7 +297,7 @@ func TestReciprocalRelBinding_RelatedPaths(t *testing.T) {
 // handle column is then the only thing that can tell the two edges of a
 // reciprocal pair apart, and it does.
 func TestReciprocalRelBinding_GoAPIEdges(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"A", "B"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode(%q): %v", k, err)

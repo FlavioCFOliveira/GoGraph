@@ -24,24 +24,16 @@ import (
 )
 
 func TestDirectTx_MixedWritersStress(t *testing.T) {
-	for _, directed := range []bool{false, true} {
-		t.Run(fmt.Sprintf("directed=%v", directed), func(t *testing.T) {
-			directTxStress(t, directed, time.Second)
-		})
-	}
+	directTxStress(t, time.Second)
 }
 
 func TestDirectTx_MixedWritersStressSoak(t *testing.T) {
 	testlayers.RequireSoak(t)
-	for _, directed := range []bool{false, true} {
-		t.Run(fmt.Sprintf("directed=%v", directed), func(t *testing.T) {
-			directTxStress(t, directed, 15*time.Second)
-		})
-	}
+	directTxStress(t, 15*time.Second)
 }
 
-func directTxStress(t *testing.T, directed bool, dur time.Duration) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: directed, Multigraph: true})
+func directTxStress(t *testing.T, dur time.Duration) {
+	g := lpg.New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	const nodes = 12
 	name := func(i int) string { return fmt.Sprintf("n%d", i) }
@@ -125,5 +117,5 @@ func directTxStress(t *testing.T, directed bool, dur time.Duration) {
 	if p := unexpected.Load(); p != nil {
 		t.Fatalf("a direct write failed with something other than a refusal: %v", *p)
 	}
-	t.Logf("directed=%v ops=%d refusals=%d", directed, ops.Load(), refusals.Load())
+	t.Logf("ops=%d refusals=%d", ops.Load(), refusals.Load())
 }

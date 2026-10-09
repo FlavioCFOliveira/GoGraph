@@ -57,7 +57,7 @@ func findRow(rows []string, needle string) string {
 // path: every per-worker min/max partial holds val == nil, so the combine must
 // merge "no value seen" partials without inventing a value.
 func TestParallelAggregate_AllNullScan_Differential(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	const n = 120 // > psTestThreshold (50) so the parallel aggregate path engages
 	for i := 0; i < n; i++ {
 		addNullVNode(t, g, strconv.Itoa(i), int64(i%3))
@@ -94,7 +94,7 @@ func TestParallelAggregate_AllNullScan_Differential(t *testing.T) {
 // NULLs), and group 2 is entirely non-NULL. This exercises the combine merging a
 // "no value seen" partial with a value-bearing one and vice versa.
 func TestParallelAggregate_MixedNullGroups_Differential(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	// Interleave so the deterministic scan order mixes groups and, within group 1,
 	// mixes NULL and non-NULL rows.
 	idx := 0

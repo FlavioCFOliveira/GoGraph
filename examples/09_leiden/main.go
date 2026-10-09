@@ -225,7 +225,7 @@ func buildSBM(ctx context.Context, cfg config) (*adjlist.AdjList[int, struct{}],
 	rng := rand.New(rand.NewSource(cfg.seed))
 	n := cfg.communities * cfg.communitySize
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	// Intern every node up front so isolated nodes (none expected at the
 	// configured densities, but possible for adversarial parameters) still
 	// count toward Order and receive a community assignment.

@@ -48,7 +48,7 @@ func BenchmarkIndexesRecoveryVsRebuild(b *testing.B) {
 	}
 
 	// === Setup: build a 10^5-node LPG with three populated indexes ===
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
 	lab := label.NewIndex()
@@ -205,7 +205,7 @@ func keyForBench(i int) string {
 // gets to run.
 func TestIndexesBenchSetupBuilds(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
 	lab := label.NewIndex()

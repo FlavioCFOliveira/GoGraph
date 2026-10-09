@@ -32,7 +32,7 @@ import (
 // is what every caller did before rmp #2302.
 func commitNodes(t *testing.T, dir string, resume uint64, keys ...string) {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	w, err := wal.Open(filepath.Join(dir, "wal"))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)

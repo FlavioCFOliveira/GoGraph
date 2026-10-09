@@ -539,7 +539,7 @@ func openEngine(_ context.Context, prefix string) (*cypher.Engine, func(), error
 	// Multigraph is set only to silence the engine's non-multigraph advisory at
 	// construction; this model has no relationships at all (accounts carry their
 	// balance as a property), so the setting is otherwise immaterial.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions(g, wlog, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

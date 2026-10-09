@@ -35,7 +35,7 @@ const labelBenchN = 200_000
 // multiset — which is what makes the pair a controlled comparison.
 func seedLabelBenchGraph(b *testing.B) *lpg.Graph[string, float64] {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < labelBenchN; i++ {
 		k := "n" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

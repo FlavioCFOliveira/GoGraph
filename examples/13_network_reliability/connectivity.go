@@ -84,7 +84,7 @@ func reportConnectivity(ctx context.Context, w io.Writer, net *network, bridges 
 // the bridge — so the resulting CSR covers the full node set and the WCC
 // component count reflects the true partition, not a dropped-node artefact.
 func (net *network) adjExcludingBridge(bridge [2]graph.NodeID) (*adjlist.AdjList[string, int64], error) {
-	adj := adjlist.New[string, int64](adjlist.Config{Directed: false})
+	adj := adjlist.New[string, int64](adjlist.Config{})
 	for _, l := range net.links {
 		ua, ub := net.idOf[l.a], net.idOf[l.b]
 		if (ua == bridge[0] && ub == bridge[1]) || (ua == bridge[1] && ub == bridge[0]) {

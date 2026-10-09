@@ -27,7 +27,7 @@ import (
 // runs ddl. 512 because the seek paths are population-gated.
 func commitStateEngine(t *testing.T, ddl string) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < 512; i++ {
 		n := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(n); err != nil {
@@ -180,7 +180,7 @@ func TestIndexCommitState_ConcurrentChurnNeverDiverges(t *testing.T) {
 		writers = 4
 		rounds  = 10
 	)
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < nodes; i++ {
 		n := fmt.Sprintf("c%d", i)
 		if err := g.AddNode(n); err != nil {
@@ -298,7 +298,7 @@ func TestIndexCommitState_ConcurrentCreateChurnNeverDiverges(t *testing.T) {
 		rounds  = 8
 		batch   = 8
 	)
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	for _, ddl := range []string{
 		"CREATE INDEX FOR (n:L) ON (n.s)",

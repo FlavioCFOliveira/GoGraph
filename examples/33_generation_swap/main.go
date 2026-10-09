@@ -226,7 +226,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 // its CSR.Order() is exactly n — the property the consistency check keys on —
 // and it gives the reader's BFS real work to do.
 func ringCSR(n int) *csr.CSR[struct{}] {
-	a := adjlist.New[int64, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int64, struct{}](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		_ = a.AddEdge(int64(i), int64((i+1)%n), struct{}{})
 	}

@@ -183,7 +183,7 @@ func diffRun(t *testing.T, seed int64, workers, perWorker int) bool {
 		t.Fatal(err)
 	}
 	// Directed multigraph: what a WAL-only recovery rebuilds.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	opts := txn.Options[string, float64]{Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec()}
 	st := txn.NewStoreWithOptions[string, float64](g, w, opts)
 	var ok, conflict atomic.Int64

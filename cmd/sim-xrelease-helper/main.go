@@ -183,9 +183,9 @@ func run(dir string, in, out *os.File) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("open WAL %q: %w", walPath, err)
 	}
-	// Directed simple graph, matching the harness's simulatorStoreConfig so the
-	// oracle (which collapses parallel edges) stays a faithful model.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: false})
+	// The directed multigraph every graph is, matching the harness's
+	// simulatorStoreConfig.
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions(g, wlog, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

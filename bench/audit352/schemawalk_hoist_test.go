@@ -149,7 +149,7 @@ func walkShapeEngine(tb testing.TB, n int) *cypher.Engine {
 	if e, ok := walkEngines[n]; ok {
 		return e
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(key); err != nil {

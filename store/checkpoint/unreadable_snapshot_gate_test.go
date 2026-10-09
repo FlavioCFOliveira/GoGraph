@@ -160,7 +160,7 @@ func TestCheckpoint_UnreadableSnapshot_DoesNotTruncateWAL(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -283,7 +283,7 @@ func TestCheckpoint_PermittedTruncation_LeavesARecoverableStore(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

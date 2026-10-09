@@ -262,7 +262,7 @@ func TestColumnarAggPreProjection_RowByteBudgetParity(t *testing.T) {
 		listLen = 20000 // 16 + 20000*16 = 320016 estimated bytes
 		ceiling = 100000
 	)
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < nodes; i++ {
 		k := fmt.Sprintf("p%d", i)
 		if err := g.AddNode(k); err != nil {
@@ -343,7 +343,7 @@ func TestColumnarAggPreProjection_RowByteBudgetParity(t *testing.T) {
 // rows to the boxed fallback.
 func aggDiffGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	const n = 240
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("n%d", i)

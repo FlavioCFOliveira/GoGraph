@@ -461,7 +461,7 @@ func build(ctx context.Context, cfg config) (genResult, error) {
 		}
 		return a.v - b.v
 	})
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for _, e := range ordered {
 		w := weight(pts[e.u], pts[e.v])
 		if err := a.AddEdge(e.u, e.v, w); err != nil {

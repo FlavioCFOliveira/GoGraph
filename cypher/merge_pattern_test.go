@@ -41,7 +41,7 @@ import (
 
 func newMergePatternEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return cypher.NewEngine(g)
 }
 
@@ -348,7 +348,7 @@ func TestMergePattern_WALDurability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
-	g1 := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g1 := lpg.New[string, float64](adjlist.Config{})
 	deleteWALEngineRun(t, g1, w1, `MERGE (a:WD1 {k: 'a'})-[:R]->(b:WD2 {k: 'b'})`)
 
 	res2, err := recovery.Open[string, float64](dir, deleteWALRecOpts())

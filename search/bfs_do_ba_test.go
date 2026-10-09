@@ -26,7 +26,7 @@ func TestBFSDirectionOpt_BA_MatchesBFSAndSwitches(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	a := g.AdjList()
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 
 	srcID, ok := a.Mapper().Lookup(0)
 	if !ok {

@@ -136,7 +136,7 @@ func TestIsolation_ViewWithUnversionedReadIsNotAtomic(t *testing.T) {
 // drive, seeded with the two nodes whose properties carry the invariant.
 func newIsolationStore(t *testing.T) (*lpg.Graph[string, int64], *Store[string, int64], func()) {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	w, err := wal.Open(filepath.Join(t.TempDir(), "wal"))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)

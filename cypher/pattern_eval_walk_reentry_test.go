@@ -44,7 +44,7 @@ const (
 
 func TestPatternEval_IncomingWalkDoesNotReenterMapper(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("h"); err != nil {
 		t.Fatalf("AddNode h: %v", err)
 	}

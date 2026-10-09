@@ -57,7 +57,7 @@ func newBoundHarness(t *testing.T) *boundHarness {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	return &boundHarness{
 		dir: dir,
 		w:   w,

@@ -32,7 +32,7 @@ import (
 // sample is unioned in, and it cannot have been drained by a sweep that had not yet
 // run.
 func TestLabelBitmapAsOf_CorrectsWhenTheSweepLandsDuringTheClone(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	if err := g.AddNode("a"); err != nil {
@@ -105,7 +105,7 @@ func TestLabelBitmapAsOf_CorrectsWhenTheSweepLandsDuringTheClone(t *testing.T) {
 // still come out corrected. It can only do so if the pre-acquire sample was
 // unioned in AND the late clone reproduced the acquired image.
 func TestLabelBitmapAsOf_SpanningSurvivesTheDeferredClone(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	if err := g.AddNode("a"); err != nil {

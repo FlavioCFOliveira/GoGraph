@@ -28,7 +28,7 @@ func TestReadTx_RolledBackDeleteOfYoungNodeStaysInvisible_3001(t *testing.T) {
 		{"detach delete then create", []string{"MATCH (h:Hub {id:9}) DETACH DELETE h", "CREATE (:Hub {id:9})"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			eng := cypher.NewEngine(g)
 			t.Cleanup(func() { _ = eng.Close() })
 			run := func(q string) {

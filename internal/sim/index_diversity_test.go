@@ -131,7 +131,7 @@ func TestIndexDiversity_CheckpointGateWired(t *testing.T) {
 // scan/seek path the index-diversity scenario relies on without the cost of the
 // 9000-node parallel backfill.
 func TestIndexConsistency_NumericBranch(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngineAdapter(cypher.NewEngine(g))
 	ctx := context.Background()
 	for i := 0; i < 40; i++ {
@@ -276,7 +276,7 @@ func TestIndexDiversity_HydrationAndIntersectShort(t *testing.T) {
 // outside the planner's per-conjunct ceiling would stop composing here.
 func TestIndexIntersectProbes_MarkerDiscriminatesComposition(t *testing.T) {
 	ctx := context.Background()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngineAdapter(cypher.NewEngine(g))
 	// Above the planner's 1024-node label-population floor, with the same value
 	// cycles the scenario's bulk load uses.

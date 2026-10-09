@@ -49,7 +49,7 @@ import (
 // lostUpdateFixture seeds one :Ctr node with count 0.
 func lostUpdateFixture(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	res, err := eng.RunAny(context.Background(), `CREATE (:Ctr {id:'c', n:0})`, nil)
 	if err != nil {

@@ -17,7 +17,7 @@ import (
 
 func TestFloydWarshall_IsolatedNodeSelfDistance(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for _, e := range []weightedEdge{{0, 1, 5}, {1, 2, 3}} {
 		if err := a.AddEdge(e.from, e.to, e.w); err != nil {
 			t.Fatalf("AddEdge: %v", err)

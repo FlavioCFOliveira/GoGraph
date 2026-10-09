@@ -252,7 +252,7 @@ func generate(ctx context.Context, cfg config) (*adjlist.AdjList[string, int64],
 	// A simple directed graph: no self-loops and no parallel edges, so the
 	// GraphML reader (which is directed and collapses parallel edges)
 	// re-materialises it edge-for-edge and the round-trip is exact.
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 
 	ids := make([]string, cfg.nodes)
 	seen := make(map[string]struct{}, cfg.nodes)

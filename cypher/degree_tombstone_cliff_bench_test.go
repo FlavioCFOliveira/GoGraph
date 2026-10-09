@@ -65,7 +65,7 @@ const degreeCliffDegree = 400_000
 // shape the query sees is identical either way.
 func seedDegreeCliffGraph(tb testing.TB, tombstone bool) *lpg.Graph[string, float64] {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	if err := g.AddNode("hub"); err != nil {
 		tb.Fatalf("AddNode(hub): %v", err)

@@ -1,11 +1,10 @@
 package lpg
 
 // edge_create_count.go — per-(src,dst) Cypher CREATE multiplicity counter
-// used by the openCypher TCK's multi-edge semantics. The underlying
-// adjacency list in its simple-graph configuration collapses parallel
-// CREATEs of the same (src,dst) into a single edge entry, but the TCK
-// asks `MERGE ... RETURN count(r)` to return the *number of CREATE
-// calls* the user issued, not the number of distinct storage entries.
+// used by the openCypher TCK's multi-edge semantics. The TCK asks
+// `MERGE ... RETURN count(r)` to return the *number of CREATE calls* the
+// user issued between the same endpoints, which the counter records
+// independently of the adjacency list.
 // The counter is incremented every time `CreateRelationship` adds an
 // edge between the same endpoints, decremented every time a
 // `DeleteRelationship` removes one, and read by `MergeRelationship` to
@@ -36,9 +35,8 @@ type edgeCreateCountShard struct {
 // IncEdgeCreateCount bumps the CREATE multiplicity counter for the
 // directed edge (src, dst) by one. Returns the new count.
 //
-// Idempotent across "edge already exists" calls: simple-graph
-// upsertEdge no-ops the underlying storage write, but the counter
-// still moves so a subsequent MERGE sees the correct multiplicity.
+// Every call moves the counter, whatever the adjacency list holds, so a
+// subsequent MERGE sees the multiplicity of the CREATE calls issued.
 //
 // IncEdgeCreateCount is safe for concurrent use.
 func (g *Graph[N, W]) IncEdgeCreateCount(src, dst N) int64 {

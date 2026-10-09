@@ -68,7 +68,7 @@ func runCappedWrite(t *testing.T, eng *cypher.Engine, query string, wantErr erro
 // must leave ZERO nodes in the live in-memory graph — the rows applied before
 // the trip are undone inside the visibility barrier, not kept.
 func TestRunInTx_RowCapTrip_RollsBackAtomically_Storeless(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{MaxResultRows: 3})
 
 	runCappedWrite(t, eng,
@@ -89,7 +89,7 @@ func TestRunInTx_RowCapTrip_RollsBackAtomically_Storeless(t *testing.T) {
 // gate for the aggregate-byte budget (MaxResultBytes): both caps share the
 // rowsErr signal, so both must drive the same atomic rollback.
 func TestRunInTx_ByteCapTrip_RollsBackAtomically_Storeless(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{MaxResultBytes: 1})
 
 	runCappedWrite(t, eng,
@@ -114,7 +114,7 @@ func TestRunInTx_RowCapTrip_RollsBackAtomically_WALBacked(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

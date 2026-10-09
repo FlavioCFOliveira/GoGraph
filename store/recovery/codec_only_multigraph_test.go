@@ -26,7 +26,7 @@ func writeCodecOnlyMultigraphCrashState(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithCodec(g, wlog, txn.NewStringCodec())
 
 	tx := st.Begin()

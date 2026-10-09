@@ -29,7 +29,7 @@ import (
 // a genuine null-bearing row.
 func buildCountRowsGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	const n = 12
 	for i := 0; i < n; i++ {
 		if err := g.AddNode(fmt.Sprintf("u%d", i)); err != nil {
@@ -226,7 +226,7 @@ func TestCountRows_PlanShowsItsChild(t *testing.T) {
 // query aliased AS c was correct throughout. Both forms are asserted so a
 // regression cannot hide behind the non-colliding one.
 func TestCountRows_AliasShadowingAPatternVariable(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	e := NewEngine(g)
 	ctx := context.Background()
 	for _, w := range []string{

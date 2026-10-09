@@ -111,7 +111,7 @@ func TestRun(t *testing.T) {
 // fail.
 func TestReconcileNetPositionsHasTeeth(t *testing.T) {
 	accountIDs := []string{"a", "b", "c"}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, id := range accountIDs {
 		if err := g.AddNode(id); err != nil {
 			t.Fatalf("AddNode %s: %v", id, err)
@@ -148,7 +148,7 @@ func TestReconcileNetPositionsHasTeeth(t *testing.T) {
 
 	// Anomaly path: a recovered node whose key is not a known account must not
 	// reconcile, even when the recognised account edges match the plan.
-	gAnomaly := lpg.New[string, int64](adjlist.Config{Directed: true})
+	gAnomaly := lpg.New[string, int64](adjlist.Config{})
 	for _, id := range accountIDs {
 		if err := gAnomaly.AddNode(id); err != nil {
 			t.Fatalf("AddNode %s: %v", id, err)

@@ -26,7 +26,7 @@ import (
 func shard0Keys(t *testing.T, n int) []int {
 	t.Helper()
 	const shardMask = 0xFF // mirrors the 256-shard layout in adjlist.go
-	probe := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	probe := adjlist.New[int, struct{}](adjlist.Config{})
 	keys := make([]int, 0, n)
 	for i := 0; len(keys) < n && i < 1_000_000; i++ {
 		id := probe.Mapper().Intern(i)
@@ -53,7 +53,7 @@ func TestAdjList_MaxShardCapacity_AddNode_AlwaysSucceeds(t *testing.T) {
 	const cap = 2
 	keys := shard0Keys(t, cap+1)
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true, MaxShardCapacity: cap})
+	a := adjlist.New[int, struct{}](adjlist.Config{MaxShardCapacity: cap})
 
 	// Saturate shard 0: each self-loop claims one intra-shard slot.
 	for i := 0; i < cap; i++ {
@@ -103,7 +103,7 @@ func TestAdjList_MaxShardCapacity_OrderTracked_AddNodeOnly(t *testing.T) {
 	const cap = 2
 	keys := shard0Keys(t, 5) // 5 distinct shard-0 keys
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true, MaxShardCapacity: cap})
+	a := adjlist.New[int, struct{}](adjlist.Config{MaxShardCapacity: cap})
 
 	// Add 5 nodes via AddNode only — none must fail.
 	for i, k := range keys {
@@ -151,7 +151,7 @@ func TestAdjList_MaxShardCapacity_AddEdgeOverflow_PreservesOrder(t *testing.T) {
 	const cap = 2
 	keys := shard0Keys(t, cap+1)
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true, MaxShardCapacity: cap})
+	a := adjlist.New[int, struct{}](adjlist.Config{MaxShardCapacity: cap})
 
 	for i := 0; i < cap; i++ {
 		if err := a.AddEdge(keys[i], keys[i], struct{}{}); err != nil {

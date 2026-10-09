@@ -46,7 +46,7 @@ func TestWriteCSR_PropagatesWriterErrors(t *testing.T) {
 	// writer at least once during the vertex/edge/weight write
 	// sequence. Without this, WriteCSR's small writes are absorbed by
 	// the buffer and the error is only surfaced at the final Flush.
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	const n = 130_000
 	for i := 0; i < n; i++ {
 		if err := a.AddEdge(i, (i+1)%n, int64(i)); err != nil {
@@ -163,7 +163,7 @@ func (f *flakyCtx) Err() error {
 
 func TestWriteSnapshotCSR_ContextCancelledAfterFirstCheckpoint(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestWriteSnapshotCSR_ContextCancelledAfterFirstCheckpoint(t *testing.T) {
 
 func TestWriteSnapshotCSR_ContextCancelledBeforeRename(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestWriteSnapshotCSR_ContextCancelledBeforeRename(t *testing.T) {
 
 func TestWriteSnapshotCSR_ContextPreCancelled(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestWriteSnapshotCSR_ContextPreCancelled(t *testing.T) {
 
 func TestWriteSnapshotCSR_ParentIsRegularFile(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestWriteSnapshotCSR_ParentIsRegularFile(t *testing.T) {
 
 func TestWriteSnapshotCSR_TmpPathPreexistsAsFile(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestWriteSnapshotCSR_TmpPathPreexistsAsFile(t *testing.T) {
 
 func TestWriteSnapshotCSR_ReplaceExistingDirectory(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestWriteSnapshotCSR_ReplaceExistingDirectory(t *testing.T) {
 	if err := os.WriteFile(stray, []byte("garbage"), 0o600); err != nil { // t.TempDir
 		t.Fatal(err)
 	}
-	a2 := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a2 := adjlist.New[string, int64](adjlist.Config{})
 	if err := a2.AddEdge("c", "d", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

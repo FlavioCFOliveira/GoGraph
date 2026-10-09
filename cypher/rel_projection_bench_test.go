@@ -53,7 +53,7 @@ import (
 // [TestRelBenchFixtureAcceptsParallelEdges] puts the fixture on the short layer.
 func newRelBenchEngine(b testing.TB, nNodes, fanout int) *cypher.Engine {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedRelGraph(b, eng, nNodes, fanout)
 	return eng

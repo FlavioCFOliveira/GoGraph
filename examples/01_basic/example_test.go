@@ -93,7 +93,7 @@ func assertRouteInvariants(t *testing.T, out string, cfg config) {
 
 	// Rebuild the identical network and verify each consecutive pair is a
 	// real road; sum the road weights along the route.
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	r := autoRadius(cfg) * cfg.radius
 	if _, err := build(context.Background(), a, cfg, r); err != nil {
 		t.Fatalf("rebuild: %v", err)

@@ -42,7 +42,7 @@ import (
 func TestSnapshotCollectors_NoMapperReentryDeadlock(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 
 	// Populate enough nodes to spread across the Mapper's 256 shards, each
 	// carrying a label and a property, with a labelled+propertied edge to its

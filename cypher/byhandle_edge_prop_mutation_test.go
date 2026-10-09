@@ -30,7 +30,7 @@ import (
 // directed multigraph, exercising the lpgMutatorAdapter write path.
 func inMemMultigraphEngine(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64]) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return cypher.NewEngine(g), g
 }
 

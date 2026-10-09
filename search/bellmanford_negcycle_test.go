@@ -19,7 +19,7 @@ import (
 // 0→1→2→0 where every edge carries weight -1.0.
 func TestBellmanFord_NegCycle_SimpleTriangle(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	for _, e := range [][3]float64{{0, 1, -1.0}, {1, 2, -1.0}, {2, 0, -1.0}} {
 		if err := a.AddEdge(int(e[0]), int(e[1]), e[2]); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -37,7 +37,7 @@ func TestBellmanFord_NegCycle_SimpleTriangle(t *testing.T) {
 // 0→1→2→3→4→0 where every edge carries weight -1.0.
 func TestBellmanFord_NegCycle_FiveCycle(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	for i := 0; i < 5; i++ {
 		if err := a.AddEdge(i, (i+1)%5, -1.0); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -56,7 +56,7 @@ func TestBellmanFord_NegCycle_FiveCycle(t *testing.T) {
 // 0→1→2→3, and then the cycle 3→4→5→3 has all -1.0 weights.
 func TestBellmanFord_NegCycle_ReachableViaPath(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	// Path to the cycle.
 	for _, e := range [][3]float64{
 		{0, 1, 1.0},

@@ -27,7 +27,7 @@ import (
 )
 
 func TestReduceGrammar2923_Positions(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, tc := range []struct {
 		name, query string
@@ -63,7 +63,7 @@ func TestReduceGrammar2923_Positions(t *testing.T) {
 // accepted wherever an identifier is: as a variable, a property key, a label, a
 // relationship type, a map key and a map-projection subject.
 func TestReduceGrammar2923_IdentifierSurvives(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	res, err := eng.RunAny(ctx, `CREATE (:reduce {reduce: 5})-[:reduce]->(:Other)`, nil)

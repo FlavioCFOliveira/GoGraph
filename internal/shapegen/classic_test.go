@@ -56,8 +56,9 @@ func classicGolden(t *testing.T, name, got string) {
 // Path
 // -------------------------------------------------------------------
 
-// TestClassic_Path_Invariants walks n through {0,1,2,3,5,10} for the
-// directed and undirected variants and asserts the catalogue invariants
+// TestClassic_Path_Invariants walks n through {0,1,2,3,5,10}, reads
+// the one stored graph both as the directed and as the undirected P_n,
+// and asserts the catalogue invariants
 // declared at the top of Path's godoc. It is the unit-test arm of
 // acceptance criterion 1.
 func TestClassic_Path_Invariants(t *testing.T) {
@@ -68,7 +69,7 @@ func TestClassic_Path_Invariants(t *testing.T) {
 			n, directed := n, directed
 			t.Run(fmt.Sprintf("n=%d_directed=%v", n, directed), func(t *testing.T) {
 				t.Parallel()
-				s := Path(n, directed)
+				s := Path(n)
 				if got, want := s.Name(), "classic.path"; got != want {
 					t.Fatalf("Name = %q, want %q", got, want)
 				}
@@ -85,7 +86,6 @@ func TestClassic_Path_Invariants(t *testing.T) {
 					wantSize = uint64(n - 1)
 				}
 				assertSize(t, g, wantSize)
-				assertDirected(t, g, directed)
 				assertDegreeSequencePath(t, g, n, directed)
 				if n >= 1 {
 					assertDiameter(t, "Path", g, pathDiameter(n))
@@ -100,43 +100,26 @@ func TestClassic_Path_PanicsOnNegative(t *testing.T) {
 	t.Parallel()
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("Path(-1, true) did not panic")
+			t.Fatal("Path(-1) did not panic")
 		}
 	}()
-	_ = Path(-1, true)
+	_ = Path(-1)
 }
 
-// TestClassic_Path_Goldens pins Path(n, true) for n in {0,1,2,3,5,10}.
-// The brief specifies we document that the undirected variant's
-// listing is the symmetric closure of the directed one: the assertion
-// is encoded in TestClassic_Path_UndirectedSymmetry below.
+// TestClassic_Path_Goldens pins Path(n) for n in {0,1,2,3,5,10}: one
+// arc i -> i+1 per edge, the single listing of the directed and the
+// undirected P_n.
 func TestClassic_Path_Goldens(t *testing.T) {
 	t.Parallel()
 	for _, n := range goldenSizes() {
 		n := n
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			t.Parallel()
-			g, err := Path(n, true).Build(defaultCfg)
+			g, err := Path(n).Build(defaultCfg)
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}
 			classicGolden(t, fmt.Sprintf("path-n%d-directed.txt", n), formatAdjacency(g))
-		})
-	}
-}
-
-// TestClassic_Path_UndirectedSymmetry asserts that the undirected
-// variant's adjacency listing is the symmetric closure of the
-// directed one: for every (u, v) emitted by the directed graph, the
-// undirected graph emits both (u, v) and (v, u). This codifies the
-// brief's contract without duplicating goldens.
-func TestClassic_Path_UndirectedSymmetry(t *testing.T) {
-	t.Parallel()
-	for _, n := range goldenSizes() {
-		n := n
-		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
-			t.Parallel()
-			assertSymmetricClosure(t, Path(n, true), Path(n, false))
 		})
 	}
 }
@@ -165,7 +148,6 @@ func TestClassic_Cycle_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(n))
 			assertSize(t, g, uint64(n))
-			assertDirected(t, g, true)
 		})
 	}
 
@@ -179,10 +161,9 @@ func TestClassic_Cycle_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(n))
 			assertSize(t, g, uint64(n))
-			assertDirected(t, g, false)
 			// 2-regular: every node has degree 2.
 			for v := 0; v < n; v++ {
-				if got := degreeOut(g, v); got != 2 {
+				if got := degreeUndirected(g, v); got != 2 {
 					t.Fatalf("undirected cycle n=%d, deg(%d) = %d, want 2", n, v, got)
 				}
 			}
@@ -372,17 +353,16 @@ func TestClassic_DoubleStar_Invariants(t *testing.T) {
 				}
 				assertOrder(t, g, uint64(2+k1+k2))
 				assertSize(t, g, uint64(k1+k2+1))
-				assertDirected(t, g, false)
 				// Centre degrees.
-				if got := degreeOut(g, 0); got != k1+1 {
+				if got := degreeUndirected(g, 0); got != k1+1 {
 					t.Fatalf("deg(centre0) = %d, want %d", got, k1+1)
 				}
-				if got := degreeOut(g, 1); got != k2+1 {
+				if got := degreeUndirected(g, 1); got != k2+1 {
 					t.Fatalf("deg(centre1) = %d, want %d", got, k2+1)
 				}
 				// Leaf degrees.
 				for v := 2; v < 2+k1+k2; v++ {
-					if got := degreeOut(g, v); got != 1 {
+					if got := degreeUndirected(g, v); got != 1 {
 						t.Fatalf("deg(leaf %d) = %d, want 1", v, got)
 					}
 				}
@@ -451,7 +431,6 @@ func TestClassic_Complete_Invariants(t *testing.T) {
 					wantSize = 0
 				}
 				assertSize(t, g, wantSize)
-				assertDirected(t, g, directed)
 				if n >= 2 {
 					assertDiameter(t, "Complete", g, 1)
 				}
@@ -476,8 +455,8 @@ func TestClassic_Complete_Invariants(t *testing.T) {
 				} else {
 					for i := 0; i < n; i++ {
 						for j := i + 1; j < n; j++ {
-							if !g.AdjList().HasEdge(i, j) || !g.AdjList().HasEdge(j, i) {
-								t.Fatalf("undirected K_%d missing symmetric edge {%d,%d}", n, i, j)
+							if !g.AdjList().HasEdge(i, j) || g.AdjList().HasEdge(j, i) {
+								t.Fatalf("undirected K_%d: edge {%d,%d} is not the single arc %d->%d", n, i, j, i, j)
 							}
 						}
 					}
@@ -542,16 +521,15 @@ func TestClassic_CompleteBipartite_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(pair.m+pair.n))
 			assertSize(t, g, uint64(pair.m)*uint64(pair.n))
-			assertDirected(t, g, false)
 			// Left side degrees (every left node connects to all n right nodes).
 			for v := 0; v < pair.m; v++ {
-				if got := degreeOut(g, v); got != pair.n {
+				if got := degreeUndirected(g, v); got != pair.n {
 					t.Fatalf("left node %d degree = %d, want %d", v, got, pair.n)
 				}
 			}
 			// Right side degrees.
 			for v := pair.m; v < pair.m+pair.n; v++ {
-				if got := degreeOut(g, v); got != pair.m {
+				if got := degreeUndirected(g, v); got != pair.m {
 					t.Fatalf("right node %d degree = %d, want %d", v, got, pair.m)
 				}
 			}
@@ -634,7 +612,6 @@ func TestClassic_Multipartite_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(total))
 			assertSize(t, g, expectedMultipartiteSize(parts))
-			assertDirected(t, g, false)
 			assertNoIntraGroupEdges(t, g, parts)
 		})
 	}
@@ -737,7 +714,7 @@ func TestClassic_Properties_RapidSweep(t *testing.T) {
 		rapid.Check(t, func(r *rapid.T) {
 			n := rapid.IntRange(0, 200).Draw(r, "n")
 			directed := rapid.Bool().Draw(r, "directed")
-			g, err := Path(n, directed).Build(defaultCfg)
+			g, err := Path(n).Build(defaultCfg)
 			if err != nil {
 				t.Fatalf("n=%d directed=%v: Build: %v", n, directed, err)
 			}
@@ -883,12 +860,12 @@ func TestClassic_Properties_RapidSweep(t *testing.T) {
 // trivial-family contract.
 func TestClassic_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	for _, tc := range []struct {
 		name string
 		s    Shape[int, int64]
 	}{
-		{"path", Path(3, true)},
+		{"path", Path(3)},
 		{"cycle_directed", Cycle(3, true)},
 		{"cycle_undirected", Cycle(3, false)},
 		{"star_outgoing", Star(3, true)},
@@ -960,12 +937,30 @@ func degreeOut(g *lpg.Graph[int, int64], v int) int {
 	return d
 }
 
+// degreeUndirected returns the degree of v in the undirected graph g
+// stores one arc per edge for: every arc with v as an endpoint counts
+// once, a self-loop included. It is the out-degree of v in the
+// symmetric projection (csr.CSR.BuildSymmetric).
+func degreeUndirected(g *lpg.Graph[int, int64], v int) int {
+	a := g.AdjList()
+	d := 0
+	a.Mapper().Walk(func(_ graph.NodeID, u int) bool {
+		for w := range a.Neighbours(u) {
+			if u == v || w == v {
+				d++
+			}
+		}
+		return true
+	})
+	return d
+}
+
 // assertDegreeSequencePath asserts the path-graph degree sequence on
 // g. For directed graphs we check out-degrees only: every node has
-// one outgoing edge except the last. For undirected graphs the
-// [adjlist.AdjList] stores both (u,v) and (v,u) entries, so the
-// out-degree iteration recovers the conventional undirected degree:
-// 1 at each endpoint and 2 at every interior node.
+// one outgoing edge except the last. For undirected graphs every edge
+// is stored once, so the conventional undirected degree counts the
+// arcs at either endpoint: 1 at each endpoint and 2 at every interior
+// node.
 func assertDegreeSequencePath(t *testing.T, g *lpg.Graph[int, int64], n int, directed bool) {
 	t.Helper()
 	if n == 0 {
@@ -984,20 +979,20 @@ func assertDegreeSequencePath(t *testing.T, g *lpg.Graph[int, int64], n int, dir
 	}
 	// Undirected.
 	if n == 1 {
-		if got := degreeOut(g, 0); got != 0 {
+		if got := degreeUndirected(g, 0); got != 0 {
 			t.Fatalf("undirected Path n=1: deg(0) = %d, want 0", got)
 		}
 		return
 	}
 	// Endpoints have degree 1; interiors have degree 2.
-	if got := degreeOut(g, 0); got != 1 {
+	if got := degreeUndirected(g, 0); got != 1 {
 		t.Fatalf("undirected Path n=%d: deg(0) = %d, want 1", n, got)
 	}
-	if got := degreeOut(g, n-1); got != 1 {
+	if got := degreeUndirected(g, n-1); got != 1 {
 		t.Fatalf("undirected Path n=%d: deg(%d) = %d, want 1", n, n-1, got)
 	}
 	for v := 1; v < n-1; v++ {
-		if got := degreeOut(g, v); got != 2 {
+		if got := degreeUndirected(g, v); got != 2 {
 			t.Fatalf("undirected Path n=%d: deg(%d) = %d, want 2", n, v, got)
 		}
 	}
@@ -1069,8 +1064,7 @@ func countTrianglesUndirected(g *lpg.Graph[int, int64], n int) uint64 {
 	return c
 }
 
-// assertOrder, assertSize, assertDirected, assertDiameter, and
-// assertSymmetricClosure are micro-helpers that keep the per-test
+// assertOrder, assertSize and assertDiameter are micro-helpers that keep the per-test
 // boilerplate to a single line.
 func assertOrder(t *testing.T, g *lpg.Graph[int, int64], want uint64) {
 	t.Helper()
@@ -1083,13 +1077,6 @@ func assertSize(t *testing.T, g *lpg.Graph[int, int64], want uint64) {
 	t.Helper()
 	if got := g.AdjList().Size(); got != want {
 		t.Fatalf("Size = %d, want %d", got, want)
-	}
-}
-
-func assertDirected(t *testing.T, g *lpg.Graph[int, int64], want bool) {
-	t.Helper()
-	if got := g.AdjList().Directed(); got != want {
-		t.Fatalf("Directed = %v, want %v", got, want)
 	}
 }
 
@@ -1183,47 +1170,4 @@ func bfsDiameterAsUndirected(g *lpg.Graph[int, int64]) uint64 {
 		}
 	}
 	return best
-}
-
-// assertSymmetricClosure verifies that the undirected variant of a
-// shape produces exactly the symmetric closure of the directed one.
-// It compares the set of stored adjacency entries: for every (u, v)
-// in the directed listing, the undirected listing must contain both
-// (u, v) and (v, u) with the same weight.
-func assertSymmetricClosure(t *testing.T, directed, undirected Shape[int, int64]) {
-	t.Helper()
-	gd, err := directed.Build(defaultCfg)
-	if err != nil {
-		t.Fatalf("directed Build: %v", err)
-	}
-	gu, err := undirected.Build(defaultCfg)
-	if err != nil {
-		t.Fatalf("undirected Build: %v", err)
-	}
-	maxID := uint64(gd.AdjList().MaxNodeID())
-	for u := uint64(0); u < maxID; u++ {
-		v, ok := gd.AdjList().Mapper().Resolve(graph.NodeID(u))
-		if !ok {
-			continue
-		}
-		for nbr, w := range gd.AdjList().Neighbours(v) {
-			if !hasNeighbourWithWeight(gu, v, nbr, w) {
-				t.Fatalf("undirected closure missing forward edge %d -> %d [%d]", v, nbr, w)
-			}
-			if !hasNeighbourWithWeight(gu, nbr, v, w) {
-				t.Fatalf("undirected closure missing reverse edge %d -> %d [%d]", nbr, v, w)
-			}
-		}
-	}
-}
-
-// hasNeighbourWithWeight reports whether g has an edge from u to v
-// carrying weight w. Returns false when u has no outgoing entry.
-func hasNeighbourWithWeight(g *lpg.Graph[int, int64], u, v int, w int64) bool {
-	for nbr, nw := range g.AdjList().Neighbours(u) {
-		if nbr == v && nw == w {
-			return true
-		}
-	}
-	return false
 }

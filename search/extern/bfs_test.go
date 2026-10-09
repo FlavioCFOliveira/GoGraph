@@ -12,7 +12,7 @@ import (
 
 func TestBFS_Chain(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 9; i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -46,7 +46,7 @@ func TestBFS_Chain(t *testing.T) {
 
 func TestBFS_EarlyStop(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 100; i++ {
 		if err := a.AddEdge(0, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -76,7 +76,7 @@ func TestBFS_EarlyStop(t *testing.T) {
 
 func TestBFS_UnknownSrc(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

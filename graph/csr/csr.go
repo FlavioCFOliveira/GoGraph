@@ -614,8 +614,8 @@ func (c *CSR[W]) LiveCount() int {
 // The reverse CSR is the canonical adjacency for in-edge enumeration:
 // it pairs with the forward CSR to support algorithms that require
 // both directions (bidirectional Dijkstra, weakly-connected
-// components, semi-external in-degree queries). On an undirected
-// graph (one whose CSR is already symmetric) the returned CSR is
+// components, semi-external in-degree queries). On a symmetric CSR
+// (for example one returned by [CSR.BuildSymmetric]) the returned CSR is
 // structurally identical to c.
 //
 // Complexity: O(V + E) time, O(V + E) memory. The returned CSR is
@@ -694,14 +694,10 @@ func (c *CSR[W]) BuildReverse() *CSR[W] {
 //     and so do the arcs of a reciprocal pair (u, v) + (v, u): each yields its
 //     own two arcs, so u's run holds v twice.
 //
-// These rules reproduce, arc for arc, the CSR that [BuildFromAdjList] builds
-// from an undirected multigraph [adjlist.AdjList] (Config{Directed: false,
-// Multigraph: true}) fed the same edges in the same order: that list mirrors
-// each non-loop insertion with the forward slot's weight and handle, stores a
-// self-loop once, and never merges. An undirected SIMPLE list (Multigraph:
-// false) differs on exactly one input: it collapses a reciprocal pair into one
-// relationship, because its second insertion finds the first one's mirror.
-// The projection keeps both, since a directed graph holds two distinct
+// These rules are those of an undirected multigraph: each non-loop
+// relationship is reachable from both endpoints with one weight and one
+// handle, a self-loop is reachable once, and nothing is merged. A reciprocal
+// pair is kept as two relationships, since a directed graph holds two distinct
 // relationships there and merging them would lose one's identity and weight.
 //
 // The weights and handles columns are carried when c has them and stay nil
@@ -803,7 +799,7 @@ func (c *CSR[W]) BuildSymmetric() *CSR[W] {
 // IsSymmetric reports whether the CSR is symmetric — that is, whether
 // every directed edge (u, v) has a matching reverse edge (v, u). A
 // symmetric CSR is the canonical representation of an undirected
-// graph built via [adjlist.AdjList] with Directed: false.
+// graph; [CSR.BuildSymmetric] builds one from any CSR.
 //
 // Algorithms that conceptually operate on undirected graphs ([BiBFS],
 // connected components, undirected Eulerian circuits) use this check

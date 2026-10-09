@@ -40,7 +40,7 @@ func TestCheckpoint_Soak_SustainedWrites(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	// Seed one edge so the very first checkpoint has something to write.
 	if err := g.AddEdge("seed", "node", 0); err != nil {
 		t.Fatalf("AddEdge(seed): %v", err)

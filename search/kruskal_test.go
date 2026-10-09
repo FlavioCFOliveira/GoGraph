@@ -12,7 +12,7 @@ func TestKruskalMST_CLRS(t *testing.T) {
 	t.Parallel()
 	// CLRS-style undirected graph (fig. 23.1). Vertices 0..8.
 	// Expected MST weight = 37.
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	type ueg struct {
 		u, v int
 		w    int64
@@ -32,7 +32,7 @@ func TestKruskalMST_CLRS(t *testing.T) {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	mst, total, err := KruskalMST(c)
 	if err != nil {
 		t.Fatalf("KruskalMST: %v", err)
@@ -47,14 +47,14 @@ func TestKruskalMST_CLRS(t *testing.T) {
 
 func TestKruskalMST_Disconnected(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 5); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	if err := a.AddEdge(2, 3, 7); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	mst, total, err := KruskalMST(c)
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -74,7 +74,7 @@ func TestKruskalMST_RandomCardinality(t *testing.T) {
 	r := rand.New(rand.NewPCG(137, 139)) //nolint:gosec // deterministic
 	for seed := 0; seed < 10; seed++ {
 		const n = 32
-		a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+		a := adjlist.New[int, int64](adjlist.Config{})
 		// Spanning chain so the graph is guaranteed connected.
 		for i := 0; i < n-1; i++ {
 			if err := a.AddEdge(i, i+1, int64(r.IntN(100)+1)); err != nil {
@@ -87,7 +87,7 @@ func TestKruskalMST_RandomCardinality(t *testing.T) {
 				t.Fatalf("AddEdge: %v", err)
 			}
 		}
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		mst, _, err := KruskalMST(c)
 		if err != nil {
 			t.Fatalf("seed=%d: %v", seed, err)
@@ -100,14 +100,14 @@ func TestKruskalMST_RandomCardinality(t *testing.T) {
 
 func BenchmarkKruskalMST_RandomGraph(b *testing.B) {
 	const n = 4096
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	r := rand.New(rand.NewPCG(149, 151)) //nolint:gosec // deterministic
 	for i := 0; i < 4*n; i++ {
 		if err := a.AddEdge(r.IntN(n), r.IntN(n), int64(r.IntN(100)+1)); err != nil {
 			b.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

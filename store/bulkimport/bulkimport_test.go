@@ -195,7 +195,7 @@ func newFixture(nNodes, edgesPerNode int) fixture {
 // buildViaImporter builds the fixture through the package under test.
 func buildViaImporter(t *testing.T, f fixture) *lpg.Graph[string, int64] {
 	t.Helper()
-	b := New[int64](Options{Directed: true, Multigraph: true, ExpectNodes: len(f.nodes)})
+	b := New[int64](Options{ExpectNodes: len(f.nodes)})
 	if err := b.AddNodes(f.nodes); err != nil {
 		t.Fatalf("AddNodes: %v", err)
 	}
@@ -224,7 +224,7 @@ func buildViaImporter(t *testing.T, f fixture) *lpg.Graph[string, int64] {
 // taken against.
 func buildViaGoAPI(t *testing.T, f fixture) *lpg.Graph[string, int64] {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, n := range f.nodes {
 		if err := g.AddNode(n.Key); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -282,7 +282,7 @@ func TestDifferential_ImporterMatchesGoAPI(t *testing.T) {
 // failing or duplicating it.
 func TestImporter_DuplicateNodeKeyMerges(t *testing.T) {
 	t.Parallel()
-	b := New[int64](Options{Directed: true, Multigraph: true})
+	b := New[int64](Options{})
 	if err := b.AddNode(Node{Key: "a", Labels: []string{"L1"},
 		Properties: map[string]lpg.PropertyValue{"x": lpg.Int64Value(1)}}); err != nil {
 		t.Fatal(err)
@@ -319,7 +319,7 @@ func TestImporter_DuplicateNodeKeyMerges(t *testing.T) {
 // than silently produce a labelless, propertyless node.
 func TestImporter_UnknownEndpointIsAnError(t *testing.T) {
 	t.Parallel()
-	b := New[int64](Options{Directed: true, Multigraph: true})
+	b := New[int64](Options{})
 	if err := b.AddNode(Node{Key: "a"}); err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +340,7 @@ func TestImporter_UnknownEndpointIsAnError(t *testing.T) {
 // touched shards' builders are still mutable in place.
 func TestImporter_GraphUnavailableBeforeFinish(t *testing.T) {
 	t.Parallel()
-	b := New[int64](Options{Directed: true})
+	b := New[int64](Options{})
 	if err := b.AddNode(Node{Key: "a"}); err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +359,7 @@ func TestImporter_GraphUnavailableBeforeFinish(t *testing.T) {
 // written to, which would mutate a frozen graph.
 func TestImporter_IngestAfterFinishIsRefused(t *testing.T) {
 	t.Parallel()
-	b := New[int64](Options{Directed: true})
+	b := New[int64](Options{})
 	if _, err := b.Finish(); err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +378,7 @@ func TestImporter_IngestAfterFinishIsRefused(t *testing.T) {
 // meaningful.
 func TestImporter_EmptyNodeKeyIsAnError(t *testing.T) {
 	t.Parallel()
-	b := New[int64](Options{Directed: true})
+	b := New[int64](Options{})
 	if err := b.AddNode(Node{Key: ""}); err == nil {
 		t.Fatal("an empty node key was accepted")
 	}

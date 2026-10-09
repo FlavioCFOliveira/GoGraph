@@ -84,7 +84,7 @@ func startICServer(t *testing.T) (addr string, driver neo4j.DriverWithContext) {
 		goleak.VerifyNone(t)
 	})
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	srv, err := server.NewServer(eng, server.Options{

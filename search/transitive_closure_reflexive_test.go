@@ -19,7 +19,7 @@ import (
 
 func TestTransitiveClosure_ReflexiveIsolatedNode(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 1.0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

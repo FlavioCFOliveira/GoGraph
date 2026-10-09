@@ -28,7 +28,7 @@ import (
 // buildHub returns a graph of total nodes in which "hub" has degree hubDegree.
 func buildHub(b *testing.B, total, hubDegree int) *lpg.Graph[string, float64] {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("hub"); err != nil {
 		b.Fatalf("AddNode: %v", err)
 	}
@@ -128,7 +128,7 @@ func BenchmarkOutDegreeByType(b *testing.B) {
 // entry and no fallback is ever taken.
 func buildMixedTypeHub(b *testing.B, total, hubDegree, typeCount int) *lpg.Graph[string, float64] {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("hub"); err != nil {
 		b.Fatalf("AddNode: %v", err)
 	}
@@ -177,7 +177,7 @@ func BenchmarkOutDegreeByType_MixedTypes(b *testing.B) {
 // it scans siblings, degrades to O(d²).
 func BenchmarkOutDegreeByType_Parallel(b *testing.B) {
 	for _, d := range []int{16, 256, 4096} {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		for _, k := range []string{"hub", "far"} {
 			if err := g.AddNode(k); err != nil {
 				b.Fatalf("AddNode: %v", err)
@@ -222,7 +222,7 @@ func BenchmarkOutDegreeByType_Parallel(b *testing.B) {
 // implied, and so a future change that hoists it has a baseline to beat.
 func BenchmarkOutDegreeByType_ByHandle(b *testing.B) {
 	for _, d := range []int{16, 256, 4096} {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		if err := g.AddNode("hub"); err != nil {
 			b.Fatalf("AddNode: %v", err)
 		}
@@ -285,7 +285,7 @@ func BenchmarkOutDegreeByTypeBounded_Shapes(b *testing.B) {
 		})
 
 		// Handle-bearing hub, built the way Cypher CREATE builds one.
-		gh := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		gh := lpg.New[string, float64](adjlist.Config{})
 		if err := gh.AddNode("hub"); err != nil {
 			b.Fatalf("AddNode: %v", err)
 		}

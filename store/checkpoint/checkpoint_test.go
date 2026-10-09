@@ -23,7 +23,7 @@ func TestCheckpoint_TriggerProducesSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestCheckpoint_TickerFires(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestCheckpoint_StopReleasesResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	var mu sync.Mutex
 	cp := New(Config{Dir: dir}, g, w, &mu)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -158,7 +158,7 @@ func TestCheckpoint_TruncatesWAL(t *testing.T) {
 	w, seg2 := twoSegmentWAL(t, walPath)
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestCheckpoint_TruncationMetric_Emits(t *testing.T) {
 	w, seg2 := twoSegmentWAL(t, walPath)
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestCheckpoint_StopIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	var mu sync.Mutex
 	cp := New(Config{Dir: dir}, g, w, &mu)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -271,7 +271,7 @@ func TestCheckpoint_TriggerCtxCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

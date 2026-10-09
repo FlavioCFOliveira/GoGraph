@@ -319,7 +319,7 @@ func distinctAdjacent(cyc []int) bool {
 // (directed: two surplus sources and two surplus sinks), so no Eulerian trail
 // exists at all and the module must report ErrNoEulerian.
 func buildGraph(cfg config, cycles [][]int, directed bool) (*adjlist.AdjList[int, struct{}], int) {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: directed})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	edges := 0
 	for ci, cyc := range cycles {
 		for i := range cyc {

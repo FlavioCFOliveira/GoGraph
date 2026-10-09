@@ -45,7 +45,7 @@ func TestLPG_LabelOrder(t *testing.T) {
 		}
 
 		const nodeKey = 0
-		g := lpg.New[int, int64](adjlist.Config{Directed: true})
+		g := lpg.New[int, int64](adjlist.Config{})
 		if err := g.AddNode(nodeKey); err != nil {
 			rt.Fatalf("AddNode: %v", err)
 		}

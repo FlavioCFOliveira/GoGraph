@@ -26,7 +26,7 @@ func TestDFS_BalancedBinaryTree(t *testing.T) {
 		t.Run("depth="+itoa(d), func(t *testing.T) {
 			t.Parallel()
 
-			g, err := shapegen.BalancedBinary(d).Build(adjlist.Config{Directed: true})
+			g, err := shapegen.BalancedBinary(d).Build(adjlist.Config{})
 			if err != nil {
 				t.Fatalf("BalancedBinary(%d): %v", d, err)
 			}

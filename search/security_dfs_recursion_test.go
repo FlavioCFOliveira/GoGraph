@@ -31,7 +31,7 @@ import (
 // shapegen Path generator that the existing DFS soak test relies on.
 func secBuildDirectedChainCSR(tb testing.TB, n int) (*csr.CSR[int64], *adjlist.AdjList[int, int64]) {
 	tb.Helper()
-	g, err := shapegen.Path(n, true).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.Path(n).Build(adjlist.Config{})
 	if err != nil {
 		tb.Fatalf("shapegen.Path(%d): %v", n, err)
 	}
@@ -45,11 +45,11 @@ func secBuildDirectedChainCSR(tb testing.TB, n int) (*csr.CSR[int64], *adjlist.A
 // biconnected component, so BCC must walk the full depth.
 func secBuildUndirectedChainCSR(tb testing.TB, n int) *csr.CSR[int64] {
 	tb.Helper()
-	g, err := shapegen.Path(n, false).Build(adjlist.Config{Directed: false})
+	g, err := shapegen.Path(n).Build(adjlist.Config{})
 	if err != nil {
-		tb.Fatalf("shapegen.Path(%d, undirected): %v", n, err)
+		tb.Fatalf("shapegen.Path(%d): %v", n, err)
 	}
-	return csr.BuildFromAdjList(g.AdjList())
+	return csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 }
 
 // TestSec_Core_TarjanSCCDeepChainNoStackOverflow runs Tarjan SCC on a

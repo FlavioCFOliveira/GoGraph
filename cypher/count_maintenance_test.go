@@ -16,7 +16,7 @@ import (
 // model) with the given per-relabel OUT recount budget (0 → default).
 func newCountEngine(t *testing.T, budget int) (*Engine, *lpg.Graph[string, float64]) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngineWithOptions(g, EngineOptions{MaxLabelRecountEdges: budget})
 	return eng, g
 }

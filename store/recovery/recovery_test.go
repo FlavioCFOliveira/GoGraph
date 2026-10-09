@@ -27,7 +27,7 @@ func writeWorkload(t *testing.T, dir string, ops []committedOp, syncEvery int) {
 	// A single-file log: this test damages or erases it as one file.
 	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	for i, op := range ops {
 		tx := store.Begin()

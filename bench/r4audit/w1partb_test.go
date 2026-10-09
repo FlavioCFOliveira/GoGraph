@@ -94,7 +94,7 @@ func TestW1PartB_BoundKeyWriteFlatInN(t *testing.T) {
 // Engine construction and there is no exported accessor for the graph).
 func seedPartB(tb testing.TB, n, batch int, disableHashJoin bool) (*cypher.Engine, []any) {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%d", i)

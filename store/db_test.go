@@ -40,7 +40,7 @@ func newStack(t *testing.T, cfg checkpoint.Config) (*stack, context.CancelFunc) 
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	st := txn.NewStoreWithCodec(g, wlog, txn.NewStringCodec())
 	if cfg.Dir == "" {
 		cfg.Dir = dir

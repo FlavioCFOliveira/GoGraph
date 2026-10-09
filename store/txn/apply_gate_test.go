@@ -50,7 +50,7 @@ func TestApplyGate_NoLostWakeup_MixedCommitPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	// Deliberately far more writers than cores, so the apply gate is genuinely
@@ -153,7 +153,7 @@ func TestApplyGate_SingleWriterTakesFastPath(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	for i := 0; i < 32; i++ {
@@ -237,7 +237,7 @@ func TestApplyGate_SingleWriterTakesFastPath(t *testing.T) {
 func TestApplyGate_ADurableCommitIsNeverRefusedByConflictDetection(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
 	if err != nil {

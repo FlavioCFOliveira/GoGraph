@@ -99,7 +99,7 @@ func TestLabelChurn_TableGrowsByDoublingAndCountsExactly(t *testing.T) {
 // seeding's own leftover deltas rather than on the raise it is meant to test.
 func churnFixture(t *testing.T, label string, keys ...string) (*Graph[string, float64], LabelID) {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	for _, k := range keys {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode(%q): %v", k, err)
@@ -362,7 +362,7 @@ func (g *Graph[N, W]) labelBitmapOracle(lid LabelID, s *Snapshot) *roaring64.Bit
 //     writer never touched, which is the case the gate actually short-circuits.
 //     The phase asserts its own preconditions so it cannot pass vacuously.
 func TestLabelChurnGate_GatedAnswerMatchesUngatedUnderMixedLoad(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	// The writer touches Alpha and Beta only. Gamma is seeded and then left

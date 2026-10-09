@@ -91,7 +91,7 @@ func TestPublish_RoundTripsThroughRecovery(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "store")
 
 	out, err := bulkimport.ImportInto[int64](context.Background(), dir,
-		bulkimport.Options{Directed: true, Multigraph: true}, nodes, edges)
+		bulkimport.Options{}, nodes, edges)
 	if err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestPublish_RefusesNonEmptyDirectory(t *testing.T) {
 			dir := t.TempDir()
 			tc.setup(t, dir)
 			_, err := bulkimport.ImportInto[int64](context.Background(), dir,
-				bulkimport.Options{Directed: true, Multigraph: true}, nodes, edges)
+				bulkimport.Options{}, nodes, edges)
 			if !errors.Is(err, bulkimport.ErrStoreNotEmpty) {
 				t.Fatalf("ImportInto into a directory that %s = %v, want ErrStoreNotEmpty",
 					tc.name, err)
@@ -258,7 +258,7 @@ func TestPublish_AcceptsAbsentAndEmptyDirectories(t *testing.T) {
 	t.Run("absent", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "does", "not", "exist")
 		if _, err := bulkimport.ImportInto[int64](context.Background(), dir,
-			bulkimport.Options{Directed: true, Multigraph: true}, nodes, edges); err != nil {
+			bulkimport.Options{}, nodes, edges); err != nil {
 			t.Fatalf("ImportInto into an absent directory: %v", err)
 		}
 		if res := openStore(t, dir); !res.SnapshotHit {
@@ -268,7 +268,7 @@ func TestPublish_AcceptsAbsentAndEmptyDirectories(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
 		dir := t.TempDir()
 		if _, err := bulkimport.ImportInto[int64](context.Background(), dir,
-			bulkimport.Options{Directed: true, Multigraph: true}, nodes, edges); err != nil {
+			bulkimport.Options{}, nodes, edges); err != nil {
 			t.Fatalf("ImportInto into an empty directory: %v", err)
 		}
 		if res := openStore(t, dir); !res.SnapshotHit {
@@ -289,7 +289,7 @@ func TestPublish_CrashedImportLeavesTheStoreUnchanged(t *testing.T) {
 	// between assembly and rename leaves behind.
 	scratch := filepath.Join(t.TempDir(), "scratch")
 	if _, err := bulkimport.ImportInto[int64](context.Background(), scratch,
-		bulkimport.Options{Directed: true, Multigraph: true}, nodes, edges); err != nil {
+		bulkimport.Options{}, nodes, edges); err != nil {
 		t.Fatal(err)
 	}
 	store := t.TempDir()
@@ -315,7 +315,7 @@ func TestPublish_CrashedImportLeavesTheStoreUnchanged(t *testing.T) {
 // that are still mutable in place.
 func TestPublish_RefusesUnfinishedBuilder(t *testing.T) {
 	t.Parallel()
-	b := bulkimport.New[int64](bulkimport.Options{Directed: true})
+	b := bulkimport.New[int64](bulkimport.Options{})
 	if err := b.AddNode(bulkimport.Node{Key: "a"}); err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +332,7 @@ func TestPublish_RefusesUnfinishedBuilder(t *testing.T) {
 // can take a long time for a large graph.
 func TestPublish_HonoursContextCancellation(t *testing.T) {
 	t.Parallel()
-	b := bulkimport.New[int64](bulkimport.Options{Directed: true})
+	b := bulkimport.New[int64](bulkimport.Options{})
 	if err := b.AddNode(bulkimport.Node{Key: "a"}); err != nil {
 		t.Fatal(err)
 	}

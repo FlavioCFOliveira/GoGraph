@@ -12,7 +12,7 @@ import (
 
 func TestWriteReadCSR_Roundtrip(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestWriteReadCSR_Roundtrip(t *testing.T) {
 
 func TestWriteSnapshotCSR_AtomicPublish(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := 0; i < 32; i++ {
 		if err := a.AddEdge("origin", string(rune('a'+i%26)), int64(i)); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -64,11 +64,10 @@ func TestWriteSnapshotCSR_AtomicPublish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadManifestFile: %v", err)
 	}
-	// WriteSnapshotCSR is the legacy v1 path: it always emits
-	// version=1 on disk so existing v1 readers and the v1 fixture
-	// continue to load bit-for-bit unchanged.
-	if m.Version != 1 {
-		t.Fatalf("Version = %d, want 1 (legacy v1 writer)", m.Version)
+	// WriteSnapshotCSR stamps ManifestVersion like every writer in this
+	// build (rmp #3072); the frozen v1 fixture pins that v1 still loads.
+	if m.Version != ManifestVersion {
+		t.Fatalf("Version = %d, want %d", m.Version, ManifestVersion)
 	}
 	if len(m.Files) != 1 || m.Files[0].Name != CSRFile {
 		t.Fatalf("Files = %v", m.Files)

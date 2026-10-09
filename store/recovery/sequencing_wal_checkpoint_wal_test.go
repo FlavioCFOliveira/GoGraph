@@ -47,7 +47,7 @@ func TestSequencing_WALCheckpointWAL(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	// Phase 1: 5 pre-checkpoint edges.

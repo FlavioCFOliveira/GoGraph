@@ -65,7 +65,7 @@ var snapshotDiffFixture = []string{
 // snapshotDiffEngine builds one arm.
 func snapshotDiffEngine(t *testing.T) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := NewEngine(g)
 	ctx := context.Background()

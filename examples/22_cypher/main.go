@@ -207,7 +207,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 
 	// Multigraph: true is required for openCypher semantics — CREATE always adds
 	// a relationship, including a parallel edge between an existing node pair.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	stats, err := build(ctx, g, cfg)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
@@ -667,7 +667,7 @@ func queryShortestPaths(ctx context.Context, eng *cypher.Engine, g *lpg.Graph[st
 // (csr.BuildFromAdjList on g's own adjacency would yield a directed CSR, which
 // would not match the undirected shortestPath pattern.)
 func buildUndirectedKnows(ctx context.Context, g *lpg.Graph[string, float64]) (*adjlist.AdjList[string, float64], error) {
-	oracle := adjlist.New[string, float64](adjlist.Config{Directed: false})
+	oracle := adjlist.New[string, float64](adjlist.Config{})
 	adj := g.AdjList()
 	var walkErr error
 	visited := 0

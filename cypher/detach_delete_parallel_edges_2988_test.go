@@ -76,8 +76,8 @@ var parallelDetachConfigs = []struct {
 	name string
 	cfg  adjlist.Config
 }{
-	{"directed", adjlist.Config{Directed: true, Multigraph: true}},
-	{"undirected", adjlist.Config{Directed: false, Multigraph: true}},
+	{"directed", adjlist.Config{}},
+	{"undirected", adjlist.Config{}},
 }
 
 // adjacencyArcs reads the committed adjacency of g and returns the arc entries
@@ -265,12 +265,6 @@ func TestDetachDelete_ParallelEdges_NoDangling_WAL(t *testing.T) {
 				g.ReclaimNow()
 				checkShape(t, "live after ReclaimNow", shapeOf(t, cypher.NewEngine(g), g), want)
 
-				if !cf.cfg.Directed {
-					// A pure-WAL recovery rebuilds the default directed adjacency
-					// (store/recovery defaultRecoveryConfig), so the undirected replay has
-					// no undirected control to equal; its live graph is checked above.
-					return
-				}
 				rec, err := recovery.Open[string, float64](dir, deleteWALRecOpts())
 				if err != nil {
 					t.Fatalf("recovery.Open: %v", err)

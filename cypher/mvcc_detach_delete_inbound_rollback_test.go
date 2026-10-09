@@ -74,7 +74,7 @@ func TestMVCCDetachDeleteRollback_DoesNotResurrectPeerInboundArc(t *testing.T) {
 					detachRollbackOutcome(aCommits), detachRollbackOutcome(bCommits),
 					map[bool]string{true: "A-finishes-first", false: "B-finishes-first"}[aFirst])
 				t.Run(name, func(t *testing.T) {
-					g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+					g := lpg.New[string, float64](adjlist.Config{})
 					eng := cypher.NewEngine(g)
 					if _, err := eng.RunInTxAny(ctx,
 						"CREATE (:P {n:'Y'})-[:K]->(:P {n:'X'}), (:P {n:'Z'})", nil); err != nil {

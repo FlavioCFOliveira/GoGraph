@@ -90,7 +90,7 @@ func TestLabelIndexAddWindow_BitmapReaderNeverLosesARow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := New[string, float64](adjlist.Config{})
 			if tc.disarmed {
 				g.disarmMVCCForTest()
 			}
@@ -270,7 +270,7 @@ func TestLabelIndexAddWindow_BitmapReaderNeverLosesARow(t *testing.T) {
 // states the rule the window depends on and fails the moment the rule is
 // dropped.
 func TestLabelIndexAddWindow_PresentTimeCountDeclinesWhileAnAddIsInFlight(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

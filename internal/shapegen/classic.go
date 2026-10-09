@@ -28,21 +28,18 @@ import (
 // # Configuration override policy
 //
 // Each generator constructs the underlying [adjlist.Config] from the
-// caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, but
-// overrides cfg.Directed and cfg.Multigraph whenever the catalogue
-// definition fixes them. Multigraph is always set to false here:
-// every classic skeleton is, by definition, a simple graph.
+// caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim. Every
+// classic skeleton is, by definition, a simple graph: no generator here
+// repeats a pair.
 //
 // # Golden format
 //
 // Goldens for this family live under
 // internal/shapegen/testdata/shapegen/classic/ and use the same
 // adjacency listing format as the trivial family (see
-// formatAdjacency in trivial_test.go). For undirected shapes the
-// listing therefore contains both (u,v) and (v,u) entries — the
-// adjlist backend mirrors undirected edges internally and iterating
-// Neighbours yields the mirror. The shape's Size() still counts each
-// undirected edge once, matching the catalogue invariant.
+// formatAdjacency in trivial_test.go). Every edge, including each edge
+// of an undirected shape, is stored and listed once, as the directed arc
+// the generator inserted; Size() counts each edge once.
 //
 // # Error propagation
 //
@@ -99,27 +96,28 @@ func classicNodeKnob(defaultN int) Knob {
 }
 
 // Path returns a Shape that builds the path graph P_n: nodes
-// 0,1,...,n-1 with edges (i, i+1) for 0 <= i < n-1. When directed is
-// true every edge points from i to i+1 only; when directed is false
-// the underlying [adjlist.AdjList] mirrors each insertion.
+// 0,1,...,n-1 with edges (i, i+1) for 0 <= i < n-1. Every edge is
+// stored as one directed arc i -> i+1; the same graph is the directed
+// and the undirected P_n, so the invariants below state both readings.
 //
 // Catalogue invariants on the returned graph:
 //
 //   - Order() == uint64(n)
 //   - Size()  == 0 when n <= 1; n-1 otherwise.
 //   - Diameter is n-1 when n >= 1.
-//   - Degree sequence (undirected, n >= 2): 1, 2, 2, ..., 2, 1.
+//   - Degree sequence (undirected, n >= 2, read through
+//     csr.CSR.BuildSymmetric): 1, 2, 2, ..., 2, 1.
 //   - Out-degree sequence (directed): 1, 1, ..., 1, 0.
 //
 // Path declares a single knob "n" over [0, 100_000]; property-based
 // tests should draw a smaller range to stay within the short layer
-// budget. Multigraph is always set to false. Build returns
+// budget. Build returns
 // adjlist.ErrShardFull verbatim when cfg.MaxShardCapacity refuses an
 // AddEdge; in that case the partially built graph is discarded.
 //
 // The constructor panics when n < 0 because the catalogue does not
 // define a path with a negative number of nodes.
-func Path(n int, directed bool) Shape[int, int64] {
+func Path(n int) Shape[int, int64] {
 	if n < 0 {
 		panic(fmt.Sprintf("shapegen: Path requires n >= 0, got %d", n))
 	}
@@ -127,8 +125,6 @@ func Path(n int, directed bool) Shape[int, int64] {
 		name:  "classic.path",
 		knobs: []Knob{classicNodeKnob(5)},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = directed
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildPath(g, n)
 		},
@@ -152,17 +148,18 @@ func buildPath(g *lpg.Graph[int, int64], n int) error {
 
 // Cycle returns a Shape that builds the cycle graph C_n: nodes
 // 0,1,...,n-1 with edges (i, (i+1) mod n) for 0 <= i < n. When
-// directed is true every edge points from i to (i+1) mod n only;
-// when directed is false the underlying [adjlist.AdjList] mirrors
-// each insertion.
+// directed is true or false every edge is stored as one directed arc
+// i -> (i+1) mod n; directed selects the catalogue definition, which
+// sets the minimum n below.
 //
 // Catalogue invariants on the returned graph:
 //
 //   - Order() == uint64(n)
 //   - Size()  == uint64(n) when n is large enough to be valid.
 //   - Diameter is floor(n / 2).
-//   - Undirected: 2-regular for n >= 3.
-//   - Directed: every node has in-degree 1 and out-degree 1.
+//   - Undirected: 2-regular for n >= 3, read through
+//     csr.CSR.BuildSymmetric.
+//   - Directed reading: every node has in-degree 1 and out-degree 1.
 //
 // Cycle requires n >= 3 in the undirected case and n >= 1 in the
 // directed case. When n is below the threshold Build returns
@@ -174,11 +171,10 @@ func buildPath(g *lpg.Graph[int, int64], n int) error {
 // Special directed cases preserved by this implementation:
 //
 //   - Cycle(1, true) builds the single self-loop graph (one edge
-//     0 -> 0). Multigraph is set to false because the catalogue
-//     treats this as a simple graph with a single self-loop.
+//     0 -> 0), a simple graph with a single self-loop.
 //   - Cycle(2, true) builds the directed digon (two anti-parallel
-//     edges 0 -> 1 and 1 -> 0). Multigraph stays false because
-//     these two edges are not parallel — they have distinct sources.
+//     edges 0 -> 1 and 1 -> 0). The two edges are not parallel —
+//     they have distinct sources.
 //
 // The constructor panics when n < 0 because the catalogue does not
 // define a cycle with a negative number of nodes.
@@ -196,8 +192,6 @@ func Cycle(n int, directed bool) Shape[int, int64] {
 			if !directed && n < 3 {
 				return nil, fmt.Errorf("%w: undirected cycle, got n=%d", ErrCycleTooSmall, n)
 			}
-			cfg.Directed = directed
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, addCycleEdges(g, n)
 		},
@@ -222,8 +216,7 @@ func addCycleEdges(g *lpg.Graph[int, int64], n int) error {
 //
 // The Star catalogue entry is always directed: the orientation of
 // edges is the whole point of the shape, and the "outgoing" flag
-// pins it. Multigraph is always set to false. cfg.Directed and
-// cfg.Multigraph are overridden accordingly.
+// pins it.
 //
 // Catalogue invariants on the returned graph:
 //
@@ -245,8 +238,6 @@ func Star(n int, outgoing bool) Shape[int, int64] {
 		name:  "classic.star",
 		knobs: []Knob{classicNodeKnob(5)},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildStar(g, n, outgoing)
 		},
@@ -275,8 +266,7 @@ func buildStar(g *lpg.Graph[int, int64], n int, outgoing bool) error {
 // attached to centre 1 (ids k1+2..k1+k2+1).
 //
 // DoubleStar is undirected: this is the conventional catalogue
-// definition and yields the cleanest degree-sequence invariant. The
-// build overrides cfg.Directed=false and cfg.Multigraph=false.
+// definition and yields the cleanest degree-sequence invariant. The build stores each edge as one directed arc.
 //
 // Catalogue invariants on the returned graph:
 //
@@ -301,8 +291,6 @@ func DoubleStar(k1, k2 int) Shape[int, int64] {
 			{Name: "k2", Min: 0, Max: 50_000, Default: 3},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildDoubleStar(g, k1, k2)
 		},
@@ -336,7 +324,7 @@ func buildDoubleStar(g *lpg.Graph[int, int64], k1, k2 int) error {
 // nodes 0..n-1. When directed is true every ordered pair (i, j) with
 // i != j is inserted (the canonical "tournament on K_n"); when
 // directed is false every unordered pair {i, j} with i < j is
-// inserted exactly once and the [adjlist.AdjList] mirrors the entry.
+// inserted exactly once, as the directed arc i -> j.
 // Self-loops are never inserted: the catalogue defines K_n as a
 // simple graph.
 //
@@ -359,8 +347,6 @@ func Complete(n int, directed bool) Shape[int, int64] {
 		name:  "classic.complete",
 		knobs: []Knob{classicNodeKnob(5)},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = directed
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildComplete(g, n, directed)
 		},
@@ -396,8 +382,8 @@ func buildComplete(g *lpg.Graph[int, int64], n int, directed bool) error {
 // CompleteBipartite returns a Shape that builds the complete
 // bipartite graph K_{m,n}: m left nodes (ids 0..m-1) and n right
 // nodes (ids m..m+n-1) with every left node connected to every right
-// node. The result is undirected by definition; cfg.Directed is
-// overridden to false and cfg.Multigraph to false.
+// node. The result is undirected by definition and stores each edge as
+// one directed arc.
 //
 // Catalogue invariants on the returned graph:
 //
@@ -426,8 +412,6 @@ func CompleteBipartite(m, n int) Shape[int, int64] {
 			{Name: "n", Min: 0, Max: 1000, Default: 5},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildBipartite(g, m, n)
 		},
@@ -454,8 +438,7 @@ func buildBipartite(g *lpg.Graph[int, int64], m, n int) error {
 // ..., parts[k-1] and every pair of nodes in distinct groups is
 // joined by an edge (no intra-group edges).
 //
-// The graph is undirected; cfg.Directed and cfg.Multigraph are
-// overridden to false. Nodes are assigned ids in contiguous blocks:
+// The graph is undirected; each edge is stored as one directed arc. Nodes are assigned ids in contiguous blocks:
 // group 0 takes ids 0..parts[0]-1, group 1 takes ids
 // parts[0]..parts[0]+parts[1]-1, and so on. Empty groups (parts[i] ==
 // 0) contribute zero nodes and zero edges; they are silently
@@ -481,8 +464,6 @@ func Multipartite(parts []int) Shape[int, int64] {
 	return classicBase{
 		name: "classic.multipartite",
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildMultipartite(g, owned)
 		},

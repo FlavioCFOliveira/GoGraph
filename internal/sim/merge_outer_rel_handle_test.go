@@ -62,7 +62,7 @@ type outerRelCollisionFixture struct {
 // the engine's own write path stamps the colliding handle.
 func newOuterRelCollisionFixture(t *testing.T) *outerRelCollisionFixture {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	a := NewEngineAdapter(cypher.NewEngine(g))
 
 	for _, name := range []string{"wp0", "wp1"} {

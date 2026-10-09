@@ -103,7 +103,7 @@ func TestRecovery_CorruptOpInsideCommittedTxn_NotCleanAndDiagnosable_2794(t *tes
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, int64](g, w, opts)
 	for _, key := range []string{"keep", "lost", "after"} {
 		tx := s.Begin()
@@ -221,7 +221,7 @@ func TestRecovery_CorruptOpInsideCommittedTxn_ReplayWALAgrees(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, int64](g, w, opts)
 	for _, key := range []string{"keep", "lost"} {
 		tx := s.Begin()
@@ -243,7 +243,7 @@ func TestRecovery_CorruptOpInsideCommittedTxn_ReplayWALAgrees(t *testing.T) {
 	}
 	defer func() { _ = r.Close() }()
 
-	rg := lpg.New[string, int64](adjlist.Config{Directed: true})
+	rg := lpg.New[string, int64](adjlist.Config{})
 	rr, err := ReplayWAL[string, int64](t.Context(), r, rg, opts.Codec, opts.WeightCodec, 0)
 	if err != nil {
 		t.Fatalf("ReplayWAL returned %v; only a ctx cancellation is reported as the function error", err)

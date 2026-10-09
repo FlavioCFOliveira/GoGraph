@@ -55,7 +55,7 @@ import (
 // outgoing :KNOWS (to B), so each single-hop probe has one correct answer.
 func pcParityEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
 		`CREATE (:Person {name:'A'})`,
@@ -311,7 +311,7 @@ func TestPatternCompParity_InnerPredicate(t *testing.T) {
 // multigraph fixture never exercises.
 func TestPatternCompParity_SimpleGraph(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
 		`CREATE (:Person {name:'A'})`,
@@ -354,7 +354,7 @@ func TestPatternCompParity_SimpleGraph(t *testing.T) {
 // so the loop must appear ONCE there, never twice.
 func TestPatternCompParity_SelfLoop(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
 		`CREATE (:Person {name:'S'})`,

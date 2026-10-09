@@ -18,13 +18,13 @@ import (
 // of them through bfsFarthest.
 func diameterCycle(t testing.TB, n int) *csr.CSR[struct{}] {
 	t.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		if err := a.AddEdge(i, (i+1)%n, struct{}{}); err != nil {
 			t.Fatalf("AddEdge(%d,%d): %v", i, (i+1)%n, err)
 		}
 	}
-	return csr.BuildFromAdjList(a)
+	return csr.BuildFromAdjList(a).BuildSymmetric()
 }
 
 // diameterQueueMallocCeiling is the ceiling on the number of heap
@@ -155,7 +155,7 @@ func TestDiameterCtx_ParallelLevelStillExact(t *testing.T) {
 		legs   = 12
 		length = 24
 	)
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	key := 1
 	for l := 0; l < legs; l++ {
 		prev := 0
@@ -167,7 +167,7 @@ func TestDiameterCtx_ParallelLevelStillExact(t *testing.T) {
 			key++
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 
 	lo, hi, exact, err := DiameterCtx(context.Background(), c)
 	if err != nil {

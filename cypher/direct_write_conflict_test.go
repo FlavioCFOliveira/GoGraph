@@ -29,7 +29,7 @@ type directGraph = lpg.Graph[string, float64]
 // directFixture builds n1:L {id:'1', k:'v'} and an unconnected n2.
 func directFixture(t *testing.T) (*directGraph, *cypher.Engine) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	for _, err := range []error{
 		g.AddNode("n1"),
@@ -265,7 +265,7 @@ func TestDirectWrite_UntouchedObjectIsNotCapturedByAnOpenTransaction(t *testing.
 // direct API, on a directed (reverse-indexed) or an undirected graph.
 func edgeFixture(t *testing.T, directed bool) (*directGraph, *cypher.Engine) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: directed, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	for _, err := range []error{
 		g.AddNode("n1"),

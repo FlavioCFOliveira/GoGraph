@@ -41,8 +41,7 @@ type capturedIndex struct {
 // Capture is a point-in-time, fully-serialised image of EVERY snapshot
 // component that derives from the live graph: csr.bin, labels.bin,
 // properties.bin, mapper.bin, tombstones.bin, edgehandles.bin, the
-// indexes/<name>.bin payloads, and the graph's directed/multigraph/weightless
-// shape.
+// indexes/<name>.bin payloads, and the graph's weightless shape.
 //
 // # Why this type exists (ACID Atomicity, rmp #2269)
 //
@@ -148,7 +147,7 @@ type Capture[W any] struct {
 
 // SetWALPosition records the store id of the write-ahead log this image pairs
 // with and the log position it covers — every frame below redoPos is folded
-// into the image. A capture that publishes a mapper (manifest version 4) then
+// into the image. A capture that publishes a mapper (manifest version 4 or 5) then
 // writes them as the manifest's store_id, wal_redo_pos and wal_format = 2,
 // which recovery checks against the log (rmp #3014). A storeID of 0 records
 // nothing. Call it before the capture is published; a Capture is not safe for
@@ -503,11 +502,7 @@ func captureGraph[N comparable, W any](
 	}
 
 	cfg := g.Config()
-	out.config = GraphConfig{
-		Directed:   cfg.Directed,
-		Multigraph: cfg.Multigraph,
-		Weightless: cfg.Weightless,
-	}
+	out.config = GraphConfig{Weightless: cfg.Weightless}
 	return out, nil
 }
 

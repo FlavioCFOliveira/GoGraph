@@ -36,7 +36,7 @@ func BenchmarkBFSDO_VsTopDown_PowerLaw(b *testing.B) {
 
 func powerLawCSR(tb testing.TB) (*csr.CSR[struct{}], graph.NodeID) {
 	tb.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	const n = 1 << 20                  // 1M nodes
 	r := rand.New(rand.NewPCG(53, 59)) //nolint:gosec // deterministic benchmark RNG
 	const edgesPerNode = 16
@@ -58,7 +58,7 @@ func powerLawCSR(tb testing.TB) (*csr.CSR[struct{}], graph.NodeID) {
 			tb.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ := a.Mapper().Lookup(0)
 	return c, src
 }
@@ -68,7 +68,7 @@ func powerLawCSR(tb testing.TB) (*csr.CSR[struct{}], graph.NodeID) {
 // most. The bench-loop reuses pooled scratch across iterations, so
 // allocs/op should be 0 post-warmup.
 func BenchmarkBFSDirectionOpt_PowerLaw(b *testing.B) {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	const n = 1 << 20                  // 1M nodes
 	r := rand.New(rand.NewPCG(53, 59)) //nolint:gosec // deterministic benchmark RNG
 	// Power-law-ish: hubs (low indices) receive far more edges.
@@ -84,7 +84,7 @@ func BenchmarkBFSDirectionOpt_PowerLaw(b *testing.B) {
 			b.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ := a.Mapper().Lookup(0)
 	// Warm pool.
 	BFSDirectionOpt(c, src, func(_ graph.NodeID, _ int) bool { return true })
@@ -97,14 +97,14 @@ func BenchmarkBFSDirectionOpt_PowerLaw(b *testing.B) {
 
 func TestBFSDirectionOpt_Tree(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	edges := [][2]int{{0, 1}, {0, 2}, {0, 3}, {1, 4}, {1, 5}, {3, 6}}
 	for _, e := range edges {
 		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ := a.Mapper().Lookup(0)
 	depths := map[int]int{}
 	BFSDirectionOpt(c, src, func(node graph.NodeID, d int) bool {
@@ -122,13 +122,13 @@ func TestBFSDirectionOpt_Tree(t *testing.T) {
 
 func TestBFSDirectionOpt_AllReachable(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 9; i++ {
 		if err := a.AddEdge(0, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ := a.Mapper().Lookup(0)
 	visited := 0
 	BFSDirectionOpt(c, src, func(_ graph.NodeID, _ int) bool {
@@ -146,7 +146,7 @@ func TestBFSDirectionOpt_AllReachable(t *testing.T) {
 // middle, then transitions back to top-down for the sparse tail.
 // The observer hook records the (depth, mode) pair for every step.
 func TestBFSDirectionOpt_BetaSwitchBack(t *testing.T) {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	const n = 4096
 	// Dense ball + sparse tail: src reaches a clique of size 200 at
 	// depth 1; the clique exits via a single edge to a long chain.
@@ -173,7 +173,7 @@ func TestBFSDirectionOpt_BetaSwitchBack(t *testing.T) {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ := a.Mapper().Lookup(0)
 	var steps []struct {
 		depth      int
@@ -217,13 +217,13 @@ func TestBFSDirectionOpt_BetaSwitchBack(t *testing.T) {
 
 func TestBFSDirectionOpt_EarlyStop(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 100; i++ {
 		if err := a.AddEdge(0, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ := a.Mapper().Lookup(0)
 	visited := 0
 	BFSDirectionOpt(c, src, func(_ graph.NodeID, _ int) bool {

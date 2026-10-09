@@ -75,7 +75,7 @@ func planCacheKeyFor(q string) string {
 
 func buildMemoGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	seed := NewEngine(g)
 	runWrite(t, seed, `CREATE (a:Person {name:'a', age: 41, nick:'ax'}),
 	                         (b:Person {name:'b', age: 22}),
@@ -229,7 +229,7 @@ func TestNodeScalarUseMemoObservesBothBailoutStates(t *testing.T) {
 //
 // The query below is a multi-label match, so it drives the min-label path.
 func TestNodeScalarUseMemoIsBoundedForSynthesisedPredicates(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	seed := NewEngine(g)
 	runWrite(t, seed, `CREATE (:Person:Admin {name:'a', age: 30}), (:Person {name:'b', age: 31})`)
 

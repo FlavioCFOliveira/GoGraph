@@ -200,7 +200,7 @@ func TestLPG_PropertyKind_Pn(t *testing.T) {
 	t.Parallel()
 	cases := allPropCases()
 
-	g, err := shapegen.Path(10, true).Build(adjlist.Config{})
+	g, err := shapegen.Path(10).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Path(10,true).Build: %v", err)
 	}

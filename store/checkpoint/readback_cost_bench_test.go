@@ -51,7 +51,7 @@ const (
 // happens to skip most of its work.
 func gateBenchGraph(tb testing.TB) *lpg.Graph[string, int64] {
 	tb.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for i := 0; i < gateBenchNodes; i++ {
 		k := "n" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

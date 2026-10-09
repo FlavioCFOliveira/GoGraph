@@ -94,7 +94,6 @@ func TestRandom_SBM_Invariants(t *testing.T) {
 				total += sz
 			}
 			assertOrder(t, g, uint64(total))
-			assertDirected(t, g, false)
 			if hasSelfLoop(g) {
 				t.Fatal("graph contains a self-loop, violating the simple-graph contract")
 			}
@@ -288,7 +287,7 @@ func TestRandom_SBM_Golden_Blocks33Pin50Pout5(t *testing.T) {
 // contracts.
 func TestRandom_SBM_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	g, err := SBM([]int{2, 2}, [][]int{{50, 5}, {5, 50}}, 42).Build(cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -308,7 +307,7 @@ func TestRandom_SBM_PreservesMaxShardCapacity(t *testing.T) {
 // Erdős-Rényi / RGG shard-full tests.
 func TestRandom_SBM_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: false, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	blockSizes := []int{150, 150}
 	probPercent := [][]int{{100, 100}, {100, 100}}
@@ -435,7 +434,6 @@ func TestRandom_PlantedPartition_Invariants(t *testing.T) {
 				t.Fatalf("Build: %v", err)
 			}
 			assertOrder(t, g, uint64(c.k*c.blockSize))
-			assertDirected(t, g, false)
 			if hasSelfLoop(g) {
 				t.Fatal("graph contains a self-loop")
 			}
@@ -560,7 +558,7 @@ func TestRandom_PlantedPartition_Golden_K3Bs4Pin50Pout5(t *testing.T) {
 // generator preserves cfg.MaxShardCapacity verbatim.
 func TestRandom_PlantedPartition_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	g, err := PlantedPartition(3, 4, 50, 5, 42).Build(cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)

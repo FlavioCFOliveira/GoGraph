@@ -50,7 +50,7 @@ import (
 // until someone calls the setter it reports the stale count — which is what made
 // the old design need a lock, and what a lost update then defeated anyway.
 func TestDerivedGate_TracksItsSourceWithNoNotification(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 
 	var indexes, constraints atomic.Int64
 	g.SetIndexCountSource(indexes.Load)
@@ -94,7 +94,7 @@ func TestDerivedGate_TracksItsSourceWithNoNotification(t *testing.T) {
 // A derived gate satisfies this by construction, which is the point: there is no
 // interval between the source changing and the gate agreeing.
 func TestDerivedGate_NeverUnderReportsUnderConcurrentChurn(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 
 	// The registry stays >= 1 throughout, so the gate must NEVER report false.
 	// Churn moves it between 1 and 2 so a stale store has something to be stale
@@ -147,7 +147,7 @@ func TestDerivedGate_NeverUnderReportsUnderConcurrentChurn(t *testing.T) {
 // definitions are counted by the store-direct counters instead. The gate must
 // answer from those rather than reporting nothing.
 func TestDerivedGate_DetachedSourceFallsBackToStoreDirect(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 
 	// No source attached at all.
 	if g.HasIndexes() || g.HasConstraints() {

@@ -55,7 +55,7 @@ type peerEngine2994 struct {
 
 var peerEngines2994 = []peerEngine2994{
 	{name: "memory", open: func(t *testing.T) *cypher.Engine {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 		t.Cleanup(func() { _ = eng.Close() })
 		return eng
@@ -65,7 +65,7 @@ var peerEngines2994 = []peerEngine2994{
 		if err != nil {
 			t.Fatalf("wal.Open: %v", err)
 		}
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		st := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 			Codec:       txn.NewStringCodec(),
 			WeightCodec: txn.NewFloat64WeightCodec(),

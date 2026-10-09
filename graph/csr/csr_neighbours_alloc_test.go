@@ -26,7 +26,7 @@ func TestCSR_NeighboursByID_ZeroAllocs(t *testing.T) {
 		{
 			name: "EmptyGraph",
 			buildFn: func() (*csr.CSR[int64], graph.NodeID) {
-				g, err := shapegen.EmptyGraph().Build(adjlist.Config{Directed: true})
+				g, err := shapegen.EmptyGraph().Build(adjlist.Config{})
 				if err != nil {
 					panic(err)
 				}
@@ -37,7 +37,7 @@ func TestCSR_NeighboursByID_ZeroAllocs(t *testing.T) {
 		{
 			name: "SingleEdge",
 			buildFn: func() (*csr.CSR[int64], graph.NodeID) {
-				g, err := shapegen.SingleEdge(true, false, false).Build(adjlist.Config{Directed: true})
+				g, err := shapegen.SingleEdge(false, false).Build(adjlist.Config{})
 				if err != nil {
 					panic(err)
 				}
@@ -50,7 +50,7 @@ func TestCSR_NeighboursByID_ZeroAllocs(t *testing.T) {
 		{
 			name: "Cycle10",
 			buildFn: func() (*csr.CSR[int64], graph.NodeID) {
-				g, err := shapegen.Cycle(10, true).Build(adjlist.Config{Directed: true})
+				g, err := shapegen.Cycle(10, true).Build(adjlist.Config{})
 				if err != nil {
 					panic(err)
 				}
@@ -63,7 +63,7 @@ func TestCSR_NeighboursByID_ZeroAllocs(t *testing.T) {
 		{
 			name: "Complete8",
 			buildFn: func() (*csr.CSR[int64], graph.NodeID) {
-				g, err := shapegen.Complete(8, true).Build(adjlist.Config{Directed: true})
+				g, err := shapegen.Complete(8, true).Build(adjlist.Config{})
 				if err != nil {
 					panic(err)
 				}
@@ -76,7 +76,7 @@ func TestCSR_NeighboursByID_ZeroAllocs(t *testing.T) {
 		{
 			name: "BarabasiAlbert100",
 			buildFn: func() (*csr.CSR[int64], graph.NodeID) {
-				g, err := shapegen.BarabasiAlbert(100, 3, 7).Build(adjlist.Config{Directed: true})
+				g, err := shapegen.BarabasiAlbert(100, 3, 7).Build(adjlist.Config{})
 				if err != nil {
 					panic(err)
 				}

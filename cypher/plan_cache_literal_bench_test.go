@@ -57,7 +57,7 @@ func newPlanCacheEngine(tb testing.TB) *cypher.Engine {
 	// Multigraph, not newBenchGraph()'s plain directed graph: this fixture CREATEs
 	// nodes, and the engine warns once per construction otherwise — a warning that
 	// lands ON the benchmark result line and hides the ns/op figure.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for i := range planCacheSeedNodes {
 		res, err := eng.RunInTx(context.Background(),

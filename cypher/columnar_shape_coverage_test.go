@@ -45,7 +45,7 @@ import (
 func coverageGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
 	const coverageNodes = 2000
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	keys := make([]string, coverageNodes)
 	for i := 0; i < coverageNodes; i++ {
 		k := coverageKey(i)

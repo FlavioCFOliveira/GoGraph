@@ -30,7 +30,7 @@ type engineB2 struct {
 func enginesB2() map[string]func(t *testing.T) engineB2 {
 	return map[string]func(t *testing.T) engineB2{
 		"memory": func(_ *testing.T) engineB2 {
-			return engineB2{eng: cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))}
+			return engineB2{eng: cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))}
 		},
 		"wal": func(t *testing.T) engineB2 {
 			t.Helper()
@@ -39,7 +39,7 @@ func enginesB2() map[string]func(t *testing.T) engineB2 {
 			if err != nil {
 				t.Fatalf("wal.Open: %v", err)
 			}
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			st := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 				Codec:       txn.NewStringCodec(),
 				WeightCodec: txn.NewFloat64WeightCodec(),

@@ -93,7 +93,7 @@ func renderExpr(v any) string {
 // false — so the probe is skipped — and all three consumers must still report
 // the per-pair property.
 func TestByHandleProbeSkip_GoAPIGraph_AllThreeConsumersAgree(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%q): %v", n, err)

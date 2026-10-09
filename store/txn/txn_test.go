@@ -20,7 +20,7 @@ func openStore(t *testing.T) (store *Store[string, int64], walPath string, clean
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store = NewStoreWithCodec(g, w, NewStringCodec())
 	walPath = path
 	cleanup = func() {

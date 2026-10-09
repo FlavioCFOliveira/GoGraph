@@ -50,7 +50,7 @@ import (
 // path row for a reason that has nothing to do with the change under test.
 func relDirCypherFixture(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	ctx := context.Background()
 	for _, q := range []string{
@@ -91,7 +91,7 @@ func relDirCypherFixture(t *testing.T) *lpg.Graph[string, float64] {
 // at 19.59s.
 func relDirGoAPIFixture(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	mk := func(k, label string) {
 		if err := g.AddNode(k); err != nil {
 			t.Fatal(err)
@@ -142,7 +142,7 @@ func relDirGoAPIFixture(t *testing.T) *lpg.Graph[string, float64] {
 func relDirColumnarFixture(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
 	const n = 200
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("p%d", i)
 		if err := g.AddNode(k); err != nil {
@@ -870,7 +870,7 @@ func TestRelStoredDir_DemotionLeavesCallerStructsUnchanged(t *testing.T) {
 // counters only say WHICH arm ran, not that its answer depends on its input.
 func TestRelStoredDir_MutationEachGuardCanFail(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatal(err)
@@ -965,7 +965,7 @@ func TestRelStoredDir_ColumnSentinelRefusesAStaleCoordinate(t *testing.T) {
 // wrong in the same way, and the counters only say which arm ran.
 func TestRelStoredDir_ColumnValueIsLoadBearing(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatal(err)
@@ -1013,7 +1013,7 @@ func TestRelStoredDir_ZeroValueMetaIsSlowNotWrong(t *testing.T) {
 	relDirCountersOn.Store(true)
 	defer relDirCountersOn.Store(false)
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatal(err)
@@ -1055,7 +1055,7 @@ func TestRelStoredDir_AnchorSwapReadsTheExecutedDirection(t *testing.T) {
 	// The swap needs a large from-label and a tiny to-label for the cost model
 	// to prefer re-rooting, so this test carries its own fixture: 400 :N nodes,
 	// one :Tag, and one written-forward :HAS edge between them.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < 400; i++ {
 		k := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(k); err != nil {
@@ -1118,7 +1118,7 @@ func TestRelStoredDir_AnchorSwapReadsTheExecutedDirection(t *testing.T) {
 // ladder falls to the TOPOLOGY probes — the arm the 26_social_scale_bench
 // profile attributed 19.59s of 20.11s to.
 func relDirBenchFixture(fan int, reciprocal bool) *lpg.Graph[string, float64] {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	_ = g.AddNode("hub")
 	_ = g.SetNodeLabel("hub", "H")
 	for i := 0; i < fan; i++ {

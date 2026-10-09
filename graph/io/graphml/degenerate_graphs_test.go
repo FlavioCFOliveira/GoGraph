@@ -18,7 +18,7 @@ func TestGraphMLRoundtrip_DegenerateGraphs(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
 		t.Parallel()
 
-		a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+		a := adjlist.New[string, int64](adjlist.Config{})
 
 		var buf bytes.Buffer
 		if err := graphml.Write(&buf, a); err != nil {

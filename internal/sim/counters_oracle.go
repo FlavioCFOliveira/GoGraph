@@ -150,8 +150,7 @@ func diffCounters(want, got *exec.QueryCounters) string {
 //
 // The numbers follow the engine's pinned counter semantics
 // (cypher/query_counters_test.go, the openCypher TCK side-effect vocabulary):
-// counters record effects ACTUALLY APPLIED — a duplicate simple-graph edge
-// CREATE is not an addition, adding a label the node carries counts nothing,
+// counters record effects ACTUALLY APPLIED — adding a label the node carries counts nothing,
 // removing an absent property counts nothing — while every property ASSIGNMENT
 // applied counts as +properties even when the value is unchanged, and a
 // whole-entity replace (SET n = {…}) clears every present property (each one
@@ -183,19 +182,14 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 		if !okA || !okB {
 			return exec.QueryCounters{}, false
 		}
-		srcID, srcOK := oracle.byName[a]
-		dstID, dstOK := oracle.byName[b]
+		_, srcOK := oracle.byName[a]
+		_, dstOK := oracle.byName[b]
 		if !srcOK || !dstOK {
 			// MATCH found nothing: CREATE ran zero times.
 			return exec.QueryCounters{}, true
 		}
-		if oracle.HasEdge(srcID, dstID, "KNOWS") {
-			// The engine REJECTS a duplicate parallel-edge CREATE on the sim's
-			// simple graph (typed error, committed == false), so a committed op
-			// never reaches this branch today; were one ever to commit, the only
-			// sound effect for a graph that cannot gain a parallel edge is zero.
-			return exec.QueryCounters{}, true
-		}
+		// Every graph is a multigraph (rmp #3072): CREATE adds a relationship
+		// even between a pair that already has one.
 		return exec.QueryCounters{RelationshipsCreated: 1}, true
 
 	case tmplSetAge:
@@ -263,9 +257,17 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 		if !srcOK || !dstOK {
 			return exec.QueryCounters{}, true // MATCH found nothing; MERGE ran zero times.
 		}
-		if oracle.HasEdge(srcID, dstID, "KNOWS") {
-			// MERGE matched: ON MATCH SET r.n = r.n+1 applies one assignment.
-			return exec.QueryCounters{PropertiesSet: 1}, true
+		if matched := oracle.edgeInstances(srcID, dstID, "KNOWS"); len(matched) > 0 {
+			// MERGE matched every KNOWS of the pair, one row each: ON MATCH SET
+			// r.n = r.n+1 applies one assignment per row whose r.n is present
+			// (null + 1 is null, which assigns nothing to an absent property).
+			var set int64
+			for _, k := range matched {
+				if _, has := oracle.edges[k].Properties["n"]; has {
+					set++
+				}
+			}
+			return exec.QueryCounters{PropertiesSet: set}, true
 		}
 		// MERGE created: the edge plus ON CREATE SET r.n = 1.
 		return exec.QueryCounters{RelationshipsCreated: 1, PropertiesSet: 1}, true

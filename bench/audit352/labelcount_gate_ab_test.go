@@ -259,7 +259,7 @@ func buildPushdownGraph(tb testing.TB, n int) *lpg.Graph[string, float64] {
 	if g, ok := pushdownGraphs[n]; ok {
 		return g
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("i%d", i)
 		if err := g.AddNode(k); err != nil {
@@ -772,7 +772,7 @@ func boxingArms(tb testing.TB) *cypher.Engine {
 	}
 	key := func(i int) string { return fmt.Sprintf("b%d", i) }
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < boxingTotal; i++ {
 		k := key(i)
 		if err := g.AddNode(k); err != nil {

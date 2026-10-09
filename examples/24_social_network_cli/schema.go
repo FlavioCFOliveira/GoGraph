@@ -11,7 +11,7 @@ import "github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 // including a second relationship between an existing node pair. The helper
 // centralises this choice so a future change is single-edit.
 func lpgConfig() adjlist.Config {
-	return adjlist.Config{Directed: true, Multigraph: true}
+	return adjlist.Config{}
 }
 
 // Node labels used by the social-network fixture and by every Cypher

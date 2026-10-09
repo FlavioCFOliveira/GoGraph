@@ -46,7 +46,7 @@ func newRaceCheckpointer(t *testing.T) (cp *Checkpointer[string, int64], cancel 
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, e := range [][2]string{{"a", "b"}, {"b", "c"}, {"c", "a"}} {
 		if err := g.AddEdge(e[0], e[1], 0); err != nil {
 			t.Fatalf("AddEdge(%s->%s): %v", e[0], e[1], err)

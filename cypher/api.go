@@ -17,8 +17,8 @@
 // adjlist.Config.Weightless for that contract.
 //
 //	g := lpg.New[string, float64](adjlist.Config{
-//		Directed:   true,
-//		Multigraph: true,
+//
+//
 //		Weightless: true,
 //	})
 //	// ... populate graph ...
@@ -1831,30 +1831,6 @@ func resolveMaxResultBytes(opt int64) int64 {
 //nolint:gocritic // public API: EngineOptions is passed by value to preserve every existing call site; the constructor only reads from it.
 func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *Engine {
 	ensureIndexManager(g)
-	// openCypher's data model is a multigraph: every CREATE adds a relationship,
-	// including a second relationship between an existing ordered node pair. A
-	// non-multigraph adjacency cannot store such a parallel edge, so any write
-	// that would create one fails fast with [ErrParallelEdgeInSimpleGraph]. Warn
-	// once at construction so the misconfiguration surfaces before the first
-	// write rather than only when a parallel-edge CREATE is attempted.
-	if !g.AdjList().Multigraph() {
-		slog.Default().Warn("cypher: engine constructed over a non-multigraph graph; "+
-			"a CREATE or MERGE that adds a parallel relationship between an existing node pair "+
-			"will fail because openCypher requires multigraph semantics",
-			slog.String("hint", "construct the graph with adjlist.Config{Multigraph: true}"))
-	}
-	// openCypher relationships are directed: MATCH/CREATE/MERGE and functions
-	// like type()/startNode()/endNode() assume a stored direction. A
-	// non-directed (undirected) backend stores each edge symmetrically, so
-	// directed pattern matching and traversal silently produce incorrect edge
-	// results. Warn once at construction so the misconfiguration surfaces before
-	// the first query rather than as silently wrong output (#1892).
-	if !g.AdjList().Directed() {
-		slog.Default().Warn("cypher: engine constructed over a non-directed (undirected) graph; "+
-			"openCypher requires directed relationships, so directed pattern matching and "+
-			"traversal will produce incorrect edge results",
-			slog.String("hint", "construct the graph with adjlist.Config{Directed: true}"))
-	}
 	reg := opts.Registry
 	if reg == nil {
 		reg = funcs.DefaultRegistry
@@ -21656,10 +21632,10 @@ func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 // backing graph is not a multigraph and therefore cannot store the parallel
 // edge. openCypher's data model is a multigraph in which every CREATE adds a
 // relationship, so the Cypher engine must be constructed over a graph built with
-// adjlist.Config{Multigraph: true}. The write fails fast and aborts the
+// adjlist.Config{}. The write fails fast and aborts the
 // transaction rather than silently discarding the edge, upholding the module's
 // fail-stop, never-fail-silent contract.
-var ErrParallelEdgeInSimpleGraph = errors.New("cypher: cannot create a parallel edge on a non-multigraph graph; construct the engine over a graph created with adjlist.Config{Multigraph: true}")
+var ErrParallelEdgeInSimpleGraph = errors.New("cypher: cannot create a parallel edge on a non-multigraph graph; construct the engine over a graph created with adjlist.Config{}")
 
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
 func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
@@ -21669,10 +21645,6 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
-	if !a.g.AdjList().Multigraph() && edgeExisted {
-		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
-	}
 	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
@@ -21688,10 +21660,8 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	// used to be a silent no-op is now rejected above, before any mutation, so
 	// this branch is never skipped. Kept explicit for symmetry with
 	// [walMutatorAdapter.AddEdge].
-	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
-	}
+	a.countRelCreated()
+	a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, nil
 }
@@ -21705,10 +21675,6 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
-	if !a.g.AdjList().Multigraph() && edgeExisted {
-		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
-	}
 	handle, err := a.w().AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
@@ -21725,10 +21691,8 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	// used to be a silent no-op is now rejected above, before any mutation, so
 	// this branch is never skipped. Kept explicit for symmetry with
 	// [walMutatorAdapter.AddEdge].
-	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
-	}
+	a.countRelCreated()
+	a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, handle, nil
 }
@@ -23001,10 +22965,6 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
-	if !a.g.AdjList().Multigraph() && edgeExisted {
-		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
-	}
 	mark, counted := a.effectMark()
 	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
@@ -23038,10 +22998,8 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	// never deduplicates), so edgeAdded is always true here: on a multigraph
 	// every AddEdge adds a parallel edge, and on a simple graph reaching this
 	// line already implies !edgeExisted.
-	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
-	}
+	a.countRelCreated()
+	a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	if txErr != nil {
 		return 0, 0, txErr
@@ -23064,10 +23022,6 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
-	if !a.g.AdjList().Multigraph() && edgeExisted {
-		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
-	}
 	mark, counted := a.effectMark()
 	handle, err := a.w().AddEdgeH(src, dst, w)
 	if err != nil {
@@ -23101,10 +23055,8 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	// used to be a silent no-op is now rejected above, before any mutation, so
 	// this branch is never skipped. Kept explicit for symmetry with
 	// [lpgMutatorAdapter.AddEdge].
-	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
-	}
+	a.countRelCreated()
+	a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	if txErr != nil {
 		return 0, 0, 0, txErr
@@ -23240,10 +23192,12 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 }
 
 // mustDescribeNoOpRemoval reports whether a removal that provably took NOTHING out
-// of the in-memory adjacency must still be written to the WAL.
+// of the in-memory adjacency must still be written to the WAL. Storage is
+// directed-only (rmp #3072), so the WAL always describes the adjacency and it
+// reports false; the history below records why it existed.
 //
-// It is true exactly when the WAL is not a faithful description of this graph's
-// adjacency, which on this adapter means an UNDIRECTED backing graph.
+// It was true exactly when the WAL was not a faithful description of this graph's
+// adjacency, which on this adapter meant an UNDIRECTED backing graph.
 // [walMutatorAdapter.RemoveAllEdgesFrom] emits one frame per OUTGOING neighbour,
 // but on an undirected adjacency the removal also retires each mirror arc, which
 // no frame describes. Recovery therefore reconstructs a different adjacency from
@@ -23258,7 +23212,7 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 // a guard against regressing a configuration the module still constructs, not a
 // commitment to its durability. It costs one already-cached bool read.
 func (a *walMutatorAdapter) mustDescribeNoOpRemoval() bool {
-	return !a.g.AdjList().Directed()
+	return false
 }
 
 // SetNodeLabel attaches label to n.

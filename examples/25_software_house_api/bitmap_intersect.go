@@ -103,7 +103,7 @@ type biDemo struct {
 // is defined over lpg.Graph[string, float64], which the served graph already is, so
 // the copy is a faithful relabelling and not a different data model.
 func buildReviewView(src *lpg.Graph[string, float64]) (*lpg.Graph[string, float64], error) {
-	dst := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	dst := lpg.New[string, float64](adjlist.Config{})
 	i := 0
 	var addErr error
 	src.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {

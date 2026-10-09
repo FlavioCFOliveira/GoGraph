@@ -20,7 +20,7 @@ func TestGraphML_TimeOffset_RoundTrips(t *testing.T) {
 	loc := time.FixedZone("IST", 5*3600+30*60) // +05:30
 	want := time.Date(2025, 3, 15, 10, 30, 0, 123456789, loc)
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.SetNodeProperty("n", "stamp", lpg.TimeValue(want)); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}

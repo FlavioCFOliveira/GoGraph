@@ -31,7 +31,7 @@ import (
 // numeric property, so a btree CREATE INDEX has real data to backfill.
 func newPairBarrierEngine(t *testing.T, nodes int) (*Engine, *lpg.Graph[string, float64]) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range nodes {
 		key := fmt.Sprintf("p%04d", i)
 		if err := g.AddNode(key); err != nil {

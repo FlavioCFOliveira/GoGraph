@@ -25,7 +25,7 @@ import (
 func TestWCC_DisconnectedForest(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 
 	addEdge := func(u, v int) {
 		t.Helper()

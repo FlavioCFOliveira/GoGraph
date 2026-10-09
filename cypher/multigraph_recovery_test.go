@@ -10,7 +10,7 @@ package cypher_test
 // recovery.Open used to rebuild the graph in simple-graph mode, so every
 // consumer that recovers from disk (e.g. a CLI where each command reopens the
 // store) silently lost all but the last parallel edge. recovery.Open now
-// builds the graph with Multigraph: true, matching the TCK harness.
+// builds the graph with matching the TCK harness.
 //
 // Layer: short. goleak-clean (engines/graphs are local).
 

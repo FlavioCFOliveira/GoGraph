@@ -54,7 +54,7 @@ const iiSmallPop = 32
 // the floor and not merely by a missing index.
 func iiSmallLabelFixture(tb testing.TB) (*lpg.Graph[string, float64], *Engine) {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < iiSmallPop; i++ {
 		key := fmt.Sprintf("m%06d", i)
 		if err := g.AddNode(key); err != nil {

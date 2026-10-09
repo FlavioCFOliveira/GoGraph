@@ -17,7 +17,7 @@ import (
 // FOLLOWS a→b over the existing KNOWS a→b.
 func buildMotifFixture(t *testing.T) (*EngineAdapter, *GraphOracle) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	a := NewEngineAdapter(cypher.NewEngine(g))
 	o := NewGraphOracle()
 	ctx := context.Background()
@@ -89,7 +89,7 @@ func TestPatternShapes_SensitivityToWrongReference(t *testing.T) {
 		// Drop c→a from the model: knows, twoHop, triangles, undirected,
 		// reverse and multi-type references all shift while the engine keeps
 		// the edge.
-		delete(o.edges, edgeKey{src: o.byName["c"], dst: o.byName["a"], label: "KNOWS"})
+		delete(o.edges, o.instanceKey(edgeKey{src: o.byName["c"], dst: o.byName["a"], label: "KNOWS"}))
 		if v := CheckPatternShapes(0, o, a); len(v) == 0 {
 			t.Fatal("battery FAILED to fire on a perturbed (missing-edge) reference")
 		}

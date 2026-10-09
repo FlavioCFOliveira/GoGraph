@@ -35,7 +35,7 @@ import (
 // newBenchGraph builds a fresh store-less directed graph for the benchmarks,
 // mirroring storelessEngineWithGraph without a *testing.T.
 func newBenchGraph() *lpg.Graph[string, float64] {
-	return lpg.New[string, float64](adjlist.Config{Directed: true})
+	return lpg.New[string, float64](adjlist.Config{})
 }
 
 // benchSeedNodes seeds n nodes via autocommit writes so the read workload has

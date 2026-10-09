@@ -50,7 +50,7 @@ func relScalarString(t *testing.T, eng *cypher.Engine, query string) string {
 // edge, not silently dropped to null.
 func TestMerge_Rel_InlineProp_NonLiteral_Create(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (:Repro {k:'a'}), (:Repro {k:'b'})`)
@@ -70,7 +70,7 @@ func TestMerge_Rel_InlineProp_NonLiteral_Create(t *testing.T) {
 // MERGE finds the edge it created rather than creating a duplicate.
 func TestMerge_Rel_InlineProp_NonLiteral_DrivesSearch_Idempotent(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (:Repro {k:'a'}), (:Repro {k:'b'})`)
@@ -102,7 +102,7 @@ func TestMerge_Rel_InlineProp_NonLiteral_DrivesSearch_Idempotent(t *testing.T) {
 // deliberately out of scope here.)
 func TestMerge_Rel_InlineProp_NonLiteral_DiscriminatesMatch_Multigraph(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (:Repro {k:'a'}), (:Repro {k:'b'})`)
@@ -131,7 +131,7 @@ func TestMerge_Rel_InlineProp_NonLiteral_DiscriminatesMatch_Multigraph(t *testin
 // relationship property map, which the literal-only parser also dropped.
 func TestMerge_Rel_InlineProp_Param(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (:Repro {k:'a'}), (:Repro {k:'b'})`)
@@ -153,7 +153,7 @@ func TestMerge_Rel_InlineProp_Param(t *testing.T) {
 // evaluator is installed, and vice versa.
 func TestMerge_Rel_InlineProp_Mixed(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (:Repro {k:'a'}), (:Repro {k:'b'})`)
@@ -179,7 +179,7 @@ func TestMerge_Rel_InlineProp_Mixed(t *testing.T) {
 // both-endpoints-bound fast path.
 func TestMerge_Pattern_InlineRelProp_NonLiteral_FreshEndpoint(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (:Repro {k:'a'})`)
@@ -199,7 +199,7 @@ func TestMerge_Pattern_InlineRelProp_NonLiteral_FreshEndpoint(t *testing.T) {
 // the compound (fresh-endpoint) MERGE path.
 func TestMerge_Pattern_InlineRelProp_Param_FreshEndpoint(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (:Repro {k:'a'})`)
@@ -222,7 +222,7 @@ func TestMerge_Pattern_InlineRelProp_Param_FreshEndpoint(t *testing.T) {
 // pattern.
 func TestMerge_Pattern_InlineRelProp_DrivesSearch(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (:Repro {k:'a'})`)
@@ -248,7 +248,7 @@ func TestMerge_Pattern_InlineRelProp_DrivesSearch(t *testing.T) {
 // edge carrying the evaluated value is bound rather than a new one created.
 func TestMerge_Rel_InlineProp_NonLiteral_Undirected(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (:Repro {k:'a'}), (:Repro {k:'b'})`)

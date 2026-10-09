@@ -23,7 +23,7 @@ func TestBFS_LDBCSf10_Soak(t *testing.T) {
 	testlayers.RequireSoak(t)
 
 	path := filepath.Join(t.TempDir(), "ldbc_sf10.csr")
-	loader := bulk.New(bulk.Options{OutputPath: path, Directed: true})
+	loader := bulk.New(bulk.Options{OutputPath: path})
 	ldbc.Synthetic(context.Background(), 600_000, 6_000_000, loader)
 	_, c, err := loader.Finalise()
 	if err != nil {

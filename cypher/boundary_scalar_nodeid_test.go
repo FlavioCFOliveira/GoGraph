@@ -44,7 +44,7 @@ var bsLiveIDs = []graph.NodeID{1, 2, 3, 5, 9}
 // nodes that every NodeID in bsLiveIDs resolves to a node.
 func bsEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ipExec(t, eng, `CREATE (:A {n: 1})-[:R {w: 1}]->(:B {n: 2}), (:C)`)
 	m := g.AdjList().Mapper()

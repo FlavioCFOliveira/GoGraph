@@ -23,7 +23,7 @@ import (
 
 func newDirGraph(tb testing.TB, nodes ...string) *lpg.Graph[string, float64] {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range nodes {
 		if err := g.AddNode(n); err != nil {
 			tb.Fatalf("AddNode: %v", err)

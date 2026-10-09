@@ -23,7 +23,7 @@ func TestSnapshot_ReadOnly(t *testing.T) {
 	}
 
 	// Build a small graph and a CSR to pass to WriteSnapshotFull.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AdjList().AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

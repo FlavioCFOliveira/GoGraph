@@ -17,7 +17,7 @@ import (
 // type and its adjacency slot, and the removed instance's metadata is gone.
 func TestGraph_RemoveEdgeByHandle_InstancePrecise(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	h1, err := g.AddEdgeH("a", "b", 0)
 	if err != nil {
 		t.Fatalf("AddEdgeH h1: %v", err)
@@ -58,7 +58,7 @@ func TestGraph_RemoveEdgeByHandle_InstancePrecise(t *testing.T) {
 // labels so a later re-add between the same endpoints does not resurrect them.
 func TestGraph_RemoveEdgeByHandle_LastInstanceClearsPairState(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	h, err := g.AddEdgeH("a", "b", 0)
 	if err != nil {
 		t.Fatalf("AddEdgeH: %v", err)
@@ -92,7 +92,7 @@ func TestGraph_RemoveEdgeByHandle_LastInstanceClearsPairState(t *testing.T) {
 // whether an edge was present.
 func TestGraph_RemoveEdgeByHandle_ZeroFallsBackToRemoveEdge(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	if _, err := g.AddEdgeH("a", "b", 0); err != nil {
 		t.Fatalf("AddEdgeH: %v", err)
 	}

@@ -100,7 +100,7 @@ func measure(t *testing.T, name string, n int, build func() any) {
 // optionally giving each a label and a property.
 func buildStringKeyed(t *testing.T, label, propKey string) any {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range probeNodes {
 		k := "__cx_" + strconv.FormatUint(uint64(i), 16)
 		if err := g.AddNode(k); err != nil {
@@ -143,7 +143,7 @@ func TestProbe_MapperStringKey(t *testing.T) {
 // same interning under an integer key, which is what the rivals use.
 func TestProbe_MapperUint64Key(t *testing.T) {
 	measure(t, "mapper/uint64-key", probeNodes, func() any {
-		g := lpg.New[uint64, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[uint64, float64](adjlist.Config{})
 		for i := range probeNodes {
 			if err := g.AddNode(uint64(i)); err != nil {
 				t.Fatalf("AddNode: %v", err)

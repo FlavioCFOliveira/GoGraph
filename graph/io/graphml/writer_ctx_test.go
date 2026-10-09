@@ -26,7 +26,7 @@ func (w *errWriter) Write(p []byte) (int, error) {
 // at the top of WriteCtx.
 func TestWriteCtx_CancelledContext(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestWriteCtx_CancelledContext(t *testing.T) {
 // from the XML declaration line.
 func TestWriteCtx_HeaderWriteFails(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -82,7 +82,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 // therefore from the encErr-set branch of encodeNodes' callback).
 func TestWriteCtx_NodeEncodingFails(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := 0; i < 64; i++ {
 		if err := a.AddNode("node-prefix-deliberately-long-" + string(rune('a'+i%26))); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -112,7 +112,7 @@ func TestWriteCtx_NodeEncodingFails(t *testing.T) {
 // encodeNodes / encodeEdges (both walk an empty mapper).
 func TestWriteCtx_EmptyGraph(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := Write(io.Discard, a); err != nil {
 		t.Fatalf("Write empty graph: %v", err)
 	}

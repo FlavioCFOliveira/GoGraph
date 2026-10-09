@@ -10,7 +10,7 @@ import (
 func TestKCore_Clique(t *testing.T) {
 	t.Parallel()
 	// K5: every vertex has coreness 4.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 5; i++ {
 		for j := i + 1; j < 5; j++ {
 			if err := a.AddEdge(i, j, struct{}{}); err != nil {
@@ -18,7 +18,7 @@ func TestKCore_Clique(t *testing.T) {
 			}
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	coreness := KCore(c)
 	for i := 0; i < 5; i++ {
 		id, _ := a.Mapper().Lookup(i)
@@ -33,13 +33,13 @@ func TestKCore_Path(t *testing.T) {
 	// Path 0-1-2-3-4: every vertex belongs to the 1-core. Each
 	// has degree 1 (endpoints) or 2 (interior), but peeling drops
 	// all to coreness 1.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	coreness := KCore(c)
 	for i := 0; i < 5; i++ {
 		id, _ := a.Mapper().Lookup(i)
@@ -54,7 +54,7 @@ func TestKCore_Path(t *testing.T) {
 // pendant has coreness 1).
 func TestKCore_Mixed(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	// Triangle 0-1-2.
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
@@ -72,7 +72,7 @@ func TestKCore_Mixed(t *testing.T) {
 	if err := a.AddEdge(3, 4, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	coreness := KCore(c)
 	m := a.Mapper()
 	expected := map[int]int{0: 2, 1: 2, 2: 2, 3: 1, 4: 1}

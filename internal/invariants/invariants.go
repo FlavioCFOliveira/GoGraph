@@ -114,7 +114,10 @@ func AssertBipartite[N comparable, W any](t testing.TB, g graphView[N, W]) {
 		colourB    uint8 = 2
 	)
 
+	// The undirected view: storage holds each edge once, in its own direction,
+	// so the 2-colouring walks the symmetric projection.
 	m := adj.Mapper()
+	c := csr.BuildFromAdjList(adj).BuildSymmetric()
 	maxID := uint64(m.MaxNodeID()) + 1
 	colour := make([]uint8, maxID)
 
@@ -134,18 +137,17 @@ func AssertBipartite[N comparable, W any](t testing.TB, g graphView[N, W]) {
 		for len(queue) > 0 && !found {
 			u := queue[0]
 			queue = queue[1:]
-			uNode, _ := m.Resolve(u)
 			nextColour := colourB
 			if colour[u] == colourB {
 				nextColour = colourA
 			}
-			for v := range adj.Neighbours(uNode) {
-				vID, _ := m.Lookup(v)
+			for vID := range c.NeighboursByID(u) {
 				if colour[vID] == uncoloured {
 					colour[vID] = nextColour
 					queue = append(queue, vID)
 				} else if colour[vID] == colour[u] {
-					offendingU, offendingV = uNode, v
+					offendingU, _ = m.Resolve(u)
+					offendingV, _ = m.Resolve(vID)
 					found = true
 					break
 				}

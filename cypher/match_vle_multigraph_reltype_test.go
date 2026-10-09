@@ -70,7 +70,7 @@ func collectSingleHopVLE(t *testing.T, eng *cypher.Engine, query string) []relRo
 // parallel edge is a distinct relationship under relationship-uniqueness, so the
 // VLE yields one path per edge.
 func TestVLE_Multigraph_ReverseHop_PerInstanceType(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:1})`,
@@ -113,7 +113,7 @@ func TestVLE_Multigraph_ReverseHop_PerInstanceType(t *testing.T) {
 // property on a reverse / undirected variable-length hop. A coalesced bug would
 // give both paths the same merged w.
 func TestVLE_Multigraph_PerInstanceProperty(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:1})`,
@@ -150,7 +150,7 @@ func TestVLE_Multigraph_PerInstanceProperty(t *testing.T) {
 // undirected variable-length hop. A 2-edge test could pass under a first/last
 // rule; a 3-edge test cannot.
 func TestVLE_Multigraph_ThreeWayParallel_ReverseHop(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:1})`,

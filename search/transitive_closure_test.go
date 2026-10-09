@@ -11,7 +11,7 @@ import (
 
 func TestTransitiveClosure_Chain(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -40,7 +40,7 @@ func TestTransitiveClosure_VsBFS(t *testing.T) {
 	r := rand.New(rand.NewPCG(181, 191)) //nolint:gosec // deterministic
 	for seed := 0; seed < 5; seed++ {
 		const n = 16
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			if err := a.AddNode(i); err != nil {
 				t.Fatalf("AddNode: %v", err)

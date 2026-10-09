@@ -66,7 +66,7 @@ var equalityBenchPopulations = []int{4000, 16000, 64000}
 // choice cannot affect the measurement.
 func newEqualityBenchEngine(tb testing.TB, n int, disableSeek bool) *cypher.Engine {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := "p" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

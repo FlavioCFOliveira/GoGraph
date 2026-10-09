@@ -8,7 +8,7 @@ package search
 // number of paths that actually exist (1), returning a slice of length
 // 1 rather than 10 and without returning an error.
 //
-// The star is built manually using adjlist.Config{Directed:false}
+// The star is built manually using adjlist.Config{}
 // because shapegen.Star is always directed (the orientation of edges is
 // the defining property of the catalogue shape). A hand-built undirected
 // star is topologically identical and avoids relying on catalogue
@@ -34,14 +34,14 @@ func TestYen_StarTruncated_KExceedsPathCount(t *testing.T) {
 	const n = 1 + nLeaves // centre + 7 leaves = 8 nodes
 
 	// Build undirected star: centre=0, leaves=1..7.
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for leaf := 1; leaf < n; leaf++ {
 		if err := a.AddEdge(0, leaf, 1); err != nil {
 			t.Fatalf("AddEdge(0→%d): %v", leaf, err)
 		}
 	}
 
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	m := a.Mapper()
 
 	// Query: leaf 1 → leaf 2 with k=10.

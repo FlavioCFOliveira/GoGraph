@@ -28,7 +28,7 @@ import (
 //
 // Each generator constructs the underlying [adjlist.Config] from the
 // caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, and
-// overrides cfg.Directed=true and cfg.Multigraph=false: every tree
+// keeps the graph simple: every tree
 // shape defined here is a directed simple graph in which every
 // non-root node has exactly one incoming edge (from its parent). The
 // directed orientation matches the trivial-family convention and
@@ -120,8 +120,6 @@ func BalancedBinary(depth int) Shape[int, int64] {
 		name:  "trees.balanced-binary",
 		knobs: []Knob{{Name: "depth", Min: 0, Max: 20, Default: 3}},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildBalancedBinary(g, depth)
 		},
@@ -182,8 +180,6 @@ func CompleteKAry(k, depth int) Shape[int, int64] {
 			{Name: "depth", Min: 0, Max: 12, Default: 2},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildCompleteKAry(g, k, depth)
 		},
@@ -270,8 +266,6 @@ func PruferTree(n int, seed uint64) Shape[int, int64] {
 		name:  "trees.prufer",
 		knobs: []Knob{{Name: "n", Min: 2, Max: 5000, Default: 10}},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildPruferTree(g, n, seed)
 		},
@@ -401,17 +395,17 @@ func addFinalPruferEdge(g *lpg.Graph[int, int64], degree []int) error {
 // tree on n nodes — the canonical worst case for tree algorithms
 // that assume balanced height (LCA without preprocessing, naive
 // centroid decomposition, recursive DFS). It delegates to
-// [Path](n, false), the undirected path P_n. The resulting Shape's
+// [Path](n), the path P_n. The resulting Shape's
 // Name() therefore reports "classic.path"; tests that need a
 // catalogue-stable name for the tree-family entry must inspect the
 // declared knobs or the Order/Size of the built graph.
 //
 // Catalogue invariants on the returned graph match those of
-// [Path](n, false):
+// [Path](n):
 //
 //   - Order() == uint64(n)
 //   - Size()  == 0 when n <= 1; n - 1 otherwise.
-//   - The graph is undirected.
+//   - Each edge is stored as one arc i -> i+1.
 //
 // PathDegenerate exposes the same single knob "n" as Path, over
 // [0, 100_000]. The constructor panics on n < 0 via the delegated
@@ -423,7 +417,7 @@ func addFinalPruferEdge(g *lpg.Graph[int, int64], degree []int) error {
 // the package; the equivalence is verified by
 // TestTrees_PathDegenerate_DelegatesToClassic.
 func PathDegenerate(n int) Shape[int, int64] {
-	return Path(n, false)
+	return Path(n)
 }
 
 // Caterpillar returns a Shape that builds the caterpillar tree
@@ -473,8 +467,6 @@ func Caterpillar(spine int, leafDist []int) Shape[int, int64] {
 		name:  "trees.caterpillar",
 		knobs: []Knob{{Name: "spine", Min: 1, Max: 1000, Default: 3}},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildCaterpillar(g, spine, owned)
 		},
@@ -543,8 +535,6 @@ func Spider(legs, legLen int) Shape[int, int64] {
 			{Name: "legLen", Min: 1, Max: 100, Default: 2},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildSpider(g, legs, legLen)
 		},
@@ -617,8 +607,6 @@ func Lobster(depths []int) Shape[int, int64] {
 	return treesBase{
 		name: "trees.lobster",
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildLobster(g, owned)
 		},

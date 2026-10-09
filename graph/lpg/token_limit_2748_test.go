@@ -37,7 +37,7 @@ type fixture2748 struct {
 
 func newFixture2748(t *testing.T) fixture2748 {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatal(err)

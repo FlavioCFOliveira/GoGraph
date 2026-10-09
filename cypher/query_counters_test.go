@@ -32,7 +32,7 @@ import (
 // requires (every CREATE adds a relationship).
 func counterEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return cypher.NewEngine(g)
 }
 
@@ -261,7 +261,7 @@ func TestQueryCounters_ReadOnlyReportsNil(t *testing.T) {
 // numbers evidence rather than a tautology.
 func TestQueryCounters_CrossCheckedAgainstTheGraph(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	before := g.LiveOrder()

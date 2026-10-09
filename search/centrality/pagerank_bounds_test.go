@@ -11,7 +11,7 @@ import (
 
 // buildRing returns a directed k-node ring CSR.
 func buildRing(k int) *csr.CSR[struct{}] {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < k; i++ {
 		if err := a.AddEdge(i, (i+1)%k, struct{}{}); err != nil {
 			panic(err)
@@ -23,7 +23,7 @@ func buildRing(k int) *csr.CSR[struct{}] {
 // buildRingWithEdge builds a simple 2-node CSR (0→1) for tests that
 // only need a non-empty graph and do not care about topology.
 func buildMinGraph() *csr.CSR[struct{}] {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		panic(err)
 	}

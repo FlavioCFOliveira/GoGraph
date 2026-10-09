@@ -95,7 +95,7 @@ const ddlCheckpointCities = 5
 // matching the simulator's own durable shape.
 func ddlCheckpointStoreConfig() simStoreConfig {
 	return simStoreConfig{
-		graphConfig: adjlist.Config{Directed: true, Multigraph: false},
+		graphConfig: adjlist.Config{},
 		dir:         defaultCheckpointDir,
 	}
 }

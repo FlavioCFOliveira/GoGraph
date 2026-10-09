@@ -49,7 +49,7 @@ func collectRelTypes(t *testing.T, eng *cypher.Engine, query string) []string {
 // the forward hop and the undirected reverse hop over two parallel,
 // distinctly-typed edges both yield {T1, T2}.
 func TestMatch_Multigraph_ReverseHop_PerInstanceType(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -101,7 +101,7 @@ func TestMatch_Multigraph_ReverseHop_PerInstanceType(t *testing.T) {
 // direction probe in buildRelationshipValueFromRow cannot tell which
 // stored direction an emitted edge came from when both directions exist.
 func TestMatch_Multigraph_ParallelSelfLoops_Undirected(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	seed := []string{
@@ -133,7 +133,7 @@ func TestMatch_Multigraph_ParallelSelfLoops_Undirected(t *testing.T) {
 // used a type-agnostic HasEdge, so MERGE (a)-[:T2]->(b) bound to the T1
 // edge and no T2 edge was created.
 func TestMerge_Multigraph_DistinctType_CreatesParallelEdge(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	seed := []string{
@@ -176,7 +176,7 @@ func TestMerge_Multigraph_DistinctType_CreatesParallelEdge(t *testing.T) {
 // type check): two distinct-type undirected MERGEs create two edges, and
 // re-MERGE of an existing type is idempotent.
 func TestMerge_Multigraph_Undirected_DistinctType_CreatesParallelEdge(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	stmts := []string{
@@ -313,7 +313,7 @@ func intVal(t *testing.T, v interface{}) int64 {
 // SETS, created by pure CREATE, read back per-instance for the bound r on every
 // single-hop direction — forward, undirected, and opposite-direction.
 func TestMatch_Multigraph_PerInstanceProperties(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	// Distinct types, distinct w, and distinct key sets: R1 carries {w}, R2
 	// carries {w, extra}. keys(r) must therefore diverge per row and
@@ -412,7 +412,7 @@ func TestMatch_Multigraph_PerInstanceProperties(t *testing.T) {
 // parallel edges with three distinct w values must each read their own. A 2-edge
 // test could pass under a first/last rule; a 3-edge test cannot.
 func TestMatch_Multigraph_ThreeWayParallel_PerInstanceProperty(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:1})`,
@@ -440,7 +440,7 @@ func TestMatch_Multigraph_ThreeWayParallel_PerInstanceProperty(t *testing.T) {
 // are emitted by the forward pass and deduplicated on the reverse pass, so this
 // exercises the forward per-instance property path.
 func TestMatch_Multigraph_ParallelSelfLoops_PerInstanceProperty(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:1})`,
@@ -467,7 +467,7 @@ func TestMatch_Multigraph_ParallelSelfLoops_PerInstanceProperty(t *testing.T) {
 // sentinel edge falls back to the per-pair coalesced map without corrupting the
 // other row's read. Both rows must still surface, each with its own type.
 func TestMatch_Multigraph_MixedHandleSentinel_PerInstanceProperty(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:1})`,
@@ -496,7 +496,7 @@ func TestMatch_Multigraph_MixedHandleSentinel_PerInstanceProperty(t *testing.T) 
 // its property exactly as before. This guards that the per-handle routing does
 // not disturb the overwhelming common case.
 func TestMatch_NonMultigraph_SingleEdge_PropertyUnchanged(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:1})-[:R {w:42}]->(b:N {k:2})`,
@@ -571,7 +571,7 @@ func scalarValue(t *testing.T, eng *cypher.Engine, query, col string) interface{
 // cover — a single-edge pair makes per-pair and per-handle storage physically
 // indistinguishable, so only this parallel variant witnesses the regression.
 func TestMatch_Multigraph_PerInstanceProperty_AfterSet(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:1})`,
@@ -631,7 +631,7 @@ func TestMatch_Multigraph_PerInstanceProperty_AfterSet(t *testing.T) {
 // MERGE-action write path specifically; the TCK scenarios use a single key, so
 // this adds a multi-key SET r = node case to widen the guard.
 func TestMatch_Merge_OnMatchSet_PerInstanceProperty(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:A {name:'A', tag:'keep'})`,
@@ -671,7 +671,7 @@ func TestMatch_Merge_OnMatchSet_PerInstanceProperty(t *testing.T) {
 // passes the AddEdgeH handle directly to applyRelActions on the create path
 // (FirstEdgeHandle would resolve the older sibling's slot).
 func TestMatch_Merge_OnCreateSet_ParallelEdge_TargetsNewEdge(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (a:N {k:1})`,
@@ -706,7 +706,7 @@ func TestMatch_Merge_OnCreateSet_ParallelEdge_TargetsNewEdge(t *testing.T) {
 // {state, role} read back with neither). The read path must detect the absent
 // by-handle entry and fall back to the per-pair store.
 func TestMatch_GoAPIEdge_PropertiesReadThroughPerPair(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	// Build the edge purely through the Go API — no Cypher CREATE, so nothing
 	// writes the by-handle store, exactly like a consumer wiring a graph directly.
 	if err := g.AddNode("d"); err != nil {
@@ -760,7 +760,7 @@ func TestMatch_GoAPIEdge_PropertiesReadThroughPerPair(t *testing.T) {
 // is non-empty" predicate would leak; the type-entry membership marker prevents
 // it.)
 func TestMatch_Multigraph_ZeroPropParallelSibling(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedMultigraph(t, eng,
 		`CREATE (x:X)`,

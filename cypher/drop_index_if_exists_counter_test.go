@@ -111,7 +111,7 @@ var dropIndexCounterSteps = []dropIndexStep{
 // both before and after.
 func TestDropIndexIfExists_CounterIsAppliedNotAttempted_InMemory(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runDropIndexSteps(t, eng)
 }
@@ -127,7 +127,7 @@ func TestDropIndexIfExists_CounterIsAppliedNotAttempted_WALStore(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

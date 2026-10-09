@@ -35,7 +35,7 @@ func neighboursOf(tb testing.TB, a *AdjList[string, int], src string) ([]graph.N
 // column is slot-aligned with neighbours.
 func TestAdjList_AddEdgeH_DistinctHandles(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdgeH("a", "b", 1, 100); err != nil {
 		t.Fatalf("AddEdgeH #1: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestAdjList_AddEdgeH_DistinctHandles(t *testing.T) {
 // workload pays nothing for the change.
 func TestAdjList_AddEdge_MintsAHandle(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	mustAddEdge(t, a, "a", "b", 1)
 	mustAddEdge(t, a, "a", "c", 2)
 	h := handlesOf(t, a, "a")
@@ -98,7 +98,7 @@ func TestAdjList_AddEdge_MintsAHandle(t *testing.T) {
 // stay aligned after the compaction.
 func TestAdjList_RemoveEdge_SurvivorKeepsHandle(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdgeH("a", "b", 1, 111); err != nil {
 		t.Fatalf("AddEdgeH #1: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestAdjList_RemoveEdge_SurvivorKeepsHandle(t *testing.T) {
 // outer two with their original handles in order.
 func TestAdjList_RemoveEdge_MiddleSurvivorsKeepHandles(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	for i, hv := range []uint64{10, 20, 30} {
 		if err := a.AddEdgeH("a", "b", i, hv); err != nil {
 			t.Fatalf("AddEdgeH %d: %v", i, err)
@@ -149,39 +149,26 @@ func TestAdjList_RemoveEdge_MiddleSurvivorsKeepHandles(t *testing.T) {
 	}
 }
 
-// TestAdjList_AddEdgeH_Undirected_SharesHandle verifies the mirrored slot
-// of an undirected edge carries the SAME handle as the forward slot.
-func TestAdjList_AddEdgeH_Undirected_SharesHandle(t *testing.T) {
+// TestAdjList_RepeatedAddEdge_IsTwoRelationships pins the multigraph contract
+// (rmp #3072): every graph keeps parallel edges, so two AddEdge calls on the
+// same pair create two relationships, each with its own stable handle.
+func TestAdjList_RepeatedAddEdge_IsTwoRelationships(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: false, Multigraph: true})
-	if err := a.AddEdgeH("a", "b", 1, 555); err != nil {
-		t.Fatalf("AddEdgeH: %v", err)
+	a := New[string, int](Config{})
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge #1: %v", err)
 	}
-	if h := handlesOf(t, a, "a"); len(h) != 1 || h[0] != 555 {
-		t.Fatalf("forward handle = %v, want [555]", h)
+	if err := a.AddEdge("a", "b", 2); err != nil {
+		t.Fatalf("AddEdge #2: %v", err)
 	}
-	if h := handlesOf(t, a, "b"); len(h) != 1 || h[0] != 555 {
-		t.Fatalf("mirror handle = %v, want [555] (shared identity)", h)
+	if got := a.Size(); got != 2 {
+		t.Fatalf("Size = %d, want 2 relationships", got)
 	}
-}
-
-// TestAdjList_AddEdgeH_SimpleGraphDuplicate verifies that a duplicate
-// (src, dst) in simple-graph mode is a no-op: the existing slot keeps its
-// original handle and the supplied handle is ignored.
-func TestAdjList_AddEdgeH_SimpleGraphDuplicate(t *testing.T) {
-	t.Parallel()
-	a := New[string, int](Config{Directed: true}) // simple graph
-	if err := a.AddEdgeH("a", "b", 1, 700); err != nil {
-		t.Fatalf("AddEdgeH #1: %v", err)
+	nb, hs := a.LoadEntryHandles("a")
+	if len(nb) != 2 || len(hs) != 2 {
+		t.Fatalf("a's entry holds %d slots and %d handles, want 2 and 2", len(nb), len(hs))
 	}
-	if err := a.AddEdgeH("a", "b", 2, 800); err != nil {
-		t.Fatalf("AddEdgeH #2 (dup): %v", err)
-	}
-	nb, h := neighboursOf(t, a, "a")
-	if len(nb) != 1 {
-		t.Fatalf("simple-graph neighbours len = %d, want 1 (collapsed)", len(nb))
-	}
-	if len(h) != 1 || h[0] != 700 {
-		t.Fatalf("simple-graph handle = %v, want [700] (original kept)", h)
+	if hs[0] == 0 || hs[1] == 0 || hs[0] == hs[1] {
+		t.Fatalf("handles = %v, want two distinct non-zero handles", hs)
 	}
 }

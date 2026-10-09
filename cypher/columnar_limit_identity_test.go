@@ -37,7 +37,7 @@ const limitFixtureRows = 8200
 // equal to its index, so a result's ORDER-free prefix is still checkable by value set.
 func seedLimitGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < limitFixtureRows; i++ {
 		k := "L" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

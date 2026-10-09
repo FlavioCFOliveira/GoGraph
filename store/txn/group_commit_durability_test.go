@@ -35,7 +35,7 @@ func TestGroupCommit_ConcurrentDurability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	const (

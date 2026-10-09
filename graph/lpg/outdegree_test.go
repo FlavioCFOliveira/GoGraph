@@ -11,8 +11,6 @@ package lpg_test
 // The cases that matter are the ones where a naive implementation diverges:
 //
 //   - a MULTIGRAPH, where parallel edges each occupy their own slot;
-//   - an UNDIRECTED graph, where insertion is mirrored so the adjacency already
-//     holds every incident edge;
 //   - a TOMBSTONED endpoint, which RemoveNode leaves in other nodes' adjacency
 //     — a raw slot count would include an edge the query layer treats as absent;
 //   - a SELF-LOOP, which must count exactly as the traversal counts it;
@@ -91,10 +89,7 @@ func TestOutDegreeMatchesEnumeration(t *testing.T) {
 		name string
 		cfg  adjlist.Config
 	}{
-		{"directed", adjlist.Config{Directed: true}},
-		{"directed-multigraph", adjlist.Config{Directed: true, Multigraph: true}},
-		{"undirected", adjlist.Config{}},
-		{"undirected-multigraph", adjlist.Config{Multigraph: true}},
+		{"default", adjlist.Config{}},
 	}
 
 	for _, c := range configs {
@@ -117,11 +112,9 @@ func TestOutDegreeMatchesEnumeration(t *testing.T) {
 			if err := g.AddEdge("loop", "loop", 1); err != nil {
 				t.Fatalf("AddEdge self-loop: %v", err)
 			}
-			if c.cfg.Multigraph {
-				// A second hub->a edge: in a multigraph it is its own slot.
-				if err := g.AddEdge("hub", "a", 2); err != nil {
-					t.Fatalf("AddEdge parallel: %v", err)
-				}
+			// A second hub->a edge: in a multigraph it is its own slot.
+			if err := g.AddEdge("hub", "a", 2); err != nil {
+				t.Fatalf("AddEdge parallel: %v", err)
 			}
 
 			for _, node := range []string{"hub", "a", "b", "c", "lonely", "loop"} {
@@ -146,7 +139,7 @@ func TestOutDegreeMatchesEnumeration(t *testing.T) {
 func TestOutDegreeAfterTombstone(t *testing.T) {
 	t.Parallel()
 
-	g := newDegreeGraph(t, adjlist.Config{Directed: true})
+	g := newDegreeGraph(t, adjlist.Config{})
 	for _, n := range []string{"hub", "a", "b", "c"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -190,7 +183,7 @@ func TestOutDegreeAfterTombstone(t *testing.T) {
 func TestOutDegreeByTypeMatchesEnumeration(t *testing.T) {
 	t.Parallel()
 
-	g := newDegreeGraph(t, adjlist.Config{Directed: true, Multigraph: true})
+	g := newDegreeGraph(t, adjlist.Config{})
 	for _, n := range []string{"hub", "a", "b", "c"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -246,7 +239,7 @@ func TestOutDegreeByTypeMatchesEnumeration(t *testing.T) {
 func TestOutDegreeUninternedNode(t *testing.T) {
 	t.Parallel()
 
-	g := newDegreeGraph(t, adjlist.Config{Directed: true})
+	g := newDegreeGraph(t, adjlist.Config{})
 	if err := g.AddNode("known"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -268,7 +261,7 @@ func TestOutDegreeUninternedNode(t *testing.T) {
 func TestOutDegreeFuncAgreesWithOutDegree(t *testing.T) {
 	t.Parallel()
 
-	g := newDegreeGraph(t, adjlist.Config{Directed: true, Multigraph: true})
+	g := newDegreeGraph(t, adjlist.Config{})
 	for i := 0; i < 8; i++ {
 		if err := g.AddEdge("hub", fmt.Sprintf("n%d", i), 1); err != nil {
 			t.Fatalf("AddEdge: %v", err)

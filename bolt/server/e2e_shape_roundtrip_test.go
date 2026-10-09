@@ -50,7 +50,7 @@ import (
 )
 
 // newShapeRoundtripDriver starts a fresh isolated bolt/server.Server backed by
-// a Directed: true, Multigraph: true engine and connects a neo4j-go-driver v5
+// a Multigraph: true engine and connects a neo4j-go-driver v5
 // driver to it. Both are cleaned up via t.Cleanup.
 //
 // This test cannot reuse the package's shared newEngine(t) helper (used by
@@ -65,7 +65,7 @@ import (
 // [cypher.ErrParallelEdgeInSimpleGraph] instead of silently no-oping.
 func newShapeRoundtripDriver(t *testing.T) neo4j.DriverWithContext {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	addr := startTestServerWithEngine(t, eng, server.Options{ConnTimeout: 10 * time.Second})
 
@@ -92,8 +92,8 @@ type shapeCase struct {
 func shortShapeCases() []shapeCase {
 	return []shapeCase{
 		// Family 1 — Degenerate / minimal
-		{name: "Path_n5", shape: shapegen.Path(5, true), undirected: false},
-		{name: "Path_n10_ud", shape: shapegen.Path(10, false), undirected: true},
+		{name: "Path_n5", shape: shapegen.Path(5), undirected: false},
+		{name: "Path_n10_ud", shape: shapegen.Path(10), undirected: true},
 
 		// Family 2 — Classic
 		{name: "Cycle_n8", shape: shapegen.Cycle(8, true), undirected: false},
@@ -131,7 +131,7 @@ func testShapeRoundtrip(
 ) {
 	t.Helper()
 
-	cfg := adjlist.Config{Directed: !tc.undirected}
+	cfg := adjlist.Config{}
 	g, err := tc.shape.Build(cfg)
 	if err != nil {
 		t.Fatalf("shape.Build: %v", err)

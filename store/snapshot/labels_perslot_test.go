@@ -181,7 +181,7 @@ func TestWriteLabels_PerSlotEdgeRecords(t *testing.T) {
 	for _, tc := range perSlotRecordCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, int64](adjlist.Config{})
 			tc.build(t, g)
 			srcID, ok := g.AdjList().Mapper().Lookup("a")
 			if !ok {
@@ -297,7 +297,7 @@ func TestReadLabels_VersionGate(t *testing.T) {
 // removes.
 func TestApplyLabelsToGraph_SlotOrdinalOutOfRange(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil { // ONE slot: ordinal 0 only
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestApplyLabelsToGraph_SlotOrdinalOutOfRange(t *testing.T) {
 // every column-typed slot of the pair carries.
 func TestApplyLabelsToGraph_OverflowSentinelRestoresPairHalf(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for i := 0; i < 2; i++ {
 		if err := g.AddEdge("a", "b", 0); err != nil {
 			t.Fatal(err)
@@ -369,7 +369,7 @@ func TestApplyLabelsToGraph_OverflowSentinelRestoresPairHalf(t *testing.T) {
 // pair whose only typed slot is the second reports ordinal 1, not 0.
 func TestForEachPairSlotRelType_SkipsUntypedSlot(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil { // untyped, ordinal 0
 		t.Fatal(err)
 	}

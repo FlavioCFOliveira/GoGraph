@@ -38,7 +38,7 @@ import (
 // actually implements.
 func thirdKeyLandsOnNodeIDZero(t *testing.T, n uint64) bool {
 	t.Helper()
-	probe := lpg.New[string, float64](adjlist.Config{Directed: true})
+	probe := lpg.New[string, float64](adjlist.Config{})
 	var third string
 	for i := uint64(1); i <= 3; i++ {
 		key := "__cx_" + strconv.FormatUint(n+i, 16)

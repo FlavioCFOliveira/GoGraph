@@ -3,8 +3,12 @@
 //
 // AdjList is the canonical builder used to assemble a graph
 // incrementally before it is frozen into an immutable CSR view for
-// analytics. It supports directed and undirected graphs (mirrored
-// insertion), parallel edges (multigraph mode), and self-loops.
+// analytics. It stores directed edges only: every edge is one src→dst slot in
+// src's entry. Every graph is a multigraph: each AddEdge appends a new edge with
+// its own stable handle, so parallel edges and self-loops are always kept. An
+// undirected view of the graph is an analytics projection built over the frozen
+// CSR ([github.com/FlavioCFOliveira/GoGraph/graph/csr.CSR.BuildSymmetric]), never
+// a storage mode.
 //
 // # Storage and concurrency
 //
@@ -36,9 +40,7 @@ import (
 	"context"
 	"errors"
 	"iter"
-	mathbits "math/bits"
 	"runtime"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -71,9 +73,9 @@ const (
 
 // Config selects the variant of graph implemented by an [AdjList].
 //
-// The zero value (Directed=false, Multigraph=false) builds a simple
-// undirected graph, which is rarely what users want; prefer
-// constructing a Config explicitly.
+// The zero value builds a directed multigraph with unbounded shards and a
+// weight column. Every graph is a directed multigraph: each AddEdge appends a
+// new edge, so there is no option selecting direction or multiplicity.
 type Config struct {
 	// MaxShardCapacity, when > 0, caps the number of node-slots that
 	// any individual shard may grow to. AddNode (or AddEdge that
@@ -83,17 +85,6 @@ type Config struct {
 	// The default (0) places no upper bound — a shard doubles its
 	// slot slice indefinitely.
 	MaxShardCapacity int
-
-	// Directed, when true, treats AddEdge as a directed insertion. When
-	// false, AddEdge also inserts the reverse edge (mirrored insertion).
-	Directed bool
-
-	// Multigraph, when true, allows parallel edges between the same
-	// pair of endpoints; AddEdge always appends. When false (simple
-	// graph), repeated AddEdge calls on the same endpoint pair are
-	// idempotent — the existing edge stays and the new weight is
-	// ignored.
-	Multigraph bool
 
 	// Weightless, when true, builds a graph that carries NO per-edge weight
 	// payload: the [adjEntry.weights] column is never allocated and stays nil
@@ -217,12 +208,6 @@ type AdjList[N comparable, W any] struct {
 	cfg Config
 
 	size atomic.Uint64
-
-	// removeAllRoundsHookForTest is a TEST-ONLY seam, nil in production and with
-	// no exported setter: it is told how many rounds each undirected
-	// [AdjList.RemoveAllEdgesFrom] took to find a stable locked set, so a test can
-	// pin the bound of rmp #2947's audit finding F8.
-	removeAllRoundsHookForTest func(rounds int)
 
 	// handleSeq mints stable per-slot edge handles. It starts at 0 and every
 	// handle is handleSeq.Add(1), so handles begin at 1 and are never reused.
@@ -446,8 +431,8 @@ const (
 // handles is a parallel column carrying a stable per-edge-slot handle
 // (uint64) for each neighbour. It is populated only when a caller
 // supplies a handle via [AdjList.AddEdgeH]; the plain [AdjList.AddEdge]
-// path leaves handles nil so simple graphs that never need per-instance
-// edge identity pay no extra memory. When non-nil, handles is the same
+// path leaves handles nil so graphs that never need per-instance edge
+// identity pay no extra memory. When non-nil, handles is the same
 // length as neighbours and is carried verbatim across compaction in
 // [AdjList.removeOneEdge] — a surviving slot keeps its ORIGINAL handle
 // (handles are never renumbered or reused).
@@ -598,22 +583,14 @@ func (a *AdjList[N, W]) Mapper() *graph.Mapper[N] {
 // docs/design-write-conflict-detection.md.
 func (a *AdjList[N, W]) Order() uint64 { return uint64(a.mapper.Len()) }
 
-// Size returns the number of edges currently in the graph. For an
-// undirected graph each AddEdge call is counted once; the mirrored
-// neighbour entry is stored but not double-counted. In multigraph
-// mode every parallel edge counts. Implements [graph.Graph].
+// Size returns the number of edges currently in the graph; every parallel
+// edge counts. Implements [graph.Graph].
 //
 // It is a STORED-state primitive: it reflects every uncommitted write, because
 // it is an eagerly maintained structure with no versioned form. It is not one
 // of the committed-only present-state readers (rmp #2965, round 6); see
 // docs/design-write-conflict-detection.md.
 func (a *AdjList[N, W]) Size() uint64 { return a.size.Load() }
-
-// Directed reports whether the graph is directed.
-func (a *AdjList[N, W]) Directed() bool { return a.cfg.Directed }
-
-// Multigraph reports whether parallel edges are allowed.
-func (a *AdjList[N, W]) Multigraph() bool { return a.cfg.Multigraph }
 
 // Weightless reports whether the graph carries no per-edge weight column
 // (see [Config.Weightless]). When true, [AdjList.LoadEntry] and
@@ -630,8 +607,8 @@ func (a *AdjList[N, W]) Weightless() bool { return a.cfg.Weightless }
 // Config is safe to call concurrently with any other operation and
 // always returns the same value for the lifetime of the AdjList. It is
 // used by the snapshot writer to persist the originating graph's
-// directed/multigraph shape so recovery can reconstruct the same
-// variant instead of guessing.
+// weightless shape so recovery can reconstruct the same variant instead
+// of guessing.
 func (a *AdjList[N, W]) Config() Config { return a.cfg }
 
 // AddNode inserts n if not already present. The node enters the
@@ -677,9 +654,7 @@ func (a *AdjList[N, W]) HasEdge(src, dst N) bool {
 }
 
 // AddEdge inserts a directed edge from src to dst with weight w, also
-// interning the endpoints if they are not yet known. When the graph
-// is undirected, the mirrored edge (dst, src) is inserted as well.
-// Implements [graph.Graph].
+// interning the endpoints if they are not yet known. Implements [graph.Graph].
 //
 // AddEdge returns [ErrShardFull] when [Config.MaxShardCapacity] is
 // set and the responsible shard would have to grow past the cap to
@@ -728,13 +703,9 @@ func (a *AdjList[N, W]) SeedHandleSeq(highWater uint64) {
 // parallel slot keeps its original handle, and handles are never reused
 // or renumbered.
 //
-// For an undirected graph the mirrored (dst, src) slot receives the SAME
-// handle, so both directions of one logical edge share one identity.
-//
 // AddEdgeH honours the same [ErrShardFull] and all-or-nothing contract as
-// [AdjList.AddEdge]. In simple-graph mode a duplicate (src, dst) is still
-// a no-op and the supplied handle is ignored (the existing slot keeps its
-// original handle).
+// [AdjList.AddEdge]. A repeated (src, dst) appends a parallel slot carrying
+// its own handle.
 func (a *AdjList[N, W]) AddEdgeH(src, dst N, w W, handle uint64) error {
 	return a.addEdge(src, dst, w, edgeExtra{handle: handle, hasHandle: true}, mvcc.Tx{})
 }
@@ -750,13 +721,10 @@ func (a *AdjList[N, W]) AddEdgeH(src, dst N, w W, handle uint64) error {
 // higher layer's "no label" sentinel). A label-free graph that never calls this
 // method keeps the labels column nil and pays no extra memory.
 //
-// For an undirected graph the mirrored (dst, src) slot receives the SAME label,
-// so both directions of one logical edge carry the same relationship type.
-//
 // AddEdgeLabeled honours the same [ErrShardFull] and all-or-nothing contract as
-// [AdjList.AddEdge]. In simple-graph mode a duplicate (src, dst) is still a
-// no-op and the supplied label is ignored (the existing slot keeps its label).
-// Use [AdjList.SetEdgeLabelSlot] to (re)label a slot of a pre-existing edge.
+// [AdjList.AddEdge]. A repeated (src, dst) appends a parallel slot carrying
+// its own label. Use [AdjList.SetEdgeLabelSlot] to (re)label a slot of a
+// pre-existing edge.
 func (a *AdjList[N, W]) AddEdgeLabeled(src, dst N, w W, label uint32) error {
 	return a.addEdge(src, dst, w, edgeExtra{label: label, hasLabel: true}, mvcc.Tx{})
 }
@@ -786,18 +754,10 @@ func (a *AdjList[N, W]) AddEdgeLabeledH(src, dst N, w W, handle uint64, label ui
 // path silently drops the payload, so the higher layer must register one before
 // using this method; lpg always does.
 //
-// For an undirected graph the mirrored (dst, src) slot receives the SAME label
-// (relationship type is symmetric) but NOT the property payload: the aux column
-// is directional, matching [AdjList.UpdateEntryAux] / the higher layer's
-// SetEdgeProperty, which writes only the source's entry. The higher layer reads a
-// pair's properties from the source's entry, so stamping the payload only on the
-// forward slot reproduces exactly the two-step AddEdgeLabeled + per-source
-// property write it replaces. AddEdgeLabeledWithProp honours the same
-// [ErrShardFull] and all-or-nothing contract as [AdjList.AddEdge]. In
-// simple-graph mode a duplicate (src, dst) is still a no-op and neither the
-// label nor the payload is stamped on the existing slot; use
-// [AdjList.SetEdgeLabelSlot] / [AdjList.UpdateEntryAux] to mutate a pre-existing
-// edge.
+// AddEdgeLabeledWithProp honours the same
+// [ErrShardFull] and all-or-nothing contract as [AdjList.AddEdge]. A repeated
+// (src, dst) appends a parallel slot; use [AdjList.SetEdgeLabelSlot] /
+// [AdjList.UpdateEntryAux] to mutate a pre-existing edge.
 func (a *AdjList[N, W]) AddEdgeLabeledWithProp(src, dst N, w W, label uint32, payload any) error {
 	return a.addEdge(src, dst, w, edgeExtra{
 		label: label, hasLabel: true,
@@ -824,39 +784,12 @@ type edgeExtra struct {
 	hasAuxPayload bool
 }
 
-// mirror returns the edgeExtra to stamp on an undirected edge's MIRROR (dst,src)
-// slot. The handle and label are symmetric (both directions of one logical edge
-// share an identity and a relationship type), but the aux-column payload is NOT:
-// edge properties are stored directionally on the source's entry, matching
-// [AdjList.UpdateEntryAux] and the higher layer's per-source SetEdgeProperty, so
-// the mirror carries no payload. This keeps the fused undirected write
-// observationally identical to the two-step AddEdgeLabeled + property write.
-func (ex edgeExtra) mirror() edgeExtra {
-	ex.auxPayload = nil
-	ex.hasAuxPayload = false
-	return ex
-}
-
 // addEdge is the shared implementation of [AdjList.AddEdge], [AdjList.AddEdgeH],
 // [AdjList.AddEdgeLabeled], and [AdjList.AddEdgeLabeledH]. The optional handle
 // and label in ex are stamped onto the new slot's parallel columns at append
 // time; when a "has" flag is false that column is left untouched (nil for a
 // fresh entry).
-//
-// For undirected multigraphs where src and dst land in DIFFERENT shards the
-// two shard locks are acquired simultaneously in a canonical (lower-index-
-// first) order before both appends are performed. This ensures the forward
-// and mirror slots are assigned atomically — no concurrent parallel-edge
-// insertion can interleave between the two appends — so both directions
-// always reflect the same slot ordering.
 func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra, tx mvcc.Tx) error {
-	_, err := a.addEdgeReport(src, dst, w, ex, tx)
-	return err
-}
-
-// addEdgeReport is [AdjList.addEdge] reporting whether a slot was inserted: false
-// for a simple graph's duplicate, which leaves the adjacency as it was.
-func (a *AdjList[N, W]) addEdgeReport(src, dst N, w W, ex edgeExtra, tx mvcc.Tx) (bool, error) {
 	// EVERY slot gets a handle (rmp #2317). A caller that supplied one — the
 	// Cypher write path, a WAL replay re-stamping the handle the log recorded —
 	// keeps it, so identity is preserved verbatim across recovery. A caller that
@@ -867,63 +800,20 @@ func (a *AdjList[N, W]) addEdgeReport(src, dst N, w W, ex edgeExtra, tx mvcc.Tx)
 	}
 	srcID := a.mapper.Intern(src)
 	dstID := a.mapper.Intern(dst)
-
-	// Directed graphs and self-loops need only the forward append.
-	if a.cfg.Directed || srcID == dstID {
-		inserted, err := a.upsertEdge(srcID, dstID, w, ex, tx)
-		if err != nil {
-			return false, err
-		}
-		if inserted {
-			a.size.Add(1)
-		}
-		return inserted, nil
-	}
-
-	// Undirected, non-self-loop: both directions must be appended atomically.
-	// Both shard locks are taken in ascending shard order (once when the two
-	// endpoints share a shard), the order every multi-shard path in this package
-	// uses, so no concurrent goroutine can interleave between the two appends and
-	// no two such paths can deadlock.
-	lo, hi := a.lockPair(srcID, dstID)
-	defer a.unlockPair(lo, hi)
-
-	// A write that carries no transaction checks BOTH entries before it writes
-	// either, so a conflict on the mirror leaves the forward entry untouched
-	// (rmp #2947, see direct_conflict.go). A no-op for a transactional write.
-	if err := a.directConflictLockedID(tx, srcID); err != nil {
-		return false, err
-	}
-	if err := a.directConflictLockedID(tx, dstID); err != nil {
-		return false, err
-	}
-
-	inserted, err := a.upsertEdgeLocked(srcID, dstID, w, ex, tx)
-	if err != nil || !inserted {
-		return false, err
-	}
-	// Forward slot appended. Now append the mirror under the same locks.
-	if _, err := a.upsertEdgeLocked(dstID, srcID, w, ex.mirror(), tx); err != nil {
-		// Undo the forward append before releasing — the locks are still held, so
-		// the rollback is atomic with respect to any reader. The mirror can fail
-		// only on shard capacity: both entries were checked above.
-		if cerr := a.removeOneEdgeLocked(srcID, dstID, tx); cerr != nil {
-			return false, errors.Join(err, cerr)
-		}
-		return false, err
+	if err := a.upsertEdge(srcID, dstID, w, ex, tx); err != nil {
+		return err
 	}
 	a.size.Add(1)
-	return true, nil
+	return nil
 }
 
-// upsertEdge publishes a new adjacency snapshot for src that includes
-// (dst, w). Returns (false, nil) when (in simple-graph mode) dst is
-// already a neighbour, and (false, ErrShardFull) when the responsible
-// shard would have to grow past [Config.MaxShardCapacity]. The new
+// upsertEdge publishes a new adjacency snapshot for src that appends
+// (dst, w). It returns ErrShardFull when the responsible shard would have
+// to grow past [Config.MaxShardCapacity]. The new
 // snapshot is constructed fresh and swapped in via atomic.StorePointer
 // so concurrent readers always observe a consistent immutable
 // adjacency.
-func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) (bool, error) {
+func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) error {
 	s := &a.shards[src&shardMask]
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -942,10 +832,7 @@ func growCap(cur int) int {
 
 // upsertEdgeLocked is the lock-free body of [AdjList.upsertEdge]. The
 // caller must already hold the shard mutex for src (i.e.
-// a.shards[src&shardMask].mu). This variant exists so that [AdjList.addEdge]
-// can acquire multiple shard locks at once — for undirected multigraph
-// cross-shard pairs — and perform both appends inside the combined critical
-// section.
+// a.shards[src&shardMask].mu).
 //
 // Append strategy: when the current backing array has spare capacity the new
 // entry reuses the SAME backing array (new slice headers only, no allocation).
@@ -955,22 +842,22 @@ func growCap(cur int) int {
 // readers). When the array is full a new one is allocated with geometric
 // capacity (growCap), amortising the copy cost to O(log d) large allocations
 // per degree-d hub.
-func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) (bool, error) {
-	inserted, err := a.upsertEdgeSlotLocked(src, dst, w, ex, tx)
-	if inserted {
+func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) error {
+	err := a.upsertEdgeSlotLocked(src, dst, w, ex, tx)
+	if err == nil {
 		// THE one place an edge slot comes into existence, so the one place the
 		// reverse index has to learn of it. Called with this shard's lock held,
 		// which is sound because the reverse index is a leaf in the lock order
 		// (reverse.go) and never reaches back for an adjacency lock.
 		a.rev.add(dst, src)
 	}
-	return inserted, err
+	return err
 }
 
 // upsertEdgeSlotLocked is [AdjList.upsertEdgeLocked] without the reverse-index
 // maintenance, so that the forward publication has exactly one implementation
 // and the index update has exactly one call site.
-func (a *AdjList[N, W]) upsertEdgeSlotLocked(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) (bool, error) {
+func (a *AdjList[N, W]) upsertEdgeSlotLocked(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) error {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 	// FIRST, before any no-op early return: a write carrying no transaction
@@ -978,7 +865,7 @@ func (a *AdjList[N, W]) upsertEdgeSlotLocked(src, dst graph.NodeID, w W, ex edge
 	// change, and returning then would lose it to the peer's rollback
 	// (rmp #2947, the shape of rmp #2943). No-op for a transactional write.
 	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
-		return false, err
+		return err
 	}
 
 	current := loadEntry[W](s, intraIdx)
@@ -1018,18 +905,10 @@ func (a *AdjList[N, W]) upsertEdgeSlotLocked(src, dst graph.NodeID, w W, ex edge
 			entry.aux = a.auxFactory(1, ex.auxPayload)
 		}
 		if err := a.storeEntry(s, intraIdx, entry, tx); err != nil {
-			return false, err
+			return err
 		}
-		return true, nil
+		return nil
 	}
-	if !a.cfg.Multigraph {
-		for _, n := range current.neighbours {
-			if n == dst {
-				return false, nil
-			}
-		}
-	}
-
 	oldLen := len(current.neighbours)
 	newLen := oldLen + 1
 
@@ -1090,9 +969,9 @@ func (a *AdjList[N, W]) upsertEdgeSlotLocked(src, dst graph.NodeID, w W, ex edge
 		// gains an aux column, so a label-/property-free graph pays nothing.
 		ax := a.growAuxEx(current.aux, oldLen, ex)
 		if err := a.storeEntry(s, intraIdx, &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls, aux: ax}, tx); err != nil {
-			return false, err
+			return err
 		}
-		return true, nil
+		return nil
 	}
 
 	// Slow path: backing array is full — allocate with geometric capacity and
@@ -1134,9 +1013,9 @@ func (a *AdjList[N, W]) upsertEdgeSlotLocked(src, dst graph.NodeID, w W, ex edge
 	// the new slot at oldLen PRESENT, otherwise the new slot is absent.
 	newAux := a.growAuxEx(current.aux, oldLen, ex)
 	if err := a.storeEntry(s, intraIdx, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH, labels: newL, aux: newAux}, tx); err != nil {
-		return false, err
+		return err
 	}
-	return true, nil
+	return nil
 }
 
 // growAuxEx returns the aux column for an entry that has just grown by one slot
@@ -1175,20 +1054,9 @@ func (a *AdjList[N, W]) growAuxEx(cur AuxColumn, oldLen int, ex edgeExtra) AuxCo
 // multigraphs only one occurrence is removed per call. The endpoints
 // remain in the graph. Implements [graph.Graph].
 //
-// For undirected multigraphs, after removing the first-match slot from the
-// forward direction, the mirror is removed by handle identity (when the
-// removed slot carried a non-zero handle). This ensures that — even after
-// concurrent parallel adds that may have reshuffled slot positions relative
-// to what they were at creation time — the same logical edge is retired from
-// both directions. When no handle is present (plain AddEdge path) the mirror
-// falls back to first-match behaviour, which is correct in the single-writer
-// case that plain AddEdge implies.
-//
 // It returns a [*mvcc.Conflict] for [mvcc.StoreAdjacency], and changes
 // nothing, when an entry the removal would replace was published by a
-// transaction that has not committed (rmp #2947, see direct_conflict.go). An
-// undirected removal checks both entries under both shard locks before it
-// writes either.
+// transaction that has not committed (rmp #2947, see direct_conflict.go).
 //
 // RemoveEdge is safe for concurrent use.
 func (a *AdjList[N, W]) RemoveEdge(src, dst N) error {
@@ -1207,34 +1075,9 @@ func (a *AdjList[N, W]) removeEdgeTx(src, dst N, tx mvcc.Tx) error {
 	if !ok {
 		return nil
 	}
-	if a.cfg.Directed || srcID == dstID {
-		removed, _, err := a.removeOneEdgeWithHandle(srcID, dstID, tx)
-		if removed {
-			a.size.Add(^uint64(0))
-		}
-		return err
-	}
-	// Undirected: both entries under both locks, checked before either is
-	// written, so the two directions retire together or not at all.
-	lo, hi := a.lockPair(srcID, dstID)
-	defer a.unlockPair(lo, hi)
-	if err := a.directConflictLockedID(tx, srcID); err != nil {
-		return err
-	}
-	if err := a.directConflictLockedID(tx, dstID); err != nil {
-		return err
-	}
-	removed, removedHandle, err := a.removeOneEdgeWithHandleLocked(srcID, dstID, tx)
-	if err != nil || !removed {
-		return err
-	}
-	a.size.Add(^uint64(0))
-	// Mirror removal: prefer handle-based targeting when the removed slot
-	// carried a non-zero handle; fall back to first-match otherwise.
-	if removedHandle != 0 {
-		_, err = a.removeOneEdgeByHandleLocked(dstID, srcID, removedHandle, tx)
-	} else {
-		err = a.removeOneEdgeLocked(dstID, srcID, tx)
+	removed, _, err := a.removeOneEdgeWithHandle(srcID, dstID, tx)
+	if removed {
+		a.size.Add(^uint64(0))
 	}
 	return err
 }
@@ -1249,11 +1092,7 @@ func (a *AdjList[N, W]) removeEdgeTx(src, dst N, tx mvcc.Tx) error {
 // This is the instance-precise counterpart of [AdjList.RemoveEdge], which
 // removes the FIRST src→dst slot regardless of identity: a Cypher DELETE of a
 // specifically-bound parallel-edge instance must retire the EXACT slot the
-// instance was bound to, not the lowest-indexed occurrence (rmp #2018). For an
-// undirected multigraph the mirror (dst→src) slot carrying the same handle is
-// removed too, so both directions of the one logical edge are retired even
-// after concurrent parallel adds reshuffled slot positions. The edge counter
-// is decremented once for the logical edge.
+// instance was bound to, not the lowest-indexed occurrence (rmp #2018).
 //
 // It refuses with a [*mvcc.Conflict], reporting false and changing nothing, on
 // the same terms as [AdjList.RemoveEdge] (rmp #2947).
@@ -1275,49 +1114,21 @@ func (a *AdjList[N, W]) removeEdgeByHandleTx(src, dst N, handle uint64, tx mvcc.
 	if !ok {
 		return false, nil
 	}
-	if a.cfg.Directed || srcID == dstID {
-		removed, err := a.removeOneEdgeByHandle(srcID, dstID, handle, tx)
-		if removed {
-			a.size.Add(^uint64(0))
-		}
-		return removed, err
+	removed, err := a.removeOneEdgeByHandle(srcID, dstID, handle, tx)
+	if removed {
+		a.size.Add(^uint64(0))
 	}
-	lo, hi := a.lockPair(srcID, dstID)
-	defer a.unlockPair(lo, hi)
-	if err := a.directConflictLockedID(tx, srcID); err != nil {
-		return false, err
-	}
-	if err := a.directConflictLockedID(tx, dstID); err != nil {
-		return false, err
-	}
-	removed, err := a.removeOneEdgeByHandleLocked(srcID, dstID, handle, tx)
-	if err != nil || !removed {
-		return false, err
-	}
-	a.size.Add(^uint64(0))
-	// Undirected: retire the mirror slot carrying the same handle. A false
-	// return here is benign (the mirror may already be gone); the logical edge
-	// counter was decremented once above.
-	if _, err := a.removeOneEdgeByHandleLocked(dstID, srcID, handle, tx); err != nil {
-		return true, err
-	}
-	return true, nil
+	return removed, err
 }
 
 // RemoveAllEdgesFrom removes all edges incident from src in O(d) time for a
 // degree-d hub, instead of the O(d²) cost of d sequential [AdjList.RemoveEdge]
 // calls.
 //
-// For directed graphs the method zeroes src's adjacency slot atomically and
-// decrements the edge counter by the number of removed edges. For undirected
-// graphs it additionally removes the mirror entry (src from each dst's list).
-//
-// An undirected removal holds the lock of every shard it writes — src's and
-// each neighbour's, taken in ascending shard order — for its whole duration, so
-// concurrent readers observe either the full pre-deletion state or the
-// post-deletion state of every entry it touches, and a write that carries no
-// transaction checks every one of those entries before it writes any. It
-// refuses with a [*mvcc.Conflict], changing nothing, when one of them was
+// The method zeroes src's adjacency slot atomically under src's shard lock and
+// decrements the edge counter by the number of removed edges, so concurrent
+// readers observe either the full pre-deletion entry or the empty one. It
+// refuses with a [*mvcc.Conflict], changing nothing, when the entry was
 // published by a transaction that has not committed (rmp #2947).
 //
 // RemoveAllEdgesFrom is safe for concurrent use.
@@ -1334,53 +1145,25 @@ func (a *AdjList[N, W]) removeAllEdgesFromTx(src N, tx mvcc.Tx) error {
 		return nil
 	}
 
-	if a.cfg.Directed {
-		// The destinations land in a caller-owned buffer, so a small degree costs
-		// no allocation, as the inline copy this replaced did not.
-		var buf [8]graph.NodeID
-		dsts, info, ts, err := a.removeAllEdgesDirectedLocked(srcID, tx, buf[:0])
-		if err != nil || len(dsts) == 0 {
-			return err
-		}
-		// Every slot just published away was an in-edge of its destination.
-		// One call per SLOT, not per distinct destination, so parallel edges
-		// lose exactly as many recorded in-edges as the forward entry held.
-		for _, dstID := range dsts {
-			a.rev.remove(dstID, srcID, info, ts)
-		}
-		// The two's-complement trick (^uint64(removed-1)) is -removed.
-		a.size.Add(^uint64(len(dsts) - 1))
-		return nil
+	// The destinations land in a caller-owned buffer, so a small degree costs
+	// no allocation, as the inline copy this replaced did not.
+	var buf [8]graph.NodeID
+	dsts, info, ts, err := a.removeAllEdgesLocked(srcID, tx, buf[:0])
+	if err != nil || len(dsts) == 0 {
+		return err
 	}
-
-	// Undirected: the set of entries to write is src's plus every neighbour's,
-	// and it is known only once src's entry has been read under its lock.
-	//
-	// THE LOCKED SET ONLY GROWS (rmp #2947, audit F8). Each round locks every
-	// shard of the set in ascending order and reads src's entry; when every shard
-	// the entry names is already in the set, the round removes and returns, and
-	// otherwise it adds the missing shards and starts again. A round that does
-	// not finish adds at least one shard, so a call finishes in at most
-	// shardCount rounds whatever concurrent appenders do. The previous form
-	// locked exactly the entry's CURRENT shards and restarted whenever the entry
-	// changed in between, which nothing bounded: measured at 1985 restarts and
-	// 3.17 s for one call against 64 appenders to the same node.
-	var locked shardSet
-	locked.add(uint64(srcID) & shardMask)
-	for round := 1; ; round++ {
-		need, finished, err := a.removeAllEdgesUndirectedRound(srcID, &locked, tx)
-		if finished {
-			a.noteRemoveAllRounds(round)
-			return err
-		}
-		if err != nil {
-			return err
-		}
-		locked = need
+	// Every slot just published away was an in-edge of its destination.
+	// One call per SLOT, not per distinct destination, so parallel edges
+	// lose exactly as many recorded in-edges as the forward entry held.
+	for _, dstID := range dsts {
+		a.rev.remove(dstID, srcID, info, ts)
 	}
+	// The two's-complement trick (^uint64(removed-1)) is -removed.
+	a.size.Add(^uint64(len(dsts) - 1))
+	return nil
 }
 
-// removeAllEdgesDirectedLocked is the locked half of a directed
+// removeAllEdgesLocked is the locked half of
 // [AdjList.RemoveAllEdgesFrom]: under src's shard lock it tests and empties
 // src's entry, and returns the destinations it held with the removal's stamp, so
 // the caller retires the reverse-index arcs after the lock is released. It
@@ -1391,7 +1174,7 @@ func (a *AdjList[N, W]) removeAllEdgesFromTx(src N, tx mvcc.Tx) error {
 // shard locked: an implicit transaction's deferred settlement withdraws its
 // entries under these same shard locks ([AdjList.WithdrawTx]), and would
 // otherwise deadlock on the way out of the panic.
-func (a *AdjList[N, W]) removeAllEdgesDirectedLocked(srcID graph.NodeID, tx mvcc.Tx, dst []graph.NodeID) ([]graph.NodeID, *mvcc.CommitInfo, uint64, error) {
+func (a *AdjList[N, W]) removeAllEdgesLocked(srcID graph.NodeID, tx mvcc.Tx, dst []graph.NodeID) ([]graph.NodeID, *mvcc.CommitInfo, uint64, error) {
 	s := &a.shards[srcID&shardMask]
 	intraIdx := uint64(srcID) >> shardBits
 	s.mu.Lock()
@@ -1414,207 +1197,6 @@ func (a *AdjList[N, W]) removeAllEdgesDirectedLocked(srcID graph.NodeID, tx mvcc
 	}
 	info, ts := a.removalStamp(s, intraIdx)
 	return append(dst, old.neighbours...), info, ts, nil
-}
-
-// removeAllEdgesUndirectedRound is one round of an undirected
-// [AdjList.RemoveAllEdgesFrom]: it locks every shard in locked, in ascending
-// order, and either finishes the removal — finished is true and err is its
-// outcome — or returns the larger set the next round must lock. A conflict
-// refuses with finished false and err set, having changed nothing.
-//
-// locked is not modified, and the locks are released by a deferred call over
-// that same set, so a panic under them cannot leave any shard locked; see
-// [AdjList.removeAllEdgesDirectedLocked] for the deadlock that prevents.
-func (a *AdjList[N, W]) removeAllEdgesUndirectedRound(srcID graph.NodeID, locked *shardSet, tx mvcc.Tx) (need shardSet, finished bool, err error) {
-	s := &a.shards[srcID&shardMask]
-	intraIdx := uint64(srcID) >> shardBits
-	a.lockSet(locked)
-	defer a.unlockSet(locked)
-	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
-		return need, false, err
-	}
-	old := loadEntry[W](s, intraIdx)
-	if old == nil || len(old.neighbours) == 0 {
-		return need, true, nil
-	}
-	need = *locked
-	for _, nb := range old.neighbours {
-		need.add(uint64(nb) & shardMask)
-	}
-	if need == *locked {
-		return need, true, a.removeAllEdgesUndirectedLocked(srcID, old, tx)
-	}
-	return need, false, nil
-}
-
-// shardSet is a set of adjacency shard indexes, one bit per shard, so the
-// expanding lock set of an undirected [AdjList.RemoveAllEdgesFrom] costs no
-// allocation per round.
-type shardSet [shardCount / 64]uint64
-
-// add puts shard sh in the set.
-func (ss *shardSet) add(sh uint64) { ss[sh>>6] |= 1 << (sh & 63) }
-
-// lockSet locks every shard in ss in ascending shard order, the order every
-// multi-shard path in this package takes.
-func (a *AdjList[N, W]) lockSet(ss *shardSet) {
-	for w, bits := range ss {
-		for b := bits; b != 0; b &= b - 1 {
-			a.shards[uint64(w)<<6|uint64(mathbits.TrailingZeros64(b))].mu.Lock()
-		}
-	}
-}
-
-// unlockSet releases every shard [AdjList.lockSet] locked.
-func (a *AdjList[N, W]) unlockSet(ss *shardSet) {
-	for w, bits := range ss {
-		for b := bits; b != 0; b &= b - 1 {
-			a.shards[uint64(w)<<6|uint64(mathbits.TrailingZeros64(b))].mu.Unlock()
-		}
-	}
-}
-
-// noteRemoveAllRounds reports how many rounds an undirected
-// [AdjList.RemoveAllEdgesFrom] took to a test-only observer.
-func (a *AdjList[N, W]) noteRemoveAllRounds(rounds int) {
-	if h := a.removeAllRoundsHookForTest; h != nil {
-		h(rounds)
-	}
-}
-
-// removeAllEdgesUndirectedLocked is the body of an undirected
-// [AdjList.RemoveAllEdgesFrom] once every shard it writes is locked and cur is
-// src's current entry.
-func (a *AdjList[N, W]) removeAllEdgesUndirectedLocked(srcID graph.NodeID, cur *adjEntry[W], tx mvcc.Tx) error {
-	// Every entry is checked before any is written (rmp #2947).
-	if err := a.directConflictLockedID(tx, srcID); err != nil {
-		return err
-	}
-	for _, dstID := range cur.neighbours {
-		if dstID == srcID {
-			continue
-		}
-		if err := a.directConflictLockedID(tx, dstID); err != nil {
-			return err
-		}
-	}
-	s := &a.shards[srcID&shardMask]
-	intraIdx := uint64(srcID) >> shardBits
-	if err := a.storeEntry(s, intraIdx, nil, tx); err != nil {
-		return err
-	}
-	info, ts := a.removalStamp(s, intraIdx)
-	removed := len(cur.neighbours)
-	for _, dstID := range cur.neighbours {
-		a.rev.remove(dstID, srcID, info, ts)
-	}
-	a.size.Add(^uint64(removed - 1))
-	// Remove src from each dst's list, ONE rewrite per distinct neighbour: a
-	// neighbour reached by k parallel edges loses its k mirror slots in a single
-	// compaction instead of k compactions of the same entry, so the work under
-	// the held locks is linear in the entries touched rather than quadratic in
-	// the multiplicity (rmp #2947, audit F8). Self-loops are already cleared by
-	// the slot zeroing above and must not be processed again.
-	dsts := slices.Clone(cur.neighbours)
-	slices.Sort(dsts)
-	for i := 0; i < len(dsts); {
-		j := i + 1
-		for j < len(dsts) && dsts[j] == dsts[i] {
-			j++
-		}
-		if dstID := dsts[i]; dstID != srcID {
-			if err := a.removeOccurrencesLocked(dstID, srcID, j-i, tx); err != nil {
-				return err
-			}
-		}
-		i = j
-	}
-	return nil
-}
-
-// removeOccurrencesLocked removes the first n slots of src's entry that point at
-// dst, in one rewrite of the entry, and retires one in-edge record per slot. It
-// is a no-op when the entry holds none. The caller holds src's shard lock.
-func (a *AdjList[N, W]) removeOccurrencesLocked(src, dst graph.NodeID, n int, tx mvcc.Tx) error {
-	s := &a.shards[src&shardMask]
-	intraIdx := uint64(src) >> shardBits
-	current := loadEntry[W](s, intraIdx)
-	if current == nil {
-		return nil
-	}
-	idxs := make([]int, 0, n)
-	for i, nb := range current.neighbours {
-		if nb == dst {
-			idxs = append(idxs, i)
-			if len(idxs) == n {
-				break
-			}
-		}
-	}
-	if len(idxs) == 0 {
-		return nil
-	}
-	var next *adjEntry[W]
-	if len(idxs) < len(current.neighbours) {
-		next = compactEntryAt(current, idxs)
-	}
-	if err := a.storeEntry(s, intraIdx, next, tx); err != nil {
-		return err
-	}
-	info, ts := a.removalStamp(s, intraIdx)
-	for range idxs {
-		a.rev.remove(dst, src, info, ts)
-	}
-	return nil
-}
-
-// compactEntryAt is [compactEntry] for several slots at once: it returns a new
-// entry equal to current with every slot in idxs — ascending, distinct, valid —
-// removed, every surviving slot keeping its handle, label and aux value.
-func compactEntryAt[W any](current *adjEntry[W], idxs []int) *adjEntry[W] {
-	if len(idxs) == 1 {
-		return compactEntry(current, idxs[0])
-	}
-	n := len(current.neighbours) - len(idxs)
-	drop := make([]bool, len(current.neighbours))
-	for _, i := range idxs {
-		drop[i] = true
-	}
-	next := &adjEntry[W]{neighbours: make([]graph.NodeID, 0, n)}
-	if current.weights != nil {
-		next.weights = make([]W, 0, n)
-	}
-	if current.handles != nil {
-		next.handles = make([]uint64, 0, n)
-	}
-	if current.labels != nil {
-		next.labels = make([]uint32, 0, n)
-	}
-	for i, nb := range current.neighbours {
-		if drop[i] {
-			continue
-		}
-		next.neighbours = append(next.neighbours, nb)
-		if current.weights != nil {
-			next.weights = append(next.weights, current.weights[i])
-		}
-		if current.handles != nil {
-			next.handles = append(next.handles, current.handles[i])
-		}
-		if current.labels != nil {
-			next.labels = append(next.labels, current.labels[i])
-		}
-	}
-	if current.aux != nil {
-		// AuxColumn excises one slot per call; descending order keeps every
-		// index still to be excised valid.
-		aux := current.aux
-		for k := len(idxs) - 1; k >= 0; k-- {
-			aux = aux.CompactSlot(idxs[k])
-		}
-		next.aux = aux
-	}
-	return next
 }
 
 // removeOneEdgeWithHandle publishes a new adjacency snapshot for src that
@@ -1682,15 +1264,6 @@ func (a *AdjList[N, W]) retireSlotLocked(s *adjShard[W], intraIdx uint64, curren
 	info, ts := a.removalStamp(s, intraIdx)
 	a.rev.remove(dst, src, info, ts)
 	return nil
-}
-
-// removeOneEdgeLocked removes one occurrence of dst from src's entry.
-// The caller must already hold the shard mutex for src. It is used by
-// [AdjList.addEdge] to roll back a forward append while still holding both
-// shard locks, and by the undirected removals for the mirror entry.
-func (a *AdjList[N, W]) removeOneEdgeLocked(src, dst graph.NodeID, tx mvcc.Tx) error {
-	_, _, err := a.removeOneEdgeWithHandleLocked(src, dst, tx)
-	return err
 }
 
 // removeOneEdgeByHandle publishes a new adjacency snapshot for src that omits
@@ -1876,10 +1449,8 @@ func (a *AdjList[N, W]) Neighbours(src N) iter.Seq2[N, W] {
 // (lpg.Graph.OutDegree), which applies the same tombstone gate lpg's own
 // traversal applies.
 //
-// For an UNDIRECTED graph this is the node's full degree: [AdjList.AddEdge]
-// mirrors the insertion, so a node's adjacency already holds every incident
-// edge. For a DIRECTED graph it is the out-degree only — the adjacency appends
-// forward edges alone, so in-degree is not an adjacency-local quantity. In-edge
+// It is the out-degree only — the adjacency appends forward edges alone, so
+// in-degree is not an adjacency-local quantity. In-edge
 // enumeration is served by the reverse CSR ([github.com/FlavioCFOliveira/GoGraph/graph/csr.CSR.BuildReverse]),
 // which is built on demand by the query layer; asking this method for it would
 // mean scanning the whole graph, so it does not offer to.

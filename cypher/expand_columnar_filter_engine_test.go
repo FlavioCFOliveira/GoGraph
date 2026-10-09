@@ -64,7 +64,7 @@ func farNodeGraph(t *testing.T) *lpg.Graph[string, float64] {
 		{true, lpg.DateValue(time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC))},
 		{false, lpg.PropertyValue{}},
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("hub"); err != nil {
 		t.Fatalf("AddNode(hub): %v", err)
 	}

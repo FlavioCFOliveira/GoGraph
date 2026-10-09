@@ -32,7 +32,7 @@ import (
 // graph and returns both, so a test can inspect the live graph directly.
 func storelessEngineWithGraph(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64]) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return cypher.NewEngine(g), g
 }
 

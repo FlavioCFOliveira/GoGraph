@@ -40,7 +40,7 @@ func newCypherEngine() (*lpg.Graph[string, float64], *cypher.Engine) {
 // exposed, so the per-handle stores that only multigraph mode populates can be
 // switched off and their cost measured rather than estimated.
 func newCypherEngineMode(multigraph bool) (*lpg.Graph[string, float64], *cypher.Engine) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: multigraph})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	return g, cypher.NewEngine(g)
 }

@@ -19,7 +19,6 @@ func ExampleReadInto() {
 		"c,a,3\n"
 
 	opts := csv.DefaultOptions()
-	opts.Directed = true
 
 	g, rows, err := csv.ReadInto(strings.NewReader(data), opts)
 	if err != nil {
@@ -42,7 +41,7 @@ func ExampleReadInto() {
 // The serialised row order follows internal NodeID assignment, so the
 // example asserts on edge presence rather than on exact bytes.
 func ExampleWrite() {
-	src := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	src := adjlist.New[string, int64](adjlist.Config{})
 	_ = src.AddEdge("a", "b", 1)
 	_ = src.AddEdge("a", "c", 2)
 	_ = src.AddEdge("b", "c", 3)
@@ -54,7 +53,6 @@ func ExampleWrite() {
 	}
 
 	readOpts := csv.DefaultOptions()
-	readOpts.Directed = true
 	dst, _, err := csv.ReadInto(&buf, readOpts)
 	if err != nil {
 		panic(err)

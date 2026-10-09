@@ -134,7 +134,7 @@ func TestJohnsonAPSP_RandomVsFloydWarshall_Property(t *testing.T) {
 	rapid.Check(t, func(r *rapid.T) {
 		n := rapid.IntRange(2, 10).Draw(r, "n")
 		m := rapid.IntRange(0, 3*n).Draw(r, "m")
-		a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+		a := adjlist.New[int, int64](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			if err := a.AddNode(i); err != nil {
 				t.Fatalf("AddNode: %v", err)
@@ -185,7 +185,7 @@ func TestJohnsonAPSP_RandomVsFloydWarshall_Property(t *testing.T) {
 // that receive a (small) negative weight; 0 means strictly positive.
 func sparseRandomCSR(t testing.TB, n int, seed1, seed2 uint64, negativeFraction float64) *csr.CSR[int64] {
 	t.Helper()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		if err := a.AddNode(i); err != nil {
 			t.Fatalf("AddNode: %v", err)

@@ -22,7 +22,7 @@ import (
 )
 
 func TestRunInTx_MultiEdgeSingleCreate(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -44,7 +44,7 @@ func TestRunInTx_MultiEdgeSingleCreate(t *testing.T) {
 }
 
 func TestRunInTx_MultiEdgeBidirectional(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -59,7 +59,7 @@ func TestRunInTx_MultiEdgeBidirectional(t *testing.T) {
 }
 
 func TestRunInTx_MatchPlusCreateRelationship(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -83,7 +83,7 @@ func TestRunInTx_MatchPlusCreateRelationship(t *testing.T) {
 }
 
 func TestRunInTx_AnonymousEndpoint(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

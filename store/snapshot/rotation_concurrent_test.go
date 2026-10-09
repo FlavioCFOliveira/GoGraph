@@ -32,7 +32,7 @@ func itoaSnap(i int) string {
 // uses a different generation counter in node names so successive
 // snapshots carry different content.
 func buildRotationGraph(gen, nEdges int) *lpg.Graph[string, int64] {
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	adj := g.AdjList()
 	for i := 0; i < nEdges; i++ {
 		src := "n" + itoaSnap(gen*100+i)

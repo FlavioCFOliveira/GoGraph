@@ -72,7 +72,7 @@ func TestRecovery_RemoveNodeReplay_Tombstones(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
 
 	tx := store.Begin()
@@ -130,7 +130,7 @@ func TestRecovery_DeleteSurvivesCheckpointReopen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open1 wal.Open: %v", err)
 		}
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
 		tx := store.Begin()
 		mustTx(t, tx.AddNode("auth"))
@@ -213,7 +213,7 @@ func TestRecovery_SnapshotLabelDoesNotResurrectAcrossWALRelabel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open1 wal.Open: %v", err)
 		}
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
 		tx := store.Begin()
 		mustTx(t, tx.AddNode("X"))
@@ -302,7 +302,7 @@ func TestRecovery_RemoveEdgeReplay_StripsStaleEdgeState(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open1 wal.Open: %v", err)
 		}
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
 		tx := store.Begin()
 		mustTx(t, tx.AddNode("a"))
@@ -377,7 +377,7 @@ func TestRecovery_ReplayOrdering_AddRemoveAddLeavesLive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
 
 	tx := store.Begin()
@@ -429,7 +429,7 @@ func TestRecovery_DetachDeleteWithEdges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
 
 	tx := store.Begin()
@@ -488,7 +488,7 @@ func TestRecovery_DeleteThenRecreateInLaterOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("wal.Open: %v", err)
 		}
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
 		tx := store.Begin()
 		mustTx(t, tx.AddNode("auth"))

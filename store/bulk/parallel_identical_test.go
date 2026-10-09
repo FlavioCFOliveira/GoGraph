@@ -77,7 +77,7 @@ func csrEqual(a, b *csr.CSR[int64]) (bool, string) {
 func loadSeq(t *testing.T, edges []Edge) (*csr.CSR[int64], []byte) {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "seq.csr")
-	l := New(Options{OutputPath: out, Directed: true})
+	l := New(Options{OutputPath: out})
 	if err := l.AddBatch(edges); err != nil {
 		t.Fatalf("seq AddBatch: %v", err)
 	}
@@ -95,7 +95,7 @@ func loadSeq(t *testing.T, edges []Edge) (*csr.CSR[int64], []byte) {
 func loadPar(t *testing.T, edges []Edge) (*csr.CSR[int64], []byte) {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "par.csr")
-	l := New(Options{OutputPath: out, Directed: true, Parallel: true})
+	l := New(Options{OutputPath: out, Parallel: true})
 	if err := l.AddBatch(edges); err != nil {
 		t.Fatalf("par AddBatch: %v", err)
 	}

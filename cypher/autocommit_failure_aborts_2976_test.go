@@ -32,7 +32,7 @@ func TestAutocommitFailureAborts_2976(t *testing.T) {
 		{
 			name: "in-memory",
 			mk: func(*testing.T) (*cypher.Engine, *lpg.Graph[string, float64]) {
-				g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+				g := lpg.New[string, float64](adjlist.Config{})
 				return cypher.NewEngine(g), g
 			},
 		},

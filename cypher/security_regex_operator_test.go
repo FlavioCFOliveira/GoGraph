@@ -73,7 +73,7 @@ func runScalar(t *testing.T, eng *cypher.Engine, query string) interface{} {
 // through the public engine and behaves as an anchored full-string match per
 // openCypher, while plain `=` equality is unchanged.
 func TestSec_Cypher_RegexMatchOperator(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	tests := []struct {

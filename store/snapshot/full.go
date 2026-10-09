@@ -12,6 +12,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
@@ -19,7 +20,7 @@ import (
 // arrays, the parsed labels readback (empty for v1 snapshots), the
 // parsed properties readback (empty when properties.bin is absent),
 // the parsed mapper readback (empty when mapper.bin is absent, e.g. a
-// v1 CSR-only snapshot or a v2 snapshot written without a codec for a
+// CSR-only snapshot or a snapshot written without a codec for a
 // non-string key type), the optional per-index byte payloads (one
 // entry per indexes/<name>.bin file referenced by the manifest), and
 // the manifest that produced them.
@@ -65,18 +66,23 @@ type LoadedSnapshot struct {
 	IndexDefs IndexDefsReadback
 	CSR       CSRReadback
 	Manifest  Manifest
+	// Legacy reports the legacy shape the manifest declares (rmp #3072). An
+	// undirected one is returned with both directions of every edge intact
+	// (see legacy_undirected.go); recovery replays the write-ahead log above
+	// the snapshot with the old semantics, folds each edge to one
+	// relationship, and checkpoints the store in the current format.
+	Legacy LegacyShape
 }
 
-// WriteSnapshotFull is the v2/v3 high-level helper: it lays out a
-// snapshot directory containing csr.bin (legacy v1 component),
-// labels.bin (v2 component), properties.bin (v2 component) and a
-// manifest indexing them. When the underlying [graph.Mapper] is
-// string-keyed (N=string) the writer additionally emits mapper.bin —
-// the durable (NodeID -> natural key) interning table — and the
-// manifest is stamped at [ManifestVersion] (v4). For any other N the
-// writer falls back to the v2 layout (no mapper.bin) and the manifest
-// records [manifestVersionV2]; recovery from a v2 snapshot continues
-// to rely on WAL replay to re-intern keys.
+// WriteSnapshotFull is the high-level helper: it lays out a
+// snapshot directory containing csr.bin, labels.bin, properties.bin
+// and a manifest indexing them. When the underlying [graph.Mapper] is
+// string-keyed (N=string), or a node-key codec is supplied, the writer
+// additionally emits mapper.bin — the durable (NodeID -> natural key)
+// interning table. Without it, recovery relies on WAL replay to
+// re-intern keys. The manifest is stamped at [ManifestVersion] (v5)
+// in both cases, so a build that predates v5 refuses every snapshot
+// this writer produces.
 //
 // Atomic publication is achieved by assembling the snapshot under
 // dir + ".tmp" and renaming it to dir on success — the same protocol
@@ -90,8 +96,7 @@ type LoadedSnapshot struct {
 // not implement [index.Serializer] are skipped (rebuild-on-restart).
 //
 // Callers that do not need durable LPG labels or properties can keep
-// using [WriteSnapshotCSR]; it writes a v1-shaped directory that
-// future readers (including this one) accept transparently.
+// using [WriteSnapshotCSR]; it writes a CSR-only directory.
 func WriteSnapshotFull[N comparable, W any](dir string, c *csr.CSR[W], g *lpg.Graph[N, W]) error {
 	defer metrics.Time("store.snapshot.WriteSnapshotFull").Stop()
 	err := WriteSnapshotFullCtx(context.Background(), dir, c, g)
@@ -576,8 +581,8 @@ func writeCaptureCore[W any](
 	// mapper.bin — durable (NodeID -> natural key) table. Whether it is
 	// present was decided at capture time: with a codec it is emitted for
 	// every key type; without one, only for string-keyed graphs (the
-	// historical v3 behaviour). When absent the snapshot stays v2 and
-	// recovery rebuilds the mapper from the WAL — the documented v2 contract.
+	// historical v3 behaviour). When absent, recovery rebuilds the mapper
+	// from the WAL. The manifest version does not depend on it.
 	mapperSize, mapperCRC, haveMapper := capt.mapper.size, capt.mapper.crc, capt.mapper.present
 	if haveMapper {
 		if err := writeCapturedComponent(fsys, filepath.Join(tmp, MapperFile), capt.mapper); err != nil {
@@ -731,19 +736,18 @@ func writeCaptureCore[W any](
 		return err
 	}
 
-	// Manifest version is v3 only when mapper.bin was emitted; non-
-	// string-keyed graphs continue to produce v2 manifests so existing
-	// recovery tests (which compare Manifest.Version against the
-	// build's [ManifestVersion]) keep passing for every shape that
-	// already worked before this change.
-	manifestVersion := manifestVersionV2
+	// Every manifest this build writes is stamped [ManifestVersion], with
+	// or without mapper.bin: a v5 manifest omits "directed" and
+	// "multigraph", which a build that predates v5 would read as an
+	// undirected simple graph, so such a build must refuse it (rmp #3072).
+	// Whether mapper.bin is present is read from the file list, never
+	// from the version.
 	files := []FileEntry{
 		{Name: CSRFile, Size: csrSize, CRC32C: csrCRC},
 		{Name: LabelsFile, Size: labelsSize, CRC32C: labelsCRC},
 		{Name: PropertiesFile, Size: propsSize, CRC32C: propsCRC},
 	}
 	if haveMapper {
-		manifestVersion = ManifestVersion
 		files = append(files, FileEntry{Name: MapperFile, Size: mapperSize, CRC32C: mapperCRC})
 	}
 	if haveNodeIDs {
@@ -780,7 +784,7 @@ func writeCaptureCore[W any](
 		files = append(files, FileEntry{Name: IndexDefsFile, Size: indexDefsSize, CRC32C: indexDefsCRC})
 	}
 
-	// Persist the originating graph's directed/multigraph shape so
+	// Persist the originating graph's weightless shape so
 	// recovery reconstructs the same variant instead of hardcoding one.
 	// The full writer always has a capture of the live graph in hand, so every
 	// NEW full snapshot carries this; the legacy CSR-only writer cannot (it
@@ -797,7 +801,7 @@ func writeCaptureCore[W any](
 		indexesCommitTS = ts
 	}
 	m := Manifest{
-		Version:   manifestVersion,
+		Version:   ManifestVersion,
 		CreatedAt: time.Now().UTC(),
 		// The IMAGE's node count, not the captured CSR's vertex-array length
 		// (rmp #2310). Under a concurrent capture the array is sized from the
@@ -832,15 +836,12 @@ func writeCaptureCore[W any](
 		// written before this field (which is every manifest any earlier build
 		// produced) rebuilds once instead; see [Manifest.IndexBuilderEpoch].
 		IndexBuilderEpoch: CurrentIndexBuilderEpoch,
-		GraphConfig: &GraphConfig{
-			Directed:   cfg.Directed,
-			Multigraph: cfg.Multigraph,
-			Weightless: cfg.Weightless,
-		},
+		GraphConfig:       &GraphConfig{Weightless: cfg.Weightless},
 	}
-	// The WAL position the image covers, written only into a version-4
-	// manifest (one that carries mapper.bin), the only version that defines it.
-	if manifestVersion == ManifestVersion && capt.walStoreID != 0 {
+	// The WAL position the image covers, written only into a manifest that
+	// carries mapper.bin: an image without it is not self-sufficient and
+	// cannot anchor the WAL.
+	if haveMapper && capt.walStoreID != 0 {
 		m.StoreID = fmt.Sprintf("%016x", capt.walStoreID)
 		m.WALRedoPos = capt.walRedoPos
 		m.WALFormat = WALFormatSegmented
@@ -917,6 +918,7 @@ func writeCaptureCore[W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return fmt.Errorf("snapshot: archive live snapshot: %w", err)
 	}
+	crashpoint.Breakpoint("snapshot.publish.archived-pre-rename")
 	notePublishStep("rename", tmp)
 	if err := fsys.Rename(tmp, dir); err != nil {
 		// Restore: undo the archive so the caller retries against an
@@ -1200,7 +1202,7 @@ func loadSnapshotFullWith(fsys fileSystem, dir string) (LoadedSnapshot, error) {
 		}
 	}
 
-	return LoadedSnapshot{
+	ls := LoadedSnapshot{
 		Manifest:    m,
 		CSR:         csrParsed,
 		Labels:      labelsParsed,
@@ -1211,7 +1213,14 @@ func loadSnapshotFullWith(fsys fileSystem, dir string) (LoadedSnapshot, error) {
 		EdgeHandles: edgeHandlesParsed,
 		Constraints: constraintsParsed,
 		IndexDefs:   indexDefsParsed,
-	}, nil
+	}
+	// A snapshot an undirected graph wrote keeps both directions of every edge;
+	// recovery folds them once the WAL above it is replayed (rmp #3072).
+	ls.Legacy = m.GraphConfig.legacyShape()
+	if ls.Legacy.Undirected {
+		assignLegacyMirrorHandles(&ls.CSR)
+	}
+	return ls, nil
 }
 
 // findEntry returns a pointer to the FileEntry named name, or nil when

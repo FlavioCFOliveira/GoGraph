@@ -17,7 +17,7 @@ import (
 // holds, so the labels come back from a Go map too.
 func TestWriteWithProps_ByteReproducible(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		n := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(n); err != nil {
@@ -60,7 +60,7 @@ func TestWriteWithProps_ByteReproducible(t *testing.T) {
 	}
 
 	// The export still round-trips: order is presentation, not content.
-	back, _, err := ReadWithProps(strings.NewReader(first), adjlist.Config{Directed: true})
+	back, _, err := ReadWithProps(strings.NewReader(first), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadWithProps: %v", err)
 	}

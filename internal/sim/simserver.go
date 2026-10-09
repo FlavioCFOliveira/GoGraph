@@ -565,5 +565,5 @@ func (s *SimServer) Close() error {
 // newSimServerGraph builds the directed multigraph the SimServer engine runs on,
 // matching the additive-CREATE relationship model the Bolt e2e path expects.
 func newSimServerGraph() *lpg.Graph[string, float64] {
-	return lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	return lpg.New[string, float64](adjlist.Config{})
 }

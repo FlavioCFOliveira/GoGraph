@@ -14,7 +14,7 @@ import (
 // undirected graph c, plus a per-NodeID count of how many triangles
 // each vertex participates in. c is expected to be a symmetric
 // directed CSR (each undirected edge appears as both (u, v) and
-// (v, u)) — typical of [adjlist.AdjList] with Directed=false.
+// (v, u)), as [csr.CSR.BuildSymmetric] builds it.
 //
 // # Input contract: simple graph
 //
@@ -24,8 +24,8 @@ import (
 // degree-ordered rank split, so specifically a parallel edge on a
 // triangle's lowest-ranked vertex is walked more than once, silently
 // over-counting that triangle — CountTriangles does not detect or reject
-// this; it is the caller's responsibility on an [adjlist.AdjList] built
-// with Multigraph: true. A self-loop, by contrast, can never trigger this:
+// this; it is the caller's responsibility, since every [adjlist.AdjList]
+// keeps parallel edges. A self-loop, by contrast, can never trigger this:
 // the rank filter below only pairs neighbours u, w with strictly higher
 // rank than the current vertex v, and a self-loop's neighbour is v itself,
 // which cannot have strictly higher rank than itself — so a self-loop is

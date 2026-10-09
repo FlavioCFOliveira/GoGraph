@@ -392,7 +392,7 @@ func commitLedger(ctx context.Context, dir string, cfg config, plan ledgerPlan, 
 		return commitStats{}, fmt.Errorf("open WAL: %w", err)
 	}
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions(g, wlog, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

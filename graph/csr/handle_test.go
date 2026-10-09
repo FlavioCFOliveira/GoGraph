@@ -12,7 +12,7 @@ import (
 // position pos is the handle of the edge at edges[pos].
 func TestCSR_HandlesSlice_AlignsWithEdges(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	// a→b (handle 1), a→b parallel (handle 2), a→c (handle 3).
 	if err := a.AddEdgeH("a", "b", 0, 1); err != nil {
 		t.Fatalf("AddEdgeH a→b#1: %v", err)
@@ -61,7 +61,7 @@ func TestCSR_HandlesSlice_AlignsWithEdges(t *testing.T) {
 // since rmp #2317 every slot has an identity whatever route created it.
 func TestCSR_HandlesSlice_PresentForPlainAddEdge(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestCSR_HandlesSlice_PresentForPlainAddEdge(t *testing.T) {
 // identity across both adjacency directions.
 func TestCSR_BuildReverse_CarriesHandles(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdgeH("a", "b", 0, 42); err != nil {
 		t.Fatalf("AddEdgeH a→b: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestCSR_BuildReverse_CarriesHandles(t *testing.T) {
 // (rmp #2317).
 func TestCSR_BuildReverse_CarriesHandlesForPlainAddEdge(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestCSR_BuildReverse_CarriesHandlesForPlainAddEdge(t *testing.T) {
 // and copies the handle column (the multigraph read-path cost).
 func benchBuildAdj(b *testing.B, withHandles bool) *adjlist.AdjList[uint32, struct{}] {
 	b.Helper()
-	a := adjlist.New[uint32, struct{}](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[uint32, struct{}](adjlist.Config{})
 	const universe = 1 << 16
 	r := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // deterministic benchmark RNG
 	const fill = 200_000

@@ -19,9 +19,9 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
-func newDirectTxGraph(t *testing.T, directed bool) *Graph[string, float64] {
+func newDirectTxGraph(t *testing.T) *Graph[string, float64] {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: directed, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	return g
 }
@@ -61,7 +61,7 @@ func driveRemovalWindow(g *Graph[string, float64], after bool, peer func()) {
 func TestDirectTx_RemoveEdgeIsAllOrNothing(t *testing.T) {
 	for _, w := range removalWindows {
 		t.Run(w.name, func(t *testing.T) {
-			g := newDirectTxGraph(t, true)
+			g := newDirectTxGraph(t)
 			requireNoErr(t, g.AddNode("a"), g.AddNode("b"), g.AddNode("c"), g.AddEdge("a", "b", 1))
 			g.IncEdgeCreateCount("a", "b")
 			requireNoErr(t,
@@ -130,7 +130,7 @@ func TestDirectTx_RemoveEdgeIsAllOrNothing(t *testing.T) {
 func TestDirectTx_RemoveEdgeByHandleIsAllOrNothing(t *testing.T) {
 	for _, w := range removalWindows {
 		t.Run(w.name, func(t *testing.T) {
-			g := newDirectTxGraph(t, true)
+			g := newDirectTxGraph(t)
 			h1, err := g.AddEdgeH("a", "b", 1)
 			requireNoErr(t, err)
 			_, err = g.AddEdgeH("a", "b", 2)
@@ -192,7 +192,7 @@ func TestDirectTx_RemoveEdgeByHandleIsAllOrNothing(t *testing.T) {
 func TestDirectTx_RemoveEdgeDoesNotStackOnAPendingOverflow(t *testing.T) {
 	for _, w := range removalWindows {
 		t.Run(w.name, func(t *testing.T) {
-			g := newDirectTxGraph(t, true)
+			g := newDirectTxGraph(t)
 			// Two parallel a→b slots typed X and Z: removing the X slot leaves no
 			// free slot for X, so the removal re-asserts it into the overflow.
 			requireNoErr(t,
@@ -252,7 +252,7 @@ var errAbortForTest = mvcc.NewConflict(mvcc.StoreNodeLabels, 0, 0, 0)
 func TestDirectTx_RemoveNodeVsPeerLabelRemovalRollback(t *testing.T) {
 	for _, window := range []string{"after the claims", "between the strip and the flip"} {
 		t.Run(window, func(t *testing.T) {
-			g := newDirectTxGraph(t, true)
+			g := newDirectTxGraph(t)
 			requireNoErr(t, g.SetNodeLabel("n", "L"), g.SetNodeProperty("n", "k", StringValue("v")))
 			id, _ := g.adj.Mapper().Lookup("n")
 			lid := g.reg.intern("L")
@@ -377,7 +377,7 @@ func TestDirectTx_LabelSetBetweenStripAndFlip(t *testing.T) {
 // the edge to a dead node. A key whose only existence was an aborted creation is
 // now created again by the next append (rmp #2947).
 func TestDirectTx_RefusedAppendDoesNotLeaveADeadEndpoint(t *testing.T) {
-	g := newDirectTxGraph(t, true)
+	g := newDirectTxGraph(t)
 	requireNoErr(t, g.AddEdge("a", "b", 1))
 	// A peer's pending write on a's entry that took no claim: an append claims
 	// a's adjacency without meeting it, creates x, and is refused by the entry
@@ -418,7 +418,7 @@ func TestDirectTx_RefusedAppendDoesNotLeaveADeadEndpoint(t *testing.T) {
 // z is a node nothing else touches.
 func f7Fixture(t *testing.T) (*Graph[string, float64], WriteTx) {
 	t.Helper()
-	g := newDirectTxGraph(t, true)
+	g := newDirectTxGraph(t)
 	requireNoErr(t, g.SetNodeProperty("x", "v", Int64Value(0)), g.AddNode("z"))
 	peer := g.BeginVersionedTx()
 	requireNoErr(t, g.Writer(peer).SetNodeProperty("x", "v", Int64Value(1)))
@@ -501,7 +501,7 @@ func TestDirectTx_ForeignWriteAfterTheBracketIsDoomed(t *testing.T) {
 // bracket ends, it survives the bracket's abort, and the bracket's own uncommitted
 // write refuses it like any other transaction's.
 func TestDirectTx_DirectCallInsideABracketIsItsOwnTransaction(t *testing.T) {
-	g := newDirectTxGraph(t, true)
+	g := newDirectTxGraph(t)
 	requireNoErr(t, g.AddNode("a"), g.AddNode("z"))
 	errAbort := errors.New("abort the bracket")
 	var visibleInside bool

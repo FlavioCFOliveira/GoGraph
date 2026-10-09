@@ -49,7 +49,7 @@ func TestRecovery_OrphanedPendingOpsDiscardedOnTxnSeqMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, int64](g, w, opts)
 
 	tx1 := s.Begin()

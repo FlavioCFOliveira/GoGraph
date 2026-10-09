@@ -488,7 +488,7 @@ func build(ctx context.Context, cfg config, breakFirstBridge bool) (*adjlist.Adj
 	rng := rand.New(rand.NewSource(cfg.seed))
 	start := time.Now()
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 
 	addEdge := func(u, v int) error {
 		if err := a.AddEdge(u, v, struct{}{}); err != nil {

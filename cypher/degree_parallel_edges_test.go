@@ -29,7 +29,7 @@ import (
 // node — so every entry is a parallel edge of the pair.
 func parallelFixture(t *testing.T, spec ...string) (*lpg.Graph[string, float64], *Engine) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := NewEngine(g)
 	mustRun(t, eng, "CREATE (:P {id: 0})")

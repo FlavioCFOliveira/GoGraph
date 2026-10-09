@@ -53,7 +53,7 @@ import (
 // buildRelGraphN, restated in-package because the counters are unexported.
 func buildRebuildFixture(tb testing.TB, n int) *lpg.Graph[string, float64] {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	ctx := context.Background()
 	for i := 0; i < n; i++ {

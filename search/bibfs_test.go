@@ -10,13 +10,13 @@ import (
 
 func TestBiBFS_Chain(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 9; i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(9)
 	path, err := BiBFS(c, src, dst)
@@ -30,11 +30,11 @@ func TestBiBFS_Chain(t *testing.T) {
 
 func TestBiBFS_SameSrcDst(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ := a.Mapper().Lookup(0)
 	path, err := BiBFS(c, src, src)
 	if err != nil || len(path) != 1 {
@@ -44,14 +44,14 @@ func TestBiBFS_SameSrcDst(t *testing.T) {
 
 func TestBiBFS_NoPath(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	if err := a.AddEdge(2, 3, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(3)
 	_, err := BiBFS(c, src, dst)
@@ -64,7 +64,7 @@ func TestBiBFS_NoPath(t *testing.T) {
 // auto-builds the reverse CSR so the backward search walks in-edges.
 func TestBiBFS_Directed(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestBiBFS_Directed(t *testing.T) {
 // path src=0 -> dst=2 via the auto-built reverse adjacency.
 func TestBiBFS_DirectedNoReversePath(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

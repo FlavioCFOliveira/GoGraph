@@ -27,7 +27,7 @@ import (
 // invisible ghost.
 func TestRemoveNode_AddNode_Resurrects(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.SetNodeLabel("auth", "Spec"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestRemoveNode_AddNode_Resurrects(t *testing.T) {
 // AddNode has already revived it.
 func TestSetNodeLabel_DoesNotRevive(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("auth"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestSetNodeLabel_DoesNotRevive(t *testing.T) {
 // so a later re-add does not resurrect them.
 func TestRemoveEdge_StripsPerPairStateOnFullDisconnect(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestRemoveEdge_StripsPerPairStateOnFullDisconnect(t *testing.T) {
 // it. Only the final removal (full disconnect) clears it.
 func TestRemoveEdge_KeepsPerPairStateWhileParallelEdgeRemains(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge 1: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestRemoveEdge_KeepsPerPairStateWhileParallelEdgeRemains(t *testing.T) {
 // in a directed graph, removing a->b must not touch the distinct b->a edge.
 func TestRemoveEdge_DirectedDoesNotStripReverseEdge(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge a->b: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestRemoveEdge_DirectedDoesNotStripReverseEdge(t *testing.T) {
 // accessor does not exist (compile failure locks the missing API).
 func TestTombstonedIDs(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if got := g.TombstonedIDs(); len(got) != 0 {
 		t.Fatalf("TombstonedIDs on a fresh graph = %v, want empty", got)
 	}

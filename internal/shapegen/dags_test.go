@@ -327,7 +327,6 @@ func TestDAGs_TransitiveTournament_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(n))
 			assertSize(t, g, uint64(n*(n-1)/2))
-			assertDirected(t, g, true)
 			assertAcyclicAndSingletonSCCs(t, g)
 		})
 	}
@@ -386,7 +385,6 @@ func TestDAGs_Diamond_Invariants(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}
-			assertDirected(t, g, true)
 			if k == 0 {
 				assertOrder(t, g, 2)
 				assertSize(t, g, 1)
@@ -507,7 +505,6 @@ func TestDAGs_Layered_Invariants(t *testing.T) {
 				t.Fatalf("Build: %v", err)
 			}
 			assertOrder(t, g, uint64(c.L*c.w))
-			assertDirected(t, g, true)
 			gotSize := g.AdjList().Size()
 			if c.density == 0 && gotSize != 0 {
 				t.Fatalf("density=0: Size = %d, want 0", gotSize)
@@ -609,7 +606,6 @@ func TestDAGs_LengauerTarjanExample_Invariants(t *testing.T) {
 	}
 	assertOrder(t, g, 13)
 	assertSize(t, g, 21)
-	assertDirected(t, g, true)
 	// Labels R, A, B, C, D, E, F, G, H, I, J, K, L are attached to
 	// user-keys 1..13 in that order.
 	for i := 0; i < len(lengauerTarjanLabels); i++ {
@@ -896,7 +892,6 @@ func TestDAGs_BuildDepDAG_Invariants(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}
-			assertDirected(t, g, true)
 			if got := g.AdjList().Order(); got < 1 {
 				t.Fatalf("Order = %d, want >= 1 (root always present)", got)
 			}
@@ -1054,7 +1049,6 @@ func TestDAGs_NegativeWeightAcyclic_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(c.n))
 			assertSize(t, g, uint64(c.n*(c.n-1)/2))
-			assertDirected(t, g, true)
 			assertAcyclicAndSingletonSCCs(t, g)
 			// Verify every edge weight is in [-1000, -1] or [1, 1000].
 			adj := g.AdjList()
@@ -1144,7 +1138,7 @@ func TestDAGs_NegativeWeightAcyclic_Golden(t *testing.T) {
 // other-family contracts.
 func TestDAGs_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	for _, tc := range []struct {
 		name string
 		s    Shape[int, int64]
@@ -1185,7 +1179,7 @@ func TestDAGs_PreservesMaxShardCapacity(t *testing.T) {
 // loop guard.
 func TestDAGs_TransitiveTournament_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	if err := buildTransitiveTournament(g, 300); err == nil {
 		t.Fatal("buildTransitiveTournament(g, 300) with MaxShardCapacity=1 returned nil error, want adjlist.ErrShardFull")
@@ -1200,7 +1194,7 @@ func TestDAGs_TransitiveTournament_ShardFullPropagates(t *testing.T) {
 // boundary.
 func TestDAGs_Diamond_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	if err := buildDiamond(g, 150); err == nil {
 		t.Fatal("buildDiamond(g, 150) with MaxShardCapacity=1 returned nil error, want adjlist.ErrShardFull")
@@ -1215,7 +1209,7 @@ func TestDAGs_Diamond_ShardFullPropagates(t *testing.T) {
 // verbatim through the build's err-threaded outer loop.
 func TestDAGs_BuildDepDAG_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	_, err := BuildDepDAG(4, 2, 10, 1).Build(cfg)
 	if err == nil {
 		t.Fatal("Build returned nil error, want adjlist.ErrShardFull")
@@ -1230,7 +1224,7 @@ func TestDAGs_BuildDepDAG_ShardFullPropagates(t *testing.T) {
 // NodeID has intraIdx >= 1 must surface adjlist.ErrShardFull.
 func TestDAGs_NegativeWeightAcyclic_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	if err := buildNegativeWeightAcyclic(g, 300, 50, 1); err == nil {
 		t.Fatal("buildNegativeWeightAcyclic(g, 300, 50, 1) with MaxShardCapacity=1 returned nil error, want adjlist.ErrShardFull")

@@ -20,7 +20,7 @@ import (
 // buildIsolated builds a directed graph with n nodes and zero edges.
 func buildIsolated(tb testing.TB, names ...string) (*lpg.Graph[string, float64], *cypher.Engine) {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range names {
 		if err := g.AddNode(n); err != nil {
 			tb.Fatalf("AddNode %q: %v", n, err)
@@ -69,7 +69,7 @@ func TestOptionalExpand_AllIsolated(t *testing.T) {
 // TestOptionalExpand_MixedConnectivity verifies mixed null / non-null semantics:
 // "a"→"b" exist, "c" is isolated.
 func TestOptionalExpand_MixedConnectivity(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "c"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode %q: %v", n, err)

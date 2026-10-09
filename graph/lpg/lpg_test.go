@@ -35,7 +35,7 @@ func TestLabelRegistry(t *testing.T) {
 
 func TestGraph_NodeLabels(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.SetNodeLabel("alice", "Person"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestGraph_NodeLabels(t *testing.T) {
 
 func TestGraph_EdgeLabels(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestGraph_EdgeLabels(t *testing.T) {
 
 func TestGraph_SetEdgeLabel_NoEdge(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.SetEdgeLabel("alice", "bob", "KNOWS"); err != nil {
 		t.Fatal(err)
 	} // no edge yet
@@ -97,7 +97,7 @@ func TestGraph_SetEdgeLabel_NoEdge(t *testing.T) {
 
 func TestGraph_LabelIndex_Query(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"alice", "bob", "charlie"} {
 		if err := g.SetNodeLabel(n, "Person"); err != nil {
 			t.Fatalf("SetNodeLabel: %v", err)
@@ -123,7 +123,7 @@ func TestGraph_LabelIndex_Query(t *testing.T) {
 
 func TestGraph_Concurrent(t *testing.T) {
 	t.Parallel()
-	g := New[int, int64](adjlist.Config{Directed: true, Multigraph: false})
+	g := New[int, int64](adjlist.Config{})
 	var wg sync.WaitGroup
 	const goroutines = 64
 	const perWorker = 128

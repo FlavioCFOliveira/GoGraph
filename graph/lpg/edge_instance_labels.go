@@ -15,8 +15,8 @@ package lpg
 //   - [Graph.EdgeLabelsAt] returns just the labels recorded at a
 //     specific instance index, used by Cypher Expand to filter
 //     parallel edges by their CREATE-time label rather than the
-//     merged union (closes Match2 [6] / Match7 [29] regressions that
-//     surface when adjlist.Config.Multigraph is enabled).
+//     merged union (closes Match2 [6] / Match7 [29] regressions on
+//     parallel edges).
 //
 // Write path:
 //   - [Graph.SetEdgeLabelAt] stores per-instance. The existing

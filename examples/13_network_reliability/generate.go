@@ -66,7 +66,7 @@ func generate(ctx context.Context, cfg config) (*network, error) {
 
 	net := &network{
 		sites:  totalSites,
-		adj:    adjlist.New[string, int64](adjlist.Config{Directed: false}),
+		adj:    adjlist.New[string, int64](adjlist.Config{}),
 		mapper: graph.NewMapper[string](),
 		idOf:   make([]graph.NodeID, totalSites),
 		source: 0,                                    // first site of cluster 0

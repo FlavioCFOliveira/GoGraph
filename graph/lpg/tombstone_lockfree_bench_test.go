@@ -19,7 +19,7 @@ const scanBenchN = 200_000
 // path; deleteEvery == 0 leaves the graph on the never-deleted fast path.
 func buildScanGraph(tb testing.TB, deleteEvery int) (*Graph[string, float64], []graph.NodeID) {
 	tb.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	ids := make([]graph.NodeID, scanBenchN)
 	for i := 0; i < scanBenchN; i++ {
 		key := fmt.Sprintf("n%d", i)

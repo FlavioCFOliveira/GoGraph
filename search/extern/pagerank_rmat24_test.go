@@ -24,7 +24,7 @@ func TestPageRank_RMATScale20_Soak(t *testing.T) {
 	testlayers.RequireSoak(t)
 
 	path := filepath.Join(t.TempDir(), "rmat20_pr.csr")
-	loader := bulk.New(bulk.Options{OutputPath: path, Directed: true})
+	loader := bulk.New(bulk.Options{OutputPath: path})
 	rmat.Generate(rmat.Spec{
 		Scale:      20,
 		EdgeFactor: 8,

@@ -33,7 +33,7 @@ const boundEndSpokes = 256
 // node "lone" nothing points at.
 func boundEndHubGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	mustNode := func(k string) {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode %s: %v", k, err)
@@ -163,7 +163,7 @@ func TestPatternPredicate_UnboundEndStillScans(t *testing.T) {
 // the undirected composition.
 func TestPatternPredicate_BoundEndVerdicts(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b", "c", "loop"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode %s: %v", k, err)

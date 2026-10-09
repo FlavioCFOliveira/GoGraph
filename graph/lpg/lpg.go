@@ -637,9 +637,7 @@ type Graph[N comparable, W any] struct {
 	// edge_property.go and edge_property_column.go.
 
 	// edgeCreateCountShards tracks how many CREATE statements have
-	// targeted each directed (src, dst) endpoint pair — separate from
-	// the underlying simple-graph adjacency, which silently collapses
-	// duplicate CREATEs. Used by MERGE to emit one output row per
+	// targeted each directed (src, dst) endpoint pair. Used by MERGE to emit one output row per
 	// recorded CREATE call when the search matches an existing edge
 	// (Merge5 [3]). See edge_create_count.go for full semantics.
 	edgeCreateCountShards [propMapShards]edgeCreateCountShard
@@ -665,21 +663,10 @@ type Graph[N comparable, W any] struct {
 	// [Graph.AddEdgeH], so the read path resolves an edge's type and
 	// properties by an identity that survives sibling-edge deletion.
 	//
-	// Populated in BOTH storage modes, not only in multigraph mode. This
-	// comment used to claim the latter, and the memory audit of 2026-08-11
-	// measured otherwise (rmp #2402): a Cypher CREATE costs the same per
-	// relationship with adjlist.Config.Multigraph false as with it true, to
-	// within 0.01 %, and a heap profile of the simple-graph arm still
-	// attributes ~45 % of the graph to these stores. The reason is that
 	// cypher/exec.CreateRelationship calls [Graph.AddEdgeH] unconditionally
-	// and the adjacency stamps a handle on the new slot in either mode, so
-	// the read path resolves by handle in either mode too.
-	//
-	// The one case in which a write here is genuinely unreachable is a
-	// DUPLICATE (src, dst) in simple-graph storage: the append is collapsed,
-	// no slot carries the returned handle, and the entry written under it can
-	// never be resolved. That is a small residual waste on a path that is
-	// already discarding the caller's edge, not the general case.
+	// and the adjacency stamps a handle on every new slot, so the read path
+	// resolves by handle (rmp #2402 measured these stores at ~45 % of a
+	// Cypher-built graph).
 	//
 	// See edge_handle.go.
 	edgeHandleLabelShards [propMapShards]edgeHandleLabelShard
@@ -2307,7 +2294,7 @@ func (g *Graph[N, W]) AdjList() *adjlist.AdjList[N, W] { return g.adj }
 // configuration is fixed at [New] and never mutated, so Config is safe
 // to call concurrently with any other operation and always returns the
 // same value for the lifetime of the graph. The snapshot writer reads
-// it to persist the directed/multigraph shape into the manifest.
+// it to persist the weightless shape into the manifest.
 func (g *Graph[N, W]) Config() adjlist.Config { return g.adj.Config() }
 
 // Registry returns the underlying label registry.
@@ -2819,9 +2806,8 @@ func (g *Graph[N, W]) reviveInfo(n N, tx *writeCtx) {
 	g.revive(id, tx)
 }
 
-// AddEdge inserts a directed edge (mirrored when the graph is
-// undirected) from src to dst with weight w. The error contract
-// matches the underlying [adjlist.AdjList.AddEdge]: callers must
+// AddEdge inserts a directed edge from src to dst with weight w. The error
+// contract matches the underlying [adjlist.AdjList.AddEdge]: callers must
 // propagate [adjlist.ErrShardFull] when the responsible shard is at
 // [adjlist.Config.MaxShardCapacity].
 //
@@ -2859,8 +2845,7 @@ func (g *Graph[N, W]) addEdgeInfo(src, dst N, w W, tx *writeCtx) error {
 // [Graph.AddEdgeLabeled], [Graph.AddEdgeLabeledWithProperty] and [Graph.AddEdgeH]:
 // it appends one src→dst slot carrying a stable handle, the encoded relationship
 // type when relType is non-zero, and payload when non-nil, and returns the
-// handle. On a simple graph's duplicate the adjacency no-ops and the handle is not
-// stored.
+// handle.
 //
 // The handle is minted into *h the first time the append gets past its conflict
 // checks, and reused when *h is already set: a direct write retried after another
@@ -2929,8 +2914,7 @@ func (g *Graph[N, W]) appendEdgeInfo(src, dst N, w W, relType uint32, payload *e
 	if payload != nil {
 		aux = payload
 	}
-	inserted, err := g.adj.Writer(tx.adjTx()).AppendEdge(src, dst, w, handle, relType, relType != 0, aux)
-	if err != nil {
+	if err := g.adj.Writer(tx.adjTx()).AppendEdge(src, dst, w, handle, relType, relType != 0, aux); err != nil {
 		return 0, adjErr(tx, err)
 	}
 	// An endpoint this append CREATED is stamped AFTER the insert, because its id
@@ -2951,12 +2935,8 @@ func (g *Graph[N, W]) appendEdgeInfo(src, dst N, w W, relType uint32, payload *e
 		// and the NEXT committed append on the same node built its immutable entry
 		// from that dirty base and PUBLISHED the phantom arc. The removal runs
 		// under this same transaction, so linkVersion's same-transaction elision
-		// collapses insert+removal out of the version chain. A simple graph's
-		// duplicate inserted nothing, so there is nothing to withdraw.
+		// collapses insert+removal out of the version chain.
 		unInsert := func(cause error) error {
-			if !inserted {
-				return cause
-			}
 			_, werr := g.adj.Writer(tx.adjTx()).RemoveEdgeByHandle(src, dst, handle)
 			return errors.Join(cause, adjErr(tx, werr))
 		}
@@ -3005,9 +2985,8 @@ func (g *Graph[N, W]) appendEdgeInfo(src, dst N, w W, relType uint32, payload *e
 	return handle, nil
 }
 
-// AddEdgeLabeled inserts a directed edge (mirrored when the graph is
-// undirected) from src to dst with weight w and tags it with the
-// relationship-type name in a SINGLE adjacency operation: the type is interned
+// AddEdgeLabeled inserts a directed edge from src to dst with weight w and tags
+// it with the relationship-type name in a SINGLE adjacency operation: the type is interned
 // and written into the edge's inline label slot AT insertion time, instead of
 // the two-step [Graph.AddEdge] + [Graph.SetEdgeLabel] which copies the whole
 // label column after the append. For a bulk labelled build this restores
@@ -3028,9 +3007,8 @@ func (g *Graph[N, W]) appendEdgeInfo(src, dst N, w W, relType uint32, payload *e
 //
 // AddEdgeLabeled honours the same error and revival contract as [Graph.AddEdge]:
 // it propagates [adjlist.ErrShardFull] and does NOT revive a tombstoned
-// endpoint. When the underlying adjacency no-ops the insertion (a simple-graph
-// duplicate (src, dst)) the supplied type is not stamped on the existing slot;
-// callers that may re-label an existing edge must use SetEdgeLabel.
+// endpoint. A repeated (src, dst) appends a parallel edge carrying the supplied
+// type; callers that re-label an existing edge use SetEdgeLabel.
 //
 // It runs as a single-operation transaction and refuses on the same terms as
 // [Graph.AddEdge] (rmp #2947).
@@ -3049,9 +3027,8 @@ func (g *Graph[N, W]) AddEdgeLabeled(src, dst N, w W, relType string) error {
 	})
 }
 
-// AddEdgeLabeledWithProperty inserts a directed edge (mirrored when the graph is
-// undirected) from src to dst with weight w, tags it with the relationship-type
-// name, AND records one property (key, value) on it — all in a SINGLE adjacency
+// AddEdgeLabeledWithProperty inserts a directed edge from src to dst with weight
+// w, tags it with the relationship-type name, AND records one property (key, value) on it — all in a SINGLE adjacency
 // operation. Both the type and the property value are written into the new edge's
 // inline slot AT insertion time, instead of the three-step [Graph.AddEdgeLabeled]
 // + [Graph.SetEdgeProperty] whose final step copies the whole per-source property
@@ -3074,9 +3051,8 @@ func (g *Graph[N, W]) AddEdgeLabeled(src, dst N, w W, relType string) error {
 // fused write keeps the same all-or-nothing contract as a validated
 // SetEdgeProperty. AddEdgeLabeledWithProperty otherwise honours the same error
 // and revival contract as [Graph.AddEdge]: it propagates [adjlist.ErrShardFull]
-// and does NOT revive a tombstoned endpoint. When the underlying adjacency
-// no-ops the insertion (a simple-graph duplicate (src, dst)) neither the type nor
-// the property is stamped on the existing slot.
+// and does NOT revive a tombstoned endpoint. A repeated (src, dst) appends a
+// parallel edge carrying its own type and property.
 //
 // A date-shaped string value (a Cypher Date delivered as a SOH-tagged canonical
 // string) is folded into the int32 epoch-day column exactly as SetEdgeProperty
@@ -3121,12 +3097,8 @@ func (g *Graph[N, W]) labeledPropAppend(relType, key string, value PropertyValue
 // survives sibling-edge deletion, instead of the positional CREATE index
 // that the old read path re-derived from CSR slot order.
 //
-// The returned handle is always non-zero. On the simple-graph collapse of
-// a duplicate (src, dst) the underlying adjacency no-ops the slot write
-// and the supplied handle is not stored, but a fresh handle value is still
-// consumed (monotonicity is a property of the counter, not of storage), so
-// callers must treat the handle as advisory in simple-graph mode and keep
-// using the per-pair / per-CREATE-index surfaces there. See edge_handle.go.
+// The returned handle is always non-zero and names the slot the call
+// appended. See edge_handle.go.
 //
 // AddEdgeH honours the same error, revival and refusal contract as
 // [Graph.AddEdge].
@@ -3175,8 +3147,7 @@ func (g *Graph[N, W]) nextEdgeHandle() uint64 { return g.adj.NextHandle() }
 // NextEdgeHandle is safe for concurrent use.
 func (g *Graph[N, W]) NextEdgeHandle() uint64 { return g.nextEdgeHandle() }
 
-// RemoveEdge removes one edge (src, dst) from the adjacency layer (and the
-// mirrored (dst, src) edge when the graph is undirected). When this leaves
+// RemoveEdge removes one edge (src, dst) from the adjacency layer. When this leaves
 // the endpoint pair with NO remaining edge — the last parallel edge between
 // them is gone — RemoveEdge also strips the per-pair edge labels and edge
 // properties, so re-creating an edge between the same endpoints later does
@@ -3242,9 +3213,8 @@ func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) bool {
 //     this removes the pair's last slot — the pair's overflow types and every
 //     per-handle and per-ordinal record of the pair. These stores are versioned,
 //     so an abort withdraws whatever of them was written.
-//  3. When parallel slots survive, hold the pair's edge-label shard lock (both
-//     directions' on an undirected graph, in ascending order) from a test of the
-//     overflow head through the re-assertion that follows the removal, so the one
+//  3. When parallel slots survive, hold the pair's edge-label shard lock from a
+//     test of the overflow head through the re-assertion that follows the removal, so the one
 //     overflow write that can only be decided after the removal cannot be refused.
 //  4. Remove the slot. An implicit or untransacted write refuses there, before
 //     changing either entry, over another transaction's uncommitted entry.
@@ -3283,8 +3253,6 @@ func (g *Graph[N, W]) removeArcInfo(src, dst N, handle uint64, tx *writeCtx) boo
 		return handle == 0
 	}
 	k := edgeKey{src: srcID, dst: dstID}
-	mk := edgeKey{src: dstID, dst: srcID}
-	mirror := !g.adj.Directed() && srcID != dstID
 
 	// How many src→dst slots there are, and whether the target is among them.
 	count, found := g.pairSlots(srcID, dstID, handle)
@@ -3297,17 +3265,12 @@ func (g *Graph[N, W]) removeArcInfo(src, dst N, handle uint64, tx *writeCtx) boo
 	// removal when a parallel edge will survive. The removed slot may be the
 	// very one carrying an inline relationship type or a property value the
 	// surviving edges still share, so the captured surfaces are re-asserted onto
-	// the survivors (the per-pair coalesced-union contract). Reverse-direction
-	// captures cover the undirected case.
-	var fwdLabels, revLabels []LabelID
-	var fwdProps, revProps map[string]PropertyValue
+	// the survivors (the per-pair coalesced-union contract).
+	var fwdLabels []LabelID
+	var fwdProps map[string]PropertyValue
 	if !last {
 		fwdLabels = g.pairLabelIDs(srcID, dstID)
 		fwdProps = g.EdgePropertiesAsOf(src, dst, nil) // stored: see own writes
-		if mirror {
-			revLabels = g.pairLabelIDs(dstID, srcID)
-			revProps = g.EdgePropertiesAsOf(dst, src, nil)
-		}
 	}
 
 	// Step 2: the side stores, before the adjacency.
@@ -3319,9 +3282,6 @@ func (g *Graph[N, W]) removeArcInfo(src, dst N, handle uint64, tx *writeCtx) boo
 	}
 	if last {
 		g.clearPairSides(k, tx)
-		if mirror {
-			g.clearPairSides(mk, tx)
-		}
 	}
 	if tx.doomed() {
 		return false
@@ -3332,11 +3292,12 @@ func (g *Graph[N, W]) removeArcInfo(src, dst N, handle uint64, tx *writeCtx) boo
 	}
 
 	// Step 3: the overflow lock held across the removal, when survivors remain.
-	var held [2]*edgeLabelShard
+	var held *edgeLabelShard
 	if !last {
-		held = g.lockPairLabelShards(k, mk, mirror)
-		if !g.overflowWritable(k, mk, mirror, tx) {
-			unlockPairLabelShards(held)
+		held = g.edgeLabelShardFor(k)
+		held.mu.Lock()
+		if !g.overflowWritable(k, tx) {
+			held.mu.Unlock()
 			return false
 		}
 	}
@@ -3351,13 +3312,13 @@ func (g *Graph[N, W]) removeArcInfo(src, dst N, handle uint64, tx *writeCtx) boo
 		if err == nil && !removed {
 			// The slot vanished between the count and the removal, which only an
 			// untransacted adjacency writer can cause. Nothing was removed.
-			unlockPairLabelShards(held)
+			unlockLabelShard(held)
 			return false
 		}
 	}
 	if err != nil {
 		_ = adjErr(tx, err)
-		unlockPairLabelShards(held)
+		unlockLabelShard(held)
 		return false
 	}
 	// Deferred, not immediate: the bump must follow the LAST write to any
@@ -3370,17 +3331,11 @@ func (g *Graph[N, W]) removeArcInfo(src, dst N, handle uint64, tx *writeCtx) boo
 	// Step 5.
 	if !last {
 		g.reassertPairLabelsLocked(k, fwdLabels, tx)
-		if mirror {
-			g.reassertPairLabelsLocked(mk, revLabels, tx)
-		}
-		unlockPairLabelShards(held)
+		held.mu.Unlock()
 		if h := g.edgeRemovalHookForTest; h != nil && tx.implicit() {
 			h(true)
 		}
 		g.reassertPairProps(src, dst, fwdProps, tx)
-		if mirror {
-			g.reassertPairProps(dst, src, revProps, tx)
-		}
 		return true
 	}
 	if h := g.edgeRemovalHookForTest; h != nil && tx.implicit() {
@@ -3388,9 +3343,6 @@ func (g *Graph[N, W]) removeArcInfo(src, dst N, handle uint64, tx *writeCtx) boo
 	}
 	if !tx.doomed() {
 		g.clearPairCreateCount(k)
-		if mirror {
-			g.clearPairCreateCount(mk)
-		}
 	}
 	return true
 }
@@ -3411,60 +3363,25 @@ func (g *Graph[N, W]) pairSlots(srcID, dstID graph.NodeID, handle uint64) (count
 	return count, found
 }
 
-// lockPairLabelShards write-locks the edge-label shard of k and, when mirror is
-// set, of mk, in ascending shard order and once when they coincide, and returns
-// them for [unlockPairLabelShards]. It takes them in the module's order — an
-// edge-label shard before any adjacency shard — so the adjacency writes made
-// while they are held cannot invert it.
-func (g *Graph[N, W]) lockPairLabelShards(k, mk edgeKey, mirror bool) [2]*edgeLabelShard {
-	a := g.edgeLabelShardFor(k)
-	if !mirror {
-		a.mu.Lock()
-		return [2]*edgeLabelShard{a}
-	}
-	b := g.edgeLabelShardFor(mk)
-	if a == b {
-		a.mu.Lock()
-		return [2]*edgeLabelShard{a}
-	}
-	// The shard index is the low bits of the pair's source; see
-	// [Graph.edgeLabelShardFor].
-	if uint64(mk.src)&(propMapShards-1) < uint64(k.src)&(propMapShards-1) {
-		a, b = b, a
-	}
-	a.mu.Lock()
-	b.mu.Lock()
-	return [2]*edgeLabelShard{a, b}
-}
-
-// unlockPairLabelShards releases what [Graph.lockPairLabelShards] locked; the
-// zero value releases nothing.
-func unlockPairLabelShards(held [2]*edgeLabelShard) {
-	if held[1] != nil {
-		held[1].mu.Unlock()
-	}
-	if held[0] != nil {
-		held[0].mu.Unlock()
+// unlockLabelShard releases the edge-label shard lock [Graph.removeArcInfo]
+// holds across a removal that leaves parallel slots; nil releases nothing.
+func unlockLabelShard(held *edgeLabelShard) {
+	if held != nil {
+		held.mu.Unlock()
 	}
 }
 
-// overflowWritable reports whether tx may write the overflow list of k — and of
-// mk when mirror is set — recording the conflict on tx when it may not. The
-// caller holds both pairs' edge-label shard locks and keeps them until its
-// overflow writes are done, so the answer cannot change in between.
-func (g *Graph[N, W]) overflowWritable(k, mk edgeKey, mirror bool, tx *writeCtx) bool {
+// overflowWritable reports whether tx may write the overflow list of k,
+// recording the conflict on tx when it may not. The caller holds the pair's
+// edge-label shard lock and keeps it until its overflow writes are done, so the
+// answer cannot change in between.
+func (g *Graph[N, W]) overflowWritable(k edgeKey, tx *writeCtx) bool {
 	if tx == nil || !g.mvccArmed {
 		return true
 	}
 	if head := g.edgeLabelShardFor(k).v.headStamp(k); tx.conflicts(head) {
 		_ = tx.conflictErr(mvcc.StoreEdgeTypes, head)
 		return false
-	}
-	if mirror {
-		if head := g.edgeLabelShardFor(mk).v.headStamp(mk); tx.conflicts(head) {
-			_ = tx.conflictErr(mvcc.StoreEdgeTypes, head)
-			return false
-		}
 	}
 	return true
 }
@@ -3631,10 +3548,6 @@ func (g *Graph[N, W]) reassertPairProps(src, dst N, props map[string]PropertyVal
 // every endpoint pair that src was involved in, exactly as [Graph.RemoveEdge]
 // does for each individual edge.
 //
-// For directed graphs the outgoing edges are removed and their forward per-pair
-// state is cleared. For undirected graphs the mirror entries are also removed
-// and both directions' per-pair state are cleared.
-//
 // It runs as a single-operation transaction (rmp #2947): it refuses with an
 // error wrapping [ErrDirectWriteConflict], and changes nothing, while another
 // transaction holds an uncommitted write on src, any neighbour, any adjacency
@@ -3696,10 +3609,8 @@ func (g *Graph[N, W]) removeAllEdgesFromInfo(src N, tx *writeCtx) bool {
 	// src is claimed FIRST and its neighbours read AFTER, so the set the side
 	// stores are cleared for is the set the adjacency removal takes out: from the
 	// claim on, no claiming writer can append to src (rmp #2947). Each destination
-	// is claimed too: on an undirected graph the mirror removal below mutates that
-	// node's entry, so an in-flight append there is a write this removal may not
-	// step over, and on either shape a concurrent delete of the destination decides
-	// from its in-edges, so the arc's removal must collide with it (rmp #2884).
+	// is claimed too: a concurrent delete of the destination decides from its
+	// in-edges, so the arc's removal must collide with it (rmp #2884).
 	if tx != nil {
 		if err := g.adjVer.noteExclusive(srcID, tx); err != nil {
 			return false
@@ -3715,7 +3626,7 @@ func (g *Graph[N, W]) removeAllEdgesFromInfo(src N, tx *writeCtx) bool {
 	if tx != nil {
 		for _, dstID := range dstIDs {
 			if dstID == srcID {
-				continue // the self-loop's mirror is this same entry
+				continue // a self-loop's destination is src, claimed above
 			}
 			if err := g.adjVer.noteExclusive(dstID, tx); err != nil {
 				return false
@@ -3724,19 +3635,14 @@ func (g *Graph[N, W]) removeAllEdgesFromInfo(src N, tx *writeCtx) bool {
 	}
 
 	// The side stores of every pair, before the adjacency (see removeArcInfo).
-	undirected := !g.adj.Directed()
 	for _, dstID := range dstIDs {
 		g.clearPairSides(edgeKey{src: srcID, dst: dstID}, tx)
-		if undirected && dstID != srcID {
-			g.clearPairSides(edgeKey{src: dstID, dst: srcID}, tx)
-		}
 		if tx.doomed() {
 			return false
 		}
 	}
 
-	// Bulk-remove from the adjacency layer. For undirected graphs this also
-	// removes the mirror entries from each dst's list.
+	// Bulk-remove from the adjacency layer.
 	if h := g.edgeRemovalHookForTest; h != nil && tx.implicit() {
 		h(false)
 	}
@@ -3752,9 +3658,6 @@ func (g *Graph[N, W]) removeAllEdgesFromInfo(src N, tx *writeCtx) bool {
 	defer g.topoGeneration.Add(1)
 	for _, dstID := range dstIDs {
 		g.clearPairCreateCount(edgeKey{src: srcID, dst: dstID})
-		if undirected && dstID != srcID {
-			g.clearPairCreateCount(edgeKey{src: dstID, dst: srcID})
-		}
 	}
 	return true
 }
@@ -4617,9 +4520,8 @@ func (g *Graph[N, W]) TombstoneCountStored() int { return int(g.tombstoneActive.
 // bitmaps but does NOT remove the incident edges other nodes hold, so a raw slot
 // count would include an edge to a node the query layer treats as absent.
 //
-// For an UNDIRECTED graph the result is the node's full degree, because the
-// adjacency mirrors insertion. For a DIRECTED graph it is the out-degree only:
-// in-degree is not an adjacency-local quantity and is served by the reverse CSR.
+// The result is the out-degree only: in-degree is not an adjacency-local
+// quantity and is served by the reverse CSR.
 //
 // # Cost
 //

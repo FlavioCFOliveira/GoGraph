@@ -41,7 +41,7 @@ func TestAbandonedReadTx_IdleReaperReleasesTheHorizonSlot(t *testing.T) {
 		idleBound  = 300 * time.Millisecond
 		totalBound = 20 * time.Second
 	)
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	addr := startTestServerWithEngine(t, eng, server.Options{
 		ConnTimeout:      30 * time.Second,

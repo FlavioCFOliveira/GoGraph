@@ -124,7 +124,7 @@ func TestNYBolt_ShortestPathCypher(t *testing.T) {
 func startNYBoltServer(t *testing.T) string {
 	t.Helper()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	srv, err := server.NewServer(eng, server.Options{ConnTimeout: 10 * time.Second, Auth: server.NoAuthHandler{}})
 	if err != nil {

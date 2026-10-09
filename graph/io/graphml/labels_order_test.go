@@ -16,7 +16,7 @@ import (
 // labels are now sorted, as the property keys already were.
 func TestWriteWithProps_ManyLabelsByteReproducible(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("n"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

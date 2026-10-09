@@ -599,8 +599,6 @@ func bulkIngest(ctx context.Context, cfg config, bulkPath, refPath string) (bulk
 	start := time.Now()
 	l := bulk.New(bulk.Options{
 		OutputPath:  bulkPath,
-		Directed:    true, // matches csv.DefaultOptions: a directed simple graph
-		Multigraph:  false,
 		ExpectNodes: cfg.nodes,        // determinism-neutral pre-size hint (node count is known)
 		Parallel:    cfg.bulkParallel, // -bulk-parallel selects the loader's parallel build
 	})

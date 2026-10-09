@@ -153,7 +153,7 @@ func assertGolden(t *testing.T, name, got string) {
 // Directed=true matches the catalogue's canonical orientation; the
 // trivial-family generators override Directed and Multigraph when
 // their topology requires it, so a single defaultCfg suffices.
-var defaultCfg = adjlist.Config{Directed: true}
+var defaultCfg = adjlist.Config{}
 
 func TestTrivial_EmptyGraph(t *testing.T) {
 	t.Parallel()
@@ -174,9 +174,6 @@ func TestTrivial_EmptyGraph(t *testing.T) {
 	}
 	if got := g.AdjList().Size(); got != 0 {
 		t.Fatalf("Size = %d, want 0", got)
-	}
-	if !g.AdjList().Directed() {
-		t.Fatal("Directed = false, want true (catalogue invariant)")
 	}
 	assertGolden(t, "empty.txt", formatAdjacency(g))
 }
@@ -209,45 +206,37 @@ func TestTrivial_SingleNode(t *testing.T) {
 }
 
 // TestTrivial_SingleEdge enumerates the constructor matrix of
-// (directed, weighted, selfLoop) instead of relying on rapid to
+// (weighted, selfLoop) instead of relying on rapid to
 // shrink booleans. Each row asserts the catalogue invariant for the
 // chosen variant plus the documented Name.
 func TestTrivial_SingleEdge(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		directed, weighted, selfLoop bool
-		wantName                     string
-		wantOrder                    uint64
-		wantSize                     uint64
-		wantHas01                    bool
-		wantHas10                    bool
-		wantHas00                    bool
+		weighted, selfLoop bool
+		wantName           string
+		wantOrder          uint64
+		wantSize           uint64
+		wantHas01          bool
+		wantHas10          bool
+		wantHas00          bool
 	}{
-		{directed: true, weighted: true, selfLoop: false, wantName: "trivial.k2",
+		{weighted: true, selfLoop: false, wantName: "trivial.k2",
 			wantOrder: 2, wantSize: 1, wantHas01: true, wantHas10: false, wantHas00: false},
-		{directed: true, weighted: false, selfLoop: false, wantName: "trivial.k2",
+		{weighted: false, selfLoop: false, wantName: "trivial.k2",
 			wantOrder: 2, wantSize: 1, wantHas01: true, wantHas10: false, wantHas00: false},
-		{directed: false, weighted: true, selfLoop: false, wantName: "trivial.k2",
-			wantOrder: 2, wantSize: 1, wantHas01: true, wantHas10: true, wantHas00: false},
-		{directed: false, weighted: false, selfLoop: false, wantName: "trivial.k2",
-			wantOrder: 2, wantSize: 1, wantHas01: true, wantHas10: true, wantHas00: false},
-		{directed: true, weighted: true, selfLoop: true, wantName: "trivial.k1.selfloop",
+		{weighted: true, selfLoop: true, wantName: "trivial.k1.selfloop",
 			wantOrder: 1, wantSize: 1, wantHas01: false, wantHas10: false, wantHas00: true},
-		{directed: true, weighted: false, selfLoop: true, wantName: "trivial.k1.selfloop",
-			wantOrder: 1, wantSize: 1, wantHas01: false, wantHas10: false, wantHas00: true},
-		{directed: false, weighted: true, selfLoop: true, wantName: "trivial.k1.selfloop",
-			wantOrder: 1, wantSize: 1, wantHas01: false, wantHas10: false, wantHas00: true},
-		{directed: false, weighted: false, selfLoop: true, wantName: "trivial.k1.selfloop",
+		{weighted: false, selfLoop: true, wantName: "trivial.k1.selfloop",
 			wantOrder: 1, wantSize: 1, wantHas01: false, wantHas10: false, wantHas00: true},
 	}
 
 	for _, c := range cases {
 		c := c
-		label := fmt.Sprintf("d=%v_w=%v_l=%v", c.directed, c.weighted, c.selfLoop)
+		label := fmt.Sprintf("w=%v_l=%v", c.weighted, c.selfLoop)
 		t.Run(label, func(t *testing.T) {
 			t.Parallel()
-			s := SingleEdge(c.directed, c.weighted, c.selfLoop)
+			s := SingleEdge(c.weighted, c.selfLoop)
 			if got := s.Name(); got != c.wantName {
 				t.Fatalf("Name = %q, want %q", got, c.wantName)
 			}
@@ -276,32 +265,23 @@ func TestTrivial_SingleEdge(t *testing.T) {
 		})
 	}
 
-	// Pin four canonical variants to golden files so changes to the
+	// Pin canonical variants to golden files so changes to the
 	// adjacency renderer or to the underlying Build are caught:
-	//   * directed weighted (no self loop)
-	//   * undirected weighted (no self loop)
-	//   * self loop weighted
+	//   * weighted (no self loop)
+	//   * self loop
 	//   * unweighted variants are covered by the matrix above but
 	//     not pinned to disk to keep the testdata corpus minimal.
 	t.Run("golden_directed_weighted", func(t *testing.T) {
 		t.Parallel()
-		g, err := SingleEdge(true, true, false).Build(defaultCfg)
+		g, err := SingleEdge(true, false).Build(defaultCfg)
 		if err != nil {
 			t.Fatalf("Build: %v", err)
 		}
 		assertGolden(t, "k2-directed-weighted.txt", formatAdjacency(g))
 	})
-	t.Run("golden_undirected_weighted", func(t *testing.T) {
-		t.Parallel()
-		g, err := SingleEdge(false, true, false).Build(defaultCfg)
-		if err != nil {
-			t.Fatalf("Build: %v", err)
-		}
-		assertGolden(t, "k2-undirected-weighted.txt", formatAdjacency(g))
-	})
 	t.Run("golden_self_loop", func(t *testing.T) {
 		t.Parallel()
-		g, err := SingleEdge(true, false, true).Build(defaultCfg)
+		g, err := SingleEdge(false, true).Build(defaultCfg)
 		if err != nil {
 			t.Fatalf("Build: %v", err)
 		}
@@ -335,9 +315,6 @@ func TestTrivial_ParallelDigon(t *testing.T) {
 	}
 	if g.AdjList().HasEdge(1, 0) {
 		t.Fatal("HasEdge(1,0) = true, want false (directed by definition)")
-	}
-	if !g.AdjList().Multigraph() {
-		t.Fatal("Multigraph = false, want true (catalogue invariant)")
 	}
 
 	// Count parallel edges out of node 0 to confirm Size accounting.
@@ -584,7 +561,7 @@ func TestTrivial_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
 
 	// A generous cap that every generator in this file fits under.
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 
 	for _, tc := range []struct {
 		name string
@@ -592,8 +569,8 @@ func TestTrivial_PreservesMaxShardCapacity(t *testing.T) {
 	}{
 		{"empty", EmptyGraph()},
 		{"k1", SingleNode()},
-		{"k2", SingleEdge(true, true, false)},
-		{"k1.selfloop", SingleEdge(true, true, true)},
+		{"k2", SingleEdge(true, false)},
+		{"k1.selfloop", SingleEdge(true, true)},
 		{"parallel-digon", ParallelDigon(2)},
 		{"isolated", IsolatedOnly(3)},
 		{"self-loop-universe", UniversalSelfLoops(3, true)},

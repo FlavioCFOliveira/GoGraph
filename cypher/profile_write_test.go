@@ -48,7 +48,7 @@ func profileWriteFixture(t *testing.T, eng *cypher.Engine) {
 
 func newProfileWriteEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 	t.Cleanup(func() { _ = eng.Close() })
 	profileWriteFixture(t, eng)
 	return eng

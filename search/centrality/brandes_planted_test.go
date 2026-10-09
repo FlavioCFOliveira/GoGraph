@@ -30,12 +30,12 @@ func TestBetweenness_PlantedBoundary(t *testing.T) {
 	)
 
 	g, err := shapegen.PlantedPartition(k, blockSize, pInPercent, pOutPercent, seed).
-		Build(adjlist.Config{Directed: false})
+		Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("PlantedPartition.Build: %v", err)
 	}
 	a := g.AdjList()
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	bc := Betweenness(c)
 
 	type classified struct {
@@ -58,7 +58,9 @@ func TestBetweenness_PlantedBoundary(t *testing.T) {
 		bid, _ := prop.Int64()
 
 		boundary := false
-		for nbr := range a.Neighbours(key) {
+		// The undirected neighbourhood: the symmetric CSR holds both arcs.
+		for nbrID := range c.NeighboursByID(nid) {
+			nbr, _ := a.Mapper().Resolve(nbrID)
 			nbrProp, nbrOK := g.GetNodeProperty(nbr, "block_id")
 			if !nbrOK {
 				continue

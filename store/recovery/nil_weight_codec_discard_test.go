@@ -33,7 +33,7 @@ func TestRecovery_NilWeightCodecDiscardsWeightedTxn_2808(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, int64](g, w, opts)
 	for _, e := range [][2]string{{"a", "b"}, {"b", "c"}} {
 		tx := s.Begin()

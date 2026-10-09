@@ -24,7 +24,7 @@ import (
 // all agree (the load-bearing invariant of the #1629 refactor).
 func TestLabelBag_TierTransitions_LockstepWithIndex(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.AddNode("n"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

@@ -114,8 +114,10 @@ func (osSnapshotBackend[N, W]) ReadManifest(path string) (snapshot.Manifest, err
 	return snapshot.ReadManifestFile(path)
 }
 
-// VerifySnapshotReadable performs the production readback in the two steps
-// recovery performs, in recovery's order:
+// VerifySnapshotReadable performs the production readback through
+// snapshot.VerifySnapshotReadable — the verification recovery's migration of a
+// legacy store also runs — in the two steps recovery performs, in recovery's
+// order:
 //
 //  1. snapshot.LoadSnapshotFull — the SAME call store/recovery makes to load a
 //     snapshot at startup (recovery.osBackend.LoadSnapshot), so a snapshot this
@@ -135,11 +137,7 @@ func (osSnapshotBackend[N, W]) ReadManifest(path string) (snapshot.Manifest, err
 // load-bearing, and holding the readback alive would double the checkpoint's
 // peak footprint for no gain.
 func (osSnapshotBackend[N, W]) VerifySnapshotReadable(snapDir string, codec txn.Codec[N]) error {
-	loaded, err := snapshot.LoadSnapshotFull(snapDir)
-	if err != nil {
-		return err
-	}
-	return snapshot.VerifyMapperDecodable[N](loaded.Mapper, codec)
+	return snapshot.VerifySnapshotReadable[N](snapDir, codec)
 }
 
 // manifestPath returns the manifest.json path inside a snapshot directory.

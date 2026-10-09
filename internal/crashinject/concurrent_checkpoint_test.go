@@ -246,7 +246,7 @@ func TestCrashRecovery_ConcurrentCheckpoint_PrePrefixTruncate(t *testing.T) {
 // A checker that has never been seen to fail is not evidence. This runs in the same
 // build as the crash test and needs no child process.
 func TestCrashRecovery_ConcurrentCheckpoint_OracleReportsTearing(t *testing.T) {
-	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, int64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	// Two whole transactions.

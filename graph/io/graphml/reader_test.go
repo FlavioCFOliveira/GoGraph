@@ -30,6 +30,8 @@ func TestReadInto_Basic(t *testing.T) {
 	}
 }
 
+// TestReadInto_Undirected pins that an edgedefault="undirected" document is
+// read as one directed relationship per edge, from source to target.
 func TestReadInto_Undirected(t *testing.T) {
 	t.Parallel()
 	doc := `<graphml xmlns="http://graphml.graphdrawing.org/xmlns">
@@ -39,8 +41,9 @@ func TestReadInto_Undirected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !a.HasEdge("a", "b") || !a.HasEdge("b", "a") {
-		t.Fatalf("undirected: mirror edge missing")
+	if !a.HasEdge("a", "b") || a.HasEdge("b", "a") || a.Size() != 1 {
+		t.Fatalf("undirected input: want the single relationship a->b, got a->b=%v b->a=%v size=%d",
+			a.HasEdge("a", "b"), a.HasEdge("b", "a"), a.Size())
 	}
 }
 

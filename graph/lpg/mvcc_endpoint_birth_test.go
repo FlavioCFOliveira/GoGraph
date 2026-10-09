@@ -34,7 +34,7 @@ import (
 // by a build that hides everything or shows everything; what the transaction owes is
 // that they AGREE.
 func TestEndpointBirth_CreatedByAnEdgeIsInvisibleBeforeItsCommit(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	// A snapshot taken BEFORE anything is written. Nothing below may reach it.
@@ -84,7 +84,7 @@ func TestEndpointBirth_CreatedByAnEdgeIsInvisibleBeforeItsCommit(t *testing.T) {
 // fresh nodes and one edge between them — which is what makes it an ABSOLUTE oracle
 // rather than a comparison against the implementation's own answer.
 func TestEndpointBirth_NodesAndEdgesStayInStep(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	const committedTx = 5
@@ -163,7 +163,7 @@ func TestEndpointBirth_HandlePathsAlsoRecordTheBirth(t *testing.T) {
 	}
 	for _, p := range paths {
 		t.Run(p.name, func(t *testing.T) {
-			g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := New[string, float64](adjlist.Config{})
 			defer func() { _ = g.Close() }()
 
 			before := g.BeginRead()

@@ -38,9 +38,8 @@ func TestParallel_NoPartialFileOnBuildError(t *testing.T) {
 	// capped AdjList (the public Options has no cap knob; this is a
 	// white-box atomicity probe).
 	l := &Loader{
-		opts: Options{OutputPath: out, Directed: true, Parallel: true},
+		opts: Options{OutputPath: out, Parallel: true},
 		adj: adjlist.New[string, int64](adjlist.Config{
-			Directed:         true,
 			MaxShardCapacity: 1, // any shard with >1 distinct source node overflows
 		}),
 	}
@@ -91,7 +90,7 @@ func TestParallel_SinglePublicationOnSuccess(t *testing.T) {
 
 	dir := t.TempDir()
 	out := filepath.Join(dir, "graph.csr")
-	l := New(Options{OutputPath: out, Directed: true, Parallel: true})
+	l := New(Options{OutputPath: out, Parallel: true})
 	if err := l.AddBatch(genEdges(3, 6000, 500)); err != nil {
 		t.Fatalf("AddBatch: %v", err)
 	}

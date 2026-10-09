@@ -52,7 +52,7 @@ func edgeCount(t *testing.T, eng *cypher.Engine) int64 {
 // new contract — the re-CREATE errors, and the pre-existing edge survives
 // because nothing was ever touched.
 func TestRollback_ParallelEdgeCreate_SimpleGraph_ErrorsAndPreservesExistingEdge(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true}) // simple graph
+	g := lpg.New[string, float64](adjlist.Config{}) // simple graph
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -92,7 +92,7 @@ func TestRollback_ParallelEdgeCreate_SimpleGraph_ErrorsAndPreservesExistingEdge(
 // adds a parallel relationship (openCypher: CREATE never deduplicates), and a
 // committed CREATE persists it.
 func TestRollback_MultigraphEdgeCreate_StillParallel(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -118,7 +118,7 @@ func TestRollback_MultigraphEdgeCreate_StillParallel(t *testing.T) {
 // no-oping. Rollback then unwinds the first CREATE's undo, so the graph returns
 // to empty — exactly its pre-transaction state.
 func TestRollback_SameTxDuplicateEdge_SimpleGraph_SecondCreateErrors(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

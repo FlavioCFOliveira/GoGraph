@@ -86,7 +86,7 @@ func TestWriteSnapshotFull_StagingDirFsyncBeforeRename(t *testing.T) {
 	dir := filepath.Join(root, "snap")
 	steps := installPublishTrace(t, dir)
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	adj := g.AdjList()
 	if err := adj.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
@@ -209,7 +209,7 @@ func TestWriteSnapshotFull_ReconstructsAfterPreRenameCrash(t *testing.T) {
 	dir := filepath.Join(root, "snap")
 
 	keys := []string{"alice", "bob", "carol", "dave"}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	adj := g.AdjList()
 	for i, k := range keys {
 		next := keys[(i+1)%len(keys)]

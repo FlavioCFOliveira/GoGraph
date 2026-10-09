@@ -126,7 +126,7 @@ func runWalkReentryStress(t *testing.T, read func() error, write func(i int) (do
 // every walked node costs the re-entering callbacks their full set of lookups.
 func reentry2897Graph(t *testing.T, n int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range n {
 		k := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(k); err != nil {

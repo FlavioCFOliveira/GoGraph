@@ -78,7 +78,7 @@ func TestCheckpointer_StoreDirectConstraint_Unwired_SkipsTruncation(t *testing.T
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, csStoreOpts())
 
 	// Declare UNIQUE (Person).name via the public txn.Tx API + full Commit.

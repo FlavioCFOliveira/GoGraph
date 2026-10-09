@@ -302,7 +302,7 @@ func TestAggregation_AllScalarsByProperty(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestAggregation_EmptyInputNeutralRow(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(),
@@ -383,7 +383,7 @@ func TestAggregation_StDevDetection(t *testing.T) {
 // (so callers can run queries) and the graph (so callers can introspect).
 func newAggGraph(t *testing.T, props []map[string]any) (*cypher.Engine, *lpg.Graph[string, float64]) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	if len(props) == 0 {
 		return eng, g

@@ -71,7 +71,7 @@ var lazyRelTempProps = map[string]string{
 // is the route relLazyRoute reaches through its latch-is-false arm.
 func buildLazyRelPerPairGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode(%q): %v", k, err)
@@ -120,7 +120,7 @@ func buildLazyRelPerPairGraph(t *testing.T) *lpg.Graph[string, float64] {
 // value-key relationship materialisations take.
 func buildLazyRelByHandleGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	e := NewEngine(g)
 	runWrite(t, e, `CREATE (a:P {nm:'a'}), (b:P {nm:'b'})`)
 	runWrite(t, e, `MATCH (a:P {nm:'a'}), (b:P {nm:'b'}) CREATE (a)-[:R {
@@ -610,7 +610,7 @@ func TestLazyRelationshipEndToEndMatchesTheEagerProjection(t *testing.T) {
 // from the by-handle store to the per-pair coalesced union, the later sibling's
 // value would leak into the earlier one's answer.
 func TestLazyRelationshipRouteIsExclusive(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	e := NewEngine(g)
 	runWrite(t, e, `CREATE (a:P {nm:'a'}), (b:P {nm:'b'})`)
 	runWrite(t, e, `MATCH (a:P {nm:'a'}), (b:P {nm:'b'}) CREATE (a)-[:R {w:10}]->(b)`)
@@ -627,7 +627,7 @@ func TestLazyRelationshipRouteIsExclusive(t *testing.T) {
 	// that fell back on a by-handle miss would report the sibling's 10 instead of
 	// null. Without this arm the exclusivity claim is untested for absence, which
 	// is exactly where a fallback hides.
-	g2 := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g2 := lpg.New[string, float64](adjlist.Config{})
 	e2 := NewEngine(g2)
 	runWrite(t, e2, `CREATE (a:P {nm:'a'}), (b:P {nm:'b'})`)
 	runWrite(t, e2, `MATCH (a:P {nm:'a'}), (b:P {nm:'b'}) CREATE (a)-[:R {w:10}]->(b)`)

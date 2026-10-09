@@ -255,7 +255,7 @@ func collectPackageNames(g *lpg.Graph[string, int64]) ([]string, error) {
 func buildRegistryEngine(ctx context.Context, names []string, disableSeek bool) (*cypher.Engine, error) {
 	// Directed + Multigraph is the openCypher storage model, which is what the
 	// Cypher engine expects; anything else makes it warn at construction.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i, n := range names {
 		if i%checkEvery == 0 {
 			if err := ctx.Err(); err != nil {

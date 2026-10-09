@@ -59,7 +59,7 @@ func TestPropertyValue_TypedAccess(t *testing.T) {
 
 func TestGraph_NodeProperties(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.SetNodeProperty("alice", "age", Int64Value(30)); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}

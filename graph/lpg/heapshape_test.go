@@ -211,7 +211,7 @@ func TestHeapShape_PerNode(t *testing.T) {
 func measureObjectsPerNode(t *testing.T, nodes, degree int) (ratio float64, before, after uint64) {
 	t.Helper()
 
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() {
 		if err := g.Close(); err != nil {
 			t.Errorf("Close: %v", err)

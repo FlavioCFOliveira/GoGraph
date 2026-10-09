@@ -4,7 +4,7 @@ import "testing"
 
 func TestBuildFixture_Deterministic(t *testing.T) {
 	t.Parallel()
-	spec := FixtureSpec{Vertices: 256, Edges: 4096, Seed: 7, Multigraph: true}
+	spec := FixtureSpec{Vertices: 256, Edges: 4096, Seed: 7}
 	a, err := BuildFixture(spec)
 	if err != nil {
 		t.Fatalf("BuildFixture: %v", err)
@@ -31,11 +31,11 @@ func TestBuildFixture_Deterministic(t *testing.T) {
 
 func TestBuildFixture_SeedVariation(t *testing.T) {
 	t.Parallel()
-	a, err := BuildFixture(FixtureSpec{Vertices: 100, Edges: 1024, Seed: 1, Multigraph: true})
+	a, err := BuildFixture(FixtureSpec{Vertices: 100, Edges: 1024, Seed: 1})
 	if err != nil {
 		t.Fatalf("BuildFixture(seed=1): %v", err)
 	}
-	b, err := BuildFixture(FixtureSpec{Vertices: 100, Edges: 1024, Seed: 2, Multigraph: true})
+	b, err := BuildFixture(FixtureSpec{Vertices: 100, Edges: 1024, Seed: 2})
 	if err != nil {
 		t.Fatalf("BuildFixture(seed=2): %v", err)
 	}

@@ -239,7 +239,7 @@ func newBenchServerSeeded(b *testing.B, seedNodes int) string {
 	// constructs — and those warnings land ON the benchmark result lines, where
 	// they hid the ns/op values. Separating stdout from stderr does not help; the
 	// only clean fix is not to emit them.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// Seed nodes so read queries return non-trivially.

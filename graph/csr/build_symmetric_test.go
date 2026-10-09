@@ -137,13 +137,15 @@ func TestBuildSymmetric_FromArraysWithoutHandles(t *testing.T) {
 	}
 }
 
-// TestBuildSymmetric_MatchesUndirectedAdjList is the equivalence property: for
+// TestBuildSymmetric_MatchesMirroredAdjList is the equivalence property: for
 // a random directed edge list, BuildSymmetric of the directed CSR equals,
-// array for array, the CSR an undirected multigraph adjlist builds from the
-// same edges inserted in the same order. Both adjlists mint handles from the
-// same sequence, so the handle columns are compared too. It also checks that
-// the input snapshot is not mutated.
-func TestBuildSymmetric_MatchesUndirectedAdjList(t *testing.T) {
+// array for array, the CSR of an undirected multigraph built by hand: a
+// directed multigraph adjlist fed every edge followed, for a non-loop edge, by
+// its mirror carrying the same weight and the same handle. That is the layout
+// the storage-level undirected mode had before storage became directed-only.
+// Both adjlists mint handles from the same sequence, so the handle columns are
+// compared too. It also checks that the input snapshot is not mutated.
+func TestBuildSymmetric_MatchesMirroredAdjList(t *testing.T) {
 	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		n := rapid.IntRange(1, 12).Draw(rt, "n")
@@ -151,15 +153,21 @@ func TestBuildSymmetric_MatchesUndirectedAdjList(t *testing.T) {
 		seed := rapid.Uint64().Draw(rt, "seed")
 		rng := rand.New(rand.NewPCG(seed, seed^0x3071)) //nolint:gosec // deterministic test RNG
 
-		dir := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
-		und := adjlist.New[int, int64](adjlist.Config{Directed: false, Multigraph: true})
+		dir := adjlist.New[int, int64](adjlist.Config{})
+		und := adjlist.New[int, int64](adjlist.Config{})
 		for i := range m {
 			src, dst, w := rng.IntN(n), rng.IntN(n), int64(i)
 			if err := dir.AddEdge(src, dst, w); err != nil {
 				rt.Fatalf("directed AddEdge: %v", err)
 			}
-			if err := und.AddEdge(src, dst, w); err != nil {
-				rt.Fatalf("undirected AddEdge: %v", err)
+			h := und.NextHandle()
+			if err := und.AddEdgeH(src, dst, w, h); err != nil {
+				rt.Fatalf("mirrored AddEdgeH: %v", err)
+			}
+			if src != dst {
+				if err := und.AddEdgeH(dst, src, w, h); err != nil {
+					rt.Fatalf("mirror AddEdgeH: %v", err)
+				}
 			}
 		}
 

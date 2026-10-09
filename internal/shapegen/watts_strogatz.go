@@ -34,7 +34,7 @@ import (
 //
 // The generator constructs the underlying [adjlist.Config] from the
 // caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, and
-// forces cfg.Directed=false and cfg.Multigraph=false: the
+// stores each undirected edge as ONE directed arc, in the orientation the generator enumerates it: the
 // Watts-Strogatz model is an undirected simple graph (no parallel
 // edges, no self-loops) by definition.
 //
@@ -105,8 +105,7 @@ func (s wattsStrogatzBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], er
 // rewires each edge independently with probability betaPercent / 100
 // (Watts & Strogatz, "Collective dynamics of 'small-world' networks",
 // Nature 393(6684), 1998). The graph is undirected and simple (no
-// parallel edges, no self-loops); cfg.Directed and cfg.Multigraph are
-// overridden to false.
+// parallel edges, no self-loops); each edge is stored as one directed arc.
 //
 // The PRNG is a deterministically-seeded [math/rand/v2.PCG], so every
 // (n, k, betaPercent, seed) tuple yields the same byte-for-byte
@@ -207,8 +206,6 @@ func WattsStrogatz(n, k, betaPercent int, seed uint64) Shape[int, int64] {
 			{Name: "beta", Min: 0, Max: 100, Default: 10},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildWattsStrogatz(g, n, k, betaPercent, seed)
 		},

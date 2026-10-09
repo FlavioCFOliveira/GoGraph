@@ -38,7 +38,7 @@ func doomOnNode(t *testing.T, g *Graph[string, float64], tx WriteTx) WriteTx {
 func TestDurableEdgeApply_RefusedOverExplicitUncommittedEntry(t *testing.T) {
 	for _, mode := range []string{"abort", "abort-after-undo"} {
 		t.Run(mode, func(t *testing.T) {
-			g := newDirectTxGraph(t, true)
+			g := newDirectTxGraph(t)
 			requireNoErr(t, g.AddNode("a"), g.AddNode("c"), g.AddNode("d"))
 
 			t1 := g.BeginVersionedTx()
@@ -88,43 +88,13 @@ func TestDurableEdgeApply_RefusedOverExplicitUncommittedEntry(t *testing.T) {
 	}
 }
 
-// TestDurableEdgeApply_UndirectedLeavesNoHalfEdge: on an undirected graph the
-// store's edge apply touching one endpoint of an explicit transaction's
-// uncommitted edge is refused, so the abort cannot leave the edge in one
-// endpoint's entry only.
-func TestDurableEdgeApply_UndirectedLeavesNoHalfEdge(t *testing.T) {
-	g := newDirectTxGraph(t, false)
-	requireNoErr(t, g.AddNode("a"), g.AddNode("c"), g.AddNode("d"))
-	t1 := g.BeginVersionedTx()
-	if _, err := g.Writer(t1).AddEdgeH("a", "c", 1); err != nil {
-		t.Fatalf("t1 append: %v", err)
-	}
-	applyErr := g.ApplyVersioned(func(wtx WriteTx) error {
-		_, e := g.Writer(wtx).AddEdgeHIfAbsent("c", "d", 1, 999999)
-		return e
-	})
-	if !errors.Is(applyErr, mvcc.ErrSerializationConflict) {
-		t.Fatalf("store edge apply on c while t1 holds a-c: err = %v; want a serialization conflict", applyErr)
-	}
-	blocker := doomOnNode(t, g, t1)
-	g.EndVersionedTx(t1)
-	g.EndVersionedTx(blocker)
-	g.ReclaimNow()
-	if g.AdjList().HasEdge("a", "c") || g.AdjList().HasEdge("c", "a") {
-		t.Error("ATOMICITY: part of the aborted edge a-c survived")
-	}
-	if err := g.AdjList().CheckInvariants(); err != nil {
-		t.Errorf("INTEGRITY: %v", err)
-	}
-}
-
 // TestAdjacency_ExplicitWriteRefusedOverExplicitEntryWithoutClaim pins the
 // structural half of the fix: the adjacency refuses an explicit transaction's
 // write over another explicit transaction's uncommitted entry on its own, with
 // no claim taken by the layer above. A raw adjacency write through the
 // transaction's own token is such a write.
 func TestAdjacency_ExplicitWriteRefusedOverExplicitEntryWithoutClaim(t *testing.T) {
-	g := newDirectTxGraph(t, true)
+	g := newDirectTxGraph(t)
 	requireNoErr(t, g.AddNode("a"), g.AddNode("c"), g.AddNode("d"))
 	t1 := g.BeginVersionedTx()
 	if _, err := g.Writer(t1).AddEdgeH("a", "c", 1); err != nil {
@@ -148,7 +118,7 @@ func TestAdjacency_ExplicitWriteRefusedOverExplicitEntryWithoutClaim(t *testing.
 // transaction's withdrawal no longer recognised its own entry and the aborted arc
 // stayed committed.
 func TestCompact_KeepsTheVersionChainOfAnUncommittedEntry(t *testing.T) {
-	g := newDirectTxGraph(t, true)
+	g := newDirectTxGraph(t)
 	requireNoErr(t, g.AddNode("a"), g.AddNode("b"), g.AddNode("c"))
 	for i := 0; i < 4; i++ { // spare capacity in a's columns, so Compact trims
 		requireNoErr(t, g.AddEdge("a", "b", 1))
@@ -199,7 +169,7 @@ func TestApplyDurable_Outcomes(t *testing.T) {
 	}
 
 	t.Run("explicit-conflict-refuses-before-durable", func(t *testing.T) {
-		g := newDirectTxGraph(t, true)
+		g := newDirectTxGraph(t)
 		requireNoErr(t, g.AddNode("n"))
 		t1 := g.BeginVersionedTx()
 		requireNoErr(t, g.Writer(t1).SetNodeProperty("n", "v", StringValue("t1")))
@@ -215,7 +185,7 @@ func TestApplyDurable_Outcomes(t *testing.T) {
 	})
 
 	t.Run("durable-error-aborts", func(t *testing.T) {
-		g := newDirectTxGraph(t, true)
+		g := newDirectTxGraph(t)
 		requireNoErr(t, g.AddNode("n"))
 		boom := errors.New("fsync failed")
 		if err := g.ApplyDurable(context.Background(), write(g), func() error { return boom }); !errors.Is(err, boom) {
@@ -229,7 +199,7 @@ func TestApplyDurable_Outcomes(t *testing.T) {
 	})
 
 	t.Run("durable-panic-aborts", func(t *testing.T) {
-		g := newDirectTxGraph(t, true)
+		g := newDirectTxGraph(t)
 		requireNoErr(t, g.AddNode("n"))
 		func() {
 			defer func() {
@@ -246,7 +216,7 @@ func TestApplyDurable_Outcomes(t *testing.T) {
 	})
 
 	t.Run("success-publishes", func(t *testing.T) {
-		g := newDirectTxGraph(t, true)
+		g := newDirectTxGraph(t)
 		requireNoErr(t, g.AddNode("n"))
 		var seen bool
 		err := g.ApplyDurable(context.Background(), write(g), func() error {

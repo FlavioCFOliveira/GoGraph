@@ -26,7 +26,7 @@ import (
 
 func TestNodeBornAsOf_AbortedCreationNeverReadsBorn(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	if err := g.ApplyVersioned(func(tx WriteTx) error { return g.Writer(tx).AddNode("seed") }); err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestNodeBornAsOf_AbortedCreationNeverReadsBorn(t *testing.T) {
 // a node removed before the instant is still born (dead, not a hole).
 func TestNodeBornAsOf_Cases(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	add := func(k string) {
 		t.Helper()

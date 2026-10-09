@@ -36,8 +36,7 @@ package adjlist
 // [github.com/FlavioCFOliveira/GoGraph/graph/lpg.Graph.AddEdgeHIfAbsent] inside
 // a store commit — so its entry embedded another explicit transaction's
 // uncommitted arc, and that transaction's abort then restored the stacked entry
-// with the arc still in it; on an undirected graph it left a half edge. The
-// claims remain, because they also order writes against versions committed
+// with the arc still in it. The claims remain, because they also order writes against versions committed
 // after a writer's snapshot, which this test does not see; this test is what
 // makes "no entry is built on an uncommitted one" hold whatever the claims do.
 //
@@ -50,19 +49,13 @@ package adjlist
 //
 // # Several entries, one decision
 //
-// An undirected edge lives in two entries. A write that changes both takes both
-// shard locks in ascending shard order — a shard shared by both is locked once
-// — tests both entries, and only then writes either, so a refusal on the second
-// entry leaves the first untouched. A bulk removal does the same over its whole
-// locked set (see [AdjList.RemoveAllEdgesFrom]). Every path that holds more than
-// one adjacency shard lock takes them in ascending shard order, which is what
-// makes the order deadlock-free; the reverse index stays a leaf below all of
-// them.
+// An edge lives in one entry, its source's. Every edge write tests that entry
+// under its shard lock before it writes it, so a refusal changes nothing. A path
+// that holds more than one adjacency shard lock takes them in ascending shard
+// order, which is what makes the order deadlock-free; the reverse index stays a
+// leaf below all of them.
 
-import (
-	"github.com/FlavioCFOliveira/GoGraph/graph"
-	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
-)
+import "github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 
 // directConflictLocked returns the conflict a write carrying tx would hit on the
 // entry at intraIdx of shard s, or nil, by the rule in this file's comment. It
@@ -90,34 +83,4 @@ func (a *AdjList[N, W]) directConflictLocked(tx mvcc.Tx, s *adjShard[W], intraId
 		return nil
 	}
 	return mvcc.NewConflict(mvcc.StoreAdjacency, head, 0, own)
-}
-
-// directConflictLockedID is [AdjList.directConflictLocked] addressed by node id.
-// The caller holds the lock of id's shard.
-func (a *AdjList[N, W]) directConflictLockedID(tx mvcc.Tx, id graph.NodeID) error {
-	return a.directConflictLocked(tx, &a.shards[id&shardMask], uint64(id)>>shardBits)
-}
-
-// lockPair locks the shards of x and y in ascending shard order — once when
-// they share a shard — and returns them for [AdjList.unlockPair]. It is the
-// two-entry case every undirected edge write takes, without a slice or a
-// returned closure: either would allocate on the hot path.
-func (a *AdjList[N, W]) lockPair(x, y graph.NodeID) (lo, hi uint64) {
-	lo, hi = uint64(x)&shardMask, uint64(y)&shardMask
-	if lo > hi {
-		lo, hi = hi, lo
-	}
-	a.shards[lo].mu.Lock()
-	if hi != lo {
-		a.shards[hi].mu.Lock()
-	}
-	return lo, hi
-}
-
-// unlockPair releases the shards [AdjList.lockPair] locked.
-func (a *AdjList[N, W]) unlockPair(lo, hi uint64) {
-	if hi != lo {
-		a.shards[hi].mu.Unlock()
-	}
-	a.shards[lo].mu.Unlock()
 }

@@ -27,7 +27,7 @@ func TestSnapshot_V3SelfSufficient(t *testing.T) {
 	t.Parallel()
 
 	keys := []string{"alice", "bob", "carol", "dave", "eve"}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	adj := g.AdjList()
 
 	// Build a 5-node, 5-edge ring so the CSR is non-trivial.

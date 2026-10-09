@@ -26,7 +26,7 @@ func TestBuildDep_TopoAndSCC(t *testing.T) {
 	// Build a random DAG: only add edge i→j when i < j, guaranteeing acyclicity.
 	// Target ≈150 edges: accept each candidate pair with probability 150/(n*(n-1)/2) ≈ 12%.
 	rng := rand.New(rand.NewPCG(seed, 0)) //nolint:gosec // deterministic PRNG for test-data generation, not cryptography
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 
 	type edge struct{ u, v int }
 	var edges []edge

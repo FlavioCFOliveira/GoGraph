@@ -10,6 +10,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -20,7 +21,7 @@ import (
 //
 // WriteSnapshotFull (the no-codec writer used here, via a checkpointer
 // constructed WITHOUT checkpoint.WithMapperCodec) emits mapper.bin only
-// for string keys; for any other key type it writes a v2 snapshot
+// for string keys; for any other key type it writes a snapshot
 // without a mapper, which CANNOT reconstruct the graph on its own. If
 // the checkpointer truncated the WAL after such a snapshot, the
 // NodeID->key mapping — and therefore every edge/label/property keyed by
@@ -51,7 +52,7 @@ func TestCheckpointDurability_NonStringKeysNotLost(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 
-	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, int64](adjlist.Config{})
 	opts := txn.Options[int64, int64]{
 		Codec:       txn.NewInt64Codec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -101,6 +102,15 @@ func TestCheckpointDurability_NonStringKeysNotLost(t *testing.T) {
 	}
 	if res.WALOps == 0 {
 		t.Fatal("WALOps = 0 — the WAL was not replayed; non-string state would be lost")
+	}
+	// The mapper-less snapshot is still stamped ManifestVersion (rmp #3072),
+	// so a build that predates it refuses the store instead of misreading it.
+	if !res.SnapshotHit || res.SnapshotSelfSufficient {
+		t.Fatalf("SnapshotHit = %v, SnapshotSelfSufficient = %v, want true, false",
+			res.SnapshotHit, res.SnapshotSelfSufficient)
+	}
+	if res.SnapshotSchemaVersion != snapshot.ManifestVersion {
+		t.Fatalf("SnapshotSchemaVersion = %d, want %d", res.SnapshotSchemaVersion, snapshot.ManifestVersion)
 	}
 	rg := res.Graph
 	if !rg.AdjList().HasEdge(1, 2) {

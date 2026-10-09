@@ -393,7 +393,7 @@ func TestConcurrentWritersOracle_ReportsViolations(t *testing.T) {
 		}
 	}
 	newGraph := func() *lpg.Graph[int64, int64] {
-		return lpg.New[int64, int64](adjlist.Config{Directed: true})
+		return lpg.New[int64, int64](adjlist.Config{})
 	}
 
 	t.Run("clean graph reports nothing", func(t *testing.T) {

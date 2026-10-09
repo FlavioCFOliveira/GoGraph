@@ -80,7 +80,7 @@ func Run(ctx context.Context, spec Spec) Report {
 // partially-built adjlist on any [adjlist.AdjList] error so callers
 // can observe how far ingestion progressed before failure.
 func Synthetic(ctx context.Context, v, e uint64) (*adjlist.AdjList[uint32, int64], error) {
-	a := adjlist.New[uint32, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[uint32, int64](adjlist.Config{})
 	if v == 0 {
 		return a, nil
 	}

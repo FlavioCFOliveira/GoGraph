@@ -138,7 +138,7 @@ func TestWriteAndSyncIndex_SerializeFailure(t *testing.T) {
 // flushed.
 func TestWriteLabels_NodeRecordWriteFailure(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	// Add a node with a label so node records are non-empty.
 	if err := g.AddNode("alice"); err != nil {
 		t.Fatalf("AddNode: %v", err)
@@ -161,7 +161,7 @@ func TestWriteLabels_NodeRecordWriteFailure(t *testing.T) {
 // an edge label exercises the edge-record section of the writer.
 func TestWriteLabels_EdgeRecordWriteFailure(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestWriteLabels_EdgeRecordWriteFailure(t *testing.T) {
 // are not hit by the simple node-only tests.
 func TestWriteLabels_RoundtripEdgeLabels(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

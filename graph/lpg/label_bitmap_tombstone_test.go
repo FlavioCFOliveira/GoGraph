@@ -18,7 +18,7 @@ import (
 
 // newTestGraph returns a directed LPG for use in tests.
 func newTestGraph() *Graph[string, float64] {
-	return New[string, float64](adjlist.Config{Directed: true})
+	return New[string, float64](adjlist.Config{})
 }
 
 // TestRemoveNode_StripsLabelBitmap is the primary gate for task #1409:

@@ -389,7 +389,7 @@ func build(ctx context.Context, cfg config) (*adjlist.AdjList[int, int64], genRe
 	rng := rand.New(rand.NewSource(cfg.seed))
 	start := time.Now()
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	sites := make([]site, cfg.regions*cfg.sitesPerRegion)
 	added := make(map[[2]int]struct{})
 	var res genResult

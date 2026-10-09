@@ -631,7 +631,7 @@ func TestCreateConstraint_UncommittedDuplicateIsRefusedAtItsCommit(t *testing.T)
 // which is the variable the two tests above differ on.
 func constraintDupEngine(tb testing.TB, names map[string]string, stmt string) (*Engine, *ExplicitTx) {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for key, name := range names {
 		if err := g.SetNodeLabel(key, "Person"); err != nil {
 			tb.Fatalf("seed label %s: %v", key, err)
@@ -666,7 +666,7 @@ func constraintDupEngine(tb testing.TB, names map[string]string, stmt string) (*
 // string-valued test could observe.
 func TestUniqueValueSeed_CoversNonStringValues(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		key := fmt.Sprintf("n%d", i)
 		if err := g.SetNodeLabel(key, "Acct"); err != nil {

@@ -33,7 +33,7 @@ const inlj3013Query = `UNWIND [{a: "s"}] AS r MATCH (b:P) WHERE b.age = r.a RETU
 func inlj3013Engines() map[string]func(t *testing.T) *cypher.Engine {
 	return map[string]func(t *testing.T) *cypher.Engine{
 		"memory": func(t *testing.T) *cypher.Engine {
-			eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+			eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 			t.Cleanup(func() { _ = eng.Close() })
 			return eng
 		},

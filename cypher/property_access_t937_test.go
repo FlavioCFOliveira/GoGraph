@@ -20,7 +20,7 @@ import (
 // resolves the property from the bound node instead of producing null.
 func TestT937_PropertyAccess_BasicReturn(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -48,7 +48,7 @@ func TestT937_PropertyAccess_BasicReturn(t *testing.T) {
 // TestT937_PropertyAccess_WhereFilter checks that WHERE n.prop = lit works.
 func TestT937_PropertyAccess_WhereFilter(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -74,7 +74,7 @@ func TestT937_PropertyAccess_WhereFilter(t *testing.T) {
 // relationships.
 func TestT937_PropertyAccess_RelProperty(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -99,7 +99,7 @@ func TestT937_PropertyAccess_RelProperty(t *testing.T) {
 // a full relationship value (not just the edge ID integer).
 func TestT937_PropertyAccess_RelReturnBare(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

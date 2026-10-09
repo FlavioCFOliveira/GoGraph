@@ -66,7 +66,7 @@ func BenchmarkBarrier_BareRWMutexParallel(b *testing.B) {
 // visibility barrier (Lock/Unlock plus the adjacency commit window) with an
 // empty transaction.
 func BenchmarkBarrier_ApplyAtomically(b *testing.B) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

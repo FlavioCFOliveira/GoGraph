@@ -240,7 +240,7 @@ func scriptParallelPair(t *testing.T, sm *Simulator) {
 // map, the deleted instance's endpoints stay alive, and every op's counters
 // match the oracle's expectation exactly.
 func TestEdgeProperties_ScriptedParallelPair(t *testing.T) {
-	sm, err := New(Config{Seed: 1, MaxTicks: 1, Workload: edgePropertiesWorkload(NewSeed(1)), Multigraph: true})
+	sm, err := New(Config{Seed: 1, MaxTicks: 1, Workload: edgePropertiesWorkload(NewSeed(1))})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -275,8 +275,7 @@ func TestEdgeProperties_ScriptedParallelPair(t *testing.T) {
 func TestEdgeProperties_ScriptedParallelPair_SurvivesCrash(t *testing.T) {
 	sm, err := New(Config{
 		Seed: 2, MaxTicks: 1, Workload: edgePropertiesWorkload(NewSeed(2)),
-		Multigraph: true,
-		Disk:       DiskConfig{CapacityBytes: 1 << 30}, // opts into the durable store; no scheduled crash
+		Disk: DiskConfig{CapacityBytes: 1 << 30}, // opts into the durable store; no scheduled crash
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -307,7 +306,7 @@ func TestEdgeProperties_ScriptedParallelPair_SurvivesCrash(t *testing.T) {
 // read-back check: perturbing one parallel twin's property map in the MODEL
 // (while the engine holds the real values) must fire the checker.
 func TestEdgeProperties_DetectsTwinPerturbation(t *testing.T) {
-	sm, err := New(Config{Seed: 3, MaxTicks: 1, Workload: edgePropertiesWorkload(NewSeed(3)), Multigraph: true})
+	sm, err := New(Config{Seed: 3, MaxTicks: 1, Workload: edgePropertiesWorkload(NewSeed(3))})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -327,7 +326,7 @@ func TestEdgeProperties_DetectsTwinPerturbation(t *testing.T) {
 // against its twin (eid 2) — the exact wrong-instance identity confusion the
 // by-handle code guards — and the checker must fire.
 func TestEdgeProperties_DetectsWrongInstanceTarget(t *testing.T) {
-	sm, err := New(Config{Seed: 4, MaxTicks: 1, Workload: edgePropertiesWorkload(NewSeed(4)), Multigraph: true})
+	sm, err := New(Config{Seed: 4, MaxTicks: 1, Workload: edgePropertiesWorkload(NewSeed(4))})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -389,7 +388,7 @@ func TestEdgeProperties_CountersSensitivity_DeleteR(t *testing.T) {
 // tmplRemoveKnowsSince expectation in expectedKnowsInstCounters; this test
 // pins the same contract directly, plus the absent-property no-op.
 func TestEdgeProperties_RemoveCountersPerInstance(t *testing.T) {
-	sm, err := New(Config{Seed: 5, MaxTicks: 1, Workload: edgePropertiesWorkload(NewSeed(5)), Multigraph: true})
+	sm, err := New(Config{Seed: 5, MaxTicks: 1, Workload: edgePropertiesWorkload(NewSeed(5))})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

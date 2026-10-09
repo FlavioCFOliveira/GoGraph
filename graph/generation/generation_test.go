@@ -13,7 +13,7 @@ import (
 
 func makeCSR(tb testing.TB, seed int) *csr.CSR[struct{}] {
 	tb.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(seed, seed+1, struct{}{}); err != nil {
 		tb.Fatalf("AddEdge: %v", err)
 	}

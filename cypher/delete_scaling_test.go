@@ -264,7 +264,7 @@ func allocRatio(v []uint64) float64 {
 // deliberately-degrading control used to prove that the gate can still fire.
 func deleteCycles(t *testing.T, perCycle, batch, cycles int, detach, degrade bool) []cycleSample {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -425,7 +425,7 @@ const singleStatementDeleteBudget = 10 * time.Second
 func TestSingleStatementDeleteOfNinetyThousandNodes(t *testing.T) {
 	testlayers.RequireSoak(t)
 	const nodes = 90_000
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -460,7 +460,7 @@ func BenchmarkDeleteAccumulated(b *testing.B) {
 			ctx := context.Background()
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
-				g := lpg.New[string, float64](adjlist.Config{Directed: true})
+				g := lpg.New[string, float64](adjlist.Config{})
 				eng := cypher.NewEngine(g)
 				if accumulated > 0 {
 					seedTmp(ctx, b, eng, accumulated, 10_000)
@@ -483,7 +483,7 @@ func BenchmarkDeleteAccumulated(b *testing.B) {
 func BenchmarkCreateRelationships(b *testing.B) {
 	const perStatement = 500
 	ctx := context.Background()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	b.ReportAllocs()
 	b.ResetTimer()

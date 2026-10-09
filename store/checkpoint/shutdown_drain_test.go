@@ -26,7 +26,7 @@ func TestCheckpoint_ShutdownDrain(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	edges := [][2]string{{"a", "b"}, {"b", "c"}, {"c", "a"}}
 	for _, e := range edges {
 		if err := g.AddEdge(e[0], e[1], 0); err != nil {
@@ -76,7 +76,7 @@ func TestCheckpoint_ShutdownCtxCancel(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	var mu sync.Mutex
 	cp := New(Config{Dir: dir}, g, w, &mu)
 

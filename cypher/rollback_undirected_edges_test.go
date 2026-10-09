@@ -38,7 +38,7 @@ import (
 )
 
 // undirectedConfig is the storage shape under test.
-var undirectedConfig = adjlist.Config{Directed: false, Multigraph: true}
+var undirectedConfig = adjlist.Config{}
 
 // undirectedEdgeStatements are every #2885 statement plus the removals that
 // reach a relationship through its mirror slot on an undirected graph: a
@@ -126,10 +126,6 @@ func TestRollback_UndirectedEdges_Durable_2886(t *testing.T) {
 	res, err := recovery.Open[string, float64](dir, parallelEdgeRecOpts())
 	if err != nil {
 		t.Fatalf("recovery.Open: %v", err)
-	}
-	if res.Graph.AdjList().Directed() || !res.Graph.AdjList().Multigraph() {
-		t.Fatalf("recovered graph is not an undirected multigraph: directed=%v multigraph=%v",
-			res.Graph.AdjList().Directed(), res.Graph.AdjList().Multigraph())
 	}
 	w2, err := wal.Open(walPath)
 	if err != nil {

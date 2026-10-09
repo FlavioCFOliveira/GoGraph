@@ -32,13 +32,12 @@ func TestOutDegreeProperty_MatchesEnumeration(t *testing.T) {
 	t.Parallel()
 
 	rapid.Check(t, func(rt *rapid.T) {
-		directed := rapid.Bool().Draw(rt, "directed")
 		multigraph := rapid.Bool().Draw(rt, "multigraph")
 		nodeCount := rapid.IntRange(1, 12).Draw(rt, "nodeCount")
 		edgeCount := rapid.IntRange(0, 30).Draw(rt, "edgeCount")
 		typeCount := rapid.IntRange(1, 3).Draw(rt, "typeCount")
 
-		g := lpg.New[string, float64](adjlist.Config{Directed: directed, Multigraph: multigraph})
+		g := lpg.New[string, float64](adjlist.Config{})
 
 		nodes := make([]string, nodeCount)
 		for i := range nodes {
@@ -88,8 +87,8 @@ func TestOutDegreeProperty_MatchesEnumeration(t *testing.T) {
 				rt.Fatalf("%s: OutDegree reported not-interned for an interned node", n)
 			}
 			if got != want {
-				rt.Fatalf("%s: OutDegree = %d, enumeration = %d (directed=%v multigraph=%v)",
-					n, got, want, directed, multigraph)
+				rt.Fatalf("%s: OutDegree = %d, enumeration = %d (multigraph=%v)",
+					n, got, want, multigraph)
 			}
 
 			typedTotal := 0

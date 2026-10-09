@@ -24,7 +24,7 @@ import (
 // A the write was a full label scan while the read was a range seek.
 func TestW1PartA_GatesEngage(t *testing.T) {
 	seed := func(n int) *cypher.Engine {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		g.SetIndexManager(index.NewManager())
 		for i := 0; i < n; i++ {
 			key := fmt.Sprintf("n%d", i)

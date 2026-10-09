@@ -13,13 +13,13 @@ import (
 func TestDiameter_Path(t *testing.T) {
 	t.Parallel()
 	// Path 0-1-2-3-4: diameter = 4.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	lo, hi, exact := Diameter(c)
 	if lo != 4 || hi != 4 || !exact {
 		t.Fatalf("Diameter = (%d, %d, %v), want (4, 4, true)", lo, hi, exact)
@@ -29,13 +29,13 @@ func TestDiameter_Path(t *testing.T) {
 func TestDiameter_Cycle(t *testing.T) {
 	t.Parallel()
 	// Cycle 0-1-2-3-4-0: diameter = floor(5/2) = 2.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 5; i++ {
 		if err := a.AddEdge(i, (i+1)%5, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	lo, _, _ := Diameter(c)
 	if lo != 2 {
 		t.Fatalf("Cycle5 diameter lo = %d, want 2", lo)
@@ -45,13 +45,13 @@ func TestDiameter_Cycle(t *testing.T) {
 func TestDiameter_Star(t *testing.T) {
 	t.Parallel()
 	// Star: hub 0 connected to 1..4. Diameter = 2 (any leaf to any leaf).
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 1; i <= 4; i++ {
 		if err := a.AddEdge(0, i, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	lo, _, _ := Diameter(c)
 	if lo != 2 {
 		t.Fatalf("Star diameter lo = %d, want 2", lo)
@@ -60,8 +60,8 @@ func TestDiameter_Star(t *testing.T) {
 
 func TestDiameter_Empty(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
-	c := csr.BuildFromAdjList(a)
+	a := adjlist.New[int, struct{}](adjlist.Config{})
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	lo, hi, exact := Diameter(c)
 	if lo != 0 || hi != 0 || !exact {
 		t.Fatalf("Empty diameter = (%d, %d, %v), want (0, 0, true)", lo, hi, exact)
@@ -74,7 +74,7 @@ func TestDiameter_Empty(t *testing.T) {
 // vertex on the other side. Diameter is 2.
 func TestDiameter_CompleteBipartite(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	// Left side {0,1}, right side {2,3,4}; full bipartite edges.
 	for u := 0; u < 2; u++ {
 		for v := 2; v < 5; v++ {
@@ -83,7 +83,7 @@ func TestDiameter_CompleteBipartite(t *testing.T) {
 			}
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	lo, hi, exact := Diameter(c)
 	if lo != 2 || hi != 2 || !exact {
 		t.Fatalf("K(2,3) diameter = (%d, %d, %v), want (2, 2, true)", lo, hi, exact)
@@ -131,7 +131,7 @@ func TestDiameter_ExactVsBruteVBFS(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		n := rapid.IntRange(12, 30).Draw(rt, "n")
 		// Build a simple undirected graph; up to n*2 random edges.
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		// Ensure n nodes exist; add a spanning path so the graph is
 		// connected enough to have a meaningful diameter.
 		for i := 0; i < n; i++ {
@@ -154,7 +154,7 @@ func TestDiameter_ExactVsBruteVBFS(t *testing.T) {
 				}
 			}
 		}
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		lo, hi, exact := Diameter(c)
 		brute := bruteDiameter(c)
 		if lo > brute {

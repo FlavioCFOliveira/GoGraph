@@ -11,7 +11,7 @@ import (
 // HierholzerUndirected computes an Eulerian circuit (or path) over
 // the undirected graph captured by c. c is expected to be a
 // symmetric directed CSR (every {u, v} edge appears as both (u, v)
-// and (v, u)) — typical of [adjlist.AdjList] with Directed=false.
+// and (v, u)), as [csr.CSR.BuildSymmetric] builds it.
 //
 // Returns the trail as a slice of NodeIDs (length = E + 1 where E is
 // the number of distinct undirected edges) or [ErrNoEulerian] when

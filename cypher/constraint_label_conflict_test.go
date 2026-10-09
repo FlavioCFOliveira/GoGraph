@@ -65,7 +65,7 @@ import (
 // the setup statements, each in its own transaction.
 func newLabelConflictGraph(t *testing.T, setup ...string) (*lpg.Graph[string, float64], *cypher.Engine, context.Context) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	for _, q := range setup {

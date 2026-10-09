@@ -24,11 +24,11 @@ import (
 func buildPlantedCSR(t *testing.T, k, blockSize, pIn, pOut int, seed uint64) *csr.CSR[int64] {
 	t.Helper()
 	g, err := shapegen.PlantedPartition(k, blockSize, pIn, pOut, seed).
-		Build(adjlist.Config{Directed: false})
+		Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("PlantedPartition Build: %v", err)
 	}
-	return csr.BuildFromAdjList(g.AdjList())
+	return csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 }
 
 func partitionsEqual(a, b Partition) bool {

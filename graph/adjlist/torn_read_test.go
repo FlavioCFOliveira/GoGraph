@@ -28,7 +28,7 @@ func TestAdjList_ConcurrentReads_ConsistentPrefix(t *testing.T) {
 	// guaranteeing the writer always has a core to run on.
 	numReaders := max(2, runtime.GOMAXPROCS(0)-1)
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 
 	// startCh: fires both the writer and the readers simultaneously.
 	// writerDone: closed by the writer goroutine when all N edges are published.

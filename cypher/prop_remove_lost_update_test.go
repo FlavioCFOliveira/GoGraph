@@ -55,7 +55,7 @@ import (
 // statement in its own autocommit transaction.
 func lostRmEngine(t *testing.T, walBacked bool, setup ...string) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	var eng *cypher.Engine
 	if walBacked {
 		wr, err := wal.Open(filepath.Join(t.TempDir(), "wal"))

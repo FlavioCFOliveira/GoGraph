@@ -53,7 +53,7 @@ func withEngageProbe(t *testing.T, fn func()) uint64 {
 // cyclicGraph builds a labelled multigraph with the given edges, all of type K.
 func cyclicGraph(t *testing.T, nodes int, edges [][2]int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	keys := make([]string, nodes)
 	for i := 0; i < nodes; i++ {
 		keys[i] = "n" + itoaCyc(i)

@@ -310,7 +310,7 @@ func TestCommitRefusesNestedPropertyList_EdgeByHandle_2783(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := NewStoreWithOptions[string, float64](g, w, Options[string, float64]{
 		Codec:       NewStringCodec(),
 		WeightCodec: NewFloat64WeightCodec(),
@@ -356,7 +356,7 @@ func TestCommitRefusesNestedPropertyList_NothingDurable_2783(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := NewStoreWithCodec[string, float64](g, w, NewStringCodec())
 
 	tx := st.Begin()
@@ -408,6 +408,6 @@ func newNestedListTestStore(t *testing.T) (*Store[string, float64], func()) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return NewStoreWithCodec[string, float64](g, w, NewStringCodec()), func() { _ = w.Close() }
 }

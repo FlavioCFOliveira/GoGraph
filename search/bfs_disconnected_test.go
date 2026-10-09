@@ -21,7 +21,7 @@ import (
 
 func TestBFS_DisconnectedForest_OnlySourceComponent(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 
 	// Component A: directed path 0→1→2→3.
 	compA := []int{0, 1, 2, 3}

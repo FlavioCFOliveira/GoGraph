@@ -40,7 +40,7 @@ const (
 // (i+1), (i+2), ..., (i+degree) modulo the population.
 func seedExpandIntoGraph(b *testing.B) *lpg.Graph[string, float64] {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	keys := make([]string, expandIntoNodes)
 	for i := 0; i < expandIntoNodes; i++ {
 		k := "n" + strconv.Itoa(i)

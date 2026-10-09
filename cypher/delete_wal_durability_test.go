@@ -84,7 +84,7 @@ func TestCypher_DeleteWALDurability_DELETE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
-	g1 := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g1 := lpg.New[string, float64](adjlist.Config{})
 	deleteWALEngineRun(t, g1, w1,
 		`CREATE (:A {name:'keep'}), (:B {name:'gone'})`,
 	)
@@ -141,7 +141,7 @@ func TestCypher_DeleteWALDurability_DETACHDELETE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
-	g1 := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g1 := lpg.New[string, float64](adjlist.Config{})
 	deleteWALEngineRun(t, g1, w1,
 		`CREATE (a:A {name:'keep'})-[:REL]->(b:B {name:'gone'})`,
 	)

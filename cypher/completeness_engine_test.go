@@ -35,7 +35,7 @@ func runScalarRows(t *testing.T, e *Engine, q, col string) []expr.Value {
 }
 
 func TestEngine_Timestamp_StatementFrozen(t *testing.T) {
-	e := NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true}))
+	e := NewEngine(lpg.New[string, float64](adjlist.Config{}))
 	// Five rows in one statement must all observe the SAME timestamp — the
 	// per-query now-aware registry freezes the instant. Without freezing,
 	// successive time.Now() reads could diverge across rows.
@@ -58,7 +58,7 @@ func TestEngine_Timestamp_StatementFrozen(t *testing.T) {
 }
 
 func TestEngine_RandomUUID_ShapeAndUniqueness(t *testing.T) {
-	e := NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true}))
+	e := NewEngine(lpg.New[string, float64](adjlist.Config{}))
 	v4 := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 	vals := runScalarRows(t, e, `UNWIND range(1, 200) AS x RETURN randomUUID() AS u`, "u")
@@ -82,7 +82,7 @@ func TestEngine_RandomUUID_ShapeAndUniqueness(t *testing.T) {
 }
 
 func TestEngine_ElementID_LiveNode(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatal(err)
 	}

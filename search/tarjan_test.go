@@ -10,7 +10,7 @@ import (
 
 func TestTarjanSCC_SingleNode(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddNode(0); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestTarjanSCC_TwoCycles(t *testing.T) {
 		{3, 4}, {4, 3},
 		{2, 3},
 	}
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for _, e := range edges {
 		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -69,7 +69,7 @@ func TestTarjanSCC_TwoCycles(t *testing.T) {
 
 func TestTarjanSCC_NoCycles(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

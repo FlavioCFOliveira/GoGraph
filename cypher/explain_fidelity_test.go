@@ -109,7 +109,7 @@ func executedShape(t *testing.T, eng *cypher.Engine, query string, params map[st
 // age, which is enough for the index-seek and join substitutions to fire.
 func seedFidelityGraph(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 	for i := 0; i < 300; i++ {
@@ -150,7 +150,7 @@ const statsReorderQuery = "MATCH (a:A) WHERE a.x > 4900 MATCH (b:B {y: 7}) " +
 // here mentions, so it changes no result and no count the planner reads.
 func seedStatsReorderEngine(t *testing.T, withLiveHistory bool) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	seedLabelled := func(prefix, label, prop string, n int) {
 		for i := 0; i < n; i++ {
 			key := fmt.Sprintf("%s%d", prefix, i)

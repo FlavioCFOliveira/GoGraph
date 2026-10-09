@@ -41,7 +41,7 @@ type iiRow struct {
 // alone covers far more of the label.
 func iiFixture(t testing.TB) (*lpg.Graph[string, float64], []iiRow) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	rows := make([]iiRow, 0, iiPop)
 	for i := 0; i < iiPop; i++ {
 		key := fmt.Sprintf("d%06d", i)

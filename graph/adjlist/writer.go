@@ -105,18 +105,16 @@ func (wr Writer[N, W]) AddEdgeLabeledWithProp(src, dst N, w W, label uint32, pay
 	}, wr.tx)
 }
 
-// AppendEdge appends one src→dst slot (mirrored on an undirected graph) carrying
+// AppendEdge appends one src→dst slot carrying
 // the stable handle, the opaque label when hasLabel is set, and the aux payload
-// when payload is non-nil, inside this writer's transaction, and reports whether
-// a slot was inserted — false only for a simple graph's duplicate, which leaves
-// the adjacency as it was.
+// when payload is non-nil, inside this writer's transaction.
 //
 // It is the one append form that names the slot it creates: a caller that must
 // withdraw the append it just made — because a check that can only run after the
 // insert refused the write — removes exactly that slot with
 // [Writer.RemoveEdgeByHandle], and no sibling (rmp #2947).
-func (wr Writer[N, W]) AppendEdge(src, dst N, w W, handle uint64, label uint32, hasLabel bool, payload any) (bool, error) {
-	return wr.a.addEdgeReport(src, dst, w, edgeExtra{
+func (wr Writer[N, W]) AppendEdge(src, dst N, w W, handle uint64, label uint32, hasLabel bool, payload any) error {
+	return wr.a.addEdge(src, dst, w, edgeExtra{
 		handle: handle, hasHandle: true,
 		label: label, hasLabel: hasLabel,
 		auxPayload: payload, hasAuxPayload: payload != nil,

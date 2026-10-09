@@ -33,7 +33,7 @@ import (
 // seedReuse builds a graph of n nodes each carrying property v = base+index.
 func seedReuse(t *testing.T, n int, base int64) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(id); err != nil {
@@ -53,7 +53,7 @@ func seedReuse(t *testing.T, n int, base int64) *lpg.Graph[string, float64] {
 func TestLazyNodeReuse_MultiVarPredicateNoAliasing(t *testing.T) {
 	t.Parallel()
 	// 3 nodes with v in {0,1,2}; the only edge is n0->n1 (v 0 -> 1).
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(id); err != nil {
