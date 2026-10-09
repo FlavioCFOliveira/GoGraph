@@ -52,16 +52,19 @@ release does **not** establish.
 - `github.com/FlavioCFOliveira/GoGraph/graph` — generic node identifiers and the `Graph[N, W]`
   contract.
 - `github.com/FlavioCFOliveira/GoGraph/graph/adjlist` — mutable, sharded adjacency-list backend
-  with copy-on-write snapshots and lock-free reads. Every edge slot carries a
-  stable identity, and adjacency is versioned inside the immutable entry so a
-  snapshot resolves it at one instant.
+  with copy-on-write snapshots and lock-free reads. It stores a directed
+  multigraph: every edge is one directed relationship, and parallel edges and
+  self-loops are kept. Every edge slot carries a stable identity, and adjacency
+  is versioned inside the immutable entry so a snapshot resolves it at one
+  instant.
 - `github.com/FlavioCFOliveira/GoGraph/graph/mvcc` — the concurrency-control substrate: a
   transaction clock and shared commit records, a contiguous commit frontier,
   the reclamation horizon and watermark, `Gate` (a weak/strong admission gate),
   and `ErrSerializationConflict`. New in `v0.11.0`; MVCC is the module's only
   concurrency-control mechanism and is armed by `lpg.New`.
 - `github.com/FlavioCFOliveira/GoGraph/graph/csr` — immutable Compressed Sparse Row view for
-  read-mostly analytics.
+  read-mostly analytics; `BuildSymmetric` projects it to the undirected view that
+  undirected algorithms read.
 - `github.com/FlavioCFOliveira/GoGraph/graph/generation` — atomic pointer swap for snapshot
   rotation across readers/writers.
 - `github.com/FlavioCFOliveira/GoGraph/graph/lpg` — Labelled Property Graph model (vertex and
@@ -268,7 +271,7 @@ import (
 )
 
 func main() {
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	a.AddEdge("Lisbon", "Madrid", 624)
 	a.AddEdge("Lisbon", "Paris", 1737)
 	a.AddEdge("Madrid", "Paris", 1274)
@@ -576,7 +579,7 @@ examples/                 — 37 runnable example programs, each pprof-able (see
 ## Labelled Property Graph + Query Example
 
 ```go
-g := lpg.New[string, int64](adjlist.Config{Directed: true})
+g := lpg.New[string, int64](adjlist.Config{})
 g.SetNodeLabel("alice", "Person")
 g.SetNodeLabel("alice", "Admin")
 g.SetNodeProperty("alice", "age", lpg.Int64Value(30))

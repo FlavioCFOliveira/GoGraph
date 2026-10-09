@@ -937,7 +937,7 @@ The module is organised around three concerns:
 
 | Layer | Responsibility |
 |---|---|
-| `graph/` | Core types: `Graph`, `Node`, `Edge`, `Weight`. Directed and undirected variants. |
+| `graph/` | Core types: `Graph`, `Node`, `Edge`, `Weight`. Every stored graph is a directed multigraph; undirected analytics read the `graph/csr` `BuildSymmetric` projection. |
 | `search/` | Traversal and path-finding algorithms: BFS, DFS, Dijkstra, A\*, Bellman-Ford. |
 | `store/` | Durable, WAL-backed persistence: `store.DB` composed with a write-ahead log, checkpointer, snapshot writer, and crash-recovery replayer (`store/{wal,checkpoint,snapshot,recovery,txn}`). The in-memory engine is `graph/lpg`; `store.DB` adds durability on top of it. |
 

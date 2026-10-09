@@ -4,6 +4,97 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+**This release breaks the exported API and changes the on-disk format.** Undirected graphs and
+simple (non-multigraph) graphs are no longer supported: every graph is a directed multigraph, as
+in Neo4j and Memgraph (rmp #3071 to #3074).
+
+### Changed — BREAKING: directed multigraph only
+
+- **Every graph is a directed multigraph.** `graph/adjlist.AdjList` stores each edge as one
+  directed relationship, and every `AddEdge` appends a new edge with its own handle, so parallel
+  edges and self-loops are always kept. The zero value `adjlist.Config{}`, which built an
+  undirected simple graph, now builds a directed multigraph. A repeated `AddEdge` between the same
+  ordered pair now adds a parallel edge (`fec95062`).
+- **Removed exported API:**
+  - `graph/adjlist`: `Config.Directed`, `Config.Multigraph`, `(*AdjList).Directed()` and
+    `(*AdjList).Multigraph()` (`fec95062`).
+  - `graph/io/csv`: `Options.Directed` and `Options.Multigraph`; `DefaultOptions` no longer sets
+    `Directed` (`fec95062`).
+  - `store/bulk`: `Options.Directed` and `Options.Multigraph` (`fec95062`).
+  - `store/bulkimport`: `Options.Directed` and `Options.Multigraph` (`fec95062`).
+  - `store/csrfile`: `FixtureSpec.Multigraph` (`fec95062`).
+  - `store/snapshot`: `GraphConfig.Directed` and `GraphConfig.Multigraph` (`fec95062`).
+  - `cypher`: `ErrParallelEdgeInSimpleGraph`; every `CREATE` adds a relationship (`bed4de53`).
+  - `cmd/gograph-import`: the `-undirected` and `-simple` flags (`fec95062`).
+- **Re-signed:** `graph/adjlist.Writer.AppendEdge` returns `error` instead of `(bool, error)`; the
+  boolean reported a simple graph's skipped duplicate (`fec95062`).
+- **Interchange formats (`fec95062`).** The GraphML readers (`ReadInto`, `ReadWithProps` and their
+  variants) read each `<edge>` as one directed relationship from `source` to `target`, whatever
+  the `<graph>` `edgedefault` attribute declares, `"undirected"` included. The GraphML writers
+  always emit `edgedefault="directed"`, and the DOT writer always emits a `digraph`.
+- **Upgrading code:**
+  - Delete `Directed` and `Multigraph` from every `adjlist.Config`, `csv.Options`,
+    `bulk.Options`, `bulkimport.Options` and `csrfile.FixtureSpec` literal, and `-undirected` and
+    `-simple` from every `gograph-import` invocation.
+  - For undirected analytics, build the CSR and read its symmetric projection,
+    `c.BuildSymmetric()` (see *Added*).
+  - For undirected Cypher semantics, write undirected patterns: `MATCH (a)-[r]-(b)` matches a
+    relationship in either direction, and `MERGE (a)-[r:T]-(b)` matches either direction and,
+    when none exists, creates one from `a` to `b`. `CREATE` refuses an undirected relationship.
+  - Code that relied on a simple graph to de-duplicate a repeated `AddEdge` must not repeat the
+    insertion.
+
+### Changed — BREAKING: on-disk format
+
+- **`store/snapshot.ManifestVersion` is 5 (was 4) and is stamped on every manifest this build
+  writes**, including the CSR-only and mapper-less ones previously stamped 1 and 2. A version-5
+  `graph_config` carries neither `"directed"` nor `"multigraph"`. Versions 1 to 4 still load.
+  `v0.16.0` and earlier builds refuse a version-5 manifest with `snapshot.ErrManifestUnsupported`
+  (`fec95062`).
+- **Legacy stores are migrated by the first clean recovery (`fec95062`).** For a store whose
+  snapshot manifest declares `"directed": false` or `"multigraph": false`, recovery replays the
+  WAL above the snapshot with the old engine's semantics, then:
+  - **Undirected:** folds each edge to one relationship oriented from the lower node id to the
+    higher; a self-loop is kept once. When the two directions of an edge hold different values
+    for the same property key, or different relationship types, recovery returns an error
+    wrapping `recovery.ErrLegacyMirrorConflict` that names the conflicting edges, and the
+    directory is left unchanged. A value held in one direction only is kept.
+  - **Simple:** skips each duplicate insertion the old engine skipped, keeping its edge handle
+    reserved.
+  - Before `Open` returns, it publishes a current-format snapshot and folds the WAL under it. This
+    needs write access to the directory, the operating-system filesystem
+    (`recovery.ErrLegacyMigrationUnsupportedFS` otherwise) and a non-nil `Options.Codec`
+    (`recovery.ErrLegacyMigrationNeedsCodec` otherwise). An unclean recovery does not rewrite the
+    directory. A crash during the rewrite leaves either the legacy store, which the next open
+    migrates again, or the migrated one.
+  - A migrated store cannot be opened by `v0.16.0` or any earlier build. Take a copy of the store
+    directory before the first open if a downgrade must remain possible.
+
+### Added
+
+- **`graph/csr.(*CSR).BuildSymmetric`** returns the undirected projection of a CSR: each non-loop
+  arc yields itself and its mirror with the same weight and handle, a self-loop is kept once, and
+  parallel arcs and reciprocal pairs are never merged (`11b2ddd1`).
+- `store/snapshot`: `LegacyShape` (with `Any`), `LoadedSnapshot.Legacy`,
+  `GraphConfig.UnmarshalJSON`, `VerifySnapshotReadable`, `SelfSufficient` and
+  `ErrPublishedLegacyShape` (`fec95062`).
+- `store/recovery`: `ErrLegacyMirrorConflict`, `ErrLegacyMigrationUnsupportedFS` and
+  `ErrLegacyMigrationNeedsCodec` (`fec95062`).
+
+### Removed
+
+- `adjlist.Config.Directed`, `adjlist.Config.Multigraph`, `(*adjlist.AdjList).Directed`,
+  `(*adjlist.AdjList).Multigraph`, `csv.Options.Directed`, `csv.Options.Multigraph`,
+  `bulk.Options.Directed`, `bulk.Options.Multigraph`, `bulkimport.Options.Directed`,
+  `bulkimport.Options.Multigraph`, `csrfile.FixtureSpec.Multigraph`,
+  `snapshot.GraphConfig.Directed`, `snapshot.GraphConfig.Multigraph`,
+  `cypher.ErrParallelEdgeInSimpleGraph`, and the `gograph-import` flags `-undirected` and
+  `-simple`; see *Changed — BREAKING: directed multigraph only*.
+
+[Unreleased]: https://github.com/FlavioCFOliveira/GoGraph/compare/v0.16.0...HEAD
+
 ## [0.16.0] — 2026-10-09
 
 **167 commits** — 164 non-merge commits and 3 sprint merges — counted at `60c90d73`, the

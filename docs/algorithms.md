@@ -16,6 +16,11 @@ The systematic `…Ctx` / `…Parallel` / `…Into` / `…On` variants are
 described once under [Naming conventions for the variants](#naming-conventions-for-the-variants)
 rather than repeated per row.
 
+Stored graphs are directed. An algorithm that reads an undirected graph takes a
+symmetric CSR, built from a directed one with `c.BuildSymmetric()`; the
+projection rules are in its godoc (`graph/csr/csr.go`), and each algorithm's
+input contract is in its own godoc.
+
 ## Traversal
 
 | Algorithm                        | Complexity   | File                              |
@@ -23,7 +28,7 @@ rather than repeated per row.
 | BFS                              | O(V + E)     | `search/search.go`                |
 | DFS (iterative)                  | O(V + E)     | `search/search.go`                |
 | Bidirectional BFS                | O(b^(d/2))   | `search/bibfs.go`                 |
-| Direction-optimising BFS         | O(V + E)     | `search/bfs_do.go`                |
+| Direction-optimising BFS (symmetric CSR) | O(V + E) | `search/bfs_do.go`            |
 
 ## Shortest paths
 
@@ -56,7 +61,7 @@ rather than repeated per row.
 | Algorithm                 | Notes                                          | File                  |
 |---------------------------|------------------------------------------------|-----------------------|
 | k-core / coreness         | Batagelj-Zaversnik 2003 bucket-list peeling, O(V + E) | `search/kcore.go`     |
-| Triangle counting         | total plus per-NodeID counts over the undirected graph | `search/triangles.go`, parallel variant in `search/triangles_parallel.go` |
+| Triangle counting         | total plus per-NodeID counts over a symmetric CSR with no self-loops or parallel edges | `search/triangles.go`, parallel variant in `search/triangles_parallel.go` |
 | Diameter (iFUB)           | 2-sweep BFS lower bound refined by iFUB; returns `(lo, hi, exact)` | `search/diameter.go`  |
 
 ## Minimum spanning trees
@@ -94,7 +99,7 @@ rather than repeated per row.
 
 The four measures above operate on outgoing edges (closeness/harmonic) or the
 left/in-edge convention (eigenvector/Katz); pass `c.BuildReverse()` for the
-opposite orientation. On an undirected snapshot both coincide. Eigenvector and
+opposite orientation. On a symmetric CSR both coincide. Eigenvector and
 Katz score only participating nodes (≥1 incident edge); isolated/ghost slots
 get 0.
 
