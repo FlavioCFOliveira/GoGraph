@@ -207,22 +207,24 @@
 //
 // # Example Invocation
 //
-// A typical end-to-end session:
+// A typical end-to-end session, in a fresh temporary data directory:
 //
-//	go run ./examples/24_social_network_cli init     -d /tmp/social
-//	go run ./examples/24_social_network_cli seed     -d /tmp/social
-//	go run ./examples/24_social_network_cli stats    -d /tmp/social
-//	go run ./examples/24_social_network_cli query    -d /tmp/social \
+//	DATA_DIR=$(mktemp -d)
+//	go run ./examples/24_social_network_cli init     -d "$DATA_DIR"
+//	go run ./examples/24_social_network_cli seed     -d "$DATA_DIR"
+//	go run ./examples/24_social_network_cli stats    -d "$DATA_DIR"
+//	go run ./examples/24_social_network_cli query    -d "$DATA_DIR" \
 //	    'MATCH (u:User)-[:FOLLOWS]->(v:User) RETURN u.username AS from, v.username AS to'
-//	go run ./examples/24_social_network_cli snapshot -d /tmp/social
+//	go run ./examples/24_social_network_cli snapshot -d "$DATA_DIR"
 //
 // An observable-scale session that seeds a synthetic population and
 // reports the evidence (build throughput, live heap, per-query latency):
 //
-//	go run ./examples/24_social_network_cli init  -d /tmp/social
-//	go run ./examples/24_social_network_cli seed  -d /tmp/social \
+//	DATA_DIR=$(mktemp -d)
+//	go run ./examples/24_social_network_cli init  -d "$DATA_DIR"
+//	go run ./examples/24_social_network_cli seed  -d "$DATA_DIR" \
 //	    -users 100000 -friends 20 -seed 7 -evidence
-//	go run ./examples/24_social_network_cli stats -d /tmp/social -evidence
+//	go run ./examples/24_social_network_cli stats -d "$DATA_DIR" -evidence
 //
 // # Evidence
 //

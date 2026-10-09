@@ -28,9 +28,9 @@
 // label="..." edge attribute.
 //
 // The graph is a simple directed graph (no self-loops, no parallel
-// edges), so the GraphML reader — which collapses parallel edges and is
-// directed when edgedefault is not "undirected" — re-materialises it
-// edge-for-edge. That makes the round-trip exact: re-reading the written
+// edges), and the GraphML reader turns each <edge> into one directed
+// relationship from source to target, never merging edges, so it
+// re-materialises the graph edge-for-edge. That makes the round-trip exact: re-reading the written
 // GraphML yields the same node count, the same edge count, and the same
 // weight sum.
 //
@@ -249,9 +249,10 @@ func generate(ctx context.Context, cfg config) (*adjlist.AdjList[string, int64],
 	// must reproduce a fixed dataset for a given -seed; crypto/rand would defeat that.
 	rng := rand.New(rand.NewSource(cfg.seed))
 
-	// A simple directed graph: no self-loops and no parallel edges, so the
-	// GraphML reader (which is directed and collapses parallel edges)
-	// re-materialises it edge-for-edge and the round-trip is exact.
+	// A simple directed graph: no self-loops and no parallel edges. The
+	// GraphML reader stores each <edge> as one directed relationship and
+	// never merges edges, so it re-materialises the graph edge-for-edge and
+	// the round-trip is exact.
 	a := adjlist.New[string, int64](adjlist.Config{})
 
 	ids := make([]string, cfg.nodes)

@@ -271,3 +271,32 @@ func factLines(out string) string {
 	}
 	return strings.Join(keep, "\n")
 }
+
+// TestBuildStoresEachRoadOnce guards the directed-multigraph storage model:
+// every AddEdge stores a new relationship, so a backbone road laid over a
+// successor already joined by local roads would become a parallel
+// relationship. The build must store each ordered (src, dst) pair at most
+// once, and edges.roads must equal the stored relationship count.
+func TestBuildStoresEachRoadOnce(t *testing.T) {
+	cfg := testConfig()
+	a := adjlist.New[int, int64](adjlist.Config{})
+	gen, err := build(context.Background(), a, cfg, autoRadius(cfg)*cfg.radius)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	c := csr.BuildFromAdjList(a)
+	offsets, edges := c.VerticesSlice(), c.EdgesSlice()
+	seen := make(map[[2]graph.NodeID]bool, len(edges))
+	for u := graph.NodeID(0); u < c.MaxNodeID(); u++ {
+		for e := offsets[u]; e < offsets[u+1]; e++ {
+			key := [2]graph.NodeID{u, edges[e]}
+			if seen[key] {
+				t.Fatalf("road %d->%d is stored more than once", u, edges[e])
+			}
+			seen[key] = true
+		}
+	}
+	if got := uint64(gen.edges); got != c.Size() {
+		t.Errorf("edges.roads = %d, want the stored relationship count %d", got, c.Size())
+	}
+}

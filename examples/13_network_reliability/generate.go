@@ -207,7 +207,8 @@ func (net *network) addSpineBoundaries(cfg config) error {
 }
 
 // addLink records an undirected capacitated link between two site indices
-// and mirrors it into the adjacency the structural analysis snapshots. The
+// and stores it as one directed relationship in the adjacency the structural
+// analysis snapshots (through its symmetric projection). The
 // adjacency edge weight is the capacity, purely so the CSR snapshot is a
 // faithful copy of the link list; the structural analysis ignores weights.
 func (net *network) addLink(a, b, capacity int) error {

@@ -3,7 +3,7 @@
 //
 // It builds a seeded, scale-parametrised weighted routing network with
 // numeric station IDs (int64) and real-valued edge distances (float64),
-// commits it through a typed txn.Store, takes a v2 snapshot, drops every
+// commits it through a typed txn.Store, takes a v5 snapshot, drops every
 // in-memory reference, then rebuilds the graph from disk via
 // recovery.OpenCtx instantiated with the matching codec pair. It then
 // proves the round-trip preserved the data and reports the evidence that
@@ -41,8 +41,8 @@
 //     weights verified by comparing math.Float64bits before and after);
 //   - typed properties (string / int64 / float64 / bool) attached before
 //     the snapshot survive recovery;
-//   - Result.SnapshotSchemaVersion reports the v2 manifest a non-string
-//     graph carries, so callers can branch on the on-disk schema without
+//   - Result.SnapshotSchemaVersion reports the manifest version (v5, the
+//     snapshot.ManifestVersion stamped on every manifest), so callers can branch on the on-disk schema without
 //     re-opening the manifest.
 //
 // This is the same flow the production restart path uses; the only thing
@@ -178,7 +178,7 @@ func main() {
 	}
 }
 
-// run builds the routing network described by cfg, persists it to a v2
+// run builds the routing network described by cfg, persists it to a v5
 // snapshot, recovers it through recovery.OpenCtx, verifies the round-trip,
 // and writes a report to w. Bare lines carry deterministic facts (counts,
 // the bit-exact verdict, sampled property values — reproducible for a
@@ -201,7 +201,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
-	// === Phase 1: build + commit the typed graph through a v2 snapshot ===
+	// === Phase 1: build + commit the typed graph through a v5 snapshot ===
 	gen, err := buildAndPersist(ctx, dir, cfg, w)
 	if err != nil {
 		return err
@@ -317,7 +317,7 @@ type genResult struct {
 // buildAndPersist materialises the routing network described by cfg into a
 // fresh typed graph behind a WAL-backed store, commits every node and edge
 // through transactions, attaches typed properties on the in-memory graph
-// (properties flush through the snapshot, not the WAL), writes a v2
+// (properties flush through the snapshot, not the WAL), writes a v5
 // snapshot, and closes the WAL. It returns the realised shape so the
 // caller can verify the recovery against it. ctx cancellation is honoured
 // between phases and on a periodic check inside the loops.
@@ -454,9 +454,8 @@ func buildAndPersist(ctx context.Context, dir string, cfg config, _ io.Writer) (
 	_ = g.AdjList() // touch the adjacency list to materialise the mapper
 	buildElapsed := time.Since(start)
 
-	// Persist a v2 snapshot. For an int64-keyed graph WriteSnapshotFull
-	// emits no mapper.bin and stamps the manifest v2 (a string-keyed graph
-	// would add mapper.bin and be stamped v3).
+	// Persist the snapshot. WriteSnapshotFull stamps every manifest with
+	// snapshot.ManifestVersion (5), whatever the key type.
 	if err := ctx.Err(); err != nil {
 		return genResult{}, err
 	}

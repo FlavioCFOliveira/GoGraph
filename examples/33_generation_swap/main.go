@@ -222,15 +222,23 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 }
 
 // ringCSR builds an immutable CSR snapshot of an undirected ring of n nodes
-// (node i joined to (i+1) mod n). A ring is connected with exactly n nodes, so
-// its CSR.Order() is exactly n — the property the consistency check keys on —
-// and it gives the reader's BFS real work to do.
+// (node i joined to (i+1) mod n). Each ring edge is stored once, as the
+// relationship i -> (i+1) mod n, and the snapshot is the symmetric projection
+// built by [csr.CSR.BuildSymmetric], so the reader's BFS can walk the ring in
+// both directions. For n == 2 the two endpoints share a single edge, which is
+// stored once rather than as a parallel relationship. A ring is connected
+// with exactly n nodes, so its CSR.Order() is exactly n — the property the
+// consistency check keys on — and it gives the reader's BFS real work to do.
 func ringCSR(n int) *csr.CSR[struct{}] {
 	a := adjlist.New[int64, struct{}](adjlist.Config{})
-	for i := 0; i < n; i++ {
+	edges := n
+	if n == 2 {
+		edges = 1 // 0 -> 1 and 1 -> 0 would be two relationships for one ring edge
+	}
+	for i := 0; i < edges; i++ {
 		_ = a.AddEdge(int64(i), int64((i+1)%n), struct{}{})
 	}
-	return csr.BuildFromAdjList(a)
+	return csr.BuildFromAdjList(a).BuildSymmetric()
 }
 
 // pprofLabel is a placeholder hook kept trivial; goroutine labelling is not

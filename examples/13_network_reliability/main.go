@@ -253,7 +253,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 // failure. The counts are deterministic facts; the analysis wall-clock is
 // telemetry.
 func reportSPOF(ctx context.Context, w io.Writer, net *network) (search.BCCResult, error) {
-	c := csr.BuildFromAdjList(net.adj)
+	// One stored relationship per link; BuildSymmetric projects it to the
+	// undirected view the biconnected-components analysis is defined on.
+	c := csr.BuildFromAdjList(net.adj).BuildSymmetric()
 
 	start := time.Now()
 	res, err := search.HopcroftTarjanBCCCtx(ctx, c)

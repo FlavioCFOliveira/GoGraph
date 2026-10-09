@@ -18,9 +18,9 @@ seeded generator gives every node a random out-degree in
 `[follows-min, follows-max]` to **distinct** other nodes — no self-loops,
 no duplicate `(src,dst)` pairs — so the graph is *simple* and the row
 count is exactly the edge count. That matters for the round-trip
-invariant: a simple directed graph re-serialises to exactly as many CSV
-rows as were ingested, with none collapsed by parallel-edge
-deduplication. Fixing `-seed` fixes the data shape exactly.
+invariant: the reader stores every row as one directed relationship and
+never merges rows, and the writer emits one row per relationship, so the
+graph re-serialises to exactly as many CSV rows as were ingested. Fixing `-seed` fixes the data shape exactly.
 
 The generated CSV carries a leading `# ` comment row documenting the file;
 `csv.ReadInto` skips it, which is why the written CSV is a few bytes
@@ -114,7 +114,7 @@ because every field name is repeated on every record.
 
 - `graph/io/csv.ReadIntoCtx` — parse an edge-list CSV (skipping `#` comments) into an `adjlist.AdjList[string, int64]`, honouring context cancellation; returns the row count.
 - `graph/io/csv.WriteCtx` — serialise the adjacency list back to CSV, one edge per row; returns the row count.
-- `graph/io/csv.DefaultOptions` — the default CSV layout (`,` delimiter, no header, `#` comment character, directed simple graph).
+- `graph/io/csv.DefaultOptions` — the default CSV layout (`,` delimiter, no header, `#` comment character); every row is read as one directed relationship.
 - `graph/io/jsonl.WriteCtx` — serialise the same graph as JSON Lines: a node record per node followed by an edge record per edge; returns the record count.
 - `graph/adjlist.AdjList.Order` / `.Size` — the node and edge counts of the parsed graph.
 

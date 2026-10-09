@@ -317,8 +317,8 @@ const checkEvery = 4096
 
 // buildLPG materialises the call graph into a labelled property graph for
 // the Cypher workload: (:SERVICE {tier}) nodes and (:SERVICE)-[:CALLS
-// {latency_ms}]->(:SERVICE) edges. Multigraph is enabled so the write
-// transaction's CREATE follows openCypher semantics.
+// {latency_ms}]->(:SERVICE) edges. The graph is a directed multigraph, so the
+// write transaction's CREATE follows openCypher semantics.
 func buildLPG(ctx context.Context, calls []call, cfg config) (*lpg.Graph[string, float64], error) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < cfg.services; i++ {

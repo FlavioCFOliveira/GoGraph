@@ -53,8 +53,10 @@
 // gives a unique inter-cluster path, so the betweenness winners are maximally
 // unambiguous and test-assertable.
 //
-// The graph is built UNDIRECTED: Brandes betweenness is classically read on
-// undirected graphs, and label propagation is defined on undirected
+// The graph is analysed as UNDIRECTED: each edge is stored once, as one
+// directed relationship, and both analytics read the symmetric projection
+// built by [csr.CSR.BuildSymmetric]. Brandes betweenness is classically read
+// on undirected graphs, and label propagation is defined on undirected
 // neighbourhoods. Both analytics here are unweighted (Brandes counts
 // shortest-path hops; label propagation counts neighbour labels), so the
 // edges carry no weight — the snapshot is purely structural.
@@ -191,7 +193,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric() // one stored relationship per edge, read undirected
 	mapper := a.Mapper()
 
 	fmt.Fprintf(w, "nodes.total=%d\n", c.Order())
@@ -372,7 +374,7 @@ func reportDisconnected(ctx context.Context, w io.Writer, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("build disconnected: %w", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric() // one stored relationship per edge, read undirected
 	mapper := a.Mapper()
 
 	_, components, err := search.WCC(c)
@@ -476,8 +478,9 @@ func (c config) nodeID(cluster, offset int) int {
 }
 
 // build materialises the chain-of-clusters graph described by cfg into a fresh
-// undirected adjlist, consuming the seeded RNG in a single fixed order so the
-// shape is a pure function of cfg.seed. The order is: each cluster in turn (a
+// adjlist, one directed relationship per undirected edge, consuming the
+// seeded RNG in a single fixed order so the shape is a pure function of
+// cfg.seed. The order is: each cluster in turn (a
 // random spanning tree first for guaranteed connectivity, then Erdős–Rényi
 // extra edges at intraDensity), then the chain of single bridge edges between
 // consecutive clusters' gateways. The build honours ctx cancellation on a

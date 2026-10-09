@@ -20,8 +20,9 @@
 // distance between them (always >= 1). The radius is tuned above the RGG
 // connectivity threshold (r ~ span*sqrt(ln N / (pi*N))) so the giant
 // component spans the whole graph, and an id-ordered backbone (junction
-// i <-> i+1, carrying its true geometric weight) is laid down as a
-// synthetic connectivity guarantee so that EVERY junction is reachable
+// i <-> i+1, carrying its true geometric weight, laid only where i and i+1
+// are not already joined by local roads) is laid down as a synthetic
+// connectivity guarantee so that EVERY junction is reachable
 // from the source for any seed and scale. The backbone roads are long and
 // the local roads are short, so Dijkstra almost always routes through the
 // short local roads — the backbone only guarantees reachability, it does
@@ -310,7 +311,9 @@ func autoRadius(cfg config) float64 {
 // junction at a seeded integer coordinate, buckets the junctions into a
 // spatial grid, then for each junction emits directed roads to every other
 // junction within radius r (in both directions) plus an id-ordered
-// backbone road to its successor. Roads are emitted in a fixed order
+// backbone road to its successor when that successor lies outside the
+// radius. Every AddEdge stores a new relationship, so no road is emitted
+// twice. Roads are emitted in a fixed order
 // (ascending source, then ascending destination) so the adjacency — and
 // thus the frozen CSR — is a deterministic function of the seed alone. The
 // build honours ctx cancellation on a periodic check.
@@ -380,9 +383,7 @@ func build(ctx context.Context, a *adjlist.AdjList[int, int64], cfg config, r fl
 					if j == i {
 						continue
 					}
-					dx := pi.x - pts[j].x
-					dy := pi.y - pts[j].y
-					if dx*dx+dy*dy <= r2 {
+					if withinRadius(pi, pts[j], r2) {
 						nbrs = append(nbrs, j)
 					}
 				}
@@ -401,7 +402,10 @@ func build(ctx context.Context, a *adjlist.AdjList[int, int64], cfg config, r fl
 		// guarantee — it makes every junction reachable from the source for
 		// any seed and scale, without distorting the shortest paths (the
 		// backbone roads are long, so Dijkstra routes around them).
-		if i+1 < cfg.nodes {
+		// A successor within the radius is already joined by the local roads
+		// i->i+1 and i+1->i; laying the backbone there too would store each
+		// direction twice, as parallel relationships, so it is skipped.
+		if i+1 < cfg.nodes && !withinRadius(pi, pts[i+1], r2) {
 			wgt := euclidWeight(pi, pts[i+1])
 			if err := a.AddEdge(i, i+1, wgt); err != nil {
 				return genStats{}, fmt.Errorf("AddEdge backbone %d->%d: %w", i, i+1, err)
@@ -414,6 +418,15 @@ func build(ctx context.Context, a *adjlist.AdjList[int, int64], cfg config, r fl
 	}
 
 	return genStats{nodes: cfg.nodes, edges: edges, elapsed: time.Since(start)}, nil
+}
+
+// withinRadius reports whether junctions a and b are at most the connection
+// radius apart, given the squared radius r2 — the condition under which the
+// generator joins them by local roads.
+func withinRadius(a, b point, r2 int64) bool {
+	dx := a.x - b.x
+	dy := a.y - b.y
+	return dx*dx+dy*dy <= r2
 }
 
 // euclidWeight returns ceil(sqrt(dx*dx + dy*dy)) as a strictly positive

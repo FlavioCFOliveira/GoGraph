@@ -208,9 +208,9 @@ func runRung(ctx context.Context, w io.Writer, cfg *config) error {
 	fmt.Fprintf(w, "config.rows_per_query=%d\n", cfg.rowsPerQuery())
 
 	// Engine over an in-memory labelled property graph, seeded from cfg.
-	// Directed + Multigraph are required for openCypher semantics — relationships
-	// are directed, and CREATE always adds a relationship, including a parallel
-	// edge between an existing node pair. Weightless drops the per-node edge-weight
+	// The graph is a directed multigraph, the openCypher storage model —
+	// relationships are directed, and CREATE always adds a relationship,
+	// including a parallel edge between an existing node pair. Weightless drops the per-node edge-weight
 	// column: Cypher has no edge-weight concept, so the []float64 holds no
 	// information (every relationship is recorded with the zero weight).
 	g := lpg.New[string, float64](adjlist.Config{Weightless: true})

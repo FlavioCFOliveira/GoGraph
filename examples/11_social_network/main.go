@@ -14,7 +14,9 @@
 //     reported as a community-count band and a modularity lower bound
 //     ([community.LeidenCtx]).
 //   - Friend-of-friend recommendation — who a fixed seed user should
-//     befriend next, a manual two-hop walk over the live adjacency list.
+//     befriend next, an undirected two-hop Cypher query
+//     (s)-[:FRIEND]-(f)-[:FRIEND]-(c) over the live graph, cross-checked
+//     against a manual walk over the symmetric CSR projection.
 //   - Structural analytics — the dense k-core ([search.KCore]), the global
 //     triangle count and clustering coefficient ([search.CountTriangles]),
 //     the diameter that underwrites the small-world claim ([search.Diameter]),
@@ -31,13 +33,15 @@
 // # Model
 //
 //	(:User {id, name, community})            // id is "u%07d" in creation order
-//	(:User)-[:FRIEND]-(:User)                // an undirected, unweighted friendship
+//	(:User)-[:FRIEND]->(:User)               // one stored relationship per friendship
 //
-// The graph is undirected (friendship is symmetric), so Leiden and the
-// friend-of-friend walk both see a symmetric neighbourhood, and PageRank
-// runs over the symmetric CSR (each undirected edge is stored as two
-// directed entries) where degree heterogeneity still yields a meaningful
-// centrality.
+// Friendship is symmetric, but each friendship is stored ONCE, as one
+// directed FRIEND relationship. Every reader treats it as undirected: the
+// friend-of-friend recommendation queries the undirected pattern
+// -[:FRIEND]-, and PageRank, Leiden and the structural analytics run over
+// the symmetric projection built by [csr.CSR.BuildSymmetric] (each stored
+// relationship becomes one entry at each endpoint), where degree
+// heterogeneity still yields a meaningful centrality.
 //
 // # Topology — per-community Barabási–Albert blocks + a sparse bridge layer
 //
@@ -107,9 +111,12 @@ import (
 	"math/rand"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
@@ -125,7 +132,7 @@ import (
 // surfaces as a compile error everywhere it is used.
 const (
 	labelUser = "User"
-	relFriend = "FRIEND" // (:User)-[:FRIEND]-(:User), undirected
+	relFriend = "FRIEND" // (:User)-[:FRIEND]->(:User), queried as -[:FRIEND]-
 
 	propID        = "id"
 	propName      = "name"
@@ -246,7 +253,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 
 	base := readMem()
 
-	g := lpg.New[string, int64](adjlist.Config{})
+	g := lpg.New[string, float64](adjlist.Config{})
 	stats, err := build(ctx, g, cfg)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
@@ -270,7 +277,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "# mem.heap_alloc=%s\n", humanBytes(built.HeapAlloc))
 	fmt.Fprintf(w, "# mem.heap_growth=%s\n", humanBytes(saturatingSub(built.HeapAlloc, base.HeapAlloc)))
 
-	c := csr.BuildFromAdjList(g.AdjList())
+	// One stored FRIEND relationship per friendship; BuildSymmetric projects
+	// it to the undirected view every analytic below is defined on.
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 	mapper := g.AdjList().Mapper()
 
 	if err := reportInfluence(ctx, w, c, mapper, stats.idComm, cfg); err != nil {
@@ -279,7 +288,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	if err := reportCommunities(ctx, w, c); err != nil {
 		return fmt.Errorf("communities: %w", err)
 	}
-	reportRecommendations(w, g, stats, cfg)
+	if err := reportRecommendations(ctx, w, g, c, mapper, stats, cfg); err != nil {
+		return fmt.Errorf("recommendations: %w", err)
+	}
 	if err := reportStructure(ctx, w, c, mapper, stats); err != nil {
 		return fmt.Errorf("structure: %w", err)
 	}
@@ -311,7 +322,7 @@ type buildStats struct {
 // creation order so user i has NodeID i, which lets community[] be indexed
 // directly by NodeID later. The build honours ctx cancellation on a
 // periodic check.
-func build(ctx context.Context, g *lpg.Graph[string, int64], cfg config) (buildStats, error) {
+func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config) (buildStats, error) {
 	//nolint:gosec // G404: a seeded math/rand is intentional here — the example
 	// must reproduce a fixed social network for a given -seed; crypto/rand would
 	// defeat the reproducibility the examples standard requires.
@@ -406,7 +417,7 @@ func communitySizes(total, k int) []int {
 // records every edge endpoint, so a node appears in it exactly degree
 // times and a uniform pick from it is a degree-proportional pick. Returns
 // the number of FRIEND edges added in this block.
-func buildBABlock(ctx context.Context, g *lpg.Graph[string, int64], ids []string, lo, hi, m int, rng *rand.Rand) (int, error) {
+func buildBABlock(ctx context.Context, g *lpg.Graph[string, float64], ids []string, lo, hi, m int, rng *rand.Rand) (int, error) {
 	size := hi - lo
 	if size <= 1 {
 		return 0, nil // a singleton block has no internal edges
@@ -425,8 +436,8 @@ func buildBABlock(ctx context.Context, g *lpg.Graph[string, int64], ids []string
 	}
 	for off := 1; off < seed; off++ {
 		u, v := lo+off-1, lo+off
-		if err := g.AddEdge(ids[u], ids[v], 1); err != nil {
-			return 0, fmt.Errorf("AddEdge seed %s-%s: %w", ids[u], ids[v], err)
+		if err := g.AddEdgeLabeled(ids[u], ids[v], 1, relFriend); err != nil {
+			return 0, fmt.Errorf("AddEdgeLabeled seed %s-%s: %w", ids[u], ids[v], err)
 		}
 		targetList = append(targetList, u, v)
 		edges++
@@ -462,8 +473,8 @@ func buildBABlock(ctx context.Context, g *lpg.Graph[string, int64], ids []string
 			chosen = append(chosen, u)
 		}
 		for _, u := range chosen {
-			if err := g.AddEdge(ids[u], ids[v], 1); err != nil {
-				return 0, fmt.Errorf("AddEdge BA %s-%s: %w", ids[u], ids[v], err)
+			if err := g.AddEdgeLabeled(ids[u], ids[v], 1, relFriend); err != nil {
+				return 0, fmt.Errorf("AddEdgeLabeled BA %s-%s: %w", ids[u], ids[v], err)
 			}
 			targetList = append(targetList, u, v)
 			edges++
@@ -478,20 +489,27 @@ func buildBABlock(ctx context.Context, g *lpg.Graph[string, int64], ids []string
 // pairs. Every bridge endpoint is drawn to avoid the seed user (node 0) and
 // its direct friends, so a friend-of-friend walk from the seed user never
 // crosses a community boundary — making "every FoF candidate is in the seed
-// user's community" a theorem of the construction. Returns the number of
-// bridge edges added.
+// user's community" a theorem of the construction. A bridge whose endpoint
+// pair is already linked (in either direction) is skipped rather than stored
+// as a parallel FRIEND relationship. Returns the number of bridge edges
+// added.
 //
 // The seed user (node 0) is the first-born hub of community 0; its direct
 // friends are the highest-degree members of that community. Excluding them
 // as bridge endpoints is cheap: a block of size s has s − (1 + deg(node 0))
 // eligible members, and validate guarantees s ≥ m+1.
-func buildBridges(ctx context.Context, g *lpg.Graph[string, int64], bounds []int, cfg config, rng *rand.Rand) (int, error) {
+func buildBridges(ctx context.Context, g *lpg.Graph[string, float64], bounds []int, cfg config, rng *rand.Rand) (int, error) {
 	k := cfg.communities
 	// Endpoints that a bridge must not touch: the seed user and its direct
-	// friends, all of which live in community 0. Tracked by string id (the
-	// neighbour iterator yields ids) so no NodeID conversion is needed.
+	// friends, all of which live in community 0. A friend is linked by one
+	// stored relationship in either direction, so both the out- and the
+	// in-neighbours are collected. Tracked by string id (both iterators yield
+	// ids) so no NodeID conversion is needed.
 	forbidden := map[string]struct{}{userID(0): {}}
 	for v := range g.AdjList().Neighbours(userID(0)) {
+		forbidden[v] = struct{}{}
+	}
+	for _, v := range g.AdjList().InNeighbours(userID(0)) {
 		forbidden[v] = struct{}{}
 	}
 
@@ -507,22 +525,29 @@ func buildBridges(ctx context.Context, g *lpg.Graph[string, int64], bounds []int
 		return 0, false // every member forbidden (only possible for a tiny block 0)
 	}
 
-	addBridge := func(a, b int) error {
+	addBridge := func(a, b int) (bool, error) {
 		ua, oka := pick(a)
 		ub, okb := pick(b)
 		if !oka || !okb {
-			return nil // skip a bridge we cannot place without touching the seed neighbourhood
+			return false, nil // skip a bridge we cannot place without touching the seed neighbourhood
 		}
-		return g.AddEdge(userID(ua), userID(ub), 1)
+		sa, sb := userID(ua), userID(ub)
+		if g.AdjList().HasEdge(sa, sb) || g.AdjList().HasEdge(sb, sa) {
+			return false, nil // the pair is already friends; one relationship per friendship
+		}
+		return true, g.AddEdgeLabeled(sa, sb, 1, relFriend)
 	}
 
 	edges := 0
 	// Spanning path: connects every community into one component.
 	for b := 0; b < k-1; b++ {
-		if err := addBridge(b, b+1); err != nil {
-			return 0, fmt.Errorf("AddEdge spanning bridge %d-%d: %w", b, b+1, err)
+		added, err := addBridge(b, b+1)
+		if err != nil {
+			return 0, fmt.Errorf("AddEdgeLabeled spanning bridge %d-%d: %w", b, b+1, err)
 		}
-		edges++
+		if added {
+			edges++
+		}
 	}
 	// Remaining bridges between random distinct block pairs.
 	for added := k - 1; added < cfg.bridges; added++ {
@@ -536,10 +561,13 @@ func buildBridges(ctx context.Context, g *lpg.Graph[string, int64], bounds []int
 		if b >= a {
 			b++ // map to a distinct block in [0,k) \ {a}
 		}
-		if err := addBridge(a, b); err != nil {
-			return 0, fmt.Errorf("AddEdge bridge %d-%d: %w", a, b, err)
+		added, err := addBridge(a, b)
+		if err != nil {
+			return 0, fmt.Errorf("AddEdgeLabeled bridge %d-%d: %w", a, b, err)
 		}
-		edges++
+		if added {
+			edges++
+		}
 	}
 	return edges, nil
 }
@@ -553,7 +581,7 @@ func userID(i int) string {
 // addUser adds a single :User node carrying its id, a realistic name, and
 // its planted community label (so the community is queryable and the
 // recommendation walk can verify the same-community invariant).
-func addUser(g *lpg.Graph[string, int64], id, name string, comm int) error {
+func addUser(g *lpg.Graph[string, float64], id, name string, comm int) error {
 	if err := g.AddNode(id); err != nil {
 		return fmt.Errorf("AddNode %s: %w", id, err)
 	}
@@ -584,7 +612,7 @@ func addUser(g *lpg.Graph[string, int64], id, name string, comm int) error {
 // because the topology grows one BA hub per community, a clean influencer
 // set with several communities represented is the expected, separable
 // result.
-func reportInfluence(ctx context.Context, w io.Writer, c *csr.CSR[int64], mapper *graph.Mapper[string], idComm map[string]int, cfg config) error {
+func reportInfluence(ctx context.Context, w io.Writer, c *csr.CSR[float64], mapper *graph.Mapper[string], idComm map[string]int, cfg config) error {
 	start := time.Now()
 	ranks, iters, err := centrality.PageRankCtx(ctx, c, centrality.DefaultPageRankOptions())
 	if err != nil {
@@ -649,7 +677,7 @@ func reportInfluence(ctx context.Context, w io.Writer, c *csr.CSR[int64], mapper
 // regression test asserts a count band and a Q lower bound (≥ 0.55 at the
 // default) rather than an exact float, surviving an internal change that
 // preserves partition quality.
-func reportCommunities(ctx context.Context, w io.Writer, c *csr.CSR[int64]) error {
+func reportCommunities(ctx context.Context, w io.Writer, c *csr.CSR[float64]) error {
 	start := time.Now()
 	part, err := community.LeidenCtx(ctx, c, community.DefaultLeidenOptions())
 	if err != nil {
@@ -667,24 +695,24 @@ func reportCommunities(ctx context.Context, w io.Writer, c *csr.CSR[int64]) erro
 }
 
 // computeModularity returns the Newman modularity Q of partition part over
-// the undirected, unweighted snapshot c, using the per-community form
+// the symmetric (undirected), unweighted projection c, using the per-community form
 //
 //	Q = Σ_c [ L_c/m − (D_c/2m)² ]
 //
 // where m is the edge count, L_c the number of edges with both endpoints in
 // community c (counted once), and D_c the summed degree of community c
-// (Newman & Girvan, Phys. Rev. E 69, 026113, 2004). The CSR stores each
-// undirected edge as two directed entries, so m is the total directed entry
+// (Newman & Girvan, Phys. Rev. E 69, 026113, 2004). The symmetric CSR holds
+// each stored relationship as two directed entries, so m is the total directed entry
 // count halved and L_c counts only the u<v direction of an intra-community
 // adjacency. Ghost NodeID slots (community -1 from sharded packing) are
 // skipped. Runs in O(V + E). Mirrors example 09's computeModularity, adapted
 // to the int64 edge-weight type used here.
-func computeModularity(c *csr.CSR[int64], part community.Partition) float64 {
+func computeModularity(c *csr.CSR[float64], part community.Partition) float64 {
 	offsets := c.VerticesSlice() // len == MaxNodeID()+1
 	edges := c.EdgesSlice()
 	maxID := c.MaxNodeID()
 
-	twoM := len(edges) // each undirected edge contributes two directed entries
+	twoM := len(edges) // each stored relationship contributes two directed entries
 	if twoM == 0 {
 		return 0
 	}
@@ -724,16 +752,40 @@ func computeModularity(c *csr.CSR[int64], part community.Partition) float64 {
 // Stage 3 — Friend-of-friend recommendation
 // ─────────────────────────────────────────────────────────────────────────────
 
-// reportRecommendations runs a manual two-hop friend-of-friend walk from the
-// fixed seed user and reports the deterministic recommendation result: the
-// number of distinct candidates, whether every candidate lies in the seed
-// user's community (a theorem of the construction — the seed user is placed
-// away from any bridge), and the top recommendation by shared-friend count.
-// The walk timing is telemetry.
-func reportRecommendations(w io.Writer, g *lpg.Graph[string, int64], stats buildStats, cfg config) {
+// fofQuery is the friend-of-friend recommendation as an undirected Cypher
+// pattern. Each friendship is stored once, in one direction, so the pattern
+// -[:FRIEND]- (no arrow) is what reaches a friend whichever way the
+// relationship was stored. count(*) counts the (s)-(f)-(c) paths, which is
+// the number of mutual friends; the ORDER BY makes the ranking byte-stable.
+const fofQuery = "MATCH (s:User {id: $id})-[:FRIEND]-(f:User)-[:FRIEND]-(c:User) " +
+	"WHERE c <> s AND NOT (s)-[:FRIEND]-(c) " +
+	"RETURN c.id AS id, count(*) AS shared ORDER BY shared DESC, id ASC"
+
+// reportRecommendations runs the friend-of-friend recommendation for the
+// fixed seed user as the undirected Cypher query fofQuery and reports the
+// deterministic result: the number of distinct candidates, whether every
+// candidate lies in the seed user's community (a theorem of the construction
+// — the seed user is placed away from any bridge), and the top
+// recommendation by shared-friend count. The query result is cross-checked
+// against friendsOfFriends, an independent walk over the symmetric CSR
+// projection c; any difference is returned as an error. The query timing is
+// telemetry.
+func reportRecommendations(ctx context.Context, w io.Writer, g *lpg.Graph[string, float64], c *csr.CSR[float64], mapper *graph.Mapper[string], stats buildStats, cfg config) error {
+	eng := cypher.NewEngine(g)
 	start := time.Now()
-	recs := friendsOfFriends(g, stats.seedUser)
+	recs, err := queryFriendsOfFriends(ctx, eng, stats.seedUser)
+	if err != nil {
+		return err
+	}
 	elapsed := time.Since(start)
+
+	oracle, err := friendsOfFriends(c, mapper, stats.seedUser)
+	if err != nil {
+		return err
+	}
+	if !slices.Equal(recs, oracle) {
+		return fmt.Errorf("friend-of-friend mismatch: cypher returned %d candidates, the symmetric-CSR walk %d — module bug", len(recs), len(oracle))
+	}
 
 	allSameComm := true
 	for _, r := range recs {
@@ -761,6 +813,7 @@ func reportRecommendations(w io.Writer, g *lpg.Graph[string, int64], stats build
 	for i := 0; i < limit; i++ {
 		fmt.Fprintf(w, "# fof.rank.%d=%s shared=%d\n", i+1, recs[i].id, recs[i].shared)
 	}
+	return nil
 }
 
 // recommendation is a friend-of-friend candidate and the number of mutual
@@ -770,29 +823,67 @@ type recommendation struct {
 	shared int
 }
 
+// queryFriendsOfFriends runs fofQuery for src and returns the candidates in
+// the query's order: shared-friend count descending, then id ascending.
+func queryFriendsOfFriends(ctx context.Context, eng *cypher.Engine, src string) ([]recommendation, error) {
+	res, err := eng.Run(ctx, fofQuery, map[string]expr.Value{"id": expr.StringValue(src)})
+	if err != nil {
+		return nil, fmt.Errorf("fof query: %w", err)
+	}
+	defer func() { _ = res.Close() }() // a Close error after a full read carries nothing Err does not
+
+	var out []recommendation
+	for res.Next() {
+		rec := res.Record()
+		id, ok := rec["id"].(expr.StringValue)
+		if !ok {
+			return nil, fmt.Errorf("fof query: column id is %T, want expr.StringValue", rec["id"])
+		}
+		shared, ok := rec["shared"].(expr.IntegerValue)
+		if !ok {
+			return nil, fmt.Errorf("fof query: column shared is %T, want expr.IntegerValue", rec["shared"])
+		}
+		out = append(out, recommendation{id: string(id), shared: int(shared)})
+	}
+	if err := res.Err(); err != nil {
+		return nil, fmt.Errorf("fof query: %w", err)
+	}
+	return out, nil
+}
+
 // friendsOfFriends returns users two hops from src that are not already
 // direct friends, ranked by the number of mutual friends (descending) then
-// id (ascending) so the ordering is byte-stable despite equal counts and
-// the non-deterministic neighbour-iteration order. The walk runs over the
-// live undirected adjacency list — no CSR needed — and shows the canonical
-// triadic-closure recommendation.
-func friendsOfFriends(g *lpg.Graph[string, int64], src string) []recommendation {
-	direct := map[string]bool{src: true}
-	for v := range g.AdjList().Neighbours(src) {
+// id (ascending) so the ordering is byte-stable despite equal counts. It
+// walks the symmetric CSR projection c, where each stored FRIEND
+// relationship is one entry at each endpoint, so it shares no code with the
+// Cypher engine and serves as the independent oracle for fofQuery: each
+// (src, f, w) path through two relationships counts once, exactly as the
+// query's count(*) does.
+func friendsOfFriends(c *csr.CSR[float64], mapper *graph.Mapper[string], src string) ([]recommendation, error) {
+	srcID, ok := mapper.Lookup(src)
+	if !ok {
+		return nil, fmt.Errorf("fof oracle: seed user %q not interned", src)
+	}
+	direct := map[graph.NodeID]bool{srcID: true}
+	for v := range c.NeighboursByID(srcID) {
 		direct[v] = true
 	}
-	shared := map[string]int{}
-	for v := range g.AdjList().Neighbours(src) {
-		for w := range g.AdjList().Neighbours(v) {
-			if direct[w] {
+	shared := map[graph.NodeID]int{}
+	for v := range c.NeighboursByID(srcID) {
+		for x := range c.NeighboursByID(v) {
+			if direct[x] {
 				continue
 			}
-			shared[w]++
+			shared[x]++
 		}
 	}
 	out := make([]recommendation, 0, len(shared))
 	for id, n := range shared {
-		out = append(out, recommendation{id, n})
+		key, ok := mapper.Resolve(id)
+		if !ok {
+			return nil, fmt.Errorf("fof oracle: unresolved node id %d", id)
+		}
+		out = append(out, recommendation{key, n})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].shared != out[j].shared {
@@ -800,7 +891,7 @@ func friendsOfFriends(g *lpg.Graph[string, int64], src string) []recommendation 
 		}
 		return out[i].id < out[j].id
 	})
-	return out
+	return out, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -835,7 +926,7 @@ const tcLiveCap = 20000
 // per-node total; the reported diameter upper bound must not fall below an
 // observed shortest-path length (the seed user's eccentricity); and the
 // transitive-closure reachable count must equal the BFS reachable count.
-func reportStructure(ctx context.Context, w io.Writer, c *csr.CSR[int64], mapper *graph.Mapper[string], stats buildStats) error {
+func reportStructure(ctx context.Context, w io.Writer, c *csr.CSR[float64], mapper *graph.Mapper[string], stats buildStats) error {
 	live := c.LiveNodes() // sorted NodeIDs with >=1 incident edge; excludes ghost slots
 	liveCount := len(live)
 	verts := c.VerticesSlice() // CSR row offsets: a vertex degree is the gap between consecutive offsets

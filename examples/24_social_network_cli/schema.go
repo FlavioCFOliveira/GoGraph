@@ -3,13 +3,12 @@ package main
 import "github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 
 // lpgConfig returns the adjacency-list configuration shared by every
-// subcommand. The social-network model is directional throughout —
-// FOLLOWS, AUTHORED, ON, REPLY_OF and LIKED all have a well-defined
-// direction — so the backend is constructed with Directed: true.
-// Multigraph: true is required because this CLI issues openCypher writes,
-// whose data model is a multigraph: a CREATE always adds a relationship,
-// including a second relationship between an existing node pair. The helper
-// centralises this choice so a future change is single-edit.
+// subcommand. The zero Config is a directed multigraph, which matches the
+// model: FOLLOWS, AUTHORED, ON, REPLY_OF and LIKED all have a well-defined
+// direction, and this CLI issues openCypher writes, whose data model is a
+// multigraph — a CREATE always adds a relationship, including a second
+// relationship between an existing node pair. The helper centralises this
+// choice so a future change is single-edit.
 func lpgConfig() adjlist.Config {
 	return adjlist.Config{}
 }

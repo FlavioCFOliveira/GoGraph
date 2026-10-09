@@ -50,11 +50,14 @@ spine it answers "if I change X, who is affected?". Completed work carries
 ## Build and run
 
 ```sh
-# from the repository root — small deterministic fixture
-go run ./examples/25_software_house_api -d ./data -addr :8080
+# from the repository root — small deterministic fixture; the data
+# directory is a fresh temporary directory (mktemp follows TMPDIR)
+DATA_DIR=$(mktemp -d)
+go run ./examples/25_software_house_api -d "$DATA_DIR" -addr :8080
 
 # observable-scale run: a seeded synthetic graph (~5.7k nodes, ~19k edges)
-go run ./examples/25_software_house_api -d ./big -addr :8081 \
+BIG_DIR=$(mktemp -d)
+go run ./examples/25_software_house_api -d "$BIG_DIR" -addr :8081 \
     -scale-components 2000 -scale-tasks 1500 -scale-developers 80 -scale-seed 7
 ```
 
@@ -446,7 +449,7 @@ and a wall-clock and allocation contrast between the default engine and one
 built with `DisableMinLabelScan`:
 
 ```
-$ 25_software_house_api -d ./data -scale-components=50000
+$ 25_software_house_api -d "$DATA_DIR" -scale-components=50000
 minlabelscan.anchor=Repository
 minlabelscan.anchored_on_smaller_label=true
 minlabelscan.layer_label=Code
@@ -496,7 +499,7 @@ served graph: the API surface and every seeded fact stay exactly as they are, an
 regression test pins that the served graph is never mutated.
 
 ```
-$ 25_software_house_api -d ./data -scale-components=2000
+$ 25_software_house_api -d "$DATA_DIR" -scale-components=2000
 bitmapintersect.fire.intersected=true
 bitmapintersect.fire.left=Component:2012
 bitmapintersect.fire.right=NeedsReview:306
@@ -545,7 +548,7 @@ Every committed write is fsynced to the WAL before the response returns, so the
 data survives even a hard kill:
 
 ```sh
-go run ./examples/25_software_house_api -d ./data -addr :8080 &
+go run ./examples/25_software_house_api -d "$DATA_DIR" -addr :8080 &
 curl -s -XPOST localhost:8080/seed
 curl -s localhost:8080/query -d @- <<'JSON'
 {"query":"CREATE (d:Developer:People {key:'dev:zoe', name:'Zoe'})"}
@@ -553,7 +556,7 @@ JSON
 
 kill -9 %1                       # crash: no graceful shutdown, no final snapshot
 
-go run ./examples/25_software_house_api -d ./data -addr :8080 &
+go run ./examples/25_software_house_api -d "$DATA_DIR" -addr :8080 &
 curl -s localhost:8080/stats     # "Developer": 7 — the seed AND dev:zoe survived
 ```
 

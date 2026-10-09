@@ -20,7 +20,9 @@
 //     redundant short links that give the network realistic detours and a
 //     smooth eccentricity gradient rather than a tree's brittle one.
 //
-// Every segment is UNDIRECTED (a road runs both ways) and carries a strictly
+// Every segment is UNDIRECTED (a road runs both ways): it is stored once, as
+// one directed relationship, and the APSP passes read the symmetric
+// projection built by [csr.CSR.BuildSymmetric]. Each carries a strictly
 // positive int64 weight — the Euclidean length rounded to the nearest unit,
 // floored at 1. The elongated region (width >> height by default) stretches
 // the network along one axis so eccentricity varies smoothly from a distinct
@@ -197,7 +199,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-	c := csr.BuildFromAdjList(gen.adj)
+	c := csr.BuildFromAdjList(gen.adj).BuildSymmetric() // one stored relationship per segment, read undirected
 	mapper := gen.adj.Mapper()
 
 	fmt.Fprintf(w, "graph.nodes=%d\n", c.Order())
@@ -417,8 +419,8 @@ type edge struct {
 // build scatters cfg.nodes towns across the region with the seeded RNG, then
 // wires two overlapping edge sets — the Euclidean minimum spanning tree (which
 // guarantees connectivity for any seed) and each town's cfg.knn nearest
-// neighbours (which add realistic redundancy) — into a fresh undirected
-// adjlist. Segments are de-duplicated and inserted in canonical sorted order so
+// neighbours (which add realistic redundancy) — into a fresh adjlist, one
+// directed relationship per segment. Segments are de-duplicated and inserted in canonical sorted order so
 // the CSR build is a pure function of cfg, independent of map iteration order.
 // The build honours ctx cancellation on a coarse interval.
 func build(ctx context.Context, cfg config) (genResult, error) {
@@ -449,8 +451,8 @@ func build(ctx context.Context, cfg config) (genResult, error) {
 		return genResult{}, err
 	}
 
-	// Materialise the de-duplicated segment set into an undirected adjlist in
-	// canonical sorted order.
+	// Materialise the de-duplicated segment set into the adjlist in canonical
+	// sorted order, one directed relationship u -> v (u < v) per segment.
 	ordered := make([]edge, 0, len(segments))
 	for e := range segments {
 		ordered = append(ordered, e)

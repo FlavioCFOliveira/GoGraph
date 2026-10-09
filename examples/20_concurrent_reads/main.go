@@ -27,10 +27,12 @@
 //   - The high-degree hubs create heavy adjacency fan-out, so each read
 //     does real CPU work — the point of a concurrency benchmark.
 //
-// Edges are undirected (an [adjlist.AdjList] with Directed:false mirrors
-// every insertion) and carry an integer weight in [1, weightMax] drawn
-// from the seeded RNG. Integer weights keep Dijkstra free of NaN/Inf
-// concerns and make distance sums exact.
+// Edges are undirected: each is stored once, as one directed relationship
+// in an [adjlist.AdjList], and every reader works on the symmetric
+// projection built by [csr.CSR.BuildSymmetric], which makes each
+// relationship reachable from both endpoints. Edges carry an integer
+// weight in [1, weightMax] drawn from the seeded RNG. Integer weights keep
+// Dijkstra free of NaN/Inf concerns and make distance sums exact.
 //
 // # Evidence — the lock-free read contract
 //
@@ -230,7 +232,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 		return fmt.Errorf("target node %d not interned", cfg.nodes-1)
 	}
 
-	c := csr.BuildFromAdjList(g)
+	c := csr.BuildFromAdjList(g).BuildSymmetric() // one stored relationship per edge, read undirected
 
 	fmt.Fprintf(w, "nodes.count=%d\n", c.Order())
 	fmt.Fprintf(w, "edges.directed=%d\n", c.Size())
@@ -319,7 +321,7 @@ func reportParallelEquivalence(ctx context.Context, w io.Writer, c *csr.CSR[int6
 		if err != nil {
 			return fmt.Errorf("betweenness subgraph: %w", err)
 		}
-		betCSR = csr.BuildFromAdjList(bg)
+		betCSR = csr.BuildFromAdjList(bg).BuildSymmetric()
 	}
 	t0 = time.Now()
 	serialBet, err := centrality.BetweennessCtx(ctx, betCSR)
@@ -564,7 +566,8 @@ const ctxCheckEvery = 4
 // ─────────────────────────────────────────────────────────────────────────────
 
 // generate builds the Barabási-Albert preferential-attachment network
-// described by cfg into a fresh undirected AdjList, single-threaded so
+// described by cfg into a fresh AdjList, one directed relationship per
+// undirected edge, single-threaded so
 // the seeded RNG draws in a fixed order (and the data shape is
 // reproducible for a given -seed). It starts from a connected path core
 // of cfg.seedCore nodes, then each subsequent node attaches cfg.attach

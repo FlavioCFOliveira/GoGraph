@@ -3,9 +3,11 @@
 ## What it demonstrates
 
 Finding an **Eulerian circuit** — a tour that traverses every edge exactly
-once and returns to its start — with Hierholzer's algorithm, over both an
-**undirected** graph (`search.HierholzerUndirected`) and a **directed** one
-(`search.Hierholzer`). It verifies the returned tour uses every street exactly
+once and returns to its start — with Hierholzer's algorithm, over one stored
+route network read two ways: as an **undirected** graph through its symmetric
+projection (`csr.CSR.BuildSymmetric` + `search.HierholzerUndirected`) and as a
+**directed** one (`search.Hierholzer`). Each street is stored once, as one
+directed relationship. It verifies the returned tour uses every street exactly
 once and is a closed circuit, and shows the module correctly reporting
 `search.ErrNoEulerian` when the preconditions fail. The scenario is *route
 inspection* (the "Chinese postman" setting): a fleet must cover every street
@@ -105,8 +107,9 @@ and watch the elapsed grow linearly with the street count.
 
 ## Key APIs
 
-- `graph/adjlist.New` (`Directed: false` / `true`) / `AdjList.AddEdge` — build the mutable route network; the undirected form mirrors each street automatically.
-- `graph/csr.BuildFromAdjList` — freeze the builder into the immutable CSR snapshot Hierholzer reads.
+- `graph/adjlist.New` / `AdjList.AddEdge` — build the mutable route network, one directed relationship per street, each cycle oriented one way.
+- `graph/csr.BuildFromAdjList` — freeze the builder into the immutable CSR snapshot the directed Hierholzer reads.
+- `graph/csr.CSR.BuildSymmetric` — project that snapshot to the symmetric (undirected) CSR the undirected Hierholzer reads.
 - `search.HierholzerUndirectedCtx` — Eulerian circuit/path over an undirected (symmetric) CSR; returns the trail as `[]graph.NodeID` of length `E + 1`, or `search.ErrNoEulerian`.
 - `search.HierholzerCtx` — the directed counterpart, requiring equal in- and out-degree for a circuit.
 - `search.ErrNoEulerian` — the sentinel returned when no Eulerian trail exists.

@@ -169,15 +169,16 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 
 	base := readMem()
 
-	// Build the mutable undirected weighted graph, then freeze it into the
-	// single immutable CSR snapshot both MST algorithms read. An immutable CSR
+	// Build the mutable weighted graph (one directed relationship per link),
+	// freeze it into a CSR, and project it to the single immutable symmetric
+	// (undirected) snapshot both MST algorithms read. An immutable CSR
 	// needs no synchronisation on the read path, so Prim and Kruskal could even
 	// run concurrently against it.
 	a, gen, err := build(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 
 	live := c.LiveNodes()
 	fmt.Fprintf(w, "sites.total=%d\n", len(live))
@@ -375,9 +376,10 @@ type genResult struct {
 // site is a 2-D geographic position, in metres.
 type site struct{ x, y float64 }
 
-// build materialises the site network described by cfg into a fresh undirected
-// weighted adjlist, consuming the seeded RNG in a single fixed order so the
-// shape is a pure function of cfg.seed. For each region it places the sites,
+// build materialises the site network described by cfg into a fresh weighted
+// adjlist, one directed relationship per undirected link, consuming the
+// seeded RNG in a single fixed order so the shape is a pure function of
+// cfg.seed. For each region it places the sites,
 // wires a random spanning tree (guaranteeing the region is connected), then
 // adds extraEdges redundant candidate links per site; finally, when requested,
 // it chains consecutive regions with one inter-region link. Link cost is the
@@ -394,8 +396,8 @@ func build(ctx context.Context, cfg config) (*adjlist.AdjList[int, int64], genRe
 	added := make(map[[2]int]struct{})
 	var res genResult
 
-	// addLink adds the undirected link u-v once (deduplicated on the canonical
-	// node-value pair), weighted by the two sites' Euclidean separation.
+	// addLink stores the undirected link u-v once, as the relationship u -> v
+	// (deduplicated on the canonical node-value pair), weighted by the two sites' Euclidean separation.
 	addLink := func(u, v int) error {
 		key := [2]int{u, v}
 		if u > v {
