@@ -134,7 +134,13 @@ architectural correction rather than an optimisation. See
 
 ```
 <dir>/
-  wal                — single un-segmented, appended file of framed records
+  wal.control        — 64-byte WAL control file: store id, oldest retained
+                       position, checkpoint redo position (store/wal/FORMAT.md)
+  wal.d/             — the WAL segments, <016x segNo>.wal, numbered from 1
+  wal                — the legacy single-file log of a store written before
+                       WAL v2, ending with its seal, or a one-frame seal stub
+  wal.prefix-truncated — durable marker: the WAL prefix has been truncated,
+                       so the history requires the snapshot
   wal.lock           — 0-byte sentinel carrying an exclusive flock(2). Held for
                        the writer's lifetime; a second process opening the same
                        WAL gets wal.ErrWALLocked instead of blocking.
@@ -171,15 +177,22 @@ it is written only when the graph has something to put in it, its absence loads
 as an empty component, and none of them bumps the manifest version — see
 "Snapshot file format" below.
 
-The WAL is one file. It is **not** segmented: `wal.Writer` reclaims space by
-rewriting the surviving suffix under an atomic rename
-(`wal.Writer.TruncatePrefix`), not by unlinking whole segments.
+The WAL is **segmented** (WAL v2, [design-wal-v2.md](design-wal-v2.md)):
+`wal.Writer` reclaims space by unlinking whole segments below the oldest
+retained position (`wal.Writer.MarkCheckpoint`, then
+`wal.Writer.ReclaimSegments`), never by rewriting a file. A store written by an
+earlier release keeps its single-file `wal`; the first writable, clean open
+seals it and continues in segments, and a build older than WAL v2 then refuses
+the directory. The snapshot also carries `nodeids.bin`, the per-shard node-id
+high-water marks, in manifest version 4.
 
 ## WAL payload schema
 
-A WAL frame is `magic("GGWA") | uint16 version | uint32 length | uint32 crc32c`
-followed by the payload — a 14-byte header (`wal.HeaderSize`), with
-`wal.CurrentVersion` currently `1`. The frame layer is documented in
+A WAL frame written by this release is a 36-byte header (`wal.HeaderSizeV2`,
+`wal.CurrentVersion` = `2`) carrying the magic, version, length, the frame's
+logical position, the distance back to its predecessor, the store id and a
+CRC32C, followed by the payload. The 14-byte version-1 header
+(`wal.HeaderSize`, `wal.LegacyVersion`) is still read, never written. The frame layer is documented in
 [`store/wal/FORMAT.md`](../store/wal/FORMAT.md); this section covers the
 payload the transaction layer puts inside it. A single frame payload is capped
 at 1 GiB, so a corrupt or crafted length field cannot force an unbounded
@@ -1500,11 +1513,14 @@ transactions commit and append frames *past W*. Then:
    snapshot lacks. That is a supported degraded mode (unbounded WAL growth,
    Durability intact), surfaced via
    `store.checkpoint.truncate_skipped_not_self_sufficient`.
-7. Otherwise call `wal.Writer.TruncatePrefix(W)`, which discards **only**
-   *[0, W)* and preserves every frame committed during phase 2. It is itself
-   crash-safe: it writes the surviving suffix to a temporary file and renames it
-   over the WAL. The reclaimed byte count is recorded on `Stats.WALTruncBytes`
-   and emitted via `store.checkpoint.wal_truncated_bytes`.
+7. Otherwise call `wal.Writer.MarkCheckpoint(W)`, which records the redo
+   position in the control file (temp file, fsync, rename, directory fsync),
+   then `wal.Writer.ReclaimSegments`, which unlinks only the segments whose
+   frames all lie below the oldest retained position — never the active
+   segment — and preserves every frame committed during phase 2. Reclamation
+   takes neither the commit lock nor the append lock. The reclaimed byte count
+   is recorded on `Stats.WALTruncBytes` and emitted via
+   `store.checkpoint.wal_truncated_bytes`.
 
 Measured end to end on a 40 000-commit `int64`-keyed store with four writer
 goroutines committing throughout: the checkpoint completed in 103.8 ms, 45
@@ -2023,4 +2039,4 @@ change that intentionally bumps the on-disk shape, and add a fresh
 
 ---
 
-*Last reviewed: 2026-09-08 against commit `efd32fb991f415c3a2871dab1ea1bfb83434d189`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-10-09 against commit `60c90d730ebdd6fb3168614de4b92d78bf4d6ca4`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

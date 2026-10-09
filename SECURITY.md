@@ -11,7 +11,8 @@ Security fixes are issued for the following release lines:
 
 | Version line | Status                    | Receives security fixes      |
 |--------------|---------------------------|------------------------------|
-| v0.15.x      | Current (pre-1.0)         | Yes                          |
+| v0.16.x      | Current (pre-1.0)         | Yes                          |
+| v0.15.x      | Superseded by v0.16.x     | No                           |
 | v0.14.x      | Superseded by v0.15.x     | No                           |
 | v0.13.x      | Superseded by v0.14.x     | No                           |
 | v0.12.x      | Superseded by v0.13.x     | No                           |
