@@ -21,6 +21,7 @@ package lpg
 //     raise site turn the test red.
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"sync"
@@ -108,7 +109,7 @@ func churnFixture(t *testing.T, label string, keys ...string) (*Graph[string, fl
 		}
 	}
 	g.ReclaimNow()
-	lid := g.reg.Intern(label)
+	lid := g.reg.intern(label)
 	if got := g.labelChurn.load(lid); got != 0 {
 		t.Fatalf("precondition: the churn gate for %q reads %d after a full reclaim, want 0. "+
 			"Every assertion in this file would then pass on leftover churn rather than on "+
@@ -141,7 +142,7 @@ func TestLabelChurnGate_LabelDeltaRaisesTheGate(t *testing.T) {
 	}
 	g.ReclaimNow()
 
-	lid := g.reg.Intern("Late")
+	lid := g.reg.intern("Late")
 	if got := g.labelChurn.load(lid); got != 0 {
 		t.Fatalf("precondition: gate for Late reads %d, want 0", got)
 	}
@@ -183,7 +184,9 @@ func TestLabelChurnGate_DeferredIndexRemovalRaisesTheGate(t *testing.T) {
 	defer func() { _ = g.Close() }()
 	id := mustID(t, g, "gone")
 
-	g.RemoveNode("gone")
+	if err := g.RemoveNode("gone"); err != nil {
+		t.Fatalf("g.RemoveNode(\"gone\"): %v", err)
+	}
 
 	// Drop the life records, and only those. What is left holding the gate is the
 	// deferred index removal the strip recorded.
@@ -222,7 +225,9 @@ func TestLabelChurnGate_ReviveRaisesTheGate(t *testing.T) {
 	defer func() { _ = g.Close() }()
 	id := mustID(t, g, "phoenix")
 
-	g.RemoveNode("phoenix")
+	if err := g.RemoveNode("phoenix"); err != nil {
+		t.Fatalf("g.RemoveNode(\"phoenix\"): %v", err)
+	}
 	g.ReclaimNow()
 	if g.nodeIdx.Has(uint32(lid), id) {
 		t.Fatal("setup: the deferred removal should have been applied by the reclaim, leaving " +
@@ -276,7 +281,7 @@ func TestLabelChurnGate_QuietLabelIsNotCorrected(t *testing.T) {
 	if err := g.SetNodeLabel("c", "Busy"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	busy := g.reg.Intern("Busy")
+	busy := g.reg.intern("Busy")
 	if !g.labelChurn.live(busy) {
 		t.Fatal("setup: the write on Busy did not raise its own gate")
 	}
@@ -308,7 +313,7 @@ func (g *Graph[N, W]) labelBitmapUngated(lid LabelID, s *Snapshot) *roaring64.Bi
 	pre := g.suspectNodes()
 	bm := g.nodeIdx.Intersect(uint32(lid))
 	pre = append(pre, g.suspectNodes()...)
-	g.correctBitmapOver(bm, s, func(bag labelBag) bool { return bag.has(lid) }, pre)
+	_ = g.correctBitmapOver(context.Background(), bm, s, func(bag labelBag) bool { return bag.has(lid) }, pre)
 	return bm
 }
 
@@ -399,7 +404,7 @@ func TestLabelChurnGate_GatedAnswerMatchesUngatedUnderMixedLoad(t *testing.T) {
 	for i := 0; i < still; i++ {
 		seedLabelled(fmt.Sprintf("g%d", i), "Gamma")
 	}
-	alpha, beta, gamma := g.reg.Intern("Alpha"), g.reg.Intern("Beta"), g.reg.Intern("Gamma")
+	alpha, beta, gamma := g.reg.intern("Alpha"), g.reg.intern("Beta"), g.reg.intern("Gamma")
 	lids := []LabelID{alpha, beta, gamma}
 
 	// Opened BEFORE the writer starts, and held to the end: it pins the
@@ -425,11 +430,15 @@ func TestLabelChurnGate_GatedAnswerMatchesUngatedUnderMixedLoad(t *testing.T) {
 			case 0:
 				_ = g.SetNodeLabel(key, hot[(i+1)%len(hot)])
 			case 1:
-				g.RemoveNodeLabel(key, hot[(i+1)%len(hot)])
+				if err := g.RemoveNodeLabel(key, hot[(i+1)%len(hot)]); err != nil {
+					t.Errorf("g.RemoveNodeLabel(key, hot[(i+1)%%len(hot)]): %v", err)
+				}
 			case 2:
 				// Each doomed node is retired exactly ONCE, and never revived.
 				if nextDoomed < doomed {
-					g.RemoveNode(fmt.Sprintf("d%d", nextDoomed))
+					if err := g.RemoveNode(fmt.Sprintf("d%d", nextDoomed)); err != nil {
+						t.Errorf("g.RemoveNode(fmt.Sprintf(\"d%%d\", nextDoomed)): %v", err)
+					}
 					nextDoomed++
 				}
 			case 3:
@@ -656,7 +665,9 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 		run(t, "removeNodeInfo", nil,
 			func(t *testing.T, g *Graph[string, float64], keys []string, ids []graph.NodeID, dead *settledDead) {
 				for i, k := range keys {
-					g.RemoveNode(k)
+					if err := g.RemoveNode(k); err != nil {
+						t.Fatalf("g.RemoveNode(k): %v", err)
+					}
 					dead.publish(ids[i])
 				}
 			})
@@ -709,13 +720,13 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 	t.Run("reviveAborted", func(t *testing.T) {
 		run(t, "reviveAborted", nil,
 			func(t *testing.T, g *Graph[string, float64], keys []string, ids []graph.NodeID, dead *settledDead) {
-				lid := g.reg.Intern("Retired")
+				lid := g.reg.intern("Retired")
 				for batch := 0; batch < 4; batch++ {
 					lo, hi := batch*30, batch*30+30
 					err := g.ApplyVersioned(func(tx WriteTx) error {
 						wv := g.Writer(tx)
 						for _, k := range keys[lo:hi] {
-							wv.RemoveNode(k)
+							_, _ = wv.RemoveNode(k)
 						}
 						// IN FLIGHT: the deletes are applied to the tombstone
 						// bitmap already and their index removals are deferred, so
@@ -755,7 +766,9 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 				}
 				// Nothing is settled-dead on this path, so publish the one node the
 				// close needs to be non-vacuous: a node retired the ordinary way.
-				g.RemoveNode(keys[0])
+				if err := g.RemoveNode(keys[0]); err != nil {
+					t.Fatalf("g.RemoveNode(keys[0]): %v", err)
+				}
 				dead.publish(ids[0])
 			})
 	})
@@ -787,7 +800,7 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 						t.Fatalf("SetNodeLabel(Marker): %v", err)
 					}
 				}
-				retired, marker := g.reg.Intern("Retired"), g.reg.Intern("Marker")
+				retired, marker := g.reg.intern("Retired"), g.reg.intern("Marker")
 				if !g.churnLive(oneLabel(marker)) {
 					t.Fatal("setup: the Marker writes did not raise Marker's gate")
 				}
@@ -800,10 +813,12 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 			func(t *testing.T, g *Graph[string, float64], _ []string, ids []graph.NodeID, dead *settledDead) {
 				for batch := 0; batch < 4; batch++ {
 					chunk := ids[batch*30 : batch*30+30]
-					g.RestoreTombstones(chunk)
+					if err := g.RestoreTombstones(chunk); err != nil {
+						t.Fatalf("g.RestoreTombstones(chunk): %v", err)
+					}
 					dead.publish(chunk...)
 				}
-				if got := g.labelChurn.load(g.reg.Intern("Retired")); got == 0 {
+				if got := g.labelChurn.load(g.reg.intern("Retired")); got == 0 {
 					t.Fatal("RestoreTombstones left Retired's gate at zero while the nodes it " +
 						"tombstoned are still in Retired's bitmap: a reader will take the raw " +
 						"bitmap and report them (rmp #2686)")
@@ -833,7 +848,9 @@ func TestLabelChurnGate_DeathRecordRaisesTheGate(t *testing.T) {
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
 
-	g.RemoveNode("victim")
+	if err := g.RemoveNode("victim"); err != nil {
+		t.Fatalf("g.RemoveNode(\"victim\"): %v", err)
+	}
 	g.applyDeferredIndexRemovals(g.mvccClock.ReadTS())
 	if got := g.idxPendingActive.Load(); got != 0 {
 		t.Fatalf("setup: %d deferred removals survived, so their hold may still be covering "+
@@ -871,7 +888,9 @@ func abortedRevivalFixture(t *testing.T, key, label string) (*Graph[string, floa
 	g, lid := churnFixture(t, label, key)
 	id := mustID(t, g, key)
 
-	g.RemoveNode(key)
+	if err := g.RemoveNode(key); err != nil {
+		t.Fatalf("g.RemoveNode(key): %v", err)
+	}
 	g.ReclaimNow()
 	if g.nodeIdx.Has(uint32(lid), id) {
 		t.Fatalf("setup: %q should have left %s's bitmap when the deferred removal was applied", key, label)
@@ -885,7 +904,7 @@ func abortedRevivalFixture(t *testing.T, key, label string) (*Graph[string, floa
 		g.EndRead(hold)
 		t.Fatalf("SetNodeLabel(Marker): %v", err)
 	}
-	if !g.churnLive(oneLabel(g.reg.Intern("Marker"))) {
+	if !g.churnLive(oneLabel(g.reg.intern("Marker"))) {
 		g.EndRead(hold)
 		t.Fatal("setup: the Marker write did not raise Marker's own gate")
 	}
@@ -943,18 +962,23 @@ func TestLabelChurnGate_TombstoneAbortedPinsTheGate(t *testing.T) {
 // TestLabelChurnGate_ReviveAbortedPinsTheGate is the guard on the pin in
 // [Graph.reviveAborted], and it tests the LOSING direction.
 //
-// The shape is an aborted DELETE of a node that was already tombstoned: the
-// withdrawal brings it back to life with no birth instant and restores no label
-// bitmap, so it ends alive, carrying the label in its bag, and absent from that
-// label's bitmap. Only the correction's add-back can give the row back, and only
-// the pin can keep the correction from being skipped.
+// The shape is an aborted death record on a node that is tombstoned and absent
+// from its label's bitmap: the withdrawal brings it back to life with no birth
+// instant and restores no label bitmap, so it ends alive, carrying the label in
+// its bag, and absent from that label's bitmap. Only the correction's add-back
+// can give the row back, and only the pin can keep the correction from being
+// skipped.
+//
+// The record is written directly. [Graph.removeNodeInfo] no longer writes a death
+// on a node that is already dead (ACID audit round 6, finding C2), which is how
+// this fixture used to reach it; the pin still guards every lone aborted death
+// whose node's bag and bitmap disagree.
 func TestLabelChurnGate_ReviveAbortedPinsTheGate(t *testing.T) {
 	g, lid, id, hold := abortedRevivalFixture(t, "sleeper", "Kept")
 	defer func() { g.EndRead(hold); _ = g.Close() }()
 
 	err := g.ApplyVersioned(func(tx WriteTx) error {
-		wv := g.Writer(tx)
-		wv.RemoveNode("sleeper")
+		g.noteNodeDied(id, tx.w, g.nodeLabelBagLids(id))
 		_ = tx.w.conflictErr(mvcc.StoreNodeExistence, ^uint64(0))
 		return tx.w.err()
 	})
@@ -1006,6 +1030,31 @@ func TestLabelChurnGate_ReviveAbortedPinsTheGate(t *testing.T) {
 // The window is microseconds wide inside one function call, so this drives it
 // many times rather than constructing it. It is the one guard in this file that
 // is probabilistic; the counter assertion beneath it is not.
+//
+// # The overlap is structural, not timed (rmp #2944)
+//
+// What the guard needs is reads that run WHILE retirements run. Starting the
+// readers and then retiring at full speed left that to the scheduler: on a
+// saturated host the 300 retirements finished before any reader was scheduled,
+// and the test failed its own vacuity check. So the writer waits for a reader to
+// have completed a read before the first retirement, and before EVERY
+// retirement for a read to be in flight. Each wait is bounded by
+// overlapDeadline, sized to catch a hang, never to pace the race. The window
+// itself is still raced, not constructed, and the test asserts that at least
+// one read observed a retirement boundary while it ran.
+//
+// # What it discriminates today (measured for rmp #2944)
+//
+// Since rmp #2687 the autocommit path registers the deferred strip ABOVE the
+// flip, which closes the window described above by itself. Removing the scoped
+// hold ALONE therefore does not fail this test (0 failures in 200 runs, idle and
+// with every core saturated), nor any other test in this package. With the
+// pre-#2687 order restored as well, removing the hold fails it in 86 of 100
+// runs, and the version before rmp #2944 caught that double mutant in 0 of 100.
+//
+// The scoped hold itself was removed by rmp #2963. This test is kept as the
+// reader-side check on the window; the deterministic guard on the gate is
+// TestRetireHold_GateRaisedAcrossStripAndFlip.
 func TestLabelChurnGate_ScopedHoldSpansTheTombstoneFlip(t *testing.T) {
 	const population = 300
 	keys := make([]string, population)
@@ -1044,20 +1093,33 @@ func TestLabelChurnGate_ScopedHoldSpansTheTombstoneFlip(t *testing.T) {
 		return out
 	}
 
+	const overlapDeadline = time.Minute
 	var (
-		stop  atomic.Bool
-		wg    sync.WaitGroup
-		reads atomic.Int64
-		bad   atomic.Int64
+		stop       atomic.Bool
+		wg         sync.WaitGroup
+		reads      atomic.Int64
+		inFlight   atomic.Int64
+		overlapped atomic.Int64
+		// retiring counts retirement boundaries: odd while one is in progress. A
+		// read overlapped a retirement when it started inside one or saw a
+		// boundary pass while it ran.
+		retiring atomic.Uint64
+		bad      atomic.Int64
 	)
 	for r := 0; r < 3; r++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for !stop.Load() {
+				inFlight.Add(1)
+				startPass := retiring.Load()
 				before := dead()
 				got := g.LabelBitmapAsOf(lid, nil)
 				after := dead()
+				if startPass%2 == 1 || retiring.Load() != startPass {
+					overlapped.Add(1)
+				}
+				inFlight.Add(-1)
 				reads.Add(1)
 				if v := roaring64.And(roaring64.And(before, after), got); !v.IsEmpty() {
 					if bad.Add(1) == 1 {
@@ -1071,19 +1133,49 @@ func TestLabelChurnGate_ScopedHoldSpansTheTombstoneFlip(t *testing.T) {
 			}
 		}()
 	}
+	// awaitAbove blocks until c exceeds floor, bounded by overlapDeadline. It
+	// stops the readers before failing so the deferred cleanup does not race
+	// them.
+	awaitAbove := func(c *atomic.Int64, floor int64, what string) {
+		deadline := time.Now().Add(overlapDeadline)
+		for c.Load() <= floor {
+			if time.Now().After(deadline) {
+				stop.Store(true)
+				wg.Wait()
+				t.Fatalf("no %s within %v: the readers are hung", what, overlapDeadline)
+			}
+			runtime.Gosched()
+		}
+	}
+	awaitAbove(&reads, 0, "reader completed a read before the first retirement")
 	for _, k := range keys {
-		g.RemoveNode(k)
+		awaitAbove(&inFlight, 0, "read in flight before a retirement")
+		retiring.Add(1)
+		err := g.RemoveNode(k)
+		retiring.Add(1)
+		if err != nil {
+			stop.Store(true)
+			wg.Wait()
+			t.Fatalf("g.RemoveNode(k): %v", err)
+		}
 	}
 	stop.Store(true)
 	wg.Wait()
 
+	// Structural floors, not proportions (a fraction of a fixed workload in a
+	// fixed window is a timing assertion in disguise).
 	if reads.Load() == 0 {
 		t.Fatal("the readers completed no read, so nothing was asserted")
+	}
+	if overlapped.Load() == 0 {
+		t.Fatalf("none of %d reads overlapped any of %d retirements, so the window "+
+			"was never raced", reads.Load(), population)
 	}
 	if bm := g.LabelBitmapAsOf(lid, nil); !roaring64.And(dead(), bm).IsEmpty() {
 		t.Fatalf("with the workload stopped, the Scanned bitmap still reports tombstoned "+
 			"nodes %v", roaring64.And(dead(), bm).ToArray())
 	}
 	_ = ids
-	t.Logf("%d reads asserted across %d retirements", reads.Load(), population)
+	t.Logf("%d reads asserted across %d retirements, %d of them overlapping one",
+		reads.Load(), population, overlapped.Load())
 }

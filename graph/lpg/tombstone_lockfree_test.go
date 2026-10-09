@@ -45,8 +45,12 @@ func TestTombstoneLockfree_LivenessUnchanged(t *testing.T) {
 	}
 
 	// Remove two nodes.
-	g.RemoveNode("k1")
-	g.RemoveNode("k3")
+	if err := g.RemoveNode("k1"); err != nil {
+		t.Fatalf("g.RemoveNode(\"k1\"): %v", err)
+	}
+	if err := g.RemoveNode("k3"); err != nil {
+		t.Fatalf("g.RemoveNode(\"k3\"): %v", err)
+	}
 
 	if got := g.TombstoneCount(); got != 2 {
 		t.Fatalf("TombstoneCount after 2 removes = %d, want 2", got)
@@ -169,7 +173,9 @@ func TestTombstoneLockfree_ConcurrentScanDuringDelete(t *testing.T) {
 		defer close(stop)
 		for round := 0; round < rounds; round++ {
 			key := fmt.Sprintf("n%d", round%n)
-			g.RemoveNode(key)
+			if err := g.RemoveNode(key); err != nil {
+				t.Errorf("g.RemoveNode(key): %v", err)
+			}
 			// Re-create (revive) so the working set churns both directions,
 			// forcing repeated copy-on-write publishes of a non-trivial set.
 			if err := g.AddNode(key); err != nil {

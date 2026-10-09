@@ -71,7 +71,9 @@ func richGraph(t testing.TB) *lpg.Graph[string, float64] {
 		if err := g.AddEdge(u, v, 1.0); err != nil {
 			t.Fatalf("AddEdge(%s->%s): %v", u, v, err)
 		}
-		g.SetEdgeLabel(u, v, typ)
+		if err := g.SetEdgeLabel(u, v, typ); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// Triangle a→b→c→a, with a parallel edge on b→c and a reciprocal b→a.
 	edge("a", "b", "K")
@@ -326,7 +328,9 @@ func TestCyclicDiff_Rapid(t *testing.T) {
 			if err := g.AddEdge(keys[u], keys[v], 1.0); err != nil {
 				rt.Fatalf("AddEdge: %v", err)
 			}
-			g.SetEdgeLabel(keys[u], keys[v], "K")
+			if err := g.SetEdgeLabel(keys[u], keys[v], "K"); err != nil {
+				t.Fatal(err)
+			}
 		}
 
 		off := NewEngine(g)

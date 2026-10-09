@@ -1,11 +1,13 @@
 // Package txn provides the transactional surface (Begin / Commit /
 // Rollback) layered over an [lpg.Graph] and a [wal.Writer].
 //
-// A transaction buffers mutations in a per-Tx slice. Commit appends
-// each mutation as a WAL frame, then a single [OpCommit] marker frame,
-// fsyncs the WAL once, and only then applies the mutations to the
-// in-memory graph — so a process crash between Commit's WAL sync and the
-// in-memory apply is recoverable by replaying the WAL into a fresh graph.
+// A transaction buffers mutations in a per-Tx slice. Commit applies them to
+// the in-memory graph as one uncommitted transaction, which claims every
+// object it writes; appends each mutation as a WAL frame, then a single
+// [OpCommit] marker frame; fsyncs the WAL once; and only then makes the
+// transaction visible. A refusal therefore comes before anything is durable,
+// and a durable transaction is never refused. A process crash after the fsync
+// is recoverable by replaying the WAL into a fresh graph; see [Tx.Commit].
 //
 // # Atomicity
 //
@@ -78,6 +80,11 @@ import (
 // ErrTxFinished is returned by operations on a transaction that has
 // already been committed or rolled back.
 var ErrTxFinished = errors.New("txn: transaction already finished")
+
+// ErrReadOnlyStore is returned by [Tx.Commit], [Tx.CommitCtx] and
+// [Tx.CommitWALOnly] on a transaction of a store built by [NewReadOnlyStore]
+// that buffered at least one op. Nothing is applied and nothing is written.
+var ErrReadOnlyStore = errors.New("txn: store is read-only; refusing to commit")
 
 // ErrTransactionTooLarge is returned by [Tx.Commit] / [Tx.CommitWALOnly]
 // when the transaction has buffered more than the store's per-transaction
@@ -156,11 +163,22 @@ const DefaultMaxTxnOps = 16_000_000
 // replay bound for you.
 const MaxTxnOpsUnlimited = -1
 
-// ErrCommittedNotApplied is returned by [Tx.Commit] when the transaction
-// was made durable (its op frames and [OpCommit] marker were written and
-// fsynced) but a later in-memory apply step failed — today only reachable
-// as [adjlist.ErrShardFull] when the store's graph was built with a
-// [adjlist.Config.MaxShardCapacity] cap.
+// ErrCommittedNotApplied reports a transaction that was made durable (its op
+// frames and [OpCommit] marker were written and fsynced) while a later
+// in-memory apply step failed.
+//
+// Deprecated: no function of this package returns it any longer; see below.
+// It is kept only so that existing errors.Is checks still compile, and such a
+// check is now always false.
+//
+// [Tx.Commit] no longer returns it. Commit applies the transaction in memory,
+// holding its claims, BEFORE it writes the WAL record, so every refusal the
+// apply can raise — a conflict, a validator's refusal, [adjlist.ErrShardFull]
+// under a [adjlist.Config.MaxShardCapacity] cap — is returned with nothing
+// durable, and a durable record can no longer be refused. Until then Commit
+// returned this error after the fsync; the sentinel is kept so a caller that
+// matches it still compiles, and the contract below describes what such an
+// error meant.
 //
 // The transaction IS durably committed: it carries a complete commit
 // marker, so recovery — which rebuilds the graph without a shard-capacity
@@ -522,7 +540,16 @@ type Store[N comparable, W any] struct {
 	applyWaiters map[uint64]chan struct{}
 
 	g   *lpg.Graph[N, W]
-	wal *wal.Writer
+	wal *wal.Writer // nil only when readOnly
+
+	// ids records the graph mapper's node id reservations in the WAL (WAL v2
+	// step 4, idreserve.go). nil for a store without a WAL or a graph.
+	ids *idReserver[N]
+
+	// readOnly is set by [NewReadOnlyStore]: the store has no WAL, and every
+	// commit that buffered an op is refused with [ErrReadOnlyStore]. Fixed at
+	// construction, so it is read without synchronisation.
+	readOnly bool
 
 	inflightCond *sync.Cond
 
@@ -559,13 +586,13 @@ type Store[N comparable, W any] struct {
 	// replays within recovery's buffer (audit gap: bounded resources).
 	maxTxnOps int
 
-	// appliedSeq is the highest transaction sequence whose post-durability
-	// in-memory apply step has completed (or been skipped, for a durable txn
-	// whose apply failed or whose path performs no apply). A committer holding
-	// sequence seq waits until appliedSeq == seq-1 before applying, then sets
+	// appliedSeq is the highest transaction sequence whose in-memory
+	// publication has completed (or been skipped, for a transaction that did not
+	// become durable or whose path performs no apply). A committer holding
+	// sequence seq waits until appliedSeq == seq-1 before publishing, then sets
 	// appliedSeq = seq. It is advanced for EVERY consumed sequence — including a
-	// transaction whose fsync failed or whose apply errored — so a failed
-	// transaction never wedges the apply chain behind it.
+	// transaction whose append or fsync failed — so a failed transaction never
+	// wedges the chain behind it.
 	appliedSeq uint64
 
 	// txnSeq is the last assigned transaction sequence number. A
@@ -593,18 +620,18 @@ type Store[N comparable, W any] struct {
 	// --- group-commit apply gate (#1507) ---
 	//
 	// Committers overlap freely and the fsync is coalesced across them by
-	// [wal.Writer.SyncGroup]. But [Tx.Commit]'s post-durability in-memory apply
-	// ([applyOp] under [lpg.Graph.ApplyVersioned], rmp #2320) must still run in
-	// transaction-sequence order: applying a higher-seq transaction before a
-	// lower-seq one could materialise an op against a node a not-yet-applied
-	// earlier transaction was to create (lpg property writes are
-	// create-on-demand), letting a snapshot reader observe a state no
-	// serial schedule produces — a Consistency/Isolation regression. The apply
-	// gate restores that order WITHOUT serialising the commit path around the
-	// fsync: a committer waits until appliedSeq == its seq-1, applies, then
-	// advances appliedSeq and wakes the next committer. rmp #2306 tried to remove
-	// it and MEASURED that it cannot be: see
-	// [TestApplyGate_ADurableCommitIsNeverRefusedByConflictDetection].
+	// [wal.Writer.SyncGroup]. [Tx.Commit] applies its ops BEFORE its WAL record,
+	// as an uncommitted transaction whose versions claim what it writes
+	// ([lpg.Graph.ApplyDurable]), so two transactions writing one object can no
+	// longer both be past the apply: the second is refused, or waits, until the
+	// first has published or aborted. What the gate still orders is
+	// PUBLICATION: a committer waits until appliedSeq == its seq-1, publishes,
+	// then advances appliedSeq and wakes the next committer, so the in-memory
+	// view becomes visible in WAL order WITHOUT serialising the commit path
+	// around the fsync. No committer waits at the gate for another's claims:
+	// each mints its sequence only after its own apply holds all of them.
+	// rmp #2306 measured that the post-fsync apply could not run without the
+	// gate; see [TestApplyGate_ADurableCommitIsNeverRefusedByConflictDetection].
 	//
 	// applyMu guards appliedSeq and applyWaiters.
 	applyMu sync.Mutex
@@ -691,6 +718,7 @@ func NewStoreWithCodecCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.
 	}
 	s.applyWaiters = make(map[uint64]chan struct{}, 64)
 	s.inflightCond = sync.NewCond(&s.inflightMu)
+	s.installIDReserver()
 	return s
 }
 
@@ -760,8 +788,72 @@ func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wa
 	s.appliedSeq = opts.ResumeTxnSeq
 	s.applyWaiters = make(map[uint64]chan struct{}, 64)
 	s.inflightCond = sync.NewCond(&s.inflightMu)
+	s.installIDReserver()
 	return s
 }
+
+// installIDReserver installs the store's id reserver on its graph's mapper when
+// the store has both a WAL and a graph (WAL v2 step 4). From then on every new
+// node id the mapper issues is covered by a ReserveIDs record logged ahead of any
+// transaction that can use it.
+func (s *Store[N, W]) installIDReserver() {
+	if s.wal == nil || s.g == nil {
+		return
+	}
+	m := s.g.AdjList().Mapper()
+	s.ids = newIDReserver(m, s.wal)
+	m.SetIDReserver(s.ids)
+}
+
+// Close ends the store's use of its WAL for node id reservations (WAL v2 step 4):
+// it stops the reservation prefetch goroutine and appends the mapper's exact
+// per-shard high-water marks (a NextIDsExact record), so the next recovery
+// resumes at those marks and a clean restart wastes no id. It does not close the
+// WAL and does not refuse later transactions: a node created after Close
+// reserves synchronously, and its reservation is logged after the exact marks.
+//
+// Call it with writers quiesced, before the WAL is closed — [store.Opened]'s
+// close does so inside [Store.RunUnderCommitLock]. Without a call the next
+// recovery falls back to the logged reservations and wastes at most one batch
+// per shard. Close is idempotent; it returns the WAL's append error, if any. A
+// store without a WAL has nothing to close.
+//
+// Concurrency: safe for concurrent use with every other Store method.
+func (s *Store[N, W]) Close() error {
+	if s.ids == nil {
+		return nil
+	}
+	return s.ids.close()
+}
+
+// NewReadOnlyStore returns a Store over g that has no WAL and refuses every
+// write: a transaction may be begun and may buffer ops, but [Tx.Commit],
+// [Tx.CommitCtx] and [Tx.CommitWALOnly] return [ErrReadOnlyStore] for any
+// transaction that buffered at least one op, before a sequence is minted and
+// before anything is applied. A transaction that buffered nothing commits as a
+// no-op, so a read-only statement that opens and closes a transaction still
+// succeeds. Rollback behaves as on any store.
+//
+// It exists for a directory whose recovery did not complete cleanly and that
+// the caller has chosen to open for reading (store.Options.AllowUnclean):
+// appending to such a WAL would be discarded by every later recovery, so no
+// WAL writer is opened at all.
+//
+// opts.Codec must not be nil; opts.WeightCodec may be nil.
+// opts.ResumeTxnSeq is ignored, because no sequence is ever minted.
+//
+// Concurrency: as for any [Store]; [Store.ReadOnly] is safe from any
+// goroutine.
+func NewReadOnlyStore[N comparable, W any](g *lpg.Graph[N, W], opts Options[N, W]) *Store[N, W] {
+	defer metrics.Time("store.txn.NewReadOnlyStore").Stop()
+	s := NewStoreWithOptionsCapped(g, nil, Options[N, W]{Codec: opts.Codec, WeightCodec: opts.WeightCodec}, 0)
+	s.readOnly = true
+	return s
+}
+
+// ReadOnly reports whether the store was built by [NewReadOnlyStore] and
+// therefore refuses every commit that would write.
+func (s *Store[N, W]) ReadOnly() bool { return s.readOnly }
 
 // Codec returns the [Codec] installed on the Store. The returned value
 // is the same one passed to [NewStoreWithCodec] or [NewStoreWithOptions].
@@ -1025,6 +1117,11 @@ type Op[N comparable, W any] struct {
 	// ([OpCreateIndex], [OpDropIndex]). It is the zero value ([IndexKindHash])
 	// and ignored for every other op kind.
 	IndexKind IndexKind
+	// noEffect marks an op the latest in-memory apply of [Tx.Commit] found to
+	// change nothing, so the durable step leaves it out of the WAL (rmp #2965,
+	// round 5). It occupies the struct's existing tail padding, so an op costs
+	// no more memory for it, and neither does the [Tx].
+	noEffect bool
 }
 
 // Tx is an in-progress transaction. It is registered as an admitted writer from
@@ -1067,6 +1164,11 @@ type Tx[N comparable, W any] struct {
 	// per Tx no matter which of the three terminal paths gets there first.
 	writerReleased bool
 	finished       bool
+	// wtx is the lpg write transaction that applied the ops, when known: set by
+	// [Tx.Commit] from its final apply attempt, or by [Tx.AttachWriteTx]. Its
+	// created ids become the commit marker's id annex (WAL v2 step 3).
+	wtx         lpg.WriteTx
+	wtxAttached bool
 }
 
 // takeApplyTurn blocks until this transaction's minted sequence is next in the
@@ -1316,11 +1418,14 @@ func (t *Tx[N, W]) RemoveNodeLabel(node N, label string) error {
 // validateProperty runs the graph's installed schema validator against a value
 // about to be BUFFERED, so a refused write never reaches the write-ahead log.
 //
-// The ordering is the whole point (rmp #2602). [Tx.Commit] appends and fsyncs
-// every buffered op and only THEN applies them through lpg, which is where the
-// graph's own validator hook lives — so before this guard existed, a value the
-// schema refused was already durable when the rejection surfaced as
-// [ErrCommittedNotApplied]. The live graph stayed clean, but recovery installs
+// The ordering is the whole point (rmp #2602). Until the ACID audit of
+// rmp #2965 [Tx.Commit] appended and fsynced every buffered op and only THEN
+// applied them through lpg, which is where the graph's own validator hook
+// lives — so before this guard existed, a value the schema refused was already
+// durable when the rejection surfaced as [ErrCommittedNotApplied]. Commit now
+// applies before the WAL, so the hook's refusal is returned with nothing
+// durable even without this guard; refusing at staging still tells the caller
+// at the call that carried the value. The live graph stayed clean, but recovery installs
 // no validator, so replay materialised the refused value: MEASURED 2026-08-24,
 // an `age` declared PropInt64 came back from a host crash as a STRING.
 //
@@ -1647,8 +1752,94 @@ func (t *Tx[N, W]) DropIndex(name string) error {
 	return nil
 }
 
-// Commit durably appends every buffered op to the WAL and only then
-// applies it to the in-memory graph.
+// Commit applies every buffered op to the in-memory graph as one UNCOMMITTED
+// transaction, durably appends the ops to the WAL, and only then makes the
+// transaction visible.
+//
+// # Refused before the WAL, never refused after it
+//
+// The in-memory apply runs first, and the versions it writes are the
+// transaction's claims on every object it changes: while they are uncommitted
+// every other writer is refused by them and every reader steps back over them:
+// a snapshot read, and every direct present-state accessor of the graph —
+// properties, labels, edges, degrees, neighbours (rmp #2965, round 5; see
+// [lpg.Graph.GetNodeProperty]). The exceptions are the eagerly maintained
+// structures with no versioned form: the tombstone readers
+// ([lpg.Graph.IsTombstoned]), the label index ([lpg.Graph.NodeIndex]) and the
+// aggregate counts. The WAL record is appended and fsynced only once the apply has taken every
+// claim, and the transaction becomes visible only after that fsync
+// ([lpg.Graph.ApplyDurable]). Therefore:
+//
+//   - A refusal by the in-memory apply — a write-write conflict with another
+//     transaction's uncommitted write, an installed validator's refusal,
+//     [adjlist.ErrShardFull] under a shard-capacity cap — returns that error
+//     having written NOTHING to the WAL and left nothing visible. A conflict
+//     wraps [graph/mvcc.ErrSerializationConflict] and is retryable with a new
+//     transaction. A conflict with a direct write or with another store commit
+//     is first waited out: the attempt is aborted and parks, in arrival order,
+//     until the other commit ends, then reruns (a direct write's claim is
+//     waited out by a short backoff); one with an explicit transaction is
+//     returned at once. Commits of one object serialise across the fsync, which
+//     is inherent to claiming before the commit record.
+//   - Once the record is durable, nothing can refuse the transaction: it
+//     publishes, and Commit returns nil. A durable commit is therefore never
+//     reported as an error, and [ErrCommittedNotApplied] is not returned.
+//   - A WAL append or fsync failure returns that error with the in-memory
+//     apply aborted: the transaction is neither durable nor visible.
+//
+// Visibility follows WAL order: the transaction sequence is minted inside the
+// WAL writer's append critical section ([wal.Writer.AppendRun]), so sequence
+// order IS the order of the records in the file, and a transaction publishes
+// only after every lower-sequence transaction has published or been skipped.
+//
+// # The WAL records effects, not requests
+//
+// Only the ops the in-memory apply found to take effect are written to the WAL.
+// An op that changes nothing — [Tx.AddNode] of a live node, [Tx.SetNodeLabel]
+// of a label already present, [Tx.SetNodeProperty] to the value already held,
+// a removal of something absent, an [OpAddEdgeH] whose handle is already
+// present — writes no version, so it holds no claim, and another commit may
+// change the same object and log before this one. Replaying such an op at its
+// WAL position would evaluate it against that later state, where it is no
+// longer a no-op, and recovery would rebuild a graph that never existed in
+// memory. Dropping it makes replay equal memory by construction: every logged
+// op wrote a version, and a version is a claim held until the transaction
+// publishes, so no commit that logs before it can have changed what it
+// changed. The decision is made per op by sampling [lpg.WriteTx.Versions]
+// around it. A commit in which no op took effect writes nothing to the WAL and
+// mints no sequence.
+//
+// The four schema-DDL ops ([OpCreateConstraint], [OpDropConstraint],
+// [OpCreateIndex], [OpDropIndex]) are ALWAYS logged, and that cannot let memory
+// and replay diverge. Their only in-memory effect is a set update on the
+// graph's store-direct schema slots, which writes no version and so cannot be
+// sampled; it is applied in [Tx.commitDurable] after the fsync, while the
+// transaction holds its apply-gate turn — that is, strictly in sequence order.
+// Replay applies the same frames with the same set semantics in WAL order, and
+// sequence order IS WAL order (the sequence is minted inside the append). So
+// both sides apply the same idempotent operations in the same order, and a
+// re-asserted create or a drop of something absent is a no-op on both. Logging
+// only the ones that change the set would need the set as of every
+// lower-sequence commit at the moment of the append, which is known only after
+// their fsyncs; dropping a frame on a stale answer could lose a definition once
+// a checkpoint has truncated the frame that created it.
+//
+// Prior art, read as structure and never as code. Memgraph encodes its WAL
+// from the transaction's deltas — the changes it made — and writes it under
+// engine_lock_ with the commit timestamp, and its SetProperty skips the delta
+// for an identical value, so such a write never reaches the log
+// (memgraph/memgraph commit 3f2d6f8ed27ef6610933a218403f05f7a51a4d81;
+// src/storage/v2/inmemory/storage.cpp, the commit path's AppendDelta loop;
+// src/storage/v2/vertex_accessor.cpp, VertexAccessor::SetProperty).
+// PostgreSQL's heap_update builds its WAL record in log_heap_update from the
+// tuple it actually changed, after the change (postgres/postgres commit
+// 50d6e533e4d9a0f70d798c534254007c83c0d428;
+// src/backend/access/heap/heapam.c).
+//
+// The claims are versions, so they are released on every path — published on
+// success, withdrawn by the abort on every refusal, error and panic. No
+// committer waits while holding them for another transaction's claims, so the
+// order cannot deadlock, and the wait is bounded in time.
 //
 // For a typed store the whole batch is committed atomically: every op is
 // written as a v3 frame carrying one transaction sequence, followed by an
@@ -1682,7 +1873,35 @@ func (t *Tx[N, W]) DropIndex(name string) error {
 // engine's adapter discarded the mutators' return value at eighteen sites and a
 // refusal raised there would have been swallowed (rmp #2742); those sites either
 // propagate now or carry a verified statement of what their callee can return.
+//
+// Commit is [Tx.CommitCtx] with [context.Background]: its waits behind other
+// store commits are bounded only by the in-memory layer's budget. Like every
+// method of Tx it must be called by the goroutine that owns the transaction.
 func (t *Tx[N, W]) Commit() error {
+	return t.CommitCtx(context.Background())
+}
+
+// CommitCtx is [Tx.Commit] with its waits bounded by ctx; everything Commit's
+// documentation states holds for it.
+//
+// # Cancellation
+//
+// ctx bounds only the time the in-memory apply spends waiting for another
+// store commit or direct write that holds a conflicting uncommitted version
+// ([lpg.Graph.ApplyDurable]). When ctx is done before the apply has taken its
+// claims, CommitCtx returns an error wrapping ctx's error — [context.Canceled]
+// or [context.DeadlineExceeded], matched with [errors.Is] — and the
+// transaction is finished with NOTHING durable and nothing applied: no WAL
+// record was written, and a new transaction may retry the same ops. Once the
+// apply holds its claims, ctx is no longer consulted: the WAL append, the
+// fsync and the publication run to their own end, so a cancellation can never
+// leave a durable record that was not published, nor report a durable commit
+// as cancelled.
+//
+// Like every method of Tx it must be called by the goroutine that owns the
+// transaction; concurrent CommitCtx calls on different transactions of one
+// [Store] are safe.
+func (t *Tx[N, W]) CommitCtx(ctx context.Context) error {
 	defer metrics.Time("store.txn.Commit").Stop()
 	if t.finished {
 		metrics.IncCounter("store.txn.Commit.errors", 1)
@@ -1696,117 +1915,211 @@ func (t *Tx[N, W]) Commit() error {
 	// in-flight count while a commit still owes the gate an advance.
 	defer t.finishCommit()
 
-	// Group-commit phase 1 — APPEND: cap check, mint the transaction sequence,
-	// encode and append every op frame plus the OpCommit marker. Contiguity of a
-	// transaction's frames is enforced by [wal.Writer.AppendRun], which holds the
-	// writer's own mutex for the framing only; nothing here serialises the
-	// transaction as a whole (rmp #2306). Frame order need not match sequence
-	// order and recovery does not require it — it groups a transaction by the
-	// TxnSeq each frame carries.
-	//
-	// commitTS is 0 — "no MVCC timestamp" (rmp #2309). This is the STORE's own
-	// commit path: it applies through the store, has no MVCC clock in scope, and
-	// mints no commit instant. Recovery treats a zero-or-absent timestamp as
-	// contributing nothing to the derived clock floor, which is exactly right here
-	// — a store-only writer has no instant to restore. The MVCC path is
-	// [Tx.CommitWALOnly], which is handed the timestamp its caller allocated before
-	// the fsync.
-	hasSeq, mark, appendErr := t.appendOnly(0)
-
-	if !hasSeq {
-		// No sequence was minted (empty commit, or the cap-check rejection
-		// which writes nothing). It never enters the apply gate. An empty
-		// commit still flushes any prior buffered tail; the cap rejection
-		// returns its error without I/O.
-		if appendErr != nil {
-			metrics.IncCounter("store.txn.Commit.errors", 1)
-			return appendErr
+	if t.store.readOnly {
+		// No WAL exists: refuse a commit that would write, before anything is
+		// minted or applied; an empty one is a no-op.
+		t.markFinished()
+		if len(t.ops) == 0 {
+			return nil
 		}
-		// SyncBuffered, not SyncGroup: this commit appended nothing, so it has no
-		// watermark of its own to acknowledge — only a courtesy flush of whatever
-		// tail another committer left buffered.
+		metrics.IncCounter("store.txn.Commit.errors", 1)
+		return ErrReadOnlyStore
+	}
+
+	if len(t.ops) == 0 {
+		// Empty commit: no sequence is minted and nothing is applied. It still
+		// flushes any prior buffered tail. SyncBuffered, not SyncGroup: this
+		// commit appended nothing, so it has no watermark of its own to
+		// acknowledge — only a courtesy flush of whatever tail another committer
+		// left buffered.
+		t.markFinished()
 		if syncErr := t.store.wal.SyncBuffered(); syncErr != nil {
 			metrics.IncCounter("store.txn.Commit.errors", 1)
 			return syncErr
 		}
 		return nil
 	}
-
-	// A sequence was minted (hasSeq). It MUST advance the apply gate exactly
-	// once, in every outcome below (append error, fsync failure, apply error,
-	// or success) AND on a panic, or a gap would wedge every higher-sequence
-	// committer. That is what the deferred [Tx.finishCommit] above guarantees.
-
-	// Group-commit phase 2 — DURABILITY with the semaphore free: a single
-	// coalesced fsync covers this transaction's marker and every other
-	// concurrently-buffered committer's frames. Returns only after the fsync
-	// covering this marker has completed (durable-before-visible), or fails the
-	// whole group on a sync error (poison fails all). If the append itself
-	// failed we still run SyncGroup so a poisoned writer surfaces the sticky
-	// error to this committer too; either way this transaction will not apply.
-	syncErr := t.store.wal.SyncGroup(mark)
-
-	// Group-commit phase 3 — APPLY in sequence order. Wait until every
-	// lower-sequence transaction has applied (or been skipped), so the
-	// in-memory view is mutated in WAL order and no Graph.View reader observes
-	// an out-of-order or pre-durable state.
-	//
-	// The matching advance is the deferred [Tx.finishCommit]'s. It runs after the
-	// apply below, exactly as the `defer t.advanceApply(seq)` it replaced did.
-	t.takeApplyTurn()
-
-	if appendErr != nil {
-		// The append did not complete (encode/append failure). No durable,
-		// fully-marked transaction exists; do not apply. Surface the append
-		// error (the primary cause); the writer is typically poisoned, so
-		// syncErr would echo it.
+	// The cap and the foldable-record bound refuse before anything is applied:
+	// they need no claim and cost nothing to undo.
+	if err := t.precheckCommit(); err != nil {
 		metrics.IncCounter("store.txn.Commit.errors", 1)
+		return err
+	}
+
+	// CLAIMS BEFORE THE COMMIT RECORD. [lpg.Graph.ApplyDurable] runs the apply
+	// first, as one write transaction whose versions stay UNCOMMITTED: each is
+	// this transaction's claim on what it writes, so every other writer is
+	// refused by it and every reader steps back over it. Only with every claim
+	// held does the durable step append and fsync the WAL; only after the fsync
+	// does the transaction publish. A conflict, or any other refusal by the
+	// in-memory apply, therefore refuses the commit while NOTHING is durable,
+	// and a commit whose record is durable can no longer be refused. Until the
+	// ACID audit of rmp #2965 the order was the reverse — fsync, then apply —
+	// and a concurrent writer's claim refused 161 of 493 durable commits with
+	// [ErrCommittedNotApplied].
+	//
+	// The apply may run more than once: an attempt refused by a direct write or
+	// by another store commit is aborted and rerun from the top, bounded; see
+	// [lpg.Graph.ApplyDurable]. applyOp is a pure function of the buffered op and
+	// the graph, so a rerun applies the same ops to the latest committed state,
+	// which is what the post-fsync apply used to see. The store-direct schema
+	// counts are not versioned, so they are applied once, in the durable step,
+	// after the fsync.
+	//
+	// EFFECTS, NOT REQUESTS. Each op's version count is sampled around its
+	// apply; an op that wrote none changed nothing and is marked, so the durable
+	// step leaves it out of the WAL. The mark is rewritten by every attempt, because
+	// a rerun applies the ops to a newer state, where a no-op may take effect.
+	err := t.store.g.ApplyDurable(ctx, func(wtx lpg.WriteTx) error {
+		// The FINAL attempt's transaction is the one commitDurable sees; its
+		// created ids are the commit marker's id annex (WAL v2 step 3).
+		t.AttachWriteTx(wtx)
+		wv := t.store.g.Writer(wtx)
+		for i := range t.ops {
+			op := &t.ops[i]
+			before, counted := wtx.Versions()
+			if aerr := applyOp(wv, *op); aerr != nil {
+				return aerr
+			}
+			after, _ := wtx.Versions()
+			op.noEffect = counted && !isSchemaCountOp(op.Kind) && after == before
+		}
+		return nil
+	}, t.commitDurable)
+	// Every outcome ends the transaction, as every other Commit error does: a
+	// refused commit is retried by beginning a new one.
+	t.markFinished()
+	if err != nil {
+		metrics.IncCounter("store.txn.Commit.errors", 1)
+		return err
+	}
+	return nil
+}
+
+// commitDurable is the durable step of [Tx.Commit], run by
+// [lpg.Graph.ApplyDurable] once the in-memory apply holds every claim: append
+// the transaction's frames and [OpCommit] marker, wait for the coalesced fsync
+// that covers them, and take the apply-gate turn, so transactions publish in
+// sequence order. A nil return means the transaction is durable; an error means
+// it is not, and the caller aborts the in-memory apply.
+//
+// The gate turn is taken on every path once a sequence is minted, and the
+// matching advance is the caller's deferred [Tx.finishCommit], so a failure or
+// a panic here cannot leave a hole in the dense sequence chain.
+func (t *Tx[N, W]) commitDurable() error {
+	// Drop the ops the apply found to take no effect (see [Tx.Commit]). The
+	// durable step runs once, after the attempt whose apply succeeded, so the
+	// marks describe exactly the ops that attempt applied.
+	if t.dropNoEffectOps() {
+		if len(t.ops) == 0 {
+			// Nothing took effect: there is nothing to make durable and no
+			// sequence to mint, exactly as for an empty commit.
+			return t.store.wal.SyncBuffered()
+		}
+	}
+	// Group-commit phase 1 — APPEND. Contiguity of a transaction's frames is
+	// enforced by [wal.Writer.AppendRun], which holds the writer's own mutex for
+	// the framing only (rmp #2306). commitTS is 0 — "no MVCC timestamp"
+	// (rmp #2309): this path mints no commit instant before the fsync, and
+	// recovery treats a zero timestamp as contributing nothing to the derived
+	// clock floor. The MVCC path is [Tx.CommitWALOnly].
+	_, mark, appendErr := t.appendChecked(0)
+	// Group-commit phase 2 — DURABILITY: one coalesced fsync covers this
+	// marker and every other concurrently-buffered committer's frames, and
+	// fails the whole group on a sync error (poison fails all). If the append
+	// itself failed SyncGroup still runs, so a poisoned writer surfaces its
+	// sticky error to this committer too.
+	syncErr := t.store.wal.SyncGroup(mark)
+	// Group-commit phase 3 — ORDER. Wait until every lower-sequence transaction
+	// has published (or been skipped), so transactions become visible in WAL
+	// order. No lower-sequence committer waits for this one's claims: each
+	// minted its sequence only after its own apply had taken all of its claims.
+	t.takeApplyTurn()
+	if appendErr != nil {
+		// No durable, fully-marked transaction exists: recovery discards frames
+		// that no durable marker follows.
 		return appendErr
 	}
 	if syncErr != nil {
-		// The shared fsync failed: this transaction is NOT durable (its frames
-		// were discarded by the writer's poison/truncate). Do not apply.
-		metrics.IncCounter("store.txn.Commit.errors", 1)
+		// The shared fsync failed: the writer discarded this transaction's
+		// frames, so it is NOT durable.
 		return syncErr
 	}
-
-	// Apply to the in-memory graph after durability is secured, as ONE write
-	// transaction so the whole transaction's writes flip visible as a single
-	// atomic step — no reader can observe a partially-applied transaction (audit
-	// gap F3, docs/isolation-design.md).
-	//
-	// SHARED, not exclusive (rmp #2320): concurrent applies overlap and are
-	// serialised only by the per-object latches guarding each version-chain head.
-	// What makes the atomic-visibility promise now is not exclusion but the
-	// transaction every op CARRIES — applyOp writes through the [lpg.WriteView]
-	// this closure is handed, so every version the transaction creates points at
-	// one commit record and [lpg.Graph.ApplyVersioned] publishes it with one
-	// atomic store.
-	//
-	// rmp #2304 tried this flip before the ops carried their transaction and had to
-	// revert it: with two brackets open, writes resolving their record through the
-	// graph's ambient slot split one transaction across two records, and a snapshot
-	// reader observed half a transaction (105 942 torn observations from
-	// examples/27_concurrent_txn). That is what rmp #2320's threading removed.
-	//
-	// The transaction is already durable (op frames + OpCommit marker fsynced), so
-	// an apply error here does not undo the commit: recovery — which builds the
-	// graph without a shard-capacity cap — replays the whole transaction
-	// atomically. Surface it as ErrCommittedNotApplied so the caller knows the
-	// commit is durable and must not be retried (F5).
-	if err := t.store.g.ApplyVersioned(func(wtx lpg.WriteTx) error {
-		wv := t.store.g.Writer(wtx)
-		for _, op := range t.ops {
-			if aerr := applyOp(wv, op); aerr != nil {
-				return aerr
-			}
+	// Durable. The store-direct schema counts the apply skipped are applied
+	// now; they cannot fail.
+	for _, op := range t.ops {
+		if isSchemaCountOp(op.Kind) {
+			applySchemaCountOp(t.store.g, op)
 		}
-		return nil
-	}); err != nil {
-		metrics.IncCounter("store.txn.Commit.applyErrors", 1)
-		return fmt.Errorf("%w: %w", ErrCommittedNotApplied, err)
 	}
 	return nil
+}
+
+// dropNoEffectOps compacts t.ops in place to the ops the apply did not mark
+// noEffect, preserving their order, and clears the vacated tail so the dropped
+// values are not retained. It reports whether it dropped anything.
+func (t *Tx[N, W]) dropNoEffectOps() bool {
+	j := 0
+	for i := range t.ops {
+		if t.ops[i].noEffect {
+			continue
+		}
+		t.ops[j] = t.ops[i]
+		j++
+	}
+	if j == len(t.ops) {
+		return false
+	}
+	clear(t.ops[j:])
+	t.ops = t.ops[:j]
+	return true
+}
+
+// isSchemaCountOp reports whether kind is a schema-DDL op, whose only in-memory
+// effect is the graph's unversioned store-direct constraint or index count.
+// These ops are always logged; see "The WAL records effects" on [Tx.Commit]
+// for why memory and replay still cannot diverge.
+func isSchemaCountOp(kind OpKind) bool {
+	switch kind {
+	case OpCreateConstraint, OpDropConstraint, OpCreateIndex, OpDropIndex:
+		return true
+	}
+	return false
+}
+
+// applySchemaCountOp applies the in-memory effect of a schema-DDL op — see the
+// matching cases of [applyOp] for why each count exists. It is unversioned, so
+// [Tx.Commit] applies it only once the transaction is durable.
+func applySchemaCountOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) {
+	switch op.Kind {
+	case OpCreateConstraint:
+		// The store keeps no constraint registry of its own (constraint
+		// enforcement lives in the cypher engine), so the only in-memory effect
+		// is to drive the graph's store-direct constraint count. That count
+		// makes Graph.HasConstraints true for a txn.Store-direct embedder that
+		// never goes through the engine's SetActiveConstraintCount, so a
+		// WAL-truncating checkpoint correctly judges its snapshot NOT
+		// self-sufficient and retains the OpCreateConstraint frame (#1756).
+		g.AddStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
+	case OpDropConstraint:
+		// Mirror the create: drop the store-direct constraint slot so the count
+		// falls back to zero once the last constraint is removed.
+		g.RemoveStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
+	case OpCreateIndex:
+		// As with constraints, the store keeps no index registry of its own
+		// (index maintenance lives in the cypher engine), so the only in-memory
+		// effect is to drive the graph's store-direct index count. That count
+		// makes Graph.HasIndexes true for a txn.Store-direct embedder that never
+		// goes through the engine's index-def registry, so a WAL-truncating
+		// checkpoint correctly judges its snapshot NOT self-sufficient and
+		// retains the OpCreateIndex frame (#1755). ConstraintName carries the
+		// index name for the index ops (see Tx.CreateIndex / Tx.DropIndex).
+		g.AddStoreIndex(op.ConstraintName)
+	case OpDropIndex:
+		// Mirror the create: drop the store-direct index slot so the count falls
+		// back to zero once the last index is removed.
+		g.RemoveStoreIndex(op.ConstraintName)
+	}
 }
 
 // CommitWALOnly durably appends every buffered op to the WAL but does NOT
@@ -1846,6 +2159,16 @@ func (t *Tx[N, W]) CommitWALOnly(commitTS uint64) error {
 
 	// See [Tx.Commit] for why this is registered before the mint.
 	defer t.finishCommit()
+
+	if t.store.readOnly {
+		// See the same guard in [Tx.CommitCtx].
+		t.markFinished()
+		if len(t.ops) == 0 {
+			return nil
+		}
+		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
+		return ErrReadOnlyStore
+	}
 
 	hasSeq, mark, appendErr := t.appendOnly(commitTS)
 	if !hasSeq {
@@ -1972,14 +2295,16 @@ func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
 // #2727).
 //
 // The return values:
-//   - hasSeq is true once a sequence has been MINTED (txnSeq.Add) — true for any
-//     non-empty transaction, even one whose subsequent encode/append failed. A
+//   - hasSeq is true once a sequence has been MINTED (txnSeq.Add, inside the WAL
+//     writer's append critical section) — true for any non-empty transaction
+//     whose run the writer began, even one whose encode/append then failed. A
 //     minted sequence MUST take its turn in the apply gate and advance it, or a
 //     gap in the dense sequence chain would wedge every higher-sequence
 //     committer; the caller therefore enters the gate whenever hasSeq is true
 //     and decides whether to apply based on err and the SyncGroup result.
-//     hasSeq is false only for an empty commit and for the cap-check rejection,
-//     both of which mint no sequence.
+//     hasSeq is false for an empty commit, for the cap-check rejection, and for
+//     a run the writer refused before it began (closed or poisoned writer),
+//     none of which mints a sequence.
 //   - watermark is the run's own durability watermark, to be handed to
 //     [wal.Writer.SyncGroup]; it is returned even on error, for the reason that
 //     function documents.
@@ -2008,11 +2333,7 @@ func (t *Tx[N, W]) appendOnly(commitTS uint64) (hasSeq bool, watermark int64, er
 	// consumes a sequence slot. The producer cap is <= the recovery cap, so
 	// every transaction that passes here is guaranteed to fit recovery's buffer
 	// (see [ErrTransactionTooLarge], [DefaultMaxTxnOps]).
-	if t.store.maxTxnOps > 0 && len(t.ops) > t.store.maxTxnOps {
-		metrics.IncCounter("store.txn.appendOnly.txnTooLarge", 1)
-		t.markFinished()
-		return false, 0, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
-	}
+	//
 	// Bounded resources / Durability: reject, on the same terms and for the same
 	// reason, a transaction that would leave an edge handle carrying more labels
 	// or properties than store/snapshot can capture — a record that commits and
@@ -2021,26 +2342,35 @@ func (t *Tx[N, W]) appendOnly(commitTS uint64) (hasSeq bool, watermark int64, er
 	// and before any frame is written, so a refusal costs nothing durable. See
 	// [Tx.checkFoldableHandleRecords] for why this bound cannot be enforced by
 	// the encoder the way rmp #2750's value bound is.
+	if err := t.precheckCommit(); err != nil {
+		return false, 0, err
+	}
+	return t.appendChecked(commitTS)
+}
+
+// precheckCommit is the refusal half of [Tx.appendOnly] for a transaction with
+// at least one op: the op cap and the foldable-handle-record bound, checked
+// before anything is applied, minted or written. A refusal marks the
+// transaction finished and returns the same error appendOnly would.
+func (t *Tx[N, W]) precheckCommit() error {
+	if t.store.maxTxnOps > 0 && len(t.ops) > t.store.maxTxnOps {
+		metrics.IncCounter("store.txn.appendOnly.txnTooLarge", 1)
+		t.markFinished()
+		return fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
+	}
 	if err := t.checkFoldableHandleRecords(); err != nil {
 		metrics.IncCounter("store.txn.appendOnly.handleRecordTooLarge", 1)
 		t.markFinished()
-		return false, 0, err
+		return err
 	}
-	// Mint the sequence, and RECORD IT ON THE Tx in the same step. From here
-	// hasSeq is true on every return: the sequence is consumed, so the apply gate
-	// must be advanced past it even if the append below fails (a gap would
-	// deadlock the dense sequence chain). A partial append is harmless on disk —
-	// recovery discards any frames not followed by a durable matching OpCommit
-	// marker — and the err makes the caller skip the in-memory apply.
-	//
-	// The two statements are adjacent and in this order on purpose: the
-	// obligation begins at the Add, and the caller's deferred [Tx.finishCommit]
-	// can only discharge an obligation it can SEE. Recording the sequence on the
-	// Tx is what makes the window between the mint and the caller's apply-gate
-	// turn survivable by a panic (rmp #2727) — the caller's return values do not
-	// exist yet while that window is open.
-	seq := t.store.txnSeq.Add(1)
-	t.applyGateSeq, t.applyGateMinted = seq, true
+	return nil
+}
+
+// appendChecked is the minting half of [Tx.appendOnly], for a transaction with
+// at least one op that has passed [Tx.precheckCommit]. hasSeq reports whether a
+// sequence was minted: true on every return except a run the WAL writer refused
+// before it began (closed or poisoned), which mints nothing and owes nothing.
+func (t *Tx[N, W]) appendChecked(commitTS uint64) (hasSeq bool, watermark int64, err error) {
 	// One scratch buffer, borrowed from the pool, is reused for every op frame
 	// and the trailing OpCommit marker. wal.Append copies each encoded payload
 	// into its bufio buffer synchronously, so the scratch is safe to reset and
@@ -2048,6 +2378,17 @@ func (t *Tx[N, W]) appendOnly(commitTS uint64) (hasSeq bool, watermark int64, er
 	// the pool on every exit path, including encode/append failures.
 	scratch := getEncodeScratch()
 	defer putEncodeScratch(scratch)
+	// The id annex (WAL v2 step 3) is resolved and encoded BEFORE the run, so the
+	// WAL writer's critical section does no mapper lookups. A failure here writes
+	// nothing and mints nothing.
+	annexBuf := getEncodeScratch()
+	defer putEncodeScratch(annexBuf)
+	annex, anErr := t.buildAnnex((*annexBuf)[:0])
+	if anErr != nil {
+		t.markFinished()
+		return false, 0, anErr
+	}
+	*annexBuf = annex
 	// ONE contiguous run, not a loop of independent appends (rmp #2302, audit
 	// finding E5). Recovery commits the ops carrying a marker's own TxnSeq and
 	// discards the buffered prefix as orphaned, which is correct only while a
@@ -2059,6 +2400,26 @@ func (t *Tx[N, W]) appendOnly(commitTS uint64) (hasSeq bool, watermark int64, er
 	// The per-op encoding happens INSIDE the run, so the pooled scratch buffer is
 	// still reused for every frame and the commit allocates no more than before.
 	mark, aerr := t.store.wal.AppendRun(func(emit func([]byte) error) error {
+		// MINT THE SEQUENCE INSIDE THE APPEND CRITICAL SECTION (rmp #2965,
+		// round 5). The WAL writer holds its mutex for the whole run, so a
+		// sequence minted here is ordered exactly as the records are in the file:
+		// sequence order, which is the apply gate's publication order, IS WAL
+		// order. Minted before the run, two committers could take sequences in
+		// one order and append in the other. PostgreSQL reserves a record's
+		// position the same way — inside the WAL insertion lock, in
+		// ReserveXLogInsertLocation called from XLogInsertRecord, so position
+		// order is byte order in the log (postgres/postgres commit
+		// 50d6e533e4d9a0f70d798c534254007c83c0d428; src/backend/access/transam/xlog.c).
+		//
+		// RECORDED ON THE Tx in the same step: from here the sequence is consumed,
+		// so the apply gate must be advanced past it even if an append below fails
+		// (a gap would deadlock the dense sequence chain). A partial append is
+		// harmless on disk — recovery discards frames no durable matching OpCommit
+		// marker follows. The caller's deferred [Tx.finishCommit] can only
+		// discharge an obligation it can SEE, which is what makes a panic between
+		// the mint and the apply-gate turn survivable (rmp #2727).
+		seq := t.store.txnSeq.Add(1)
+		t.applyGateSeq, t.applyGateMinted = seq, true
 		for _, op := range t.ops {
 			payload, enErr := encodeOpTypedV3Into((*scratch)[:0], op, seq, t.store.codec, t.store.wcodec)
 			if enErr != nil {
@@ -2070,17 +2431,12 @@ func (t *Tx[N, W]) appendOnly(commitTS uint64) (hasSeq bool, watermark int64, er
 			}
 		}
 		marker := encodeCommitV3Into((*scratch)[:0], seq, commitTS)
+		marker = append(marker, annex...)
 		*scratch = marker
 		return emit(marker)
 	})
-	if aerr != nil {
-		t.markFinished()
-		return true, mark, aerr
-	}
-	// Frames + marker are buffered. Release the semaphore so the next
-	// transaction can append while this one fsyncs (group-commit coalescing).
 	t.markFinished()
-	return true, mark, nil
+	return t.applyGateMinted, mark, aerr
 }
 
 // Rollback discards buffered ops without touching the WAL or graph.
@@ -2249,6 +2605,11 @@ func encodeOpTypedV3Into[N comparable, W any](buf []byte, op Op[N, W], seq uint6
 // The compatibility policy is therefore "absent body means no timestamp", which is
 // a test obligation rather than a version negotiation. Neither [CurrentVersion] nor
 // [OpRecordV3] changes.
+//
+// Since WAL v2 step 3 the caller appends the id annex after the timestamp (see
+// annex.go): the exact node ids the transaction created. The same policy applies —
+// a body that ends after the timestamp is a marker written before the annex
+// existed, and recovery replays it as it always did.
 func encodeCommitV3Into(buf []byte, seq, commitTS uint64) []byte {
 	buf = append(buf, OpRecordV3, byte(OpCommit))
 	buf = binary.LittleEndian.AppendUint64(buf, seq)
@@ -2389,10 +2750,14 @@ func appendOpConstraintBody[N comparable, W any](buf []byte, op Op[N, W]) ([]byt
 // uint16-prefixed string on the wire: the schema identifiers (constraint and
 // index label, property and name) and the graph vocabulary the mutation frames
 // carry (node and edge labels, property keys). Schema identifiers are capped far
-// below this at the DDL boundary (cypher/ir maxSchemaIdentifierLen, #1903);
-// labels and property keys reaching the embedded Go API are bounded HERE and
-// nowhere else.
-const maxWALSchemaStringLen = 1<<16 - 1
+// below this at the DDL boundary (cypher/ir maxSchemaIdentifierLen, #1903).
+//
+// It IS [lpg.MaxTokenLen] (rmp #2748): the one definition of the token limit
+// lives in graph/lpg, which refuses an over-long label, relationship type or
+// property key before any in-memory write, and this layer refuses the same
+// names as they are staged. Taking the value from there means the two layers
+// cannot disagree about what is durable.
+const maxWALSchemaStringLen = lpg.MaxTokenLen
 
 // maxWALValueLen is the largest byte length a uint32 length prefix in the
 // property-value encoders can represent without truncation. It bounds a
@@ -2440,10 +2805,54 @@ const maxWALValueLenInt = maxWALValueLen & math.MaxInt
 // The same sentinel carries the OTHER refusal a property value can earn at
 // commit: a value whose snapshot encoding would exceed [maxSnapshotValueLen],
 // which the WAL could hold but the checkpointer could never fold (rmp #2750).
-// It is deliberately not a second sentinel — from the caller's side both mean
-// "this field is too long for a durable format to carry", and the message names
-// the length and the cap that was exceeded.
+//
+// # Field kinds (rmp #2942)
+//
+// ErrFieldTooLong is the UMBRELLA. Every refusal also matches exactly one
+// narrower sentinel or none, so a caller can tell WHAT was too long without
+// parsing the message:
+//
+//   - [ErrTokenTooLong] — a label, a relationship type, a property key, or a
+//     schema identifier (index or constraint name, label, property) over the
+//     uint16 length prefix every WAL op body reserves for one: 65535 bytes.
+//   - [ErrValueTooLong] — a property value over a durable format's cap: the
+//     snapshot fold cap ([maxSnapshotValueLen], 1 GiB) or the WAL's uint32
+//     prefix (a string or byte payload, a list element, a list element count).
+//   - neither — a per-edge-handle label or property COUNT over the snapshot's
+//     per-record cap (rmp #2784), which is neither a token nor a value.
+//
+// errors.Is(err, ErrFieldTooLong) holds for all three, so every caller that
+// tested the umbrella before the split still matches.
 var ErrFieldTooLong = errors.New("txn: field too long for its WAL length prefix")
+
+// ErrTokenTooLong is the refusal for a TOKEN: a label, a relationship type, a
+// property key, or a schema identifier longer than [lpg.MaxTokenLen] (65535
+// bytes), the most the WAL's uint16 length prefix can carry. [CheckSchemaField]
+// reports it before anything is staged.
+//
+// It is the same value as [lpg.ErrTokenTooLong] (rmp #2748), so a refusal from
+// the in-memory engine and one from this layer match each other's name. A
+// refusal raised by THIS package also matches the umbrella [ErrFieldTooLong]
+// (rmp #2942); one raised by graph/lpg, which knows nothing of the WAL, does
+// not.
+var ErrTokenTooLong = lpg.ErrTokenTooLong
+
+// ErrValueTooLong is the [ErrFieldTooLong] refusal for a property VALUE whose
+// encoding exceeds what a durable format can carry: the snapshot fold cap
+// (1 GiB) or the WAL's uint32 length prefix. errors.Is(err, ErrFieldTooLong) is
+// also true for it (rmp #2942).
+var ErrValueTooLong error = &fieldTooLongKind{msg: "txn: property value too long for a durable format"}
+
+// fieldTooLongKind is the type of the per-kind sentinel [ErrValueTooLong]. It
+// is its own identity for errors.Is and ALSO matches the umbrella
+// [ErrFieldTooLong], through the Is method below.
+type fieldTooLongKind struct{ msg string }
+
+func (k *fieldTooLongKind) Error() string { return k.msg }
+
+// Is reports whether target is the umbrella [ErrFieldTooLong]; identity with
+// the kind itself is decided by errors.Is before this method is consulted.
+func (k *fieldTooLongKind) Is(target error) bool { return target == ErrFieldTooLong }
 
 // ErrNestedPropertyList is the sentinel a commit fails with when a property
 // value is a [lpg.PropList] one of whose elements is itself a PropList. It is a
@@ -2494,8 +2903,10 @@ var ErrNestedPropertyList = errors.New("txn: a nested list is not a valid proper
 
 // CheckSchemaField reports whether s fits the uint16 length prefix every WAL
 // frame reserves for a schema string — a label, a property key, or a schema
-// identifier — returning an error wrapping [ErrFieldTooLong] when it does not.
-// what names the field in that error ("node label", "edge property key", ...).
+// identifier — returning an error wrapping [ErrTokenTooLong] and
+// [ErrFieldTooLong] when it does not. what names the field in that error
+// ("node label", "edge property key", ...). The bound is [lpg.MaxTokenLen],
+// 65535 bytes.
 //
 // It exists so a caller that stages work of its own BEFORE it reaches a [Tx]
 // mutator can refuse an unencodable field at its own API boundary, against the
@@ -2519,7 +2930,7 @@ func CheckSchemaField(what, s string) error { return checkWALSchemaString(what, 
 // (backstop). See [Tx.SetNodeLabel] for why both.
 func checkWALSchemaString(what, s string) error {
 	if len(s) > maxWALSchemaStringLen {
-		return errFieldTooLong(what, len(s), maxWALSchemaStringLen)
+		return errFieldTooLong(ErrTokenTooLong, what, len(s), maxWALSchemaStringLen)
 	}
 	return nil
 }
@@ -2528,7 +2939,7 @@ func checkWALSchemaString(what, s string) error {
 // property value, a list element, or a list element count (rmp #2742).
 func checkWALValueLen(what string, n int) error {
 	if n > maxWALValueLenInt {
-		return errFieldTooLong(what, n, maxWALValueLen)
+		return errFieldTooLong(ErrValueTooLong, what, n, maxWALValueLen)
 	}
 	return nil
 }
@@ -2673,7 +3084,7 @@ func snapshotEncodedScalarLen(v lpg.PropertyValue) int64 {
 // checkSnapshotValueLen is pinned.
 func checkSnapshotFoldableLen(what string, n int64) error {
 	if n > maxSnapshotValueLen {
-		return errFieldTooLongN(what, n, maxSnapshotValueLen)
+		return errFieldTooLongN(ErrValueTooLong, what, n, maxSnapshotValueLen)
 	}
 	return nil
 }
@@ -2739,16 +3150,43 @@ func checkFlatPropertyList(v lpg.PropertyValue) error {
 // well-predicted branch, not a call. Verified with
 // `go build -gcflags='-m' ./store/txn/`, which reports both checks
 // "can inline" and this one not.
-func errFieldTooLong(what string, n int, maxLen uint64) error {
-	return errFieldTooLongN(what, int64(n), maxLen)
+//
+// kind is the sentinel the refusal wraps: [ErrTokenTooLong], [ErrValueTooLong],
+// or the umbrella [ErrFieldTooLong] itself for a refusal of neither kind.
+func errFieldTooLong(kind error, what string, n int, maxLen uint64) error {
+	return errFieldTooLongN(kind, what, int64(n), maxLen)
 }
 
 // errFieldTooLongN is [errFieldTooLong] for a length that is already an int64,
 // which [checkSnapshotFoldableLen] needs because it sums a list's elements and
 // that sum must not be truncated on a 32-bit platform. It holds the ONE format
 // string, so the two refusal shapes cannot drift apart.
-func errFieldTooLongN(what string, n int64, maxLen uint64) error {
-	return fmt.Errorf("%w: %s is %d bytes, maximum %d", ErrFieldTooLong, what, n, maxLen)
+func errFieldTooLongN(kind error, what string, n int64, maxLen uint64) error {
+	return &fieldTooLongError{
+		kind: kind,
+		msg:  fmt.Sprintf("%s: %s is %d bytes, maximum %d", kind, what, n, maxLen),
+	}
+}
+
+// fieldTooLongError is every refusal this package raises for an over-long
+// field. It matches its kind ([ErrTokenTooLong], [ErrValueTooLong], or the
+// umbrella alone) AND the umbrella [ErrFieldTooLong]. The second is not
+// automatic for a token: [ErrTokenTooLong] is graph/lpg's sentinel, which
+// cannot know about this package's umbrella.
+type fieldTooLongError struct {
+	kind error
+	msg  string
+}
+
+func (e *fieldTooLongError) Error() string { return e.msg }
+
+// Unwrap exposes both the kind and the umbrella to errors.Is and errors.As.
+func (e *fieldTooLongError) Unwrap() []error {
+	if errors.Is(e.kind, ErrFieldTooLong) {
+		// The umbrella itself, or a kind that already matches it.
+		return []error{e.kind}
+	}
+	return []error{e.kind, ErrFieldTooLong}
 }
 
 // appendOpIndexBody appends the body of an [OpCreateIndex] / [OpDropIndex]
@@ -3313,13 +3751,13 @@ func decodeTxnTimeProp(buf []byte) (lpg.PropertyValue, []byte, error) {
 	return lpg.TimeValue(time.Unix(0, nanos).UTC()), buf[n:], nil
 }
 
-// applyOp dispatches one buffered Op against the in-memory LPG.
-// Returns any error surfaced by the graph (currently only
-// [adjlist.ErrShardFull] is reachable, and only when the underlying
-// [adjlist.Config.MaxShardCapacity] is set). The WAL has already been
-// fsynced for op by the time applyOp runs, so an error here means the
-// durable log and the in-memory view are temporarily inconsistent —
-// recovery will replay the same op and surface the same error.
+// applyOp dispatches one buffered Op against the in-memory LPG, inside the
+// transaction [Tx.Commit] applies BEFORE its WAL record is written. It returns
+// any error surfaced by the graph — a serialization conflict, an installed
+// validator's refusal, [adjlist.ErrShardFull] under a
+// [adjlist.Config.MaxShardCapacity] cap — and any such error refuses the
+// commit with nothing durable. The schema-DDL ops change no versioned state and
+// are applied by [applySchemaCountOp] once the transaction is durable.
 func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 	switch op.Kind {
 	case OpAddEdge:
@@ -3356,13 +3794,19 @@ func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 			wv.Graph().BumpTopoGeneration()
 		}
 	case OpSetEdgeLabelByHandle:
-		wv.SetEdgeLabelByHandle(op.Src, op.Dst, op.Handle, op.Label)
+		if err := wv.SetEdgeLabelByHandle(op.Src, op.Dst, op.Handle, op.Label); err != nil {
+			return err
+		}
 	case OpSetEdgePropertyByHandle:
 		return wv.SetEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key, op.Value)
 	case OpDelEdgePropertyByHandle:
-		wv.DelEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key)
+		if err := wv.DelEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key); err != nil {
+			return err
+		}
 	case OpRemoveEdgeInstanceByHandle:
-		wv.RemoveEdgeInstanceByHandle(op.Src, op.Dst, op.Handle)
+		if err := wv.RemoveEdgeInstanceByHandle(op.Src, op.Dst, op.Handle); err != nil {
+			return err
+		}
 		wv.Graph().BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
 	case OpRemoveEdgeByHandle:
 		// Instance-precise removal: retire the exact parallel slot carrying the
@@ -3373,7 +3817,9 @@ func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 	case OpSetNodeLabel:
 		return wv.SetNodeLabel(op.Src, op.Label)
 	case OpSetEdgeLabel:
-		wv.SetEdgeLabel(op.Src, op.Dst, op.Label)
+		if err := wv.SetEdgeLabel(op.Src, op.Dst, op.Label); err != nil {
+			return err
+		}
 	case OpAddNode:
 		return wv.AddNode(op.Src)
 	case OpRemoveNode:
@@ -3390,20 +3836,59 @@ func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 		// carries their uncommitted labels and properties. Stripping those would
 		// tear another transaction apart, and missing this transaction's own
 		// earlier ops would leave the tombstoned node still label-reachable.
+		//
+		// The strip runs AGAIN after the removal (ACID audit round 6). The first
+		// pass reads before this transaction holds any claim on the node, so a
+		// label or property another transaction commits between that read and
+		// the removal's claim is neither stripped nor refused, while replay,
+		// which strips what the log holds at this op's position, strips it:
+		// memory kept a label recovery did not. From the claim on, no other
+		// transaction can commit a label or property on the node, so the second
+		// pass sees every one committed before it.
+		//
+		// The second pass reads a FRESH latest-committed view, never rv (rmp
+		// #3030). rv's snapshot pins the verdict of every version it first read
+		// in flight, for repeatable reads: a peer write the first pass saw
+		// uncommitted stays invisible to rv after the peer commits. The claim's
+		// cross-check reads the head's stamp, sees that commit, and passes, so a
+		// second pass through rv skipped a value replay strips. A view built
+		// after the claim classifies the peer anew. Everything it sees committed
+		// precedes this transaction in the log: a peer publishes only after its
+		// sequence is minted, and this transaction mints its own after this apply.
 		rv := wv.Read()
-		for _, lbl := range rv.NodeLabels(op.Src) {
-			wv.RemoveNodeLabel(op.Src, lbl)
+		strip := func() error {
+			for _, lbl := range rv.NodeLabels(op.Src) {
+				if err := wv.RemoveNodeLabel(op.Src, lbl); err != nil {
+					return err
+				}
+			}
+			for k := range rv.NodeProperties(op.Src) {
+				if err := wv.DelNodeProperty(op.Src, k); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
-		for k := range rv.NodeProperties(op.Src) {
-			wv.DelNodeProperty(op.Src, k)
+		if err := strip(); err != nil {
+			return err
 		}
-		wv.RemoveNode(op.Src)
+		if ok, err := wv.RemoveNode(op.Src); !ok {
+			return err
+		}
+		rv = wv.Graph().LatestViewOf(wv.Tx(), true)
+		if err := strip(); err != nil {
+			return err
+		}
 	case OpRemoveNodeLabel:
-		wv.RemoveNodeLabel(op.Src, op.Label)
+		if err := wv.RemoveNodeLabel(op.Src, op.Label); err != nil {
+			return err
+		}
 	case OpSetNodeProperty:
 		return wv.SetNodeProperty(op.Src, op.Key, op.Value)
 	case OpDelNodeProperty:
-		wv.DelNodeProperty(op.Src, op.Key)
+		if err := wv.DelNodeProperty(op.Src, op.Key); err != nil {
+			return err
+		}
 	case OpRemoveEdge:
 		// Use the LPG edge removal so a fully-disconnected pair also sheds
 		// its per-pair edge labels/properties (matching recovery replay),
@@ -3413,34 +3898,9 @@ func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 	case OpSetEdgeProperty:
 		return wv.SetEdgeProperty(op.Src, op.Dst, op.Key, op.Value)
 	case OpDelEdgeProperty:
-		wv.DelEdgeProperty(op.Src, op.Dst, op.Key)
-	case OpCreateConstraint:
-		// The store keeps no constraint registry of its own (constraint
-		// enforcement lives in the cypher engine), so the only in-memory effect
-		// is to drive the graph's store-direct constraint count. That count
-		// makes Graph.HasConstraints true for a txn.Store-direct embedder that
-		// never goes through the engine's SetActiveConstraintCount, so a
-		// WAL-truncating checkpoint correctly judges its snapshot NOT
-		// self-sufficient and retains the OpCreateConstraint frame (#1756).
-		wv.Graph().AddStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
-	case OpDropConstraint:
-		// Mirror the create: drop the store-direct constraint slot so the count
-		// falls back to zero once the last constraint is removed.
-		wv.Graph().RemoveStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
-	case OpCreateIndex:
-		// As with constraints, the store keeps no index registry of its own
-		// (index maintenance lives in the cypher engine), so the only in-memory
-		// effect is to drive the graph's store-direct index count. That count
-		// makes Graph.HasIndexes true for a txn.Store-direct embedder that never
-		// goes through the engine's index-def registry, so a WAL-truncating
-		// checkpoint correctly judges its snapshot NOT self-sufficient and
-		// retains the OpCreateIndex frame (#1755). ConstraintName carries the
-		// index name for the index ops (see Tx.CreateIndex / Tx.DropIndex).
-		wv.Graph().AddStoreIndex(op.ConstraintName)
-	case OpDropIndex:
-		// Mirror the create: drop the store-direct index slot so the count falls
-		// back to zero once the last index is removed.
-		wv.Graph().RemoveStoreIndex(op.ConstraintName)
+		if err := wv.DelEdgeProperty(op.Src, op.Dst, op.Key); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -36,7 +36,10 @@ package isolationtest_test
 //     rmp #2336 still chases with a standing randomised search.
 
 import (
+	"context"
+	"errors"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
@@ -258,5 +261,137 @@ func TestOnlyRejectsUnknownPermutation(t *testing.T) {
 	}
 	if sink.n != 0 {
 		t.Errorf("wrote %d bytes for an unknown permutation; expected none", sink.n)
+	}
+}
+
+// TestProbeRendersRowsAndReachesTheObserver pins the Probe step: a Go step body
+// whose rows must appear in the transcript exactly as a query's would, and must
+// reach the Observer as the same strings. Without both, a scenario driven
+// through an API other than Cypher could record nothing a golden file can pin.
+func TestProbeRendersRowsAndReachesTheObserver(t *testing.T) {
+	t.Parallel()
+	var seen [][]string
+	r := &isolationtest.Runner{NewEngine: memEngine, Observe: func(o isolationtest.Observation) error {
+		if o.Step == "p" {
+			seen = o.Rows
+		}
+		return nil
+	}}
+	s := &isolationtest.Spec{
+		Name: "probe",
+		Sessions: []*isolationtest.Session{{Name: "s1", Steps: []isolationtest.Step{{
+			Name:  "p",
+			Label: "<probe>",
+			Probe: func(context.Context) ([]string, [][]string, error) {
+				return []string{"k", "v"}, [][]string{{"a", "1"}, {"b", "22"}}, nil
+			},
+		}}}},
+	}
+	got := runToString(t, s, r)
+	want := "step p: <probe>\nk|v \n-+--\na|1 \nb|22\n(2 rows)\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("probe transcript lacks the rendered rows\n--- want fragment ---\n%s--- got ---\n%s", want, got)
+	}
+	if len(seen) != 2 || seen[1][1] != "22" {
+		t.Errorf("observer saw rows %v, want the probe's two rows", seen)
+	}
+}
+
+// TestFinalIsRenderedAndObserved pins Spec.Final: the state a permutation leaves
+// behind must reach the transcript and the Observer, where Teardown's results
+// reach neither. A golden that cannot see the final state cannot tell a lost
+// update that was reported from one that was not.
+func TestFinalIsRenderedAndObserved(t *testing.T) {
+	t.Parallel()
+	var seen [][]string
+	r := &isolationtest.Runner{NewEngine: memEngine, Observe: func(o isolationtest.Observation) error {
+		if o.Step == "fin" {
+			seen = o.Rows
+		}
+		return nil
+	}}
+	s := &isolationtest.Spec{
+		Name:  "final",
+		Setup: []isolationtest.Step{{Name: "mk", Query: "CREATE (:N {v: 7})"}},
+		Sessions: []*isolationtest.Session{{Name: "s1", Steps: []isolationtest.Step{
+			{Name: "w", Query: "MATCH (n:N) SET n.v = 8"},
+		}}},
+		Final:    []isolationtest.Step{{Name: "fin", Query: "MATCH (n:N) RETURN n.v AS v"}},
+		Teardown: []isolationtest.Step{{Name: "td", Query: "MATCH (n:N) RETURN n.v AS hidden"}},
+	}
+	got := runToString(t, s, r)
+	if want := "final fin: MATCH (n:N) RETURN n.v AS v\nv\n-\n8\n(1 row)\n"; !strings.Contains(got, want) {
+		t.Errorf("final state not rendered\n--- want fragment ---\n%s--- got ---\n%s", want, got)
+	}
+	if strings.Contains(got, "hidden") {
+		t.Errorf("teardown result rendered; only Final's are:\n%s", got)
+	}
+	if len(seen) != 1 || seen[0][0] != "8" {
+		t.Errorf("observer saw final rows %v, want [[8]]", seen)
+	}
+}
+
+// TestCommitOfPoisonedTxRollsItBack pins the COMMIT control on a poisoned
+// transaction. The engine refuses that COMMIT with cypher.ErrTxPoisoned and
+// leaves the transaction OPEN, so the caller must roll it back. The harness
+// clears the session's handle at COMMIT, so it performs that rollback itself:
+// without it the poisoned transaction would keep its uncommitted write until
+// the engine closed, and a later writer of the same node would be refused by
+// a transaction the transcript reports as finished.
+//
+// The step must still report the COMMIT's own error, and the peer's write after
+// it must succeed.
+func TestCommitOfPoisonedTxRollsItBack(t *testing.T) {
+	t.Parallel()
+	var (
+		g        *lpg.Graph[string, float64]
+		writers  int64
+		commitEr error
+	)
+	r := &isolationtest.Runner{
+		NewEngine: func() (*isolationtest.Engine, error) {
+			g = lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			eng := cypher.NewEngine(g)
+			return &isolationtest.Engine{Eng: eng, Close: eng.Close}, nil
+		},
+		Observe: func(o isolationtest.Observation) error {
+			if o.Step == "s1c" {
+				commitEr = o.Err
+			}
+			return nil
+		},
+	}
+	s := &isolationtest.Spec{
+		Name:  "poisoned-commit",
+		Setup: []isolationtest.Step{{Name: "mk", Query: "CREATE (:N {name:'x', v: 0})"}},
+		Sessions: []*isolationtest.Session{
+			{Name: "s1", Setup: []isolationtest.Step{{Name: "s1b", Ctl: isolationtest.Begin}}, Steps: []isolationtest.Step{
+				{Name: "s1w", Query: "MATCH (n:N {name:'x'}) SET n.v = 1"},
+				{Name: "s1e", Query: "MATCH (n:N {name:'x'}) RETURN n.v / 0 AS boom"},
+				{Name: "s1c", Ctl: isolationtest.Commit},
+				{Name: "s1st", Label: "<writers in flight>", Hook: func(context.Context) error {
+					writers = g.MVCCStats().Write.Writers
+					return nil
+				}},
+			}},
+			{Name: "s2", Steps: []isolationtest.Step{
+				{Name: "s2w", Query: "MATCH (n:N {name:'x'}) SET n.v = 2 RETURN n.v AS v"},
+			}},
+		},
+		Final:        []isolationtest.Step{{Name: "fin", Query: "MATCH (n:N {name:'x'}) RETURN n.v AS v"}},
+		Permutations: [][]string{{"s1w", "s1e", "s1c", "s1st", "s2w"}},
+	}
+	got := runToString(t, s, r)
+	if !errors.Is(commitEr, cypher.ErrTxPoisoned) {
+		t.Fatalf("COMMIT reported %v, want cypher.ErrTxPoisoned:\n%s", commitEr, got)
+	}
+	if writers != 0 {
+		t.Errorf("%d writers in flight after the COMMIT of the poisoned transaction, want 0:\n%s", writers, got)
+	}
+	if want := "step s2w: MATCH (n:N {name:'x'}) SET n.v = 2 RETURN n.v AS v\nv\n-\n2\n(1 row)\n"; !strings.Contains(got, want) {
+		t.Errorf("the peer's write after the poisoned COMMIT did not succeed\n--- want fragment ---\n%s--- got ---\n%s", want, got)
+	}
+	if want := "final fin: MATCH (n:N {name:'x'}) RETURN n.v AS v\nv\n-\n2\n(1 row)\n"; !strings.Contains(got, want) {
+		t.Errorf("final state is not the peer's write\n--- want fragment ---\n%s--- got ---\n%s", want, got)
 	}
 }

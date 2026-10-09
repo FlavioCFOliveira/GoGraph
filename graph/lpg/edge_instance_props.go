@@ -33,15 +33,29 @@ type edgeInstancePropShard struct {
 // any error returned by the installed [SchemaValidator]; when the validator
 // rejects the write the graph state is left unchanged.
 //
-// SetEdgePropertyAt is safe for concurrent use.
+// SetEdgePropertyAt is safe for concurrent use.//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
+//
+// It runs as a single-operation transaction (rmp #2947): it refuses with an
+// error wrapping [ErrDirectWriteConflict], and changes nothing, while another
+// transaction holds an uncommitted write on the instance's per-ordinal properties. The refusal is retryable. See
+// [ErrDirectWriteConflict].
 func (g *Graph[N, W]) SetEdgePropertyAt(src, dst N, idx int64, key string, value PropertyValue) error {
-	return g.setEdgePropertyAtInfo(src, dst, idx, key, value, nil)
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
+	return g.direct(func(tx *writeCtx) error {
+		return g.setEdgePropertyAtInfo(src, dst, idx, key, value, tx)
+	})
 }
 
-// setEdgePropertyAtInfo is [Graph.SetEdgePropertyAt] with an explicit write transaction; tx is
-// nil for a direct Go-API mutation, which is committed the instant it is made
-// and takes no conflict check. See [writeCtx].
+// setEdgePropertyAtInfo is [Graph.SetEdgePropertyAt] inside write transaction tx; tx is
+// nil only on a graph whose versioning substrate is disarmed. See [writeCtx].
 func (g *Graph[N, W]) setEdgePropertyAtInfo(src, dst N, idx int64, key string, value PropertyValue, tx *writeCtx) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
@@ -58,7 +72,7 @@ func (g *Graph[N, W]) setEdgePropertyAtInfo(src, dst N, idx int64, key string, v
 	if !ok {
 		return nil
 	}
-	pid := g.pkeys.Intern(key)
+	pid := g.pkeys.intern(key)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeInstancePropShardFor(k)
 	sh.mu.Lock()
@@ -100,8 +114,13 @@ func (g *Graph[N, W]) setEdgePropertyAtInfo(src, dst N, idx int64, key string, v
 // at one instant; see [Graph.ApplyAtomically]. Also see docs/isolation-design.md.
 //
 // EdgePropertiesAt is safe for concurrent use.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) EdgePropertiesAt(src, dst N, idx int64) map[string]PropertyValue {
-	return g.EdgePropertiesAtAsOf(src, dst, idx, nil)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.EdgePropertiesAtAsOf(src, dst, idx, g.latestCommitted(&cs))
 }
 
 // EdgePropertiesAtAsOf is [Graph.EdgePropertiesAt] as the instance stood at

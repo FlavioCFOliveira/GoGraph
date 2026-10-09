@@ -772,6 +772,8 @@ func TestWALPhantomCommit_CrashInsideTheLeaderFsyncLosesTheFlushedSuffix(t *test
 	if err != nil {
 		t.Fatalf("OpenFS: %v", err)
 	}
+	// The frames land in the log's first segment; that file is the image.
+	seg := wal.SegmentPath(path, 1)
 
 	// (1) An acknowledged, durable commit. It is the control: whatever the crash
 	// does to the in-flight suffix, this must still be there.
@@ -782,7 +784,7 @@ func TestWALPhantomCommit_CrashInsideTheLeaderFsyncLosesTheFlushedSuffix(t *test
 	if err := w.SyncGroup(ackedMark); err != nil {
 		t.Fatalf("sync acked: %v", err)
 	}
-	ackedImage, err := disk.DurableImage(path)
+	ackedImage, err := disk.DurableImage(seg)
 	if err != nil {
 		t.Fatalf("DurableImage after acked commit: %v", err)
 	}
@@ -803,11 +805,11 @@ func TestWALPhantomCommit_CrashInsideTheLeaderFsyncLosesTheFlushedSuffix(t *test
 	// (3) Park the leader INSIDE its fsync. Its flush has already pushed the
 	// frames into the disk's live image; nothing below them is durable.
 	<-gate.Reached()
-	liveDuringFsync, err := disk.ReadFile(path)
+	liveDuringFsync, err := disk.ReadFile(seg)
 	if err != nil {
 		t.Fatalf("ReadFile during fsync: %v", err)
 	}
-	durableDuringFsync, err := disk.DurableImage(path)
+	durableDuringFsync, err := disk.DurableImage(seg)
 	if err != nil {
 		t.Fatalf("DurableImage during fsync: %v", err)
 	}
@@ -817,11 +819,11 @@ func TestWALPhantomCommit_CrashInsideTheLeaderFsyncLosesTheFlushedSuffix(t *test
 	gate.Release()
 	leaderErr := <-done
 
-	afterCrash, err := disk.DurableImage(path)
+	afterCrash, err := disk.DurableImage(seg)
 	if err != nil {
 		t.Fatalf("DurableImage after crash: %v", err)
 	}
-	live, err := disk.ReadFile(path)
+	live, err := disk.ReadFile(seg)
 	if err != nil {
 		t.Fatalf("ReadFile after crash: %v", err)
 	}

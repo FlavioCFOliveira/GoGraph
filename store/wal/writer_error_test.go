@@ -26,23 +26,20 @@ func TestWriter_Truncate_FreesAllBytes(t *testing.T) {
 	if err := w.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	preInfo, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pre := w.DurableOffset()
+	oldSeg := tailSegment(t, path)
 	freed, err := w.Truncate()
 	if err != nil {
 		t.Fatalf("Truncate: %v", err)
 	}
-	if freed != preInfo.Size() {
-		t.Fatalf("Truncate freed = %d, want %d", freed, preInfo.Size())
+	if freed != pre {
+		t.Fatalf("Truncate freed = %d, want %d", freed, pre)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(oldSeg); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the segment holding the discarded frames survived Truncate: %v", err)
 	}
-	if info.Size() != 0 {
-		t.Fatalf("post-Truncate file size = %d, want 0", info.Size())
+	if segs := segmentPaths(t, path); len(segs) > 2 {
+		t.Fatalf("post-Truncate segments = %v, want the active one and at most one spare", segs)
 	}
 	// Verify subsequent Append+Sync writes from offset 0 cleanly.
 	if err := w.Append([]byte("post")); err != nil {
@@ -51,7 +48,7 @@ func TestWriter_Truncate_FreesAllBytes(t *testing.T) {
 	if err := w.Sync(); err != nil {
 		t.Fatalf("post-Truncate Sync: %v", err)
 	}
-	postFrame, err := Decode(bytes.NewReader(mustRead(t, path)))
+	postFrame, err := Decode(bytes.NewReader(segmentFrameBytes(t, path)))
 	if err != nil {
 		t.Fatalf("Decode of post-Truncate frame: %v", err)
 	}
@@ -132,7 +129,7 @@ func TestReader_TailOffset_AtCleanEOF(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wal")
 	writeNFrames(t, path, 3)
-	info, err := os.Stat(path)
+	info, err := os.Stat(tailSegment(t, path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,10 +138,11 @@ func TestReader_TailOffset_AtCleanEOF(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	for range r.Frames() { //nolint:revive // we only need to drive the iterator
+	for range r.Frames() { // we only need to drive the iterator
 	}
-	if got := r.TailOffset(); got != info.Size() {
-		t.Fatalf("clean-EOF TailOffset = %d, want %d", got, info.Size())
+	// The end position counts frame bytes only: the segment's size less its header.
+	if got := r.TailOffset(); got != info.Size()-segHeaderSize {
+		t.Fatalf("clean-EOF TailOffset = %d, want %d", got, info.Size()-segHeaderSize)
 	}
 	if r.TailError() != nil {
 		t.Fatalf("clean-EOF TailError = %v, want nil", r.TailError())
@@ -156,14 +154,15 @@ func TestReader_TailOffset_AtTornFrame(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wal")
 	writeNFrames(t, path, 3)
-	info, err := os.Stat(path)
+	seg := tailSegment(t, path)
+	info, err := os.Stat(seg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Cut one byte off the file: the last frame becomes torn but the
+	// Cut one byte off the segment: the last frame becomes torn but the
 	// first two should remain readable. TailOffset should mark the
 	// start of the torn frame.
-	if err := os.Truncate(path, info.Size()-1); err != nil {
+	if err := os.Truncate(seg, info.Size()-1); err != nil {
 		t.Fatal(err)
 	}
 	r, err := OpenReader(path)
@@ -171,7 +170,7 @@ func TestReader_TailOffset_AtTornFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	for range r.Frames() { //nolint:revive // empty-block: the iteration is the work; the test asserts on r.TailOffset() after the reader has walked every intact frame
+	for range r.Frames() { // empty-block: the iteration is the work; the test asserts on r.TailOffset() after the reader has walked every intact frame
 	}
 	if got := r.TailOffset(); got >= info.Size() {
 		t.Fatalf("torn TailOffset = %d, want < %d", got, info.Size())
@@ -211,13 +210,4 @@ func TestReader_ReplayPropagatesApplyError(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Replay = %v, want sentinel", err)
 	}
-}
-
-func mustRead(t *testing.T, path string) []byte {
-	t.Helper()
-	b, err := os.ReadFile(path) //nolint:gosec // t.TempDir-rooted
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
 }

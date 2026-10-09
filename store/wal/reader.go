@@ -15,6 +15,9 @@ import (
 // stops cleanly at the first torn or corrupted frame, reporting the
 // byte offset where the cut occurred via [Reader.TailOffset].
 //
+// A Reader opened by [OpenReader] on the base path of a segmented log
+// iterates that store's whole log instead: see [OpenReader].
+//
 // Reader is not safe for concurrent use; create one Reader per
 // goroutine that wishes to iterate.
 type Reader struct {
@@ -24,11 +27,28 @@ type Reader struct {
 	bufr      *bufio.Reader
 	tail      int64
 	totalRead int64
+	// log, when non-nil, makes this Reader iterate a segmented store's log.
+	log *Log
 }
 
 // OpenReader opens path for read-only frame iteration.
+//
+// When path is the base path of a segmented log (a control file exists at
+// [ControlPath](path)), the Reader iterates the store's log: the frames of the
+// legacy single-file log except its seal, then the segment frames from the
+// oldest retained segment, validated as [Log.Frames] validates them; and
+// [Reader.TailOffset] reports the end position of the log. Otherwise it reads
+// path as one file of frames.
 func OpenReader(path string) (*Reader, error) {
 	defer metrics.Time("store.wal.OpenReader").Stop()
+	if _, err := os.Stat(ControlPath(path)); err == nil {
+		l, err := OpenLog(path)
+		if err != nil {
+			metrics.IncCounter("store.wal.OpenReader.errors", 1)
+			return nil, fmt.Errorf("wal: open %q: %w", path, err)
+		}
+		return &Reader{log: l}, nil
+	}
 	f, err := os.OpenFile(path, os.O_RDONLY|walNoFollow, 0) //nolint:gosec // caller-supplied path is by-design; walNoFollow rejects a symlinked final component (CWE-59)
 	if err != nil {
 		metrics.IncCounter("store.wal.OpenReader.errors", 1)
@@ -50,6 +70,9 @@ func NewReader(r io.Reader, closer io.Closer) *Reader {
 // Close releases any underlying resource passed to [NewReader] or
 // [OpenReader].
 func (r *Reader) Close() error {
+	if r.log != nil {
+		return r.log.Close()
+	}
 	if r.closer == nil {
 		return nil
 	}
@@ -60,17 +83,30 @@ func (r *Reader) Close() error {
 // where iteration stopped. After a successful iteration to EOF this
 // equals the file size; after a torn frame this equals the start of
 // the torn frame.
-func (r *Reader) TailOffset() int64 { return r.tail }
+func (r *Reader) TailOffset() int64 {
+	if r.log != nil {
+		return r.log.TailOffset()
+	}
+	return r.tail
+}
 
 // TailError returns the error that ended iteration (typically
 // [ErrTornFrame], [ErrCRCMismatch], or [ErrBadMagic]), or nil when
 // iteration ended at clean EOF.
-func (r *Reader) TailError() error { return r.tailErr }
+func (r *Reader) TailError() error {
+	if r.log != nil && r.tailErr == nil {
+		return r.log.TailError()
+	}
+	return r.tailErr
+}
 
 // Frames returns an iterator over every frame in the WAL. The
 // iterator stops at the first error; call [Reader.TailError] /
 // [Reader.TailOffset] after iteration to inspect why.
 func (r *Reader) Frames() iter.Seq[Frame] {
+	if r.log != nil {
+		return r.logFrames()
+	}
 	return func(yield func(Frame) bool) {
 		for {
 			beforeRead := r.totalRead
@@ -84,7 +120,7 @@ func (r *Reader) Frames() iter.Seq[Frame] {
 				}
 				return
 			}
-			r.totalRead += int64(HeaderSize + len(frame.Payload))
+			r.totalRead += int64(FrameSize(frame))
 			if !yield(frame) {
 				r.tail = r.totalRead
 				return
@@ -118,9 +154,42 @@ func (r *Reader) Replay(apply func(Frame) error) error {
 			return err
 		}
 	}
-	if r.tailErr != nil && !errors.Is(r.tailErr, ErrTornFrame) {
+	if tErr := r.TailError(); tErr != nil && !errors.Is(tErr, ErrTornFrame) {
 		metrics.IncCounter("store.wal.Replay.errors", 1)
-		return r.tailErr
+		return tErr
 	}
 	return nil
+}
+
+// logFrames iterates a segmented store's log: the legacy file's frames except
+// its seal, then the segment frames.
+func (r *Reader) logFrames() iter.Seq[Frame] {
+	return func(yield func(Frame) bool) {
+		lr, err := r.log.LegacyReader()
+		if err != nil {
+			r.tailErr = err
+			return
+		}
+		if lr != nil {
+			for f := range lr.Frames() {
+				if _, seal := DecodeLegacySeal(f.Payload); seal {
+					continue
+				}
+				if !yield(f) {
+					_ = lr.Close()
+					return
+				}
+			}
+			_ = lr.Close()
+			if err := lr.TailError(); err != nil {
+				r.tailErr = err
+				return
+			}
+		}
+		for f := range r.log.Frames() {
+			if !yield(f) {
+				return
+			}
+		}
+	}
 }

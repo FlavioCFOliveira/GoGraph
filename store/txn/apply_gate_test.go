@@ -223,11 +223,23 @@ func TestApplyGate_SingleWriterTakesFastPath(t *testing.T) {
 // The assertion is phrased as "no durable commit is refused" rather than "the gate
 // exists", so a future design that removes the gate and satisfies both points passes it
 // unchanged.
+//
+// # Since the claims moved before the WAL (ACID audit of rmp #2965)
+//
+// Commit now applies BEFORE its WAL record, holding its versions as claims, and
+// publishes after the fsync, so conflict detection runs while nothing is durable
+// and a durable commit cannot be refused. Two commits on the SAME object can then
+// no longer both pass the apply: the second waits for the first, within a bounded
+// budget, and is otherwise refused with a retryable serialization conflict. Such
+// a refusal is not a durable commit refused, so the writers retry it, and the test
+// proves the distinction from the log itself: the WAL must hold exactly one commit
+// marker per Commit that returned nil.
 func TestApplyGate_ADurableCommitIsNeverRefusedByConflictDetection(t *testing.T) {
 	t.Parallel()
 
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	w, err := wal.Open(filepath.Join(t.TempDir(), "wal"))
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
@@ -258,14 +270,19 @@ func TestApplyGate_ADurableCommitIsNeverRefusedByConflictDetection(t *testing.T)
 		mu        sync.Mutex
 		refusals  []error
 		otherErrs []error
+		committed = 1 // the seed
+		retried   int
 	)
 	for k := 0; k < writers; k++ {
 		wg.Add(1)
 		go func(k int) {
 			defer wg.Done()
 			for r := 0; r < rounds; r++ {
+			retry:
 				tx := store.Begin()
-				if e := tx.SetNodeProperty("n", "v", lpg.Int64Value(int64(k*1000+r))); e != nil {
+				// +1 keeps every value distinct from the seed's 0: a same-value set is a
+				// no-op that writes no WAL record, which would break the marker count.
+				if e := tx.SetNodeProperty("n", "v", lpg.Int64Value(int64(k*1000+r+1))); e != nil {
 					mu.Lock()
 					otherErrs = append(otherErrs, e)
 					mu.Unlock()
@@ -273,12 +290,22 @@ func TestApplyGate_ADurableCommitIsNeverRefusedByConflictDetection(t *testing.T)
 				}
 				e := tx.Commit()
 				if e == nil {
+					mu.Lock()
+					committed++
+					mu.Unlock()
 					continue
 				}
 				mu.Lock()
-				if errors.Is(e, txn.ErrCommittedNotApplied) || errors.Is(e, mvcc.ErrSerializationConflict) {
+				switch {
+				case errors.Is(e, txn.ErrCommittedNotApplied):
 					refusals = append(refusals, e)
-				} else {
+				case errors.Is(e, mvcc.ErrSerializationConflict):
+					// Refused BEFORE the WAL: retryable, and nothing durable (the
+					// marker count below proves it). Retry the same round.
+					retried++
+					mu.Unlock()
+					goto retry
+				default:
 					otherErrs = append(otherErrs, e)
 				}
 				mu.Unlock()
@@ -300,4 +327,11 @@ func TestApplyGate_ADurableCommitIsNeverRefusedByConflictDetection(t *testing.T)
 			"the apply gate requires (rmp #2306).",
 			len(refusals), writers*rounds, refusals[0])
 	}
+	// Every commit that returned nil, and no other, is durable: a retryable refusal
+	// is decided before the WAL record exists.
+	if got := len(walSeqs(t, dir)); got != committed {
+		t.Fatalf("WAL holds %d commit markers; want %d (the commits that returned nil). "+
+			"%d retryable refusals must have left no record", got, committed, retried)
+	}
+	t.Logf("%d commits, %d retryable refusals before the WAL", committed, retried)
 }

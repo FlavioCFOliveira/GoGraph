@@ -60,7 +60,9 @@ func TestQuery_NoPredicateCardinalityEqualsOrder(t *testing.T) {
 func TestQuery_TombstonedNodeExcludedEverywhere(t *testing.T) {
 	t.Parallel()
 	g, c := setupTriangleGraph(t)
-	g.RemoveNode("dead")
+	if err := g.RemoveNode("dead"); err != nil {
+		t.Fatalf("g.RemoveNode(\"dead\"): %v", err)
+	}
 	e := New(g, c)
 
 	// Cardinality must equal the live (non-tombstoned) order.
@@ -106,7 +108,9 @@ func TestQuery_TombstonedNodeExcludedEverywhere(t *testing.T) {
 func TestQuery_DeleteThenRecreateAppearsOnce(t *testing.T) {
 	t.Parallel()
 	g, c := setupTriangleGraph(t)
-	g.RemoveNode("dead")
+	if err := g.RemoveNode("dead"); err != nil {
+		t.Fatalf("g.RemoveNode(\"dead\"): %v", err)
+	}
 	if err := g.AddNode("dead"); err != nil { // revives the tombstoned node
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -139,7 +143,9 @@ func TestQuery_AllNodesDeleted(t *testing.T) {
 	t.Parallel()
 	g, c := setupTriangleGraph(t)
 	for _, n := range []string{"alice", "bob", "dead"} {
-		g.RemoveNode(n)
+		if err := g.RemoveNode(n); err != nil {
+			t.Fatalf("g.RemoveNode(n): %v", err)
+		}
 	}
 	e := New(g, c)
 

@@ -50,8 +50,11 @@ func TestSchema_RegisterPropertyConflict(t *testing.T) {
 func TestSchema_Introspection(t *testing.T) {
 	t.Parallel()
 	s := New(nil, nil)
-	s.RegisterLabel("Person")
-	s.RegisterLabel("Account")
+	for _, l := range []string{"Person", "Account"} {
+		if _, err := s.RegisterLabel(l); err != nil {
+			t.Fatalf("RegisterLabel(%q): %v", l, err)
+		}
+	}
 	if _, err := s.RegisterProperty("age", lpg.PropInt64); err != nil {
 		t.Fatalf("RegisterProperty: %v", err)
 	}
@@ -78,7 +81,9 @@ func TestSchema_Concurrent(t *testing.T) {
 	for w := 0; w < goroutines; w++ {
 		go func(w int) {
 			defer wg.Done()
-			s.RegisterLabel("Hot")
+			if _, err := s.RegisterLabel("Hot"); err != nil {
+				t.Errorf("RegisterLabel: %v", err)
+			}
 			if _, err := s.RegisterProperty("shared", lpg.PropInt64); err != nil {
 				t.Errorf("RegisterProperty: %v", err)
 			}

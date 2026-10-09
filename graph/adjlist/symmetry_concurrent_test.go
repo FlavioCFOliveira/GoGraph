@@ -135,7 +135,7 @@ func TestUndirectedMultigraph_ConcurrentAddEdgeH_SymmetryGate(t *testing.T) {
 			}
 
 			// Remove one edge and assert both directions lose the SAME handle.
-			a.RemoveEdge("u", "v")
+			must(t).E(a.RemoveEdge("u", "v"))
 
 			nbU2, _, hU2 := a.LoadEntryH(uID)
 			nbV2, _, hV2 := a.LoadEntryH(vID)
@@ -244,7 +244,7 @@ func TestUndirectedMultigraph_ConcurrentAddEdgeH_CrossShardSymmetry(t *testing.T
 			}
 
 			// RemoveEdge and verify the same handle is removed from both sides.
-			a.RemoveEdge(key0, key1)
+			must(t).E(a.RemoveEdge(key0, key1))
 
 			nbU2, _, hU2 := a.LoadEntryH(uID)
 			nbV2, _, hV2 := a.LoadEntryH(vID)

@@ -255,7 +255,8 @@ func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s str
 // plan: ProfileTable and Profile run the identical build-and-drain and render
 // one captured [exec.PlanNode] tree two ways. Every caveat documented on Profile
 // applies unchanged — the query really runs and its rows are discarded, a
-// writing statement is refused rather than executed, and each Time is INCLUSIVE
+// writing statement executes and commits as under [Engine.RunInTx] (rmp #2790),
+// and each Time is INCLUSIVE
 // of the operator's children, so a node's exclusive cost is its own time minus
 // its children's.
 //

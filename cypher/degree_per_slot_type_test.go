@@ -88,7 +88,9 @@ func perSlotCases() []perSlotCase {
 			name: "two handle-less parallel slots typed by SetEdgeLabel",
 			build: func(t *testing.T, g *lpg.Graph[string, float64], _ *Engine) {
 				addEdges(t, g, "a", "b", 2)
-				g.SetEdgeLabel("a", "b", "K")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			far: "b", farQ: true, wantDeg: 2, wantK: 2, wantM: 0,
 		},
@@ -96,7 +98,9 @@ func perSlotCases() []perSlotCase {
 			name: "three handle-less parallel slots typed by SetEdgeLabel",
 			build: func(t *testing.T, g *lpg.Graph[string, float64], _ *Engine) {
 				addEdges(t, g, "a", "b", 3)
-				g.SetEdgeLabel("a", "b", "K")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			far: "b", farQ: true, wantDeg: 3, wantK: 3, wantM: 0,
 		},
@@ -136,8 +140,12 @@ func perSlotCases() []perSlotCase {
 			name: "different types via SetEdgeLabel twice on two parallel slots",
 			build: func(t *testing.T, g *lpg.Graph[string, float64], _ *Engine) {
 				addEdges(t, g, "a", "b", 2)
-				g.SetEdgeLabel("a", "b", "K")
-				g.SetEdgeLabel("a", "b", "M")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
+				if err := g.SetEdgeLabel("a", "b", "M"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			far: "b", farQ: true, wantDeg: 2, wantK: 2, wantM: 2,
 		},
@@ -148,9 +156,13 @@ func perSlotCases() []perSlotCase {
 			name: "different types via interleaved AddEdge and SetEdgeLabel",
 			build: func(t *testing.T, g *lpg.Graph[string, float64], _ *Engine) {
 				addEdges(t, g, "a", "b", 1)
-				g.SetEdgeLabel("a", "b", "K")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
 				addEdges(t, g, "a", "b", 1)
-				g.SetEdgeLabel("a", "b", "M")
+				if err := g.SetEdgeLabel("a", "b", "M"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			far: "b", farQ: true, wantDeg: 2, wantK: 1, wantM: 1,
 		},
@@ -160,8 +172,12 @@ func perSlotCases() []perSlotCase {
 			name: "one slot named twice puts the second type in overflow",
 			build: func(t *testing.T, g *lpg.Graph[string, float64], _ *Engine) {
 				addEdges(t, g, "a", "b", 1)
-				g.SetEdgeLabel("a", "b", "K")
-				g.SetEdgeLabel("a", "b", "M")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
+				if err := g.SetEdgeLabel("a", "b", "M"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			far: "b", farQ: true, wantDeg: 1, wantK: 1, wantM: 1,
 		},
@@ -173,7 +189,9 @@ func perSlotCases() []perSlotCase {
 			build: func(t *testing.T, g *lpg.Graph[string, float64], eng *Engine) {
 				createTyped(t, eng, 0, 1, "K")
 				addEdges(t, g, "a", "b", 1)
-				g.SetEdgeLabel("a", "b", "K")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			far: "b", farQ: true, wantDeg: 2, wantK: 2, wantM: 0,
 		},
@@ -195,7 +213,9 @@ func perSlotCases() []perSlotCase {
 			build: func(t *testing.T, g *lpg.Graph[string, float64], eng *Engine) {
 				createTyped(t, eng, 0, 1, "M")
 				addEdges(t, g, "a", "b", 1)
-				g.SetEdgeLabel("a", "b", "K")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			far: "b", farQ: true, wantDeg: 2, wantK: 1, wantM: 1,
 		},
@@ -217,7 +237,9 @@ func perSlotCases() []perSlotCase {
 			name: "two handle-less parallel slots to a far node without the label",
 			build: func(t *testing.T, g *lpg.Graph[string, float64], _ *Engine) {
 				addEdges(t, g, "a", "c", 2)
-				g.SetEdgeLabel("a", "c", "K")
+				if err := g.SetEdgeLabel("a", "c", "K"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			far: "c", farQ: false, wantDeg: 2, wantK: 2, wantM: 0,
 		},
@@ -240,7 +262,9 @@ func perSlotCases() []perSlotCase {
 			name: "self-loop with twelve slots all named by SetEdgeLabel",
 			build: func(t *testing.T, g *lpg.Graph[string, float64], _ *Engine) {
 				addEdges(t, g, "a", "a", 12)
-				g.SetEdgeLabel("a", "a", "K")
+				if err := g.SetEdgeLabel("a", "a", "K"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			far: "a", farQ: false, wantDeg: 12, wantK: 12, wantM: 0,
 		},
@@ -398,7 +422,9 @@ func TestPerSlotRelType_BoundedAndUnboundedDegreesAgree(t *testing.T) {
 func TestPerSlotRelType_RemoveEdgeLabelClearsEverySlot(t *testing.T) {
 	g, eng := perSlotFixture(t)
 	addEdges(t, g, "a", "b", 3)
-	g.SetEdgeLabel("a", "b", "K")
+	if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+		t.Fatal(err)
+	}
 
 	lid, known := g.Registry().Lookup("K")
 	if !known {
@@ -408,7 +434,9 @@ func TestPerSlotRelType_RemoveEdgeLabelClearsEverySlot(t *testing.T) {
 		t.Fatalf("precondition: OutDegreeByType(a, K) = %d, want 3", got)
 	}
 
-	g.RemoveEdgeLabel("a", "b", "K")
+	if err := g.RemoveEdgeLabel("a", "b", "K"); err != nil {
+		t.Fatal(err)
+	}
 
 	if got, _ := g.OutDegreeByType("a", lid); got != 0 {
 		t.Errorf("after RemoveEdgeLabel: OutDegreeByType(a, K) = %d, want 0", got)

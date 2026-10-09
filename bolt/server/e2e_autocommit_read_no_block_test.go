@@ -18,7 +18,7 @@ package server_test
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -27,168 +27,212 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/config"
 
 	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
-	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestE2E_ConcurrentAutocommitReadsRunInParallel verifies that N concurrent
-// autocommit read sessions all complete in parallel rather than serialising on
-// a write lock (task #1432 regression gate).
+// autocommit read sessions execute inside the engine AT THE SAME TIME rather than
+// serialising on a lock (task #1432 regression gate).
 //
-// Before the fix, each autocommit read acquired writeMu exclusively, so
-// N reads completed in Θ(N × T). After the fix they all acquire visMu.RLock
-// concurrently and complete in Θ(T). We assert that 8 concurrent reads finish
-// within 4 × the measured single-read latency, providing ≈2× margin without
-// depending on a precise wall-clock constant.
+// # The oracle is structural, not a timing ratio (rmp #2828)
+//
+// Each read evaluates a function that parks at a rendezvous inside the engine's
+// execution of the query, and the rendezvous opens only once all N reads are
+// parked there at once. It records the largest number of reads it ever held
+// simultaneously, and the test asserts that number is N. A server that serialises
+// autocommit reads — the #1432 regression, where every read held one lock for its
+// whole execution — can never have more than one read inside execution, so the
+// peak is 1 and the test fails once the rendezvous bound expires.
+//
+// This replaces a ratio of two wall-clock windows measured seconds apart (N
+// concurrent reads against a serial baseline, limit 0.75·N). That ratio measured
+// the cores available at each instant as much as the server: at HEAD d506d25d, on
+// a 10-core host, it failed 0/32 at loadavg 1.86, 1/32 at loadavg 10.22-12.44,
+// 1/32 at 23.94-25.39 and 3/32 at 40.07-42.79, the failing runs reporting
+// 6.1x-10.6x, while the rendezvous peaked at N on every run under the same load.
+// The failures were the host, not the engine. Observing overlap CLIENT-SIDE could
+// not have replaced it either — a read blocked on a lock is in flight exactly as
+// much as one executing — which is why the rendezvous sits inside execution,
+// where a blocked read never arrives.
+//
+// Host load can only delay arrivals; it cannot stop N concurrently admitted reads
+// from all reaching the rendezvous, so the verdict does not depend on it. The
+// bound matters only on the failing path.
 func TestE2E_ConcurrentAutocommitReadsRunInParallel(t *testing.T) {
 	const (
 		concurrency = 8
-		// A serialised handler (the #1432 regression) takes ~concurrency* the
-		// single-read baseline; a parallel one is bounded by the host CPU count.
-		// 0.75*concurrency still flags serialisation (~8x) while tolerating
-		// CPU-bound execution on small CI runners (8 reads on 2 cores ~4x).
-		maxFactor = 0.75 * concurrency
+		// rendezvousBound caps how long a parked read waits for the others. A
+		// parallel server releases the rendezvous as soon as the last read arrives,
+		// so the bound is spent only when reads are serialised.
+		rendezvousBound = 20 * time.Second
 	)
 
 	ctx := context.Background()
-	addr := startTestServer(t, server.Options{ConnTimeout: 15 * time.Second})
+	rv := newReadRendezvous(concurrency)
+	reg := rendezvousRegistry{inner: funcs.DefaultRegistry, rv: rv}
+	eng := cypher.NewEngineWithRegistry(lpg.New[string, float64](adjlist.Config{}), reg)
+	addr := startTestServerWithEngine(t, eng, server.Options{ConnTimeout: 15 * time.Second})
 
-	newDriver := func() neo4j.DriverWithContext {
-		drv, err := neo4j.NewDriverWithContext(
-			"bolt://"+addr,
-			neo4j.NoAuth(),
-			func(c *config.Config) {
-				c.MaxConnectionPoolSize = concurrency + 2
-				c.ConnectionAcquisitionTimeout = 5 * time.Second
-				c.SocketConnectTimeout = 3 * time.Second
-			},
-		)
-		if err != nil {
-			t.Fatalf("NewDriverWithContext: %v", err)
-		}
-		t.Cleanup(func() { _ = drv.Close(context.Background()) })
-		return drv
+	drv, err := neo4j.NewDriverWithContext(
+		"bolt://"+addr,
+		neo4j.NoAuth(),
+		func(c *config.Config) {
+			c.MaxConnectionPoolSize = concurrency + 2
+			c.ConnectionAcquisitionTimeout = 5 * time.Second
+			c.SocketConnectTimeout = 3 * time.Second
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewDriverWithContext: %v", err)
 	}
+	t.Cleanup(func() { _ = drv.Close(context.Background()) })
 
-	drv := newDriver()
-
-	runRead := func() (time.Duration, error) {
+	runRead := func(query string) error {
 		sess := drv.NewSession(ctx, neo4j.SessionConfig{})
 		defer func() { _ = sess.Close(ctx) }()
-		start := time.Now()
-		// A read heavy enough (a few ms) that the serialisation signal dominates
-		// fixed per-request overhead (goroutine scheduling, driver pool mutex,
-		// session Run/Consume). A sub-millisecond "RETURN 1" makes the
-		// concurrent/baseline ratio noise-dominated rather than a parallelism
-		// measurement. This is a pure read (no graph mutation): it routes
-		// through the shared read lock, exactly the #1432 path under test.
-		result, err := sess.Run(ctx, "UNWIND range(1, 200000) AS x RETURN count(x) AS n", nil)
+		// A pure read (no graph mutation): it routes through the autocommit read
+		// path, exactly the #1432 path under test.
+		result, err := sess.Run(ctx, query, nil)
 		if err != nil {
-			return 0, err
+			return err
 		}
-		if _, err = result.Consume(ctx); err != nil {
-			return 0, err
-		}
-		return time.Since(start), nil
+		_, err = result.Consume(ctx)
+		return err
 	}
 
 	// Prime the driver single-threaded first. One read initialises the neo4j
 	// driver's shared connector state (it lazily assigns Connector.SupplyConnection
 	// on the first Connect, unsynchronised in v5.28.4) and opens one pooled
-	// connection. Without this prime, the concurrent warm-up below would have
-	// many goroutines hit that cold-start lazy-init simultaneously, and the race
-	// detector would (correctly) flag the driver's own unsynchronised write.
-	if _, err := runRead(); err != nil {
+	// connection. Without this prime, the concurrent phase would have many
+	// goroutines hit that cold-start lazy-init simultaneously, and the race
+	// detector would (correctly) flag the driver's own unsynchronised write. The
+	// prime does not touch the rendezvous.
+	if err := runRead("RETURN 1 AS n"); err != nil {
 		t.Fatalf("priming read: %v", err)
 	}
 
-	// Warm the ENTIRE connection pool next. The baseline below warms only one
-	// pooled connection, but the concurrent phase needs `concurrency` of them;
-	// without this warm-up the concurrent phase pays to establish concurrency-1
-	// fresh Bolt connections (TCP + handshake + HELLO), which dominates the
-	// measurement and is unrelated to read parallelism.
-	var warm sync.WaitGroup
-	for i := 0; i < concurrency; i++ {
-		warm.Add(1)
-		go func() { defer warm.Done(); _, _ = runRead() }()
-	}
-	warm.Wait()
-
-	// Warm up: measure a single-read baseline (evicts cold-start latency).
-	baseline, err := runRead()
-	if err != nil {
-		t.Fatalf("baseline read: %v", err)
-	}
-	t.Logf("baseline single-read latency: %v", baseline)
-
-	// Concurrent phase: fire concurrency reads simultaneously.
-	type res struct {
-		dur time.Duration
-		err error
-	}
-	results := make([]res, concurrency)
+	// Concurrent phase: every read parks at the rendezvous inside execution.
+	t.Cleanup(rv.arm(rendezvousBound))
+	errs := make([]error, concurrency)
 	var wg sync.WaitGroup
-	start := time.Now()
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			d, e := runRead()
-			results[idx] = res{dur: d, err: e}
+			errs[idx] = runRead("UNWIND ['" + rendezvousArg + "'] AS s RETURN toString(s) AS v")
 		}(i)
 	}
 	wg.Wait()
-	total := time.Since(start)
 
-	for i, r := range results {
-		if r.err != nil {
-			t.Errorf("session %d error: %v", i, r.err)
+	arrived, peak := rv.observed()
+	t.Logf("%d reads reached the rendezvous; at most %d were inside execution at once (want %d)",
+		arrived, peak, concurrency)
+	if arrived == 0 {
+		t.Fatalf("no read reached the rendezvous, so the oracle observed no execution and proves "+
+			"nothing (errors: %v)", errs)
+	}
+	// A serialised server lets one read into execution at a time, so the others
+	// never arrive while it is parked: arrived < N is the same verdict as peak < N.
+	if peak != concurrency {
+		t.Fatalf("at most %d of %d concurrent autocommit reads were inside execution at once within %v "+
+			"(%d arrived): reads are serialised (errors: %v)", peak, concurrency, rendezvousBound, arrived, errs)
+	}
+	for i, e := range errs {
+		if e != nil {
+			t.Errorf("session %d error: %v", i, e)
 		}
 	}
-	if t.Failed() {
-		t.FailNow()
-	}
+}
 
-	limit := time.Duration(float64(baseline) * maxFactor)
-	t.Logf("%d concurrent reads finished in %v (limit %v, baseline %v)", concurrency, total, limit, baseline)
+// rendezvousArg is the argument that makes [rendezvousRegistry]'s toString park
+// at the rendezvous. Any other argument takes the built-in path unchanged.
+const rendezvousArg = "gograph-read-rendezvous"
 
-	// The strict assertion below is a ratio of two wall-clock windows measured
-	// SECONDS APART, so a load change between them reads as subject behaviour, and
-	// the property under test — that the read did not serialise behind the writer
-	// — depends on the parallelism actually available at that instant, which under
-	// `make ci` is not the core count (rmp #2573).
-	//
-	// It is guarded rather than replaced because the three instruments rmp #2573
-	// proposed are all unavailable, which was established by measurement rather
-	// than assumed:
-	//
-	//   - counting writeMu acquisitions is impossible: Engine.writeMu was retired
-	//     outright by rmp #2306 and no longer exists.
-	//   - no counter the module exposes concerns read/write overlap or lock
-	//     acquisition; the full set is MetricDeltaApplied, MetricExpandIntersect-
-	//     Engaged, MetricLookup*, MetricRefresh*, MetricRecompute, MetricRelabel-
-	//     Dirtied and the two MetricsSkippedEmptyRegistry pair.
-	//   - observed overlap cannot be measured CLIENT-SIDE, where this test sits: a
-	//     read BLOCKED on a lock is in flight exactly as much as one executing, so
-	//     if the server serialised them all N would still be simultaneously in
-	//     flight. The two regimes are indistinguishable from here.
-	//
-	// The soak-layer fallback the task offers would be pure coverage loss: soak is
-	// explicitly not a release gate, and this gate measured 0 failures in 8 runs
-	// under 300 CPU-bound processes on a 10-core host, ratios 1.05x-1.45x against
-	// its 6.0x limit. RequireQuietMachine keeps it gating every push, in the serial
-	// `make test-timing` phase where the two windows see the same machine.
-	//
-	// This REPLACES the testing.CoverMode() hatch that used to sit here. That hatch
-	// existed for the same distortion by a different cause, and `make cover-gate`
-	// now sets GOGRAPH_PARALLEL_SUITE too, so the guard subsumes it. Keeping both
-	// would be two mechanisms for one precondition.
-	testlayers.RequireQuietMachine(t, fmt.Sprintf(
-		"the ratio of %d concurrent reads (%v) against a serial baseline (%v) measured seconds earlier, "+
-			"limit %.1fx", concurrency, total, baseline, maxFactor))
-	if total > limit {
-		t.Errorf("concurrent reads took %v > %v (%.1f× baseline %v): reads appear to be serialised",
-			total, limit, float64(total)/float64(baseline), baseline)
+// readRendezvous holds up to want callers inside [readRendezvous.wait] until all
+// of them are there at once, and records the most it ever held simultaneously.
+//
+// Safe for concurrent use.
+type readRendezvous struct {
+	want    int
+	mu      sync.Mutex
+	arrived int
+	inside  int
+	peak    int
+	all     chan struct{}
+	expired chan struct{}
+}
+
+func newReadRendezvous(want int) *readRendezvous {
+	return &readRendezvous{want: want, all: make(chan struct{}), expired: make(chan struct{})}
+}
+
+// arm starts the bound after which parked callers give up, and returns the
+// function that stops it.
+func (r *readRendezvous) arm(bound time.Duration) (stop func()) {
+	tm := time.AfterFunc(bound, func() { close(r.expired) })
+	return func() { tm.Stop() }
+}
+
+// wait parks the caller until want callers are parked together, or until the
+// bound set by arm expires, in which case it returns an error.
+func (r *readRendezvous) wait() error {
+	r.mu.Lock()
+	r.arrived++
+	r.inside++
+	r.peak = max(r.peak, r.inside)
+	if r.arrived == r.want {
+		close(r.all)
 	}
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.inside--
+		r.mu.Unlock()
+	}()
+	select {
+	case <-r.all:
+		return nil
+	case <-r.expired:
+		return errors.New("read rendezvous: bound expired before every read arrived")
+	}
+}
+
+// observed returns how many callers arrived and the most held at once.
+func (r *readRendezvous) observed() (arrived, peak int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.arrived, r.peak
+}
+
+// rendezvousRegistry is the built-in function registry with toString wrapped so
+// that a call on [rendezvousArg] parks at rv first. It overrides a built-in
+// rather than adding a name because the semantic check accepts only built-in
+// function names. Safe for concurrent use, as inner and rv are.
+type rendezvousRegistry struct {
+	inner expr.FunctionRegistry
+	rv    *readRendezvous
+}
+
+// Resolve implements [expr.FunctionRegistry].
+func (r rendezvousRegistry) Resolve(name string) (expr.BuiltinFn, bool) {
+	fn, ok := r.inner.Resolve(name)
+	if !ok || name != "tostring" {
+		return fn, ok
+	}
+	return func(args []expr.Value) (expr.Value, error) {
+		if len(args) == 1 {
+			if s, isStr := args[0].(expr.StringValue); isStr && string(s) == rendezvousArg {
+				if err := r.rv.wait(); err != nil {
+					return nil, err
+				}
+			}
+		}
+		return fn(args)
+	}, true
 }
 
 // TestE2E_AutocommitReadDoesNotAcquireWriterLock verifies that a read-only

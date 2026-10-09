@@ -21,7 +21,7 @@ func TestDecode_ForgedLargePlen_TornNotHuge(t *testing.T) {
 	const plen = 256 << 20 // > framePayloadEagerCap, < maxFrameSize
 	payload := []byte("only-a-few-bytes-not-a-frame")
 	buf := make([]byte, HeaderSize+len(payload))
-	putCandidateHeader(buf, 0, CurrentVersion, plen, 0xDEADBEEF)
+	putCandidateHeader(buf, 0, LegacyVersion, plen, 0xDEADBEEF)
 	copy(buf[HeaderSize:], payload)
 
 	if _, err := Decode(bytes.NewReader(buf)); !errors.Is(err, ErrTornFrame) {
@@ -38,13 +38,13 @@ func TestDecode_ForgedLargePlen_MasksDataStillDetected(t *testing.T) {
 	// A real, CRC-valid inner frame with a tiny payload.
 	inner := []byte("committed")
 	innerFrame := make([]byte, HeaderSize+len(inner))
-	putCandidateHeader(innerFrame, 0, CurrentVersion, uint32(len(inner)), crc32Header(CurrentVersion, uint32(len(inner)), inner))
+	putCandidateHeader(innerFrame, 0, LegacyVersion, uint32(len(inner)), crc32Header(LegacyVersion, uint32(len(inner)), inner))
 	copy(innerFrame[HeaderSize:], inner)
 
 	// Outer frame over-declares plen but is backed only by the inner frame bytes.
 	const plen = 8 << 20 // > framePayloadEagerCap so it takes the grow path
 	buf := make([]byte, HeaderSize+len(innerFrame))
-	putCandidateHeader(buf, 0, CurrentVersion, plen, 0xFEEDFACE)
+	putCandidateHeader(buf, 0, LegacyVersion, plen, 0xFEEDFACE)
 	copy(buf[HeaderSize:], innerFrame)
 
 	if _, err := Decode(bytes.NewReader(buf)); !errors.Is(err, ErrTornFrameMasksData) {

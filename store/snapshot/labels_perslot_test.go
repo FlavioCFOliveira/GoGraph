@@ -84,8 +84,12 @@ func perSlotRecordCases() []perSlotRecordCase {
 						t.Fatal(err)
 					}
 				}
-				g.SetEdgeLabel("a", "b", "K")
-				g.SetEdgeLabel("a", "b", "M")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
+				if err := g.SetEdgeLabel("a", "b", "M"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			wantStrings: []string{"K", "M"},
 			wantSlots:   [][2]uint32{{0, 0}, {1, 0}, {EdgeLabelSlotOverflow, 1}},
@@ -102,8 +106,12 @@ func perSlotRecordCases() []perSlotRecordCase {
 				if err != nil {
 					t.Fatal(err)
 				}
-				g.SetEdgeLabel("a", "b", "K")
-				g.SetEdgeLabelByHandle("a", "b", h, "K")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
+				if err := g.SetEdgeLabelByHandle("a", "b", h, "K"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			wantStrings: []string{"K"},
 			wantSlots:   [][2]uint32{{0, 0}},
@@ -124,7 +132,9 @@ func perSlotRecordCases() []perSlotRecordCase {
 				if _, err := g.AddEdgeH("a", "b", 0); err != nil {
 					t.Fatal(err)
 				}
-				g.SetEdgeLabel("a", "b", "K")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
 				if err := g.AddEdgeLabeled("a", "b", 0, "M"); err != nil {
 					t.Fatal(err)
 				}
@@ -146,11 +156,15 @@ func perSlotRecordCases() []perSlotRecordCase {
 				if _, err := g.AddEdgeHIfAbsent("a", "b", 0, 900); err != nil {
 					t.Fatal(err)
 				}
-				g.SetEdgeLabel("a", "b", "K")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
 				if _, err := g.AddEdgeHIfAbsent("a", "b", 0, 100); err != nil {
 					t.Fatal(err)
 				}
-				g.SetEdgeLabel("a", "b", "M")
+				if err := g.SetEdgeLabel("a", "b", "M"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			wantStrings: []string{"K", "M"},
 			// Canonical order is [M(100), K(900)], so M is ordinal 0.

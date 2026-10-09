@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/goleak"
 
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 )
@@ -32,6 +33,10 @@ func TestSchemaChanger_AllFamiliesMeetContract(t *testing.T) {
 		fam    SchemaChangeFamily
 		modern bool
 	}{
+		// Absorbed drops first: neither object exists yet, so each must report
+		// no removal on the wire (rmp #2829, the #2818 shape over Bolt).
+		{SchemaDropIndex, false},
+		{SchemaDropConstraint, false},
 		{SchemaCreateIndex, false},
 		{SchemaDropIndex, false},
 		{SchemaCreateConstraint, false}, // legacy ON ... ASSERT ... IF NOT EXISTS
@@ -47,13 +52,16 @@ func TestSchemaChanger_AllFamiliesMeetContract(t *testing.T) {
 		if err := c.Connect(context.Background()); err != nil {
 			t.Fatalf("%s Connect: %v", r.fam, err)
 		}
-		out, err := a.Run(c, r.fam, r.modern)
+		out, violations, err := a.RunChecked(srv, c, r.fam, r.modern)
 		_ = c.Close()
 		if err != nil {
 			t.Fatalf("%s (modern=%t) Run: %v", r.fam, r.modern, err)
 		}
 		if !out.MeetsContract() {
 			t.Errorf("%s (modern=%t): contract-breaching outcome %+v", r.fam, r.modern, out)
+		}
+		for _, v := range violations {
+			t.Errorf("%s (modern=%t): wire DDL counters: %s", r.fam, r.modern, v.Message)
 		}
 	}
 }
@@ -95,12 +103,16 @@ func TestSchemaChanger_IfNotExistsRecreateSucceeds(t *testing.T) {
 		{"re-create constraint (modern)", SchemaCreateConstraint, true},
 	}
 	for _, s := range steps {
-		out, err := a.Run(c, s.fam, s.modern)
+		out, violations, err := a.RunChecked(srv, c, s.fam, s.modern)
 		if err != nil {
 			t.Fatalf("%s: %v", s.name, err)
 		}
 		if !out.Succeeded {
 			t.Fatalf("%s: want idempotent SUCCESS, got %+v", s.name, out)
+		}
+		// The re-creates are absorbed: their wire counters must report nothing.
+		for _, v := range violations {
+			t.Errorf("%s: wire DDL counters: %s", s.name, v.Message)
 		}
 	}
 }
@@ -360,5 +372,46 @@ func TestSchemaChanger_FamiliesReproducible(t *testing.T) {
 		if first[i] != second[i] {
 			t.Fatalf("draw diverged at %d: %s vs %s", i, first[i], second[i])
 		}
+	}
+}
+
+// TestWireDDLCounters_DecodingIsStrict pins the decoder the wire DDL counters
+// adjudication reads the terminal SUCCESS through (rmp #2829): a well-formed
+// stats map decodes to its counters, an absent map to nil, and every malformed
+// shape — an unknown key, a non-integer counter, a contains-updates flag that is
+// missing, false, or disagrees with the counters — is an error rather than a
+// silently clean report.
+func TestWireDDLCounters_DecodingIsStrict(t *testing.T) {
+	t.Parallel()
+	success := func(stats map[string]packstream.Value) *proto.Success {
+		meta := map[string]packstream.Value{}
+		if stats != nil {
+			meta["stats"] = stats
+		}
+		return &proto.Success{Metadata: meta}
+	}
+
+	got, err := wireDDLCounters(success(map[string]packstream.Value{"indexes-removed": int64(1), "contains-updates": true}))
+	if err != nil || got == nil || got.IndexesRemoved != 1 || got.IndexesAdded != 0 {
+		t.Fatalf("well-formed stats: got %+v, %v; want IndexesRemoved=1", got, err)
+	}
+	if got, err := wireDDLCounters(success(nil)); err != nil || got != nil {
+		t.Fatalf("absent stats: got %+v, %v; want nil, nil", got, err)
+	}
+
+	bad := map[string]map[string]packstream.Value{
+		"unknown key":              {"indexes-dropped": int64(1), "contains-updates": true},
+		"non-integer counter":      {"indexes-added": "1", "contains-updates": true},
+		"missing contains-updates": {"indexes-added": int64(1)},
+		"false contains-updates":   {"indexes-added": int64(1), "contains-updates": false},
+		"flag without a counter":   {"contains-updates": true},
+	}
+	for name, stats := range bad {
+		if got, err := wireDDLCounters(success(stats)); err == nil {
+			t.Errorf("%s: decoded to %+v, want an error", name, got)
+		}
+	}
+	if _, err := wireDDLCounters(&proto.Failure{Code: "x"}); err == nil {
+		t.Error("a FAILURE terminal decoded without error")
 	}
 }

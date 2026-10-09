@@ -160,9 +160,12 @@ type MVCCSessionsResult struct {
 	// counts transactions that were OPEN when a crash landed and therefore
 	// died unacknowledged — their effects must be absent after recovery.
 	// ReplayedOps totals the WAL operations recovery replayed.
-	Crashes     int
-	TxCrashed   int
-	ReplayedOps int
+	Crashes   int
+	TxCrashed int
+	// NodeIDsCompared counts the surviving nodes the NodeID stability oracle
+	// compared across the run's recoveries (WAL v2 step 3, nodeid_stability.go).
+	NodeIDsCompared int
+	ReplayedOps     int
 	// OverlapTicks counts ticks at which >= 2 transactions were open at once;
 	// WriteOverlapTicks counts ticks with >= 2 WRITE transactions open. A run
 	// that never overlaps proves nothing about MVCC — the gates assert these
@@ -415,6 +418,7 @@ func (h *mvccHarness) maybeCrash(tick int64) error {
 	// HOST crash: no graceful close; every byte no successful fsync covered and
 	// every not-yet-durable directory entry are lost, exactly as a power failure
 	// loses them ([SimDisk.Crash] is [SimDisk.CrashHost]).
+	idsBefore := liveNodeIDs(h.store.Graph())
 	h.disk.Crash()
 	store, err := OpenSimStore(h.disk, h.store.Config())
 	if err != nil {
@@ -450,6 +454,9 @@ func (h *mvccHarness) maybeCrash(tick int64) error {
 		return nil
 	}
 	h.res.Violations = append(h.res.Violations, h.crashPairSweep(tick)...)
+	n, idViolations := checkNodeIDStability(tick, idsBefore, store.Graph())
+	h.res.NodeIDsCompared += n
+	h.res.Violations = append(h.res.Violations, idViolations...)
 	return nil
 }
 
@@ -662,7 +669,7 @@ func (h *mvccHarness) nameDiff(tick int64) []Violation {
 			id := graph.NodeID(nodeID)
 			snap := g.BeginRead()
 			state := fmt.Sprintf("tombstoned=%v existsPresent=%v existsSnap=%v",
-				g.IsTombstoned(id), g.NodeExistsAsOf(id, nil), g.NodeExistsAsOf(id, snap))
+				g.IsTombstonedStored(id), g.NodeExistsAsOf(id, nil), g.NodeExistsAsOf(id, snap))
 			g.EndRead(snap)
 			out = append(out, Violation{Tick: tick, Op: "name diff", Kind: ViolationACIDConsistency,
 				Message: fmt.Sprintf("engine holds a non-Person node (id=%d name=%q, %s) the workload never creates", nodeID, name, state)})
@@ -706,7 +713,7 @@ func (h *mvccHarness) lpgState(name string) string {
 	existsSnap := g.NodeExistsAsOf(id, snap)
 	g.EndRead(snap)
 	return fmt.Sprintf("id=%d tombstoned=%v existsPresent=%v existsSnap=%v",
-		id, g.IsTombstoned(id), g.NodeExistsAsOf(id, nil), existsSnap)
+		id, g.IsTombstonedStored(id), g.NodeExistsAsOf(id, nil), existsSnap)
 }
 
 // observeOverlap updates the overlap counters for the current tick.

@@ -73,7 +73,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -342,7 +341,7 @@ func RunTxnOversizeProducer(ctx context.Context, cfg TxnOversizeConfig) (TxnOver
 			Name:        step.name,
 			Ops:         step.ops,
 			WALBefore:   len(before),
-			OrderBefore: st.graph.LiveOrder(),
+			OrderBefore: st.graph.LiveOrderStored(),
 		}
 
 		tx, berr := st.store.BeginCtx(ctx)
@@ -375,7 +374,7 @@ func RunTxnOversizeProducer(ctx context.Context, cfg TxnOversizeConfig) (TxnOver
 		}
 		attempt.WALAfter = len(after)
 		attempt.WALIdentical = bytes.Equal(before, after)
-		attempt.OrderAfter = st.graph.LiveOrder()
+		attempt.OrderAfter = st.graph.LiveOrderStored()
 		ev.Attempts = append(ev.Attempts, attempt)
 		ev.MaxAttemptOps = max(ev.MaxAttemptOps, step.ops)
 	}
@@ -392,7 +391,7 @@ func RunTxnOversizeProducer(ctx context.Context, cfg TxnOversizeConfig) (TxnOver
 	defer func() { _ = re.Close() }()
 
 	ev.ReopenClean = re.clean
-	ev.RecoveredOrder = re.graph.LiveOrder()
+	ev.RecoveredOrder = re.graph.LiveOrderStored()
 	slices.Sort(model)
 	slices.Sort(refused)
 	ev.ModelKeys = model
@@ -433,7 +432,7 @@ func txnOversizeWALImage(disk *SimDisk, path string) ([]byte, error) {
 	if !disk.Exists(path) {
 		return nil, nil
 	}
-	b, err := disk.ReadFile(path)
+	b, err := simWALFrameImage(disk, path, disk.ReadFile)
 	if err != nil {
 		return nil, fmt.Errorf("sim: txn-oversize read WAL image: %w", err)
 	}
@@ -784,7 +783,7 @@ func RunTxnOversizeReplay(ctx context.Context, seed uint64) (TxnOversizeReplayEv
 		}
 		arm.Clean = res.IsClean()
 		arm.WALOps = res.WALOps
-		arm.Order = g.LiveOrder()
+		arm.Order = g.LiveOrderStored()
 
 		// (2) The harness store-open path over the same image: an embedder must
 		// refuse to append onto a fail-stop, never swallow it.
@@ -808,11 +807,10 @@ func txnOversizeReplay(
 	ctx context.Context, disk *SimDisk, path string, scfg simStoreConfig, capOps int,
 ) (recovery.ReplayResult, *lpg.Graph[string, float64], error) {
 	g := lpg.New[string, float64](scfg.graphConfig)
-	rh, err := disk.OpenFile(path, os.O_RDONLY)
+	reader, err := wal.OpenLogFS(simLogFS{disk: disk}, path)
 	if err != nil {
 		return recovery.ReplayResult{}, g, fmt.Errorf("sim: txn-oversize open crafted WAL: %w", err)
 	}
-	reader := wal.NewReader(rh, rh)
 	res, rerr := recovery.ReplayWAL[string, float64](
 		ctx, reader, g, txn.NewStringCodec(), txn.NewFloat64WeightCodec(),
 		resolveSimMaxTxnOps(capOps),

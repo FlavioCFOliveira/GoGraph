@@ -1,0 +1,82 @@
+spec dd05-unique-under-open-duplicate-commit: 2 sessions, 3 permutations
+# DD05 (G9), commit arm. 1 101 :K nodes, one with k = 'a'. s1 opens and creates a
+# second k = 'a'; s2 creates a UNIQUE constraint on (:K).k in an autocommit statement.
+# No committed state may violate the constraint: either the DDL is refused (the
+# duplicate committed first) or s1 is (its statement after the DDL, or its COMMIT
+# straddling it). The backfill and the value-set must read a committed state, so
+# s1's uncommitted duplicate never refuses the DDL.
+
+starting permutation: s1w s1c s2ddl
+step s1w: CREATE (n:K {k:'a', v:'dup'}) RETURN n.k AS k
+k  
+---
+"a"
+(1 row)
+step s1c: COMMIT
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create UNIQUE constraint on (:K).k: exec: constraint violation: UNIQUE constraint on (K).k: pre-existing data contains duplicate value "a"
+final fa: MATCH (n:K {k:'a'}) RETURN n.v AS v ORDER BY v
+v     
+------
+"dup" 
+"orig"
+(2 rows)
+final fseek: MATCH (n:K {k:'a'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'a' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s1w s2ddl s1c
+step s1w: CREATE (n:K {k:'a', v:'dup'}) RETURN n.k AS k
+k  
+---
+"a"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+step s1c: COMMIT
+ERROR: constraint "k_unique": exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+final fa: MATCH (n:K {k:'a'}) RETURN n.v AS v ORDER BY v
+v     
+------
+"orig"
+(1 row)
+final fseek: MATCH (n:K {k:'a'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'a' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.k|             
+constraint|k_unique   |UNIQUE (:K).k
+(2 rows)
+
+starting permutation: s2ddl s1w s1c
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+step s1w: CREATE (n:K {k:'a', v:'dup'}) RETURN n.k AS k
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final fa: MATCH (n:K {k:'a'}) RETURN n.v AS v ORDER BY v
+v     
+------
+"orig"
+(1 row)
+final fseek: MATCH (n:K {k:'a'}) WITH count(n) AS seek OPTIONAL MATCH (m:K) WHERE m.k + '' = 'a' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.k|             
+constraint|k_unique   |UNIQUE (:K).k
+(2 rows)

@@ -56,7 +56,7 @@ import (
 //     concurrent append must not step over.
 //
 // The rules, as revised by the rmp #2445 decision (the original table let
-// appends commute; see [adjVersions.checkAppend] for the entry-snapshot
+// appends commute; see [adjVersions.claimAppend] for the entry-snapshot
 // embedding that retired it):
 //
 //	append(A→B)      conflicts iff conflicts(exclusiveTS(A)) or conflicts(appendTS(A))
@@ -89,19 +89,96 @@ const adjVersionShards = 64
 
 // adjStamps is one node's pair of adjacency write stamps.
 //
-// Each side is held either as a raw timestamp (a published write) or as the
-// *[commitInfo] of the transaction that made it (still in flight), exactly as
-// every other versioned store here does — an in-flight write's effective instant
-// is its transaction id until the record publishes, and reading it through the
-// record is what makes the transition atomic for a concurrent checker.
+// Each side holds the *[commitInfo] of the transaction that made the write, or
+// nil when no write is recorded on it. The side's effective instant is the
+// record's: the transaction id while it is in flight, the commit timestamp once
+// it publishes, [mvcc.AbortedTS] once it aborts. Reading it through the record is
+// what makes the transition atomic for a concurrent checker. Every stamp is
+// written with the transaction's record, never a raw timestamp, so a side needs
+// no timestamp field of its own (rmp #3059).
 type adjStamps struct {
 	appendInfo    *commitInfo
 	exclusiveInfo *commitInfo
-	appendTS      uint64
-	exclusiveTS   uint64
+	// floorTS is the newest COMMIT timestamp a stamp displaced from either side,
+	// or zero. Every check tests it beside the two sides; see [adjStamps.set].
+	floorTS uint64
 }
 
-// ts resolves one side's effective instant.
+// set records rec (tx's commit record) on one side — info is that side's field —
+// first folding the value it displaces into floorTS when that value is a
+// COMMITTED write of another transaction.
+//
+// # Why a displaced commit must outlive its slot (rmp #2997)
+//
+// Each side is ONE slot, so a write that stamps a node overwrites the stamp it
+// found. A commit is only overwritten by a transaction that can see it, so the
+// overwrite loses nothing while the overwriter lives: in flight it refuses every
+// other writer, and once committed its own instant is later than the one it
+// replaced. But when the overwriter ABORTS, [adjVersionShard.clearAbortedLocked]
+// clears its side, and with nothing else recording it the displaced commit was
+// gone: a transaction whose snapshot predates that commit then found the node
+// unstamped and wrote over a change it never saw. Measured on the Cypher path as
+// a committed DETACH DELETE of a hub beside the incoming arcs a peer committed
+// after the deleter's snapshot — the deleter's snapshot lists no such arc to
+// remove, and the stamp that should have refused its claim on the hub had been
+// wiped by an appender refused at the hub's death claim (an append claims the
+// hub, then loses the existence cross-check and aborts).
+//
+// The floor keeps the newest such commit for as long as the entry lives, which is
+// exactly the answer the lost predecessor would have given: every check tests the
+// two sides and the floor alike, so a node conflicts for tx iff some write it
+// still records — the current ones or any displaced commit — is invisible to tx.
+// It refuses nothing a kept slot would not have refused, because a displaced
+// commit is older than the in-flight or committed stamp that displaced it. Memgraph
+// reaches the same end by unlinking an aborted transaction's deltas from the
+// object's chain, which leaves the older committed delta at the head for
+// PrepareForWrite to test (memgraph/memgraph @ 6e9c79d,
+// src/storage/v2/inmemory/storage.cpp, InMemoryAccessor::Abort, the edge pass
+// setting the head to the first delta past the aborted ones; mvcc.hpp
+// PrepareForWrite).
+//
+// A displaced write of the same transaction, an aborted one, and a still
+// in-flight one of another transaction are not folded: the first is replaced by
+// the same record, the second protects nothing, and the third is reachable only
+// by a write that skips the test — an undo replay or [adjVersions.stampAppend] on
+// a node this transaction is creating — whose displaced writer is refused by the
+// existence cross-check of the node it is racing to create.
+func (e *adjStamps) set(info **commitInfo, rec *commitInfo) {
+	if *info != rec {
+		if h := stampTS(*info); h != 0 && h < mvcc.TxIDBase && h > e.floorTS {
+			e.floorTS = h
+		}
+	}
+	*info = rec
+}
+
+// blocking returns the instant of the first write recorded in e that tx may not
+// write over — the exclusive side, the append side, then the floor of displaced
+// commits ([adjStamps.set]) — or false when there is none.
+func (e *adjStamps) blocking(tx *writeCtx) (uint64, bool) {
+	if head := stampTS(e.exclusiveInfo); tx.conflicts(head) {
+		return head, true
+	}
+	if head := stampTS(e.appendInfo); tx.conflicts(head) {
+		return head, true
+	}
+	if e.floorTS != 0 && tx.conflicts(e.floorTS) {
+		return e.floorTS, true
+	}
+	return 0, false
+}
+
+// stampTS resolves one [adjStamps] side's effective instant, or zero when the
+// side records no write.
+func stampTS(info *commitInfo) uint64 {
+	if info != nil {
+		return info.TS()
+	}
+	return 0
+}
+
+// adjEffective resolves the effective instant of a stamp held as a record or a
+// raw timestamp.
 func adjEffective(info *commitInfo, ts uint64) uint64 {
 	if info != nil {
 		return info.TS()
@@ -116,6 +193,53 @@ func adjEffective(info *commitInfo, ts uint64) uint64 {
 type adjVersionShard struct {
 	d  map[graph.NodeID]*adjStamps
 	mu sync.Mutex
+	// grown records that d has held more than [adjKeepEntries] entries since it
+	// was allocated; see [adjVersionShard.releaseIfEmptyLocked].
+	grown bool
+}
+
+// adjKeepEntries is the largest map an emptied shard keeps for reuse.
+//
+// A direct write is an implicit transaction that publishes at once, so the next
+// vacuum pass finds every stamp it made below the watermark and empties the
+// shard. Releasing the emptied map made the next write on that shard allocate a
+// new one: measured at one map allocation per 3.5 direct writes on an
+// AddEdge+SetEdgeLabel build (rmp #3025). An emptied map is kept instead, but
+// only while it has never held more than this many entries: Go maps do not
+// shrink, so a map that once grew past one group is released as before, and
+// the memory an idle graph keeps is bounded by one smallest map per shard.
+const adjKeepEntries = 8
+
+// entryLocked returns id's stamps, creating an empty entry when there is none.
+// The caller holds the shard lock.
+func (sh *adjVersionShard) entryLocked(id graph.NodeID) *adjStamps {
+	if e := sh.d[id]; e != nil {
+		return e
+	}
+	return sh.newEntryLocked(id)
+}
+
+// newEntryLocked creates an empty entry for id, which has none, allocating the
+// shard's map when it has been released. The caller holds the shard lock.
+func (sh *adjVersionShard) newEntryLocked(id graph.NodeID) *adjStamps {
+	e := &adjStamps{}
+	if sh.d == nil {
+		sh.d = make(map[graph.NodeID]*adjStamps, adjKeepEntries)
+	}
+	sh.d[id] = e
+	if len(sh.d) > adjKeepEntries {
+		sh.grown = true
+	}
+	return e
+}
+
+// releaseIfEmptyLocked drops an emptied map that has grown past
+// [adjKeepEntries] and keeps a smaller one for the next write (rmp #3025). The
+// caller holds the shard lock.
+func (sh *adjVersionShard) releaseIfEmptyLocked() {
+	if len(sh.d) == 0 && sh.grown {
+		sh.d, sh.grown = nil, false
+	}
 }
 
 // adjVersions is the per-node adjacency conflict index.
@@ -135,12 +259,18 @@ type adjVersions struct {
 // low bits alone would send a contiguous batch of freshly created nodes — exactly
 // what a bulk CREATE produces — to the same handful of shards.
 func (av *adjVersions) shard(id graph.NodeID) *adjVersionShard {
-	h := uint64(id) * 0x9E3779B97F4A7C15
-	return &av.shards[(h>>58)%adjVersionShards]
+	return &av.shards[av.shardIndex(id)]
 }
 
-// checkAppend reports the conflict an adjacency append to src would hit, or
-// nil. It records nothing.
+// shardIndex is the index of the shard [adjVersions.shard] selects for id.
+func (av *adjVersions) shardIndex(id graph.NodeID) int {
+	h := uint64(id) * 0x9E3779B97F4A7C15
+	return int((h >> 58) % adjVersionShards)
+}
+
+// claimAppend tests an adjacency append to src, which already exists, and stamps
+// it in one step under src's shard lock, returning the conflict it hit, or nil.
+// A refused claim records nothing.
 //
 // BOTH sides can refuse an append (rmp #2445). The exclusive side always
 // could. The append side used to be exempt — "a concurrent append is
@@ -156,44 +286,127 @@ func (av *adjVersions) shard(id graph.NodeID) *adjVersionShard {
 // head is not visible to the writer, edge inserts included
 // (src/storage/v2/mvcc.hpp, read 2026-08-02).
 //
-// Check and record are SEPARATE because they happen either side of the mutation,
-// and for different reasons. The check must precede the insert so a doomed
-// transaction leaves the adjacency untouched; the record must follow it because
-// an append may CREATE its source node, whose id does not exist until the insert
-// has run. Stamping before the insert therefore silently skipped every
-// edge-creates-its-endpoint write — which is most of a bulk CREATE — and left
-// those nodes with no stamp for a later removal to see.
-// TestConflict_AdjacencyStampsAreReclaimed caught exactly that.
+// Test and stamp are ONE observation (rmp #2947): of two appenders to the same
+// node exactly one passes and the other sees its stamp. They used to be two —
+// the test before the insert, the stamp after it — and a second appender that
+// passed the test in between went on to create any endpoint it was adding
+// before the entry itself refused it, and an aborted creation leaves that key
+// tombstoned. The stamp still FOLLOWS the insert for a node the append creates,
+// whose id does not exist before it: [adjVersions.stampAppend]. Stamping only
+// before the insert silently skipped every edge-creates-its-endpoint write —
+// which is most of a bulk CREATE — and left those nodes with no stamp for a
+// later removal to see. TestConflict_AdjacencyStampsAreReclaimed caught exactly
+// that.
 //
-// A nil tx — a direct Go-API mutation outside any transaction — never conflicts:
-// it is committed the instant it is made, so there is no window in which another
-// transaction could displace it.
-func (av *adjVersions) checkAppend(src graph.NodeID, tx *writeCtx) error {
-	if tx == nil || tx.undoing.Load() {
-		// An UNDO-replay append is the withdrawal of this transaction's own
-		// arc removal: it re-adds exactly what the transaction took out, which
-		// commutes with every other transaction's writes the way the forward
-		// append did. It cannot be refused — the transaction is already
-		// rolling back and a skipped inverse leaves its forward write applied
-		// (rmp #2445: the adjacency is the one store where another
-		// transaction's COMMUTING append legitimately moves the head this
-		// transaction wrote under, so the head test refuses an inverse the
-		// [writeCtx.undoing] doomed-shortcut exemption was designed to admit).
+// An UNDO-replay append is the withdrawal of this transaction's own arc removal:
+// it re-adds exactly what the transaction took out, which commutes with every
+// other transaction's writes the way the forward append did. It is never refused
+// — the transaction is already rolling back and a skipped inverse leaves its
+// forward write applied (rmp #2445: the adjacency is the one store where another
+// transaction's COMMUTING append legitimately moves the head this transaction
+// wrote under, so the head test refuses an inverse the [writeCtx.undoing]
+// doomed-shortcut exemption was designed to admit) — and it is still stamped,
+// so later writers order against the rollback's publication.
+//
+// A nil tx — a write on a disarmed graph — records nothing and never conflicts.
+func (av *adjVersions) claimAppend(src graph.NodeID, tx *writeCtx) error {
+	if tx == nil {
 		return nil
 	}
 	sh := av.shard(src)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-
 	e := sh.d[src]
+	if e != nil && !tx.undoing.Load() {
+		if head, ok := e.blocking(tx); ok {
+			return tx.conflictErr(mvcc.StoreAdjacency, head)
+		}
+	}
 	if e == nil {
+		e = sh.newEntryLocked(src)
+	}
+	e.set(&e.appendInfo, tx.record())
+	tx.tx.Touch(touchedAdjClaims)
+	tx.noteSide(sideAdjClaim, uint64(src), 0, 0)
+	return nil
+}
+
+// claimAppendPair is [adjVersions.claimAppend] for the existing endpoints of one
+// append, in ONE test-then-stamp step: it takes both endpoints' shard locks in
+// ascending shard order, tests both, and stamps both only when neither refuses.
+// ids[:n] are the endpoints (n is 0, 1 or 2; a pair in one shard is locked once).
+//
+// Testing both before stamping either is what lets a refused append allocate
+// nothing (rmp #2965, audit finding 4): a stamp needs the transaction's commit
+// record, so claiming the source and then being refused on the destination
+// used to allocate a record, and a direct write's implicit transaction then had
+// to abort with one, which wakes the abort withdrawal and the vacuum. Refused
+// here, the transaction has written nothing and simply ends.
+//
+// Lock order: two shards of this index are only ever held together here, in
+// ascending order, and no other lock is taken while they are held.
+func (av *adjVersions) claimAppendPair(ids [2]graph.NodeID, n int, tx *writeCtx) error {
+	if tx == nil || n == 0 {
 		return nil
 	}
-	if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
-		return tx.conflictErr(mvcc.StoreAdjacency, head)
+	if n == 1 {
+		return av.claimAppend(ids[0], tx)
 	}
-	if head := adjEffective(e.appendInfo, e.appendTS); tx.conflicts(head) {
-		return tx.conflictErr(mvcc.StoreAdjacency, head)
+	i0, i1 := av.shardIndex(ids[0]), av.shardIndex(ids[1])
+	lo, hi := i0, i1
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	av.shards[lo].mu.Lock()
+	defer av.shards[lo].mu.Unlock()
+	if hi != lo {
+		av.shards[hi].mu.Lock()
+		defer av.shards[hi].mu.Unlock()
+	}
+	if !tx.undoing.Load() {
+		for _, id := range ids {
+			e := av.shards[av.shardIndex(id)].d[id]
+			if e == nil {
+				continue
+			}
+			if head, ok := e.blocking(tx); ok {
+				return tx.conflictErr(mvcc.StoreAdjacency, head)
+			}
+		}
+	}
+	rec := tx.record()
+	for _, id := range ids {
+		e := av.shards[av.shardIndex(id)].entryLocked(id)
+		e.set(&e.appendInfo, rec)
+		tx.noteSide(sideAdjClaim, uint64(id), 0, 0)
+	}
+	tx.tx.Touch(touchedAdjClaims)
+	return nil
+}
+
+// admits tests, WITHOUT stamping, whether tx may write the adjacency of each
+// of the nodes ids[:n], and returns the conflict it hit, or nil. It is the test
+// [adjVersions.claimAppendPair] and [adjVersions.noteExclusive] make before they
+// stamp, for a write that has found, in the STORED entry, nothing to do: such a
+// verdict must not rest on another transaction's uncommitted entry (ACID audit
+// round 6, finding C1), and recording a stamp for a write that changes nothing
+// would turn it into an effect. The undo replay is exempt, as it is from the
+// claims. A nil tx never conflicts.
+func (av *adjVersions) admits(ids [2]graph.NodeID, n int, tx *writeCtx) error {
+	if tx == nil || tx.undoing.Load() {
+		return nil
+	}
+	for _, id := range ids[:n] {
+		sh := av.shard(id)
+		sh.mu.Lock()
+		e := sh.d[id]
+		if e != nil {
+			if head, ok := e.blocking(tx); ok {
+				sh.mu.Unlock()
+				return tx.conflictErr(mvcc.StoreAdjacency, head)
+			}
+		}
+		sh.mu.Unlock()
 	}
 	return nil
 }
@@ -201,7 +414,7 @@ func (av *adjVersions) checkAppend(src graph.NodeID, tx *writeCtx) error {
 // stampAppend records that tx appended an arc from src.
 //
 // The stamp is what a later append or exclusive write on this node tests in
-// [adjVersions.checkAppend] / [adjVersions.noteExclusive]: since rmp #2445 an
+// [adjVersions.claimAppend] / [adjVersions.noteExclusive]: since rmp #2445 an
 // append conflicts with a foreign in-flight (or invisible-committed) append on
 // the same node, because adjacency entries are immutable snapshots that embed
 // whatever the slot held when they were built. See the file comment.
@@ -215,15 +428,10 @@ func (av *adjVersions) stampAppend(src graph.NodeID, tx *writeCtx) {
 	sh := av.shard(src)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	e := sh.d[src]
-	if e == nil {
-		e = &adjStamps{}
-		if sh.d == nil {
-			sh.d = make(map[graph.NodeID]*adjStamps, 8)
-		}
-		sh.d[src] = e
-	}
-	e.appendInfo, e.appendTS = tx.record(), tx.txID
+	e := sh.entryLocked(src)
+	e.set(&e.appendInfo, tx.record())
+	tx.tx.Touch(touchedAdjClaims)
+	tx.noteSide(sideAdjClaim, uint64(src), 0, 0)
 }
 
 // noteExclusive records a non-commutative adjacency write to src by tx — an arc
@@ -251,25 +459,21 @@ func (av *adjVersions) noteExclusive(src graph.NodeID, tx *writeCtx) error {
 		// claim below is still stamped, so later writers order against the
 		// rollback's publication exactly as against any other write.
 		if !tx.undoing.Load() {
-			if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
-				return tx.conflictErr(mvcc.StoreAdjacency, head)
-			}
-			if head := adjEffective(e.appendInfo, e.appendTS); tx.conflicts(head) {
+			if head, ok := e.blocking(tx); ok {
 				return tx.conflictErr(mvcc.StoreAdjacency, head)
 			}
 		}
 	} else {
-		e = &adjStamps{}
-		if sh.d == nil {
-			sh.d = make(map[graph.NodeID]*adjStamps, 8)
-		}
-		sh.d[src] = e
+		e = sh.newEntryLocked(src)
 	}
-	e.exclusiveInfo, e.exclusiveTS = tx.record(), tx.txID
+	e.set(&e.exclusiveInfo, tx.record())
+	tx.tx.Touch(touchedAdjClaims)
+	tx.noteSide(sideAdjClaim, uint64(src), 0, 0)
 	return nil
 }
 
-// truncate drops every entry whose BOTH sides are at or below watermark.
+// truncate drops every entry whose BOTH sides and floor are at or below
+// watermark.
 //
 // Those stamps can no longer refuse anything: [mvcc.Conflicts] is false for a
 // head below any live transaction's start, so keeping the entry only costs
@@ -283,16 +487,14 @@ func (av *adjVersions) truncate(watermark uint64) (freed int) {
 		sh := &av.shards[i]
 		sh.mu.Lock()
 		for id, e := range sh.d {
-			a := adjEffective(e.appendInfo, e.appendTS)
-			x := adjEffective(e.exclusiveInfo, e.exclusiveTS)
-			if a <= watermark && x <= watermark {
+			a := stampTS(e.appendInfo)
+			x := stampTS(e.exclusiveInfo)
+			if a <= watermark && x <= watermark && e.floorTS <= watermark {
 				delete(sh.d, id)
 				freed++
 			}
 		}
-		if len(sh.d) == 0 {
-			sh.d = nil
-		}
+		sh.releaseIfEmptyLocked()
 		sh.mu.Unlock()
 	}
 	return freed

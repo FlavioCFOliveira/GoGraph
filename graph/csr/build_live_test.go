@@ -44,7 +44,9 @@ func TestBuildLive_NoGhostEdgesAfterTombstone_1790(t *testing.T) {
 	}
 
 	// Tombstone b WITHOUT stripping its incident edges (the direct-Go-API path).
-	g.RemoveNode("b")
+	if err := g.RemoveNode("b"); err != nil {
+		t.Fatalf("g.RemoveNode(\"b\"): %v", err)
+	}
 	bID, ok := g.AdjList().Mapper().Lookup("b")
 	if !ok {
 		t.Fatal("expected b to remain interned (NodeID stability)")
@@ -69,8 +71,16 @@ func TestBuildLive_NoGhostEdgesAfterTombstone_1790(t *testing.T) {
 }
 
 func TestBuildLive_NilFilterMatchesRaw_1790(t *testing.T) {
-	// On a tombstone-free graph, LiveNodeFilter returns nil and the live build
-	// is byte-identical to the raw build (zero-overhead fast path).
+	// On a tombstone-free graph the live build is identical to the raw build.
+	//
+	// The filter itself is NOT asserted nil. On a versioned graph every write,
+	// a plain AddNode included, runs as an implicit transaction and leaves a
+	// birth record until reclamation, and LiveNodeFilter answers at the newest
+	// committed state, so it returns a predicate while those records are
+	// retained. A retained record cannot tell an in-flight creation from a
+	// committed one without visiting it, so the nil fast path is kept only
+	// where no record exists; the contract asserted here is the build outcome,
+	// and that every node reads live.
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 	for _, k := range []string{"x", "y", "z"} {
 		_ = g.AddNode(k)
@@ -80,7 +90,12 @@ func TestBuildLive_NilFilterMatchesRaw_1790(t *testing.T) {
 	_ = g.AddEdge("x", "z", 3)
 
 	if f := g.LiveNodeFilter(); f != nil {
-		t.Fatalf("LiveNodeFilter on a tombstone-free graph must be nil, got non-nil")
+		for _, k := range []string{"x", "y", "z"} {
+			id, _ := g.AdjList().Mapper().Lookup(k)
+			if !f(id) {
+				t.Fatalf("LiveNodeFilter on a tombstone-free graph reports %q (id=%d) dead", k, id)
+			}
+		}
 	}
 	raw := csr.BuildFromAdjList(g.AdjList())
 	live := csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())

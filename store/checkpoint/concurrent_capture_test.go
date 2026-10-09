@@ -72,14 +72,11 @@ func TestCapture_IsOneInstantWhileWritersCommit(t *testing.T) {
 	// EXCLUSIVELY just long enough to open the instant. Nothing else is done under
 	// it — the serialisation below runs with it released, while writers commit.
 	//
-	// It is not scaffolding to make the test pass. Opening an instant while a write
-	// transaction is still open is precisely what [snapshot.ErrCaptureNotQuiesced]
-	// forbids, because an id interned by that transaction sits BELOW ids later
-	// transactions have already interned and committed, and dropping it leaves a
-	// hole the recovered mapper rejects. Production gets this from
-	// txn.Store.RunUnderCommitLock, which closes admission and drains; a test
-	// driving lpg directly has to provide it, and this is the same guarantee in the
-	// smallest form.
+	// It mirrors production: txn.Store.RunUnderCommitLock closes admission and drains
+	// before the instant is opened, so the watermark and the instant name one
+	// transaction boundary. (It was once also needed so that no id interned by an
+	// open transaction sat below committed ones, which the capture refused; since
+	// WAL v2 step 1 such an id is a hole in the image and the capture accepts it.)
 	var quiesce sync.RWMutex
 	for wtr := 0; wtr < 4; wtr++ {
 		wg.Add(1)

@@ -9,9 +9,11 @@ package isolationtest
 // instrument, so its own edges are tested rather than assumed.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math/big"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -45,10 +47,15 @@ func TestValidateRejectsMalformedSpecs(t *testing.T) {
 		}}, "unnamed step"},
 		{"step with neither body", &Spec{Name: "x", Sessions: []*Session{
 			{Name: "s", Steps: []Step{{Name: "a"}}},
-		}}, "exactly one of Query, Ctl and Hook"},
+		}}, "exactly one of Query, Ctl, Hook and Probe"},
 		{"step with two bodies", &Spec{Name: "x", Sessions: []*Session{
 			{Name: "s", Steps: []Step{{Name: "a", Query: "RETURN 1", Ctl: Commit}}},
-		}}, "exactly one of Query, Ctl and Hook"},
+		}}, "exactly one of Query, Ctl, Hook and Probe"},
+		{"step with a hook and a probe", &Spec{Name: "x", Sessions: []*Session{
+			{Name: "s", Steps: []Step{{Name: "a",
+				Hook:  func(context.Context) error { return nil },
+				Probe: func(context.Context) ([]string, [][]string, error) { return nil, nil, nil }}}},
+		}}, "exactly one of Query, Ctl, Hook and Probe"},
 		{"unknown control verb", &Spec{Name: "x", Sessions: []*Session{
 			{Name: "s", Steps: []Step{{Name: "a", Ctl: Control("VACUUM")}}},
 		}}, "unknown control verb"},
@@ -393,5 +400,29 @@ func TestTranscriptLatchesOnlyTheFirstError(t *testing.T) {
 	tr.print("c")
 	if !errors.Is(tr.err, first) {
 		t.Errorf("latched %v, want the FIRST error %v", tr.err, first)
+	}
+}
+
+// TestGoldenPreDiffIndependentOfWorkingDirectory pins that Check's pre-diff
+// reads the very file goldens.Assert compares against, from any working
+// directory. A caller in another package runs with ITS directory as the working
+// directory; the pre-diff used to resolve the golden against that directory, find
+// nothing, and stay silent. Not parallel: it changes the working directory.
+func TestGoldenPreDiffIndependentOfWorkingDirectory(t *testing.T) {
+	path := goldenPath("lost-update")
+	if !filepath.IsAbs(path) {
+		t.Fatalf("goldenPath returned a relative path %q", path)
+	}
+	want, err := readGolden(path)
+	if err != nil || len(want) == 0 {
+		t.Fatalf("precondition: golden %q unreadable from the package directory: %v", path, err)
+	}
+	t.Chdir(t.TempDir())
+	got, err := readGolden(goldenPath("lost-update"))
+	if err != nil {
+		t.Fatalf("pre-diff golden unreadable from another working directory: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("pre-diff read a different file from another working directory")
 	}
 }

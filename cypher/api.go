@@ -367,6 +367,11 @@ type buildOpts struct {
 	// mis-upgrading a count result into a graph node. buildEagerAggregation
 	// populates this set for every aggregate output name it registers in the schema.
 	scalarCols map[string]struct{}
+	// pendingBindPlans logs every [rowBindPlan] made since the last scope
+	// boundary, so [buildOpts.flushBindPlans] can resolve them before the
+	// boundary rewrites the maps they resolve from (see rowbind.go). Build-time
+	// state of one goroutine; forWorker clears it.
+	pendingBindPlans []*rowBindPlan
 	// projAliasScalarCols mirrors scalarCols for the BUILDROWCTX / Variable
 	// fast-path upgrade-bypass only. Distinct from scalarCols so the
 	// colliding-alias guard in buildIRProjection still routes a
@@ -386,20 +391,18 @@ type buildOpts struct {
 	// regressing Return6 [1] / ExistentialSubquery2 [2] (which both
 	// rely on the pre-projection's `a`/`n` staying a NodeValue).
 	aggKeyScalarCols map[string]struct{}
-	// edgeIDResolver, when non-nil, returns the storage endpoints of an
-	// edge identified by its forward-CSR position. Used by the path-
-	// reconstruction fast paths to determine the true storage direction
-	// of a relationship when the row's (src, dst) columns reflect the
-	// traversal direction (which differs from storage for undirected /
-	// reverse-edge traversals). Lazily populated on first use to avoid
-	// building CSR snapshots for queries that never reconstruct paths.
-	edgeIDResolver func(edgeID uint64) (storageSrc, storageDst uint64, ok bool)
 	// csrPairCache, when non-nil, is the Engine's shared [csrPairCache], consulted
 	// by [csrPairCachedFor] so a query needing a CSR pair reuses a prior query's
 	// O(V+E) build while lpg.Graph.TopoGeneration has not advanced (rmp #2143).
 	// nil on the public BuildPlanWithMutator path, which then builds uncached —
 	// correct, just unamortised, exactly as edgeTypeFilterCache behaves.
 	csrPairCache *csrPairCache
+	// liveTopo, when non-nil, is the statement's journal of its own adjacency
+	// writes, owned by the concrete mutator adapter the statement was built with
+	// (rmp #2883). Its presence is what lets [traversalAdjacencySource] serve a
+	// write transaction's forward traversal per source instead of building a
+	// whole-graph pair; nil keeps the whole-graph build.
+	liveTopo *liveTopoLog
 	// procReg is the Engine's procedure registry, carried here rather than as a
 	// parameter because the WRITE-path builder ([buildOperatorWrite]) needs it
 	// only to hand back to [buildOperator] at its fall-through branch, and
@@ -441,7 +444,7 @@ type buildOpts struct {
 	// reconstruction helpers (edgeHandleAtFwdPos / edgeInstanceIdxFor) to read
 	// the stable per-edge handle and the per-CREATE instance index at a forward
 	// CSR position. It is built lazily, at most once per query, by [ensureFwdCSR]
-	// the first time a relationship is reconstructed (mirroring edgeIDResolver):
+	// the first time a relationship is reconstructed:
 	// before #1574 each helper rebuilt the whole forward CSR (O(V+E)) PER result
 	// row, making `RETURN r` O(R·(V+E)) and dominating heap allocations.
 	//
@@ -460,8 +463,8 @@ type buildOpts struct {
 	// disambiguates "not yet built" from a nil snapshot. Forward-only by design:
 	// the helpers never read reverse state, so the reverse CSR is not cached.
 	//
-	// Concurrency: assigned without synchronisation, exactly like edgeIDResolver,
-	// under the single-goroutine-per-query build/exec contract (the projection
+	// Concurrency: assigned without synchronisation, under the
+	// single-goroutine-per-query build/exec contract (the projection
 	// operator's Next drives reconstruction on one goroutine; ParallelScan
 	// workers never touch bopts).
 	fwdCSR *csr.CSR[float64]
@@ -574,6 +577,13 @@ type buildOpts struct {
 	// See [pendingIndexDelta] for the measured defect this closes and for why the
 	// two-dimensional key is exactly as tight as the change buffer allows.
 	pendingIdx *pendingIndexDelta
+	// idxSnap is the proof every property-index access path of this build asks
+	// for after its lookup, and the reader's start instant: when the index cannot
+	// be proved to describe the snapshot the build reads at, the access path
+	// answers from the snapshot instead (rmp #2937, see index_snapshot_read.go).
+	// Resolved once per build from the view the build reads through. The zero
+	// value asks for nothing.
+	idxSnap seekSnapshot
 	// reorderSwap is the set of plain Apply nodes whose arms the disjoint-
 	// component ordering peephole (#2091) has decided to swap for THIS query,
 	// keyed by the exact *ir.Apply pointer buildOperator will visit. The read-path
@@ -913,6 +923,10 @@ type EngineOptions struct {
 	// equality predicate on a property backed by a hash index is answered by a
 	// NodeByIndexSeek that SUBSUMES the Selection it replaces, keeping only a
 	// label residual.
+	//
+	// It also turns OFF the property-index probe of the node MERGE match phase
+	// (rmp #2812, merge_index_probe.go), which then walks the label posting list:
+	// both are equality lookups answered from the same indexes.
 	//
 	// It exists because that rewrite shipped without a kill switch of any kind: its
 	// only gate was `idxMgr != nil` — no population floor, no cost model, no knob —
@@ -1435,6 +1449,45 @@ type Engine struct {
 	// suite cannot otherwise observe both answers for one query. No public setter
 	// exists and production never sets it.
 	disableIndexNestedLoopForTest bool
+	// trustIndexSnapshotForTest makes every property-index access path treat the
+	// index as describing its reader's snapshot without asking, which is the
+	// behaviour before rmp #2937. It is a TEST SEAM for the negative controls of
+	// that task's regression tests; no public setter exists and production never
+	// sets it.
+	trustIndexSnapshotForTest bool
+	// mergeRaceRetryHookForTest is a TEST SEAM for rmp #2987, set only by
+	// in-package tests before the engine is shared. When non-nil it runs in
+	// [Engine.runInTxMergeRaceRetry] after attempt number attempt lost a MERGE
+	// UNIQUE creation race and before the pause that precedes the re-run, so a
+	// test can CONSTRUCT the holder's outcome between two attempts. Production
+	// never sets it.
+	mergeRaceRetryHookForTest func(attempt int)
+	// commitDecidedHookForTest and indexDeliveredHookForTest are TEST SEAMS for
+	// the commit-decision bracket (rmp #2936), set only by in-package tests before
+	// the engine is shared. The first runs in [ExplicitTx.Commit] after the
+	// finalisation has decided what the index buffer owes the indexes and before
+	// the transaction publishes; the second runs after an explicit transaction's
+	// index delivery and before its publication. nil in production.
+	commitDecidedHookForTest  func()
+	indexDeliveredHookForTest func()
+	// constraintValidatedHookForTest runs in CREATE CONSTRAINT after its live
+	// validation scan and before it registers the constraint;
+	// constraintDroppedHookForTest runs in DROP CONSTRAINT after the constraint is
+	// unregistered in memory and before the drop is made durable. TEST SEAMS for
+	// rmp #2936, nil in production.
+	constraintValidatedHookForTest func()
+	constraintDroppedHookForTest   func()
+	// dropCommitErrForTest, when set and returning an error, makes DROP
+	// CONSTRAINT treat its durable commit as failed with that error and run the
+	// rewind, WITHOUT poisoning the WAL, so a transaction open across the
+	// failed DROP can still commit afterwards (rmp #2936 audit, H2). TEST SEAM,
+	// nil in production.
+	dropCommitErrForTest func() error
+	// disableLiveTraversalForTest keeps every write statement's forward traversal
+	// on the whole-graph CSR build (rmp #2883), so the differential tests can
+	// obtain the pre-#2883 answer for the same statement on the same engine
+	// shape. Test-only; nothing in the module sets it.
+	disableLiveTraversalForTest bool
 
 	// forceColumnarChainDeclineForTest makes all three columnar read-chain
 	// recognisers — the two shipping ones and [tryBuildColumnarAggSource] (#2655) —
@@ -1861,10 +1914,11 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		// call is reachable by any client; Engine.RefreshStatistics is not, because an
 		// embedded caller is already inside the trust boundary.
 		//
-		// It binds the LOCKED variant: a procedure runs inside query execution, which is
-		// already inside Graph.View, and visMu is non-re-entrant — taking it again from
-		// the same goroutine would DEADLOCK a production binary (the re-entrancy guard
-		// only turns that into a panic in a debug or race build).
+		// It binds the LOCKED variant, which acquires nothing and scans the present
+		// stored state (see [Engine.scanStatsLocked]). The split dates from when query
+		// execution ran inside Graph.View, a non-re-entrant read barrier that a nested
+		// acquisition would have deadlocked; rmp #2344 removed Graph.View, and neither
+		// refresh entry point takes a barrier now.
 		RefreshStatistics: func(ctx context.Context) error { return e.RefreshStatisticsLocked(ctx) },
 	})
 	// Recovered-constraint safety net (#1918, #1981): recovery seeds the graph's
@@ -2517,8 +2571,32 @@ type pinnedView struct{ snap *lpg.Snapshot }
 // A recoverable panic raised while planning or executing the query is
 // intercepted and returned as an error wrapping [ErrInternalPanic]; it never
 // unwinds past this method to crash the embedding process.
+//
+// # Cross-statement visibility: no read-your-own-writes (rmp #2626)
+//
+// Run gives each statement snapshot isolation and promises nothing ACROSS
+// statements; in particular it does NOT give read-your-own-writes. A statement's
+// snapshot is taken at the contiguous commit frontier ([mvcc.Clock.ReadTS]),
+// which cannot pass an older commit that is still in flight. A caller that
+// committed through [Engine.RunInTx] and then reads through Run can therefore
+// miss its own acknowledged commit while an earlier, unrelated commit is still
+// in flight — measured at 1 to 4 of every 4,000 reads under 16
+// concurrent writers (docs/mvcc-frontier-visibility.md). This DIVERGES from the
+// default of PostgreSQL and InnoDB, whose snapshot carries the set of in-flight
+// transactions, and of Memgraph, which reads its start timestamp under the
+// engine lock: all three show a connection its own commits. A caller that must
+// observe its own writes runs its statements through a [Session]
+// ([Engine.NewSession]), which waits for the frontier to reach its latest commit
+// before taking the next snapshot.
 func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (*Result, error) {
 	return e.runRead(ctx, query, params, nil)
+}
+
+// errRunWrite returns the refusal [Engine.Run] gives a writing statement, with
+// or without a PROFILE prefix (rmp #2790): one constructor, so the two surfaces
+// cannot drift.
+func errRunWrite() error {
+	return fmt.Errorf("cypher: Run does not execute write or DDL statements; use RunInTx or RunAny instead: %w", ErrWriteInReadOnlyTx)
 }
 
 // runRead is the single read-execution path. It is [Engine.Run] with the read
@@ -2542,6 +2620,9 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	// but before parseAndAnalyse so a caller that has already given up never
 	// pays for the parse. O(1) and allocation-free on the happy path. ─────────
 	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	if err := e.failStopped(); err != nil {
 		return nil, err
 	}
 	// ── 1. DDL fast-path ─────────────────────────────────────────────────────
@@ -2588,7 +2669,7 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	// answer is a pure function of a plan the cache holds immutable. See
 	// [planCacheEntry.containsWrite].
 	if entry.containsWrite {
-		return nil, fmt.Errorf("cypher: Run does not execute write or DDL statements; use RunInTx or RunAny instead: %w", ErrWriteInReadOnlyTx)
+		return nil, errRunWrite()
 	}
 
 	// ── 1b. Parameter presence + type check ─────────────────────────────────
@@ -2615,8 +2696,10 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	// for exclusion that is not there and would misjudge what makes the build sound.
 	// The guarantee is unchanged; its mechanism is the instant, not the lock.)
 	//
-	// Nothing here may call g.View/g.ApplyAtomically: visMu is non-re-entrant, and a
-	// DDL transition still takes it exclusively — see lpg.Graph.View/ApplyAtomically.
+	// Nothing here may call g.ApplyAtomically: it takes the graph's schema barrier
+	// (visGate, an mvcc.Gate) exclusively, and the barrier's re-entrancy guard panics
+	// on a nested acquisition in a debug or race build. A read itself takes no
+	// barrier: lpg.Graph.View, its former read side, was removed by rmp #2344.
 	var (
 		r        *Result
 		buildErr error
@@ -2718,11 +2801,13 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 // second gate-resolution site for rendering.
 //
 // The caller must already have pinned a snapshot ([lpg.Graph.BeginRead] plus
-// [lpg.Graph.ReadAt]): the cost gates read live label counts, the node total, and
-// count-store cells, and they must all come from one consistent instant. (This
-// used to say "must already hold the graph's read barrier"; rmp #2344 removed
-// lpg.Graph.View and a read takes no barrier at all — the snapshot's start
-// timestamp is what makes the correlated reads agree.)
+// [lpg.Graph.ReadAt]): every read the operator tree binds resolves at its start
+// timestamp. The cost gates do NOT all read at that instant: label counts resolve
+// at the snapshot, but the node total (LiveOrderStored) and the count-store cells
+// are read from the present, each cell by one atomic load. A skewed gate input
+// can only choose between plans with identical results. (This used to say "must
+// already hold the graph's read barrier"; rmp #2344 removed lpg.Graph.View and a
+// read takes no barrier at all.)
 //
 // prof is nil for an ordinary execution and non-nil only for [Engine.Profile];
 // it is threaded onto the build options so the single wrapping point in
@@ -2794,7 +2879,7 @@ func (e *Engine) buildReadPhysical(
 		// at all on the query path, which passes no sink.
 		bopts.estimates = &planEstimateCollector{
 			into: estimates,
-			src:  &lpgLabelResolver{g: e.g.ReadAt(nil), eng: e},
+			src:  &lpgLabelResolver{g: e.g.ReadAt(nil), eng: e, ctx: ctx},
 		}
 	}
 	// Point the build at this plan's cross-execution analysis memo (rmp #2383).
@@ -2833,6 +2918,9 @@ func (e *Engine) buildReadPhysical(
 	// an unflushed delta of its own. A statement inside an OPEN write transaction
 	// does not come through here; it comes through [Engine.execUnderBarrier].
 	bopts.indexSeekEnabled = e.indexSeekEnabled
+	// The snapshot proof every property-index access path asks for (rmp #2937),
+	// resolved from the ONE view this whole build reads through.
+	bopts.idxSnap = indexSeekSnapshotOf(rv, e.trustIndexSnapshotForTest)
 	// Min-label scan gating (#2077): enable the smallest-cardinality
 	// multi-label anchor substitution when the Engine permits it. The
 	// substitution is result-identical (a label conjunction is commutative)
@@ -2854,9 +2942,12 @@ func (e *Engine) buildReadPhysical(
 	bopts.bitmapIntersectEnabled = e.bitmapIntersectEnabled
 	// Disjoint-component reorder gating (#2091): when the Engine permits it and
 	// the plan has memoised order-safe candidates, apply the live cardinality
-	// gate against this query's snapshot. The live node total (for AllNodesScan
-	// components) and every label count are read under View's visibility
-	// barrier, so all cost inputs come from one consistent snapshot.
+	// gate. The inputs do NOT come from one instant, and no barrier makes them:
+	// every label count resolves at this query's snapshot through labelSrc (exact,
+	// or an upper bound when the label's history backlog is large), while the node
+	// total for AllNodesScan components is LiveOrderStored, the present stored
+	// count. A skewed input can only pick the other of two plans whose results are
+	// identical, so it costs performance, never correctness.
 	//
 	// params is passed because a FILTERED component's row estimate depends on the
 	// bound operand (rmp #2766): `(a:A {x: $p})` and `(a:A {x: 1})` are the same
@@ -2867,15 +2958,22 @@ func (e *Engine) buildReadPhysical(
 	// multiset; SuppressReorder (baked into the candidate set) guarantees no
 	// downstream operator observes the change.
 	if e.joinReorderEnabled && len(entry.reorderCandidates) > 0 {
-		bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, params, int64(e.g.LiveOrder()))
+		swaps, err := computeReorderSwaps(ctx, entry.reorderCandidates, labelSrc, params, int64(e.g.LiveOrderStored()))
+		if err != nil {
+			return nil, nil, err
+		}
+		bopts.reorderSwap = swaps
 	}
 	bopts.seekHint = entry.pushedSeekHints
 	// Single-edge anchor-swap gating (#2090): when the Engine permits it and
 	// the plan has memoised order-safe single-edge sites, apply the live
-	// count-store cost gate against this query's snapshot. N(label) and every
-	// D(label,relType,dir) cell (and its dirty flag) are read under View's
-	// visibility barrier — exclusive against a committing writer — so all cost
-	// inputs come from one consistent snapshot. The swap re-roots the pattern
+	// count-store cost gate. Its inputs do NOT come from one instant, and no
+	// barrier makes them: N(label) resolves at this query's snapshot through
+	// labelSrc, while every D(label,relType,dir) cell and its dirty flag are read
+	// from the PRESENT count store, each cell by one atomic load, with writers
+	// committing concurrently (graph/index/count). A skewed input can only choose
+	// between two plans with identical results, so it costs performance, never
+	// correctness. The swap re-roots the pattern
 	// onto its other endpoint (OUT-ward only) with an identical multiset;
 	// SuppressReorder (baked into the candidate set) guarantees no downstream
 	// operator observes the emission-order change.
@@ -2899,7 +2997,18 @@ func (e *Engine) buildReadPhysical(
 	// the whole result set (#1830).
 	bopts.maxResultRows = e.maxResultRows
 	bopts.maxResultBytes = e.maxResultBytes
-	return buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
+	op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
+	if err == nil && estimates != nil {
+		// A rendering build reads exact statistics populations through the
+		// collector's resolver, which DEMOTES an estimate rather than fail when the
+		// statement is cancelled mid-correction ([resolveLabelPopulation]). Such a
+		// rendering must not be returned as if it were complete (rmp #3010).
+		if cerr := ctx.Err(); cerr != nil {
+			_ = op.Close()
+			return nil, nil, cerr
+		}
+	}
+	return op, cols, err
 }
 
 // Explain returns a textual representation of the plan that executes query with
@@ -2954,9 +3063,8 @@ func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.V
 	// A SNAPSHOT, not the barrier (rmp #2304). EXPLAIN reads the same label
 	// cardinalities and index metadata Run reads to choose a plan, so it should
 	// read them the way Run does — and Run has taken no lock since rmp #2290.
-	// Coming here through Graph.View instead would now stop every writer for the
-	// duration of a diagnostic that renders a plan and throws it away, because
-	// #2304 made View exclusive.
+	// (This path once went through Graph.View, which rmp #2304 had made stop every
+	// writer for the duration of a diagnostic; rmp #2344 removed Graph.View.)
 	snap := e.g.BeginRead()
 	defer e.g.EndRead(snap)
 	// The estimates the planner derived, collected during the build and rendered
@@ -2976,9 +3084,14 @@ func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.V
 // attributed to it — GoGraph's equivalent of the PROFILE both incumbents expose
 // (Neo4j adds db-hits, Memgraph relative time).
 //
-// The query really runs: rows are produced and discarded, so Profile is for a
-// reading statement only and returns an error for a writing one rather than
-// performing its writes as a side effect of a diagnostic.
+// The query really runs: rows are produced and discarded. A WRITING statement
+// therefore really writes (rmp #2790): it executes exactly as [Engine.RunInTx]
+// executes it — one transaction, committed on success and rolled back on error,
+// its writes applied exactly once and its write counters unchanged — with the
+// measuring wrapper installed by the write builder, so the tree covers the write
+// operators too. The Cypher `PROFILE` prefix follows the same rule on
+// [Engine.RunInTx] and [ExplicitTx.Exec]; on [Engine.Run], which never writes, a
+// writing PROFILE is refused exactly as the unprefixed statement is.
 //
 // Times are INCLUSIVE of an operator's children, because a pipelined operator's
 // Next pulls from them. Subtract a node's children to obtain its exclusive cost —
@@ -3014,6 +3127,11 @@ func (e *Engine) profilePlanTree(ctx context.Context, query string, params map[s
 	if ir.IsDDL(query) {
 		return exec.PlanNode{}, fmt.Errorf("cypher: Profile: DDL has no query plan")
 	}
+	// A writing statement is profiled on the transactional write path, by the
+	// classifier [Engine.RunAny] uses to route the same statement (rmp #2790).
+	if queryHasWritingClause(query) {
+		return e.profileWritePlanTree(ctx, query, params)
+	}
 	entry, autoParams, err := e.parseAndAnalyse(query)
 	params = mergeAutoParams(params, autoParams)
 	if err != nil {
@@ -3021,10 +3139,6 @@ func (e *Engine) profilePlanTree(ctx context.Context, query string, params map[s
 	}
 	if entry.semaErr != nil {
 		return exec.PlanNode{}, entry.semaErr
-	}
-	if queryHasWritingClause(query) {
-		return exec.PlanNode{}, fmt.Errorf("cypher: Profile: refusing to execute a writing statement; " +
-			"use Explain for its plan, or RunInTx to execute it")
 	}
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {
 		return exec.PlanNode{}, err
@@ -3049,6 +3163,35 @@ func (e *Engine) profilePlanTree(ctx context.Context, query string, params map[s
 		return exec.PlanNode{}, drainErr
 	}
 	return tree, nil
+}
+
+// profileWritePlanTree is [Engine.profilePlanTree] for a writing statement (rmp
+// #2790). It executes query on the [Engine.RunInTx] path with a profiler in the
+// write builder, drains and closes the Result — which is where an error the
+// statement raised surfaces, after the transaction was rolled back — and returns
+// the measured tree captured before the commit.
+func (e *Engine) profileWritePlanTree(ctx context.Context, query string, params map[string]expr.Value) (exec.PlanNode, error) {
+	r, err := e.runInTxSessionProfiled(ctx, nil, query, params, true)
+	if err != nil {
+		return exec.PlanNode{}, err
+	}
+	node := r.Profile()
+	for r.Next() {
+		// Drain: the measurements are the product, the rows are not.
+	}
+	drainErr := r.Err()
+	if cerr := r.Close(); cerr != nil && drainErr == nil {
+		drainErr = cerr
+	}
+	if drainErr != nil {
+		return exec.PlanNode{}, drainErr
+	}
+	if node == nil {
+		// Reached only for a statement the transactional path diverted rather than
+		// executed, such as one written with an EXPLAIN prefix.
+		return exec.PlanNode{}, fmt.Errorf("cypher: Profile: the statement produced no measured plan")
+	}
+	return *node, nil
 }
 
 // profileMaterialised builds entry's plan with the profiling instrumentation
@@ -3194,7 +3337,9 @@ func (e *Engine) explainInputsFor(entry *planCacheEntry, params map[string]expr.
 	var anchorSwaps map[*ir.Expand]bool
 	if e.joinReorderEnabled {
 		if cands := collectReorderCandidates(plan); len(cands) > 0 {
-			reorderSwaps = computeReorderSwaps(cands, labelSrc, params, int64(e.g.LiveOrder()))
+			// This rendering API takes no context, so the gate cannot be
+			// cancelled and cannot fail.
+			reorderSwaps, _ = computeReorderSwaps(context.Background(), cands, labelSrc, params, int64(e.g.LiveOrderStored()))
 		}
 	}
 	if e.anchorSwapEnabled {
@@ -3361,7 +3506,7 @@ func explainWithIndexesNode(
 			// seek does — both replace the Selection and its scan child — so it
 			// renders in the Selection's place (#2183).
 			opName = "NodeByIndexSeekSet"
-		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params, prefixSeek, true, nil); fired {
+		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params, prefixSeek, true, nil, seekSnapshot{}); fired {
 			// A range seek REPLACES the scan child but the original Selection
 			// Filter is retained on top, so the node renders as Selection over
 			// NodeByIndexRangeScan (not subsumed like the equality seek).
@@ -3686,6 +3831,28 @@ func dropIndexCounter(existed bool) func(*exec.QueryCounters) {
 	return func(c *exec.QueryCounters) { c.IndexesRemoved++ }
 }
 
+// lockSchemaForDDL takes [Engine.schemaGate] exclusively for a DDL statement,
+// with the wait bounded by ctx. On success the caller owns the gate and releases
+// it with StrongUnlock. On failure the caller owns nothing, and the returned error
+// wraps ctx's error (matchable with [errors.Is] against [context.Canceled] or
+// [context.DeadlineExceeded]).
+//
+// Every DDL path calls it BEFORE it opens a store transaction, appends to the WAL
+// or touches the index manager or the constraint registry, so a refused
+// acquisition leaves no schema state behind.
+//
+// An autocommit write holds the gate shared for its whole statement, so a DDL
+// can wait behind an in-flight statement for as long as that statement runs
+// (rmp #2982). Before this helper every DDL path took the gate with the
+// context-free StrongLock: a CREATE INDEX with a 50 ms deadline stayed blocked
+// behind a parked write and reported its deadline only once the write ended.
+func (e *Engine) lockSchemaForDDL(ctx context.Context) error {
+	if err := e.schemaGate.StrongLockCtx(ctx); err != nil {
+		return fmt.Errorf("cypher: DDL: acquire schema gate: %w", err)
+	}
+	return nil
+}
+
 // emptyDDLResult returns the canonical zero-row Result that every DDL
 // statement yields once its side effect has already been applied.
 //
@@ -3729,7 +3896,9 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 	}
 	// The whole DDL sequence — scan, validate, register — under one lock, in BOTH
 	// wirings; see [Engine.schemaMu] for why the schema barrier alone cannot do it.
-	e.schemaGate.StrongLock()
+	if err := e.lockSchemaForDDL(ctx); err != nil {
+		return nil, err
+	}
 	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.createBTreeIndexLocked(ctx, p, idxMgr, nil)
@@ -3774,7 +3943,10 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	// recording starts, exactly as on the hash path — see
 	// [Engine.beginIndexBuild] for the ordering and for why the scan must not
 	// read the live property bag (rmp #2738, rmp #2778).
-	buildLog, scanView, releaseScanView := e.beginIndexBuild(idxMgr, p.Label, p.Property)
+	buildLog, scanView, releaseScanView, err := e.beginIndexBuild(ctx, idxMgr, p.Label, p.Property)
+	if err != nil {
+		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, err)
+	}
 	defer idxMgr.AbandonBuild(buildLog)
 	defer releaseScanView()
 
@@ -3914,7 +4086,9 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	e.schemaGate.StrongLock()
+	if err := e.lockSchemaForDDL(ctx); err != nil {
+		return nil, err
+	}
 	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		// Capture the (label, property) of the index about to be dropped so the
@@ -4069,7 +4243,9 @@ func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint
 	// One lock over scan + validate + register, in BOTH wirings. Lock order
 	// schemaMu → visMu (inside scanLabelProperty's View and the registration's
 	// ApplyAtomically). See [Engine.schemaMu].
-	e.schemaGate.StrongLock()
+	if err := e.lockSchemaForDDL(ctx); err != nil {
+		return nil, err
+	}
 	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.createConstraintLocked(ctx, p, kind, idxMgr, nil)
@@ -4138,69 +4314,97 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// ctx-cancellable (rmp #1872): nothing has been registered yet, so a
 	// cancellation here aborts cleanly with no unwind needed.
 	//
-	// THIS SCAN READS THE LIVE GRAPH, AND THAT IS DELIBERATE (rmp #2792, kept by
-	// rmp #2798). It is the VALIDATION scan only; the UNIQUE value-set is no
-	// longer seeded from it (see the barrier below). Its live read is
-	// load-bearing, and that was measured rather than reasoned about: an explicit
-	// transaction that has EAGERLY written a duplicate has not committed it, so a
-	// snapshot read would ACCEPT the constraint — and nothing would then refuse
-	// that transaction's commit, because UNIQUE is reserved at WRITE time
-	// (cypher/constraint_check.go) and this transaction's statement ran before
-	// the constraint existed. Measured on this build: with the live read the DDL
-	// is refused ("pre-existing data contains duplicate value"); with a snapshot
-	// read the DDL succeeds, the commit returns nil, and two COMMITTED nodes hold
-	// the same value under an active UNIQUE constraint. A conservatively refused
-	// DDL is a poor answer; a Consistency breach is a different category.
+	// THE SCAN READS COMMITTED STATE ONLY (rmp #2946). It reads a snapshot taken
+	// after the hold below has waited out every commit already deciding and the
+	// frontier covers every commit allocated so far, so the snapshot is the
+	// committed state, and it stays the committed state until the constraint is
+	// registered: while the hold is in force no explicit transaction can decide a
+	// commit, and the schema gate the caller holds keeps every autocommit
+	// statement out.
 	//
-	// The SAME argument holds for NOT NULL, in the mirror direction and with the
-	// same verdict — measured, rmp #2798. An open transaction that has eagerly
-	// NULLED a committed property makes a compliant node look violating, so the
-	// live scan refuses a DDL that the committed data would have allowed. That
-	// conservative refusal is deliberately kept, because the alternative is not
-	// symmetric: with validation moved to the snapshot alone, the DDL SUCCEEDS,
-	// the transaction's COMMIT of the removal returns nil, and a committed node
-	// carries no value under an active NOT NULL constraint. Nothing refuses that
-	// commit for the same shape of reason as UNIQUE — [ExplicitTx] allocates its
-	// touched-node set at BeginTx, and a transaction that began before the
-	// constraint existed has none, so its commit-time NOT NULL check is a no-op.
-	// Both single-view designs are therefore unsound, in opposite directions, and
-	// the committed-state scan below is ADDED to this one rather than replacing it.
+	// An open explicit transaction's EAGER, uncommitted writes are therefore not
+	// validated here, in either direction, and must not be: a duplicate value or a
+	// removed property it has written may never commit, and refusing the DDL for
+	// it refused a constraint the committed data satisfies. Measured before this
+	// rule: with a committed (:L {s: 'v'}) and an open transaction that had run
+	// CREATE (:L {s: 'v'}), CREATE CONSTRAINT … IS UNIQUE was refused with
+	// "pre-existing data contains duplicate value", and the NOT NULL DDL was
+	// refused the same way after an open REMOVE n.s or CREATE (:L).
 	//
-	// The converse hole — a COMMITTED duplicate that an open transaction has
-	// eagerly removed, which this live scan cannot see — is closed by the seed
-	// inside the barrier, which reads committed state and lets SeedUniqueValues
-	// refuse. Its NOT NULL counterpart is committedNull, likewise inside the
-	// barrier.
+	// Such a transaction began before the constraint existed, and it is validated
+	// at its own COMMIT instead, against the latest committed state merged with its
+	// own writes (the straddler validation of rmp #2936,
+	// [exec.ConstraintRegistry.ValidateStraddler]): its duplicate or its null is
+	// refused there, so no committed state ever violates the registered
+	// constraint. That validation is what made the live read of rmp #2792 and
+	// rmp #2798 — which refused the DDL because nothing else would have refused
+	// such a commit — unnecessary.
 	//
 	// vals is collected ONLY for UNIQUE. NOT NULL reads nothing but anyNull —
-	// validatePreExisting ignores the values and there is no value-set to seed —
-	// so a NOT NULL DDL used to fill, and discard, one PropertyValue per labelled
-	// node.
+	// validatePreExisting ignores the values and there is no value-set to seed.
+	// NO COMMIT MAY DECIDE WHILE THE CONSTRAINT IS BUILT (rmp #2936). The scans
+	// below validate the existing data and seed the UNIQUE value-set and backing
+	// index from one snapshot, and nothing records a commit that lands in
+	// between. An autocommit statement is kept out by the schema gate this DDL
+	// holds; an explicit transaction is not, and one that had already decided
+	// what its index buffer owed — with no constraint yet to reserve its value in
+	// — and published after the snapshot was missing from the backing index and
+	// from the value-set for good: a second node with the same value then
+	// committed under the live constraint, and MERGE created one. So the build
+	// waits out every commit inside the decision bracket, keeps new ones out until
+	// it is registered, and waits for the frontier to cover every commit allocated
+	// so far, so the scans see every committed node.
+	//
+	// Taken HERE, after the caller has opened its store transaction: that admission
+	// can park behind a checkpointer's quiesce, which waits for the very explicit
+	// transactions this hold keeps out, so holding across it would deadlock.
+	if err := idxMgr.HoldCommitDecisions(ctx); err != nil {
+		return nil, err
+	}
+	defer idxMgr.ReleaseCommitDecisions()
+	if err := e.g.AwaitAllocatedCommits(ctx); err != nil {
+		return nil, err
+	}
+
 	var values []lpg.PropertyValue
 	var vals *[]lpg.PropertyValue
 	if kind == exec.ConstraintUnique {
 		vals = &values
 	}
-	anyNull, serr := e.scanLabelProperty(ctx, e.g.ReadAt(nil), p.Label, p.Property, vals)
+	// The horizon slot is returned as soon as the scan ends, panic included,
+	// hence the closure.
+	anyNull, serr := func() (bool, error) {
+		snap := e.g.BeginRead()
+		defer e.g.EndRead(snap)
+		return e.scanLabelProperty(ctx, e.g.ReadAt(snap), p.Label, p.Property, vals)
+	}()
 	if serr != nil {
 		return nil, serr
 	}
 	if err := validatePreExisting(kind, p.Label, p.Property, values, anyNull); err != nil {
 		return nil, err
 	}
+	if h := e.constraintValidatedHookForTest; h != nil {
+		h()
+	}
 
 	// Registration, backfill, and value-set seed run inside the visibility
-	// barrier (ApplyAtomically) so concurrent Graph.View readers never observe
-	// the constraint or its backing index in a partially-constructed state.
-	// The visibility barrier is not re-entrant, so nothing inside the closure may
-	// call Graph.View or Graph.ApplyAtomically. The LIVE scanLabelProperty above is
+	// barrier (ApplyAtomically), held EXCLUSIVELY. Every write bracket holds the
+	// same gate SHARED — a statement (lpg.Graph.applyVersionedInstant), an
+	// explicit transaction's finalisation (lpg.Graph.ApplyInVersionedTx) and its
+	// publication with the commit-time index fan-out
+	// (lpg.Graph.endVersionedTxInstant) — so no write and no index delivery
+	// lands while the constraint and its backing index are built and registered.
+	// A read takes no barrier (rmp #2344). The barrier is not re-entrant, so
+	// nothing inside the closure may open another write bracket
+	// (Graph.ApplyAtomically panics on re-entry). The validation scan above is
 	// outside it for the ORDERING reason rather than that one — it must complete
 	// before the registration it validates — and takes no barrier itself, so it is
 	// not constrained to sit outside; commitConstraintTx only appends a WAL frame
-	// and is outside so the append is not held under visMu. The COMMITTED-state NOT
-	// NULL scan is INSIDE, at the top of the closure, and calls neither View nor
-	// ApplyAtomically — see the comment on it for why that placement is what makes
-	// its observation gap-free (rmp #2798).
+	// and is outside so the append is not held under visMu. No commit can land
+	// between that scan and the registration: the commit-decision hold above keeps
+	// every explicit transaction's commit out, and the schema gate every autocommit
+	// statement.
 	//
 	// Lock ordering: the caller holds [Engine.schemaMu] exclusively, and schemaMu is
 	// taken before visMu everywhere in the write path — the ApplyAtomically call
@@ -4215,8 +4419,8 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		// every CREATE, DELETE, SET, and REMOVE, so NodeByIndexSeek queries
 		// always see the live state and checkUniqueViolation never reports stale
 		// "ghost" cardinality for deleted values (#1342). The bound index is
-		// backfilled from the live graph before it is registered so pre-existing
-		// nodes are covered immediately.
+		// backfilled from a committed snapshot before it is registered so
+		// pre-existing nodes are covered immediately.
 		//
 		// backfillNodeHashIndex reads graph state directly (no View/Apply) and
 		// is safe to call inside the barrier. newBoundNodeHashIndex only
@@ -4224,70 +4428,12 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		// it installs keep reading e.g.ReadAt(nil), the live value, and must: they
 		// run at commit time, on the state the index has to converge to.
 		//
-		// seedValues is what the value-set is seeded from. It starts as the live
-		// validation scan's values and is used as such ONLY on the unbound
-		// fallback below, where there is no backing index for it to agree with;
-		// on every real path the backfill's own reads replace it (rmp #2792).
+		// seedValues is what the value-set is seeded from. It starts as the
+		// validation scan's committed values and is used as such ONLY on the
+		// unbound fallback below, where there is no backing index for it to agree
+		// with; on every real path the backfill's own reads replace it (rmp #2792).
 		seedValues := values
 		op := exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg, e.ClearPlanCache)
-		if kind == exec.ConstraintNotNull {
-			// COMMITTED-STATE NOT NULL VALIDATION (rmp #2798).
-			//
-			// The live scan above cannot see that a node LACKS the property when an
-			// open transaction has eagerly FILLED it: the fill has not committed, the
-			// live read finds a value, and the DDL registered a NOT NULL constraint
-			// over a committed node that carries nothing. Measured on the pre-fix
-			// build, one goroutine and no concurrency at all: after an eager
-			// `SET n.email = 'x@x'` on a node with no committed email, CREATE
-			// CONSTRAINT returned err = <nil> with the constraint REGISTERED, and the
-			// rollback then left that node with no email under an active constraint.
-			// That is an ACID Consistency breach, and it is the same defect as
-			// rmp #2778 and rmp #2792 from the other side.
-			//
-			// This scan reads COMMITTED state, and it is ADDED to the live scan, not
-			// substituted for it. Either view alone is unsound — see the measurement
-			// recorded above the live scan — so the constraint is registered only when
-			// NEITHER the committed state NOR any in-flight eager state violates it.
-			// The refusal is deliberately conservative in the direction where a
-			// conservative answer is merely unhelpful, and never in the direction where
-			// it would be a breach.
-			//
-			// PLACED INSIDE THE BARRIER, immediately before applyDDLOp, for the reason
-			// rmp #2792 established for the UNIQUE seed and verified on this very path:
-			// commit-time fan-out runs under [lpg.Graph.ApplyInVersionedTx], which
-			// holds the barrier SHARED, so while this EXCLUSIVE hold is in force no
-			// transaction can commit at all. There is therefore NO window between this
-			// observation of the committed state and the registration it authorises —
-			// which the same scan placed outside the barrier could not claim, because
-			// [ExplicitTx] does not take the schema gate and its commit is not excluded
-			// by the caller's StrongLock.
-			//
-			// Re-entrancy: [Engine.scanLabelProperty] takes no barrier and calls
-			// neither Graph.View nor Graph.ApplyAtomically, and BeginRead/EndRead touch
-			// only the reclamation horizon (atomics) and the MVCC clock — never visMu,
-			// never the schema gate. The documented order schemaGate -> writer
-			// admission -> visMu is untouched. The horizon slot is returned before
-			// applyDDLOp, panic included, hence the closure.
-			//
-			// Nothing is registered yet, so a violation — or a ctx cancellation, which
-			// this scan polls — aborts the whole DDL cleanly with no unwind needed.
-			// validatePreExisting is reused so the refusal wording and the
-			// [exec.ErrConstraintViolation] wrap have one source of truth.
-			var committedNull bool
-			cerr := func() error {
-				snap := e.g.BeginRead()
-				defer e.g.EndRead(snap)
-				var serr error
-				committedNull, serr = e.scanLabelProperty(ctx, e.g.ReadAt(snap), p.Label, p.Property, nil)
-				return serr
-			}()
-			if cerr != nil {
-				return cerr
-			}
-			if err := validatePreExisting(kind, p.Label, p.Property, nil, committedNull); err != nil {
-				return err
-			}
-		}
 		if kind == exec.ConstraintUnique {
 			boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), p.Label, p.Property)
 			if bidxErr == nil {
@@ -4350,8 +4496,8 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 			// On binding error fall through: the operator uses an unbound
 			// index as a safe fallback. The value-set (seeded below) remains
 			// the primary enforcement source; the secondary check is cosmetic.
-			// That branch keeps the live validation values, because with no
-			// backing index there is no second structure for them to agree with.
+			// That branch keeps the validation scan's committed values, because with
+			// no backing index there is no second structure for them to agree with.
 			// newBoundNodeHashIndex fails only on an empty label or property,
 			// which the DDL parser cannot produce.
 		}
@@ -4360,13 +4506,12 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		}
 		if kind == exec.ConstraintUnique {
 			if err := e.constraintReg.SeedUniqueValues(p.Label, p.Property, seedValues); err != nil {
-				// REACHABLE SINCE rmp #2792, and when it fires it is the correct
-				// refusal. validatePreExisting accepted the LIVE values; these are
-				// the COMMITTED ones, so a duplicate that an open transaction had
-				// eagerly removed is seen here and nowhere earlier. Measured before
-				// the fix: that constraint was REGISTERED over committed data still
-				// holding the duplicate. The unwind below is what refuses it, and
-				// it also remains the defensive path it always was.
+				// DEFENSIVE since rmp #2946. validatePreExisting and the backfill now
+				// read the same committed state — no commit can land between them
+				// under the commit-decision hold and the schema gate — so the values
+				// seeded here are the ones already found free of duplicates. The
+				// unwind below keeps a refusal here from leaving a constraint
+				// registered over a duplicate.
 				return e.unwindConstraintRegistration(err, p.Name, p.Label, p.Property, kind, idxMgr)
 			}
 		}
@@ -4427,7 +4572,9 @@ func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, id
 		return nil, err
 	}
 
-	e.schemaGate.StrongLock()
+	if err := e.lockSchemaForDDL(ctx); err != nil {
+		return nil, err
+	}
 	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.dropConstraintLocked(ctx, p, idxMgr, nil)
@@ -4486,9 +4633,35 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 	// IF EXISTS is satisfied (the constraint exists), so the operator drops it
 	// unconditionally; pass ifExists=false so any unexpected internal mismatch
 	// surfaces rather than being absorbed.
+	// NO COMMIT MAY DECIDE WHILE THE CONSTRAINT IS DROPPED AND POSSIBLY RESTORED
+	// (rmp #2936). The unregistration below takes effect in memory before the drop
+	// is durable, and a failed durable commit restores the constraint by
+	// re-seeding it from a snapshot ([Engine.rewindConstraintDrop]). An explicit
+	// transaction committing in between wrote a value no constraint reserved, and
+	// was then held by a restored constraint it had never been checked against: a
+	// duplicate under a live UNIQUE constraint. Holding the decision bracket keeps
+	// such a commit out until the outcome is settled; one that straddles the
+	// restoration re-registers into a new catalogue generation and is validated at
+	// its own commit. Taken after the caller's store transaction is open, for the
+	// reason given on createConstraintLocked.
+	if err := idxMgr.HoldCommitDecisions(ctx); err != nil {
+		return nil, err
+	}
+	defer idxMgr.ReleaseCommitDecisions()
+	if err := e.g.AwaitAllocatedCommits(ctx); err != nil {
+		return nil, err
+	}
 	op := exec.NewDropConstraintOp(p.Name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
 	if err := applyDDLOp(ctx, op); err != nil {
 		return nil, err
+	}
+	if h := e.constraintDroppedHookForTest; h != nil {
+		h()
+	}
+	if h := e.dropCommitErrForTest; h != nil {
+		if err := h(); err != nil {
+			return nil, e.rewindConstraintDrop(err, p.Name, label, prop, kind, idxMgr)
+		}
 	}
 	if tx != nil {
 		if err := commitConstraintTx(tx, txn.OpDropConstraint, kind, label, prop, p.Name); err != nil {
@@ -4565,13 +4738,11 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 // most once per fail-stopped store, and makes this function identical in
 // discipline to createConstraintLocked instead of a second variant free to drift.
 //
-// NO UNION with a live read is taken, and that is the difference from rmp #2798.
-// There the union is over a VIOLATION predicate, so admitting the live view only
-// ever refuses a DDL that might have been legal — unhelpful, never a breach.
-// Here a live value would be merged into the enforcement value-set permanently,
-// so a phantom from a rolled-back transaction would refuse a legitimate write
-// forever. Conservative in the harmless direction there; not conservative at all
-// here.
+// NO UNION with a live read is taken. A live value would be merged into the
+// enforcement value-set permanently, so a phantom from a rolled-back transaction
+// would refuse a legitimate write forever. (CREATE CONSTRAINT once took such a
+// union over its VIOLATION predicate, rmp #2798; since rmp #2946 it validates
+// committed state only, as this does.)
 //
 // Adding an exclusion is NOT how this is done: an explicit transaction still does
 // not take the schema gate, and the lock order stays schemaGate -> writer
@@ -4581,8 +4752,9 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 // documented order.
 func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kind exec.ConstraintKind, idxMgr *index.Manager) error {
 	op := exec.NewCreateConstraintOp(name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
-	// The visibility barrier is not re-entrant, so nothing inside the closure may
-	// call Graph.View or Graph.ApplyAtomically. newBoundNodeHashIndex touches only
+	// The schema barrier is not re-entrant, so nothing inside the closure may call
+	// Graph.ApplyAtomically again (Graph.View, its former read side, was removed by
+	// rmp #2344). newBoundNodeHashIndex touches only
 	// index.Manager metadata; backfillNodeHashIndex and scanLabelProperty read
 	// graph state directly and take no barrier; BeginRead/EndRead touch only the
 	// reclamation horizon (atomics) and the MVCC clock. All four are the same
@@ -4769,7 +4941,7 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // keys are interned and immutable, so resolving them outside the walk is safe.
 //
 // It takes NO BARRIER of its own, and it is safe to call from INSIDE one, which
-// the committed-state NOT NULL scan relies on. Both phases used to run inside
+// [Engine.rewindConstraintDrop] relies on. Both phases used to run inside
 // lpg.Graph.View (task #1341) for CATALOG stability across the scan.
 // [Engine.schemaMu] supplies that already, and strictly better: every catalog
 // mutator — both [lpg.Graph.ApplyAtomically] call sites, and every DDL entry point
@@ -4784,12 +4956,10 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 //
 // On a LIVE view it never gave the scan a consistent view of DATA and still does
 // not: since rmp #2320 an ordinary write holds the barrier SHARED, so a value a
-// concurrent writer is adding may or may not be seen. That is sound for what the
-// live scan is FOR — it pre-validates a constraint that is not yet registered, and
-// every write after registration is checked by the enforcement path — so a value
-// added during the scan is caught there rather than missed. A caller that needs a
-// consistent data view passes a snapshot-bound rv, which is precisely what rmp
-// #2798 added on the NOT NULL path.
+// concurrent writer is adding may or may not be seen, and an explicit
+// transaction's eager, uncommitted writes are seen. A caller that needs a
+// consistent data view passes a snapshot-bound rv, as every constraint
+// validation does since rmp #2946.
 //
 // The #1339 deadlock is prevented by the TWO-PHASE structure below, not by any lock:
 // phase 1 snapshots (id, key) pairs under the mapper shard locks and phase 2 resolves
@@ -5652,10 +5822,15 @@ func analyseNodeScalarUseFor(bopts *buildOpts, x ast.Expression) (map[string]*no
 // subsequent calls with the same query string skip every stage above plan
 // execution.
 //
-// A non-nil error is returned only for parse or translation failures; a
-// semantically invalid (but parseable) query yields a cache entry whose
-// semaErr field is set, and parseAndAnalyse returns (entry, nil).
+// A non-nil error is returned only for parse or translation failures, and for a
+// fail-stopped engine ([ErrEngineFailStopped]), refused before parsing so that
+// every query entry point planning through here refuses too; a semantically
+// invalid (but parseable) query yields a cache entry whose semaErr field is set,
+// and parseAndAnalyse returns (entry, nil).
 func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, map[string]string, error) {
+	if err := e.failStopped(); err != nil {
+		return nil, nil, err
+	}
 	// The cache is keyed on query text, so a query that inlines a rotating
 	// string literal would miss on every execution and pay a full parse —
 	// measured at 65% more CPU per query than the same query written with a
@@ -5706,12 +5881,15 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, map[string]stri
 // median 762.68 s of mutex delay at concurrency 1024 on cypher-read-scan-large,
 // out of 762.90 s process-wide; with this collapse it is 0.
 func (e *Engine) buildPlanCacheEntry(query string) (*planCacheEntry, error) {
-	return e.planBuilds.do(query, e.compilePlanCacheEntry)
+	return e.planBuilds.do(query, e.cache.generation(), e.compilePlanCacheEntry)
 }
 
 // compilePlanCacheEntry is the body of [Engine.buildPlanCacheEntry], run by
 // exactly one goroutine per query text at a time.
 func (e *Engine) compilePlanCacheEntry(query string) (*planCacheEntry, error) {
+	// Read before anything below reads the index catalog: the entry is
+	// published only if no DDL has cleared the cache since (rmp #2854).
+	gen := e.cache.generation()
 	astNode, planMode, err := parser.ParseStatement(query)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: parse: %w", err)
@@ -5781,7 +5959,7 @@ func (e *Engine) compilePlanCacheEntry(query string) (*planCacheEntry, error) {
 		// single plan walk on a cache miss. See [planCacheEntry.containsWrite].
 		containsWrite: ir.ContainsWrite(plan),
 	}
-	actual, _ := e.cache.loadOrStore(query, entry)
+	actual, _ := e.cache.loadOrStoreAt(query, entry, gen)
 	return actual, nil
 }
 
@@ -5852,13 +6030,13 @@ type Result struct {
 	cbuf *exec.CountBuffer
 	cs   *count.Store
 
-	// matRows holds the rows drained under the transaction-visibility barrier
-	// (Graph.View for reads, Graph.ApplyAtomically for writes) at creation, so
-	// the whole query observes/produces one atomic, partial-transaction-free
-	// state (audit gap F3, docs/isolation-design.md). Once materialised the
-	// Result serves these buffered rows and holds NO lock while the caller
-	// iterates, so a long-open Result can never deadlock a concurrent writer —
-	// the property that makes the barrier safe for the lazy executor. matOn
+	// matRows holds the rows drained at creation (audit gap F3,
+	// docs/isolation-design.md). A read drains through one MVCC snapshot and takes
+	// no barrier; a write drains inside its bracket, which holds the schema
+	// barrier SHARED, and its writes stay invisible to other readers until the
+	// transaction's commit record is published. Once materialised the Result
+	// serves these buffered rows and holds NO lock while the caller iterates, so a
+	// long-open Result can never hold a writer's bracket open. matOn
 	// distinguishes a materialised Result (serve matRows) from a raw streaming
 	// one (delegate to rs).
 	// matRows holds the materialised rows column-oriented (struct-of-arrays):
@@ -5903,9 +6081,10 @@ type Result struct {
 	// walHandled is set once the WAL transaction has been committed (fsynced)
 	// or rolled back inside the write query's ApplyAtomically window (#1281,
 	// durable-then-visible). When set, closeLocked must NOT touch r.tx again —
-	// the durability decision was already made and finalised under the barrier,
-	// so the WAL fsync happens-before the mutations become observable to a
-	// concurrent Graph.View reader. It is the WAL analogue of bufHandled. For a
+	// the durability decision was already made and finalised inside the write
+	// bracket, so the WAL fsync happens-before the transaction's commit record is
+	// published and its mutations become visible to a concurrent snapshot reader.
+	// It is the WAL analogue of bufHandled. For a
 	// read query, or a write whose WAL commit is still deferred to Close (none,
 	// post-#1281), it stays false and closeLocked owns the commit/rollback.
 	walHandled bool
@@ -6208,11 +6387,12 @@ func (r *Result) rowSlice(i int) []expr.Value {
 // installs a fresh map for the next Next), which avoids the extra shallow copy
 // that re-hashing every column into a new map would cost — the alloc count is
 // unchanged (one map per retained row either way) but the per-row copy loop is
-// removed. It MUST be called inside Graph.View (read queries) or
-// Graph.ApplyAtomically (write queries): the whole drain — every graph read and
-// every eager write — then happens under one barrier acquisition, so a
-// concurrent reader observes the query's writes atomically and the query itself
-// observes a consistent, partial-transaction-free snapshot. After materialize
+// removed. A read query calls it with its reads bound to one MVCC snapshot and no
+// barrier held; a write query calls it inside its write bracket (the schema
+// barrier held SHARED), where every eager write is stamped with the
+// transaction's commit record. A concurrent reader therefore observes the
+// query's writes all at once, when that record is published, and the query
+// itself observes one consistent instant. After materialize
 // returns, the Result holds no lock; iteration is served from matRows. Errors
 // encountered during the drain are recorded on the ResultSet and surfaced via
 // Result.Err(); Close still commits/rolls back.
@@ -6764,6 +6944,15 @@ func (r *Result) releaseTxHandle() {
 	r.mvccG, r.wtx = nil, lpg.WriteTx{}
 }
 
+// resultWALDurable reports whether r's WAL transaction has been made durable by
+// [Result.commitUnderBarrier]: r carries a WAL transaction and the in-barrier
+// finalisation has handled it. A handled transaction that was rolled back instead
+// also reports true, which is harmless where it is used: the rollback has already
+// abandoned the MVCC transaction (rmp #2976). A nil r has made nothing durable.
+func resultWALDurable(r *Result) bool {
+	return r != nil && r.tx != nil && r.walHandled
+}
+
 func (r *Result) commitUnderBarrier() {
 	if r.bufHandled && r.walHandled {
 		return
@@ -6808,6 +6997,9 @@ func (r *Result) commitUnderBarrier() {
 	// index commit so the transaction is durable the instant its writes are
 	// allowed to remain observable past the barrier.
 	if r.tx != nil {
+		// The commit marker names the exact ids this statement created (WAL v2
+		// step 3); r.wtx is still open inside the barrier.
+		r.tx.AttachWriteTx(r.wtx)
 		if werr := r.tx.CommitWALOnly(r.allocCommitTS()); werr != nil {
 			cmetrics.IncCounter("cypher.RunInTx.wal.commitErrors", 1)
 			// The fsync failed: roll the not-durable write back so it never
@@ -6831,12 +7023,19 @@ func (r *Result) commitUnderBarrier() {
 		crashpoint.Breakpoint("mvcc.commit.post-fsync-pre-publish")
 	}
 	if r.buf != nil {
-		r.buf.Commit(r.idxMgr)
+		// The index changes are delivered when the bracket PUBLISHES this
+		// transaction, resolved against the state its commit produces, never
+		// against the present, which holds other transactions' uncommitted writes
+		// (rmp #2931, index_commit_apply.go). r.g, not r.mvccG: the handle below
+		// is dropped at the bracket boundary, and the applier runs inside it.
+		armIndexCommit((*resultApplier)(r), r.buf, r.idxMgr, r.g, r.wtx)
 	}
 	// Relationship count-store (#2082): apply this transaction's count deltas and
 	// dirty markings AFTER the WAL fsync and alongside the index buffer, on the
-	// same durable-then-visible side of the barrier. A View reader that sees the
-	// graph writes sees the matching counts. cbuf is nil for a write that touched
+	// same durable-then-visible side of the bracket. The cells are not versioned:
+	// a snapshot reader that sees the graph writes sees the matching counts, and
+	// a reader may also see the counts before the transaction's commit record is
+	// published (graph/index/count). cbuf is nil for a write that touched
 	// no count cell (bare CREATE (:N)); Commit is a no-op on a nil store.
 	if r.cbuf != nil {
 		recordCountCommit(r.cs, r.cbuf) // observability (#2087): count deltas applied
@@ -6875,6 +7074,16 @@ func (r *Result) commitUnderBarrier() {
 // are set, the registry is reseeded from the restored graph so those phantom
 // reservations do not falsely reject subsequent valid writes (#1342).
 func (r *Result) rollbackUnderBarrier() {
+	// END THE TRANSACTION AS AN ABORT (rmp #2976). Every caller is a path on which
+	// nothing is durable — a failed drain, a tripped resource guard, a recorded
+	// conflict, a NOT NULL violation, a failed WAL fsync — so the bracket must not
+	// publish the transaction when it closes: a published failure counts as a
+	// commit after the snapshot of every older transaction, which
+	// first-updater-wins then refuses for no visible reason. This is the autocommit
+	// counterpart of [ExplicitTx.rollbackInBarrierLocked] (rmp #2973). r.wtx is
+	// still the live handle here: [Result.releaseTxHandle] runs only after
+	// commitUnderBarrier returns, and Abandon is a no-op on the zero value.
+	r.wtx.Abandon()
 	if r.undo != nil && !r.undo.replay() {
 		r.undoErr = wrapUndoFailure(nil)
 	}
@@ -7309,6 +7518,93 @@ type lpgLabelResolver struct {
 	// query path DOES gate on these estimates — the join reorder consumes them —
 	// so the claim that they are inert or display-only no longer holds.
 	eng *Engine
+	// ctx is the statement's context, consulted ONLY where an interface carries
+	// none of its own — the statistics population fallback of the rendering
+	// paths ([resolveLabelPopulation]). nil means the resolution cannot be
+	// cancelled. Every other cancellable resolution takes its context as an
+	// argument (rmp #3010).
+	ctx context.Context //nolint:containedctx // per-statement scope, mirrors buildOpts.queryCtx
+	// memo reuses one corrected label bitmap per label for the statement this
+	// resolver serves (rmp #3011). nil disables reuse; it is set only for a read
+	// build at a pinned snapshot, where every resolution of a label describes the
+	// same instant. See [labelBitmapMemo].
+	memo *labelBitmapMemo
+}
+
+// labelBitmapMemoSlots bounds how many distinct labels one statement's memo holds.
+// A label beyond it is resolved afresh on every call, exactly as before the memo
+// existed, so the bound costs only reuse, never correctness.
+const labelBitmapMemoSlots = 4
+
+// labelBitmapMemo holds the snapshot-corrected bitmap of each label one READ
+// statement has resolved, so the statement corrects each label once (rmp #3011).
+//
+// # Why it exists
+//
+// A label scan resolves its bitmap in Init, and an Apply re-Inits its inner arm
+// once per outer row. Under MVCC churn every resolution is an O(suspects)
+// correction, so `MATCH (a:P), (b:P) RETURN count(*)` with 3 000 committed and
+// 150 000 uncommitted :P nodes corrected the :P bitmap 3 001 times and ran for
+// 2 min 21 s, measured on Apple M4 — for an answer that is the same every time.
+//
+// # Why reuse cannot change a result
+//
+// [lpg.Graph.LabelBitmapAsOfContext] answers what the reader's SNAPSHOT holds,
+// and a read statement's snapshot is fixed for its whole execution and the
+// statement writes nothing. So every resolution of one label within it is the
+// same set, and the bitmap is read-only by contract. The memo is therefore
+// enabled only for a read build with a non-nil snapshot; a present-time view
+// (rendering) or a writer's view, whose own writes move between resolutions,
+// never gets one.
+//
+// # Bounds and concurrency
+//
+// At most [labelBitmapMemoSlots] labels, held in the read build's scaffold — no
+// allocation — and released with it at the end of the statement. The mutex is
+// per statement, never global: morsel-parallel workers build and Init their
+// sub-plans concurrently against the one resolver, and the lock serialises only
+// the slot table, never a correction.
+type labelBitmapMemo struct {
+	mu  sync.Mutex
+	n   int
+	lid [labelBitmapMemoSlots]lpg.LabelID
+	bm  [labelBitmapMemoSlots]*roaring64.Bitmap
+}
+
+// get returns the memoised bitmap of lid, or nil. A nil memo holds nothing.
+func (m *labelBitmapMemo) get(lid lpg.LabelID) *roaring64.Bitmap {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.n {
+		if m.lid[i] == lid {
+			return m.bm[i]
+		}
+	}
+	return nil
+}
+
+// put records bm as lid's bitmap when a slot is free and returns the bitmap the
+// caller must use: the one already recorded, if a concurrent resolution got
+// there first, so every reader of the statement shares one instance.
+func (m *labelBitmapMemo) put(lid lpg.LabelID, bm *roaring64.Bitmap) *roaring64.Bitmap {
+	if m == nil {
+		return bm
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.n {
+		if m.lid[i] == lid {
+			return m.bm[i]
+		}
+	}
+	if m.n < labelBitmapMemoSlots {
+		m.lid[m.n], m.bm[m.n] = lid, bm
+		m.n++
+	}
+	return bm
 }
 
 // Counts returns the relationship count-store this resolver reads, or nil when
@@ -7343,17 +7639,48 @@ func (s *lpgLabelResolver) ResolvePropertyID(name string) (uint32, bool) {
 	return uint32(pid), true
 }
 
-// ResolveLabelBitmap implements exec.labelResolver.
+// ResolveLabelBitmap implements exec.labelResolver. It cannot be cancelled; a
+// caller holding the statement's context uses
+// [lpgLabelResolver.ResolveLabelBitmapContext].
 func (s *lpgLabelResolver) ResolveLabelBitmap(name string) *roaring64.Bitmap {
+	// context.Background is never cancelled, so the error is always nil.
+	bm, _ := s.ResolveLabelBitmapContext(context.Background(), name)
+	return bm
+}
+
+// ResolveLabelBitmapContext is [lpgLabelResolver.ResolveLabelBitmap] under ctx:
+// the same snapshot-corrected bitmap, or ctx's error when the statement is
+// cancelled while it is corrected — never a partially corrected bitmap (rmp
+// #3010). A label already resolved by this statement is answered from the memo
+// (rmp #3011).
+func (s *lpgLabelResolver) ResolveLabelBitmapContext(ctx context.Context, name string) (*roaring64.Bitmap, error) {
 	lid, ok := s.g.Registry().Lookup(name)
 	if !ok {
-		return roaring64.New()
+		return roaring64.New(), nil
+	}
+	if bm := s.memo.get(lid); bm != nil {
+		return bm, nil
 	}
 	// Through the snapshot-aware accessor, not the raw index. The index is a
 	// CANDIDATE source: it over-reports while a removal is deferred, and it
 	// under-reports nothing only because removals are deferred. See
 	// lpg/mvcc_index.go (rmp #2290).
-	return s.g.Raw().LabelBitmapAsOf(lid, s.g.Snapshot())
+	bm, err := s.g.Raw().LabelBitmapAsOfContext(ctx, lid, s.g.Snapshot())
+	if err != nil {
+		return nil, err
+	}
+	return s.memo.put(lid, bm), nil
+}
+
+// statementLabelBitmap resolves name under the statement context the resolver
+// carries ([lpgLabelResolver.ctx]), for a caller whose interface has no context
+// of its own. A resolver without one cannot be cancelled.
+func (s *lpgLabelResolver) statementLabelBitmap(name string) (*roaring64.Bitmap, error) {
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.ResolveLabelBitmapContext(ctx, name)
 }
 
 // HasLabelByID reports whether the node identified by id carries name AT THIS
@@ -7368,8 +7695,18 @@ func (s *lpgLabelResolver) HasLabelByID(id uint64, name string) bool {
 	return s.g.HasNodeLabelByID(graph.NodeID(id), name)
 }
 
-// ResolveLabelsCardinality reports the EXACT size of the labels' intersection
-// without materialising it, backing the planner's gate (#2133).
+// ResolveLabelsCardinality reports the size of the labels' intersection,
+// backing the planner's gate (#2133): exact when no MVCC history is live or the
+// history backlog is at most [planExactBacklog] (then through the statement's
+// cancellable correction), otherwise an O(1) UPPER BOUND.
+//
+// It was the EXACT size until rmp #3010, and exactness cost a full correction of
+// the conjunction bitmap whenever history was live — an O(suspects) walk in
+// planning that the statement could not cancel. The gate only CHOOSES between two
+// result-identical plans, and because the bound adds the same churn term to the
+// conjunction as to each label's own bound ([labelCardinalityEstimate]), the gate
+// decides under churn as it would on the raw index. See
+// [lpg.Graph.LabelsCountBound].
 //
 // It delegates to label.Index.IntersectCardinality, which runs roaring's
 // allocation-free AndCardinality against the LIVE bitmaps under one read-lock.
@@ -7392,13 +7729,24 @@ func (s *lpgLabelResolver) ResolveLabelsCardinality(names []string) (uint64, boo
 		}
 		lids = append(lids, lid)
 	}
-	// Through the as-of form, NOT NodeIndex() directly: the raw bitmaps are only
-	// authoritative when nothing is deferred and no label or node history is live.
-	// See [lpg.Graph.LabelsCountExact] for what reading them unconditionally cost
-	// (rmp #2326).
-	n, ok := s.g.Raw().LabelsCountExact(lids, s.g.Snapshot())
+	// Through the snapshot-aware bound, NOT NodeIndex() directly: the raw
+	// intersection alone could UNDER-count for a snapshot reader, which would let
+	// the gate admit on a number below the truth (rmp #2326). The bound never
+	// under-counts.
+	n, exact, ok := s.g.Raw().LabelsCountBound(lids, s.g.Snapshot())
 	if !ok {
 		return 0, false
+	}
+	// The hybrid of [lpgLabelResolver.ResolveLabelCountPlan]: exact while the
+	// correction is cheap, so the gate decides on the figure it always had.
+	if !exact && s.g.Raw().LabelHistoryBacklog() <= planExactBacklog {
+		ctx := s.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if bm, err := s.ResolveLabelsBitmapContext(ctx, names); err == nil {
+			return bm.GetCardinality(), true
+		}
 	}
 	return uint64(n), true
 }
@@ -7419,18 +7767,26 @@ func (s *lpgLabelResolver) ResolveLabelsCardinality(names []string) (uint64, boo
 // An unknown label makes the conjunction empty by definition, so it short-circuits
 // to an empty bitmap without touching the index.
 func (s *lpgLabelResolver) ResolveLabelsBitmap(names []string) *roaring64.Bitmap {
+	// context.Background is never cancelled, so the error is always nil.
+	bm, _ := s.ResolveLabelsBitmapContext(context.Background(), names)
+	return bm
+}
+
+// ResolveLabelsBitmapContext is [lpgLabelResolver.ResolveLabelsBitmap] under ctx,
+// with the cancellation contract of [lpgLabelResolver.ResolveLabelBitmapContext].
+func (s *lpgLabelResolver) ResolveLabelsBitmapContext(ctx context.Context, names []string) (*roaring64.Bitmap, error) {
 	if len(names) == 0 {
-		return roaring64.New()
+		return roaring64.New(), nil
 	}
 	ids := make([]lpg.LabelID, 0, len(names))
 	for _, n := range names {
 		lid, ok := s.g.Registry().Lookup(n)
 		if !ok {
-			return roaring64.New()
+			return roaring64.New(), nil
 		}
 		ids = append(ids, lid)
 	}
-	return s.g.Raw().LabelsBitmapAsOf(ids, s.g.Snapshot())
+	return s.g.Raw().LabelsBitmapAsOfContext(ctx, ids, s.g.Snapshot())
 }
 
 // ResolveLabelCount reports the number of live nodes that carry name, read
@@ -7471,11 +7827,50 @@ func (s *lpgLabelResolver) ResolveLabelCount(name string) (int64, bool) {
 // is present so the optional interface has the same shape as the exact-or-nothing
 // one and so a resolver that cannot answer can say so.
 func (s *lpgLabelResolver) ResolveLabelCountAsOf(name string) (int64, bool) {
+	// context.Background is never cancelled, so the error is always nil.
+	n, ok, _ := s.ResolveLabelCountAsOfContext(context.Background(), name)
+	return n, ok
+}
+
+// ResolveLabelCountAsOfContext is [lpgLabelResolver.ResolveLabelCountAsOf] under
+// ctx: a cancelled statement gets ctx's error instead of waiting for the count's
+// correction (rmp #3010). A label this statement has already resolved is counted
+// from the memoised bitmap (rmp #3011).
+func (s *lpgLabelResolver) ResolveLabelCountAsOfContext(ctx context.Context, name string) (int64, bool, error) {
+	lid, ok := s.g.Registry().Lookup(name)
+	if !ok {
+		return 0, true, nil
+	}
+	if bm := s.memo.get(lid); bm != nil {
+		return int64(bm.GetCardinality()), true, nil
+	}
+	n, err := s.g.Raw().LabelCountAsOfContext(ctx, lid, s.g.Snapshot())
+	if err != nil {
+		return 0, false, err
+	}
+	return n, true, nil
+}
+
+// ResolveLabelCountPlan implements [labelPlanCounter]: the count a plan-choice site
+// reads (rmp #3010). It is the O(1) exact count when that answers; otherwise the
+// exact snapshot count through the statement's cancellable, memoised correction
+// while the graph's history backlog is at most [planExactBacklog]; otherwise —
+// or when the statement is cancelled meanwhile — the O(1) upper bound.
+func (s *lpgLabelResolver) ResolveLabelCountPlan(name string) (int64, bool) {
 	lid, ok := s.g.Registry().Lookup(name)
 	if !ok {
 		return 0, true
 	}
-	return s.g.Raw().LabelCountAsOf(lid, s.g.Snapshot()), true
+	raw, snap := s.g.Raw(), s.g.Snapshot()
+	if n, ok := raw.LabelCountExact(lid, snap); ok {
+		return n, true
+	}
+	if raw.LabelHistoryBacklog() <= planExactBacklog {
+		if bm, err := s.statementLabelBitmap(name); err == nil {
+			return int64(bm.GetCardinality()), true
+		}
+	}
+	return raw.LabelCountBound(lid, snap)
 }
 
 // ResolveLabelCountBound reports an UPPER BOUND on the number of live nodes that
@@ -7685,7 +8080,7 @@ func BuildPlanWithMutator(
 	//     from the mutator rather than from a new parameter is why
 	//     [mutatorIndexDelta] exists.
 	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil,
-		planGates{indexSeek: true, pendingIdx: mutatorIndexDelta(mutator, plan)}, nil)
+		planGates{indexSeek: true, pendingIdx: mutatorIndexDelta(mutator, plan)}, nil, nil)
 }
 
 // planGates carries the ORDER-NEUTRAL planner substitutions the write-path build
@@ -7738,6 +8133,9 @@ type planGates struct {
 	// the scan+filter that reads the writer view (rmp #2814). nil means nothing
 	// is pending, which is the state of every read-only build.
 	pendingIdx *pendingIndexDelta
+	// trustIndexSnapshot is the engine's rmp #2937 test seam
+	// ([Engine.trustIndexSnapshotForTest]) carried to the write-path build.
+	trustIndexSnapshot bool
 }
 
 // buildPlanWithMutatorFull is the engine-internal variant of
@@ -7765,6 +8163,7 @@ func buildPlanWithMutatorFull(
 	procReg *procs.Registry,
 	gates planGates,
 	evals *writeEvalScaffold,
+	prof *exec.Profiler,
 ) (op exec.Operator, cols []string, err error) {
 	schema := make(map[string]int)
 	argByTag := make(map[uint32]*exec.Argument)
@@ -7777,6 +8176,12 @@ func buildPlanWithMutatorFull(
 	// — falls through to [buildOperator]'s default branch and errors with
 	// "unsupported IR node *ir.CreateNode".
 	bopts := &buildOpts{maxCollectItems: maxCollectItems, procReg: procReg}
+	// The PROFILE instrumentation of a WRITING statement (rmp #2790). nil — and
+	// therefore absent from the built tree — on every unprofiled run, exactly as on
+	// the read path (rmp #2222 AC 3). Installed HERE, in the write builder, so the
+	// write operators it wraps are the ones bound to this statement's live
+	// mutator; see [buildOperatorWrite] for the wrap point.
+	bopts.profiler = prof
 	// Order-neutral planner substitutions (#2225). Before this, the write path
 	// left every gate at its zero value, so a statement carrying any write clause
 	// was planned without the seek, without the min-label re-anchor and without
@@ -7811,6 +8216,12 @@ func buildPlanWithMutatorFull(
 	// transaction started.
 	bopts.indexSeekEnabled = gates.indexSeek
 	bopts.pendingIdx = gates.pendingIdx
+	// The snapshot proof (rmp #2937), from the view the label resolver reads
+	// through — the writing transaction's own view on the engine's write path. A
+	// caller-supplied resolver carries no view, and its build reads unguarded.
+	if r, ok := labelSrc.(*lpgLabelResolver); ok {
+		bopts.idxSnap = indexSeekSnapshotOf(r.g, gates.trustIndexSnapshot)
+	}
 	// The expression-level evaluators (rmp #2660). Without them [evalRow] saw two
 	// nil fields and degraded to the bare [expr.Eval] path for every expression in
 	// a writing statement, so a pattern predicate, an EXISTS { … } outside WHERE
@@ -7830,11 +8241,22 @@ func buildPlanWithMutatorFull(
 	// row carries the handle itself and no resolution happens, but the adapters still
 	// read bopts for the count store and the undo log. Only the concrete write
 	// adapters carry the field.
+	//
+	// The two concrete adapters are also the only mutators whose writes are
+	// journaled for live forward traversal (rmp #2883), so only they arm it. The
+	// journal belongs to the ADAPTER, not to this bopts: every plan built against
+	// one statement's adapter must share the one journal its writes feed.
 	switch m := mutator.(type) {
 	case *walMutatorAdapter:
 		m.bopts = bopts
+		if m.eng == nil || !m.eng.disableLiveTraversalForTest {
+			bopts.liveTopo = &m.liveTopo
+		}
 	case *lpgMutatorAdapter:
 		m.bopts = bopts
+		if m.eng == nil || !m.eng.disableLiveTraversalForTest {
+			bopts.liveTopo = &m.liveTopo
+		}
 	}
 
 	// When the IR root is a ProduceResults, use its declared columns; otherwise
@@ -7870,7 +8292,10 @@ func buildPlanWithMutatorFull(
 		if projErr != nil {
 			return nil, nil, fmt.Errorf("cypher: build final projection: %w", projErr)
 		}
-		return proj, cols, nil
+		// The final projection is built ABOVE buildOperatorWrite's recursion, so
+		// the wrap point there never sees it; without this a profiled write
+		// rendered its root as "(not measured)". A no-op when unprofiled.
+		return profileIntermediate(bopts, proj), cols, nil
 	}
 
 	// Write-only query (no RETURN clause): build the write operator tree
@@ -7893,9 +8318,39 @@ func buildPlanWithMutatorFull(
 //
 // argByTag is forwarded to buildOperator for [*ir.Argument] resolution; pass
 // nil when no Apply-family operator is in scope.
+func buildOperatorWrite(
+	plan ir.LogicalPlan,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	mutator exec.GraphMutator,
+	constraintReg *exec.ConstraintRegistry,
+	idxMgr *index.Manager,
+	argByTag map[uint32]*exec.Argument,
+	bopts *buildOpts,
+) (exec.Operator, error) {
+	op, err := buildOperatorWriteRec(plan, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
+	// The write-path counterpart of [buildOperator]'s single wrap point (rmp
+	// #2790): every node buildOperatorWriteRec produces passes through here on the
+	// way out of the recursion, because the recursion calls this function, not
+	// itself. A node the switch hands to [buildOperator] comes back wrapped
+	// already, and [exec.Profiler.Wrap] returns a wrapped operator unchanged, so no
+	// node is measured twice. With no profiler — every unprofiled run — the
+	// operator is returned exactly as built.
+	if err != nil || bopts == nil || bopts.profiler == nil {
+		return op, err
+	}
+	return bopts.profiler.Wrap(op), nil
+}
+
+// buildOperatorWriteRec is the body of [buildOperatorWrite]: the physical build
+// of one write-path plan node. It recurses through buildOperatorWrite, never
+// around it, so the profiling wrap point sees every node.
 //
 //nolint:gocyclo // large switch — one case per write IR node, no hidden branches
-func buildOperatorWrite(
+func buildOperatorWriteRec(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
 	labelSrc labelResolverIface,
@@ -8049,7 +8504,7 @@ func buildOperatorWrite(
 				// Per openCypher these surface as InvalidPropertyType at
 				// runtime (Set1 [10]).
 				if !isStorableProperty(v) {
-					return lpg.PropertyValue{}, false, false, fmt.Errorf("exec: SET %s: InvalidPropertyType: maps cannot be stored as property values", p.PropertyKey)
+					return lpg.PropertyValue{}, false, false, fmt.Errorf("exec: SET %s: maps cannot be stored as property values: %w", p.PropertyKey, exec.ErrNestedPropertyValue)
 				}
 				// A node-, relationship- or path-valued RHS is equally
 				// unstorable and must be REFUSED, not dropped into the
@@ -8065,9 +8520,15 @@ func buildOperatorWrite(
 					}
 					return lpg.PropertyValue{}, false, false, nil
 				}
+				// A list with a null element is refused, not dropped into the
+				// !ok no-op below that reported success and kept the old value
+				// (rmp #2941).
+				if listHasNullElement(v) {
+					return lpg.PropertyValue{}, false, false, errNullListElementProperty("SET", p.PropertyKey)
+				}
 				pv, ok := exprValueToLPGProp(v)
 				if !ok {
-					return lpg.PropertyValue{}, false, false, nil
+					return lpg.PropertyValue{}, false, false, errUnstorablePropertyValue("SET", p.PropertyKey)
 				}
 				return pv, false, true, nil
 			})
@@ -8217,7 +8678,20 @@ func buildOperatorWrite(
 			dn.WithRelEndpoints(deleteRelEndpoints)
 		}
 		if p.TargetExpr != nil {
-			if _, isVar := p.TargetExpr.(*ast.Variable); !isVar {
+			_, isVar := p.TargetExpr.(*ast.Variable)
+			// A bare variable that names a path carries the path's leading node id
+			// in its row slot, not a PathValue, so the schema-direct branch would
+			// treat `DELETE p` as a DELETE of that node and refuse it for the
+			// path's own relationship. Evaluate it into the reconstructed path, as
+			// DETACH DELETE does (rmp #2950).
+			if isVar && bopts != nil {
+				if _, isChainPath := bopts.pathVarChain[p.NodeVar]; isChainPath {
+					isVar = false
+				} else if _, isVLEPath := bopts.pathVarMeta[p.NodeVar]; isVLEPath {
+					isVar = false
+				}
+			}
+			if !isVar {
 				schemaSnap := newRowSchema(schemaCopy)
 				capturedExpr := p.TargetExpr
 				capturedParams := params
@@ -8385,14 +8859,14 @@ func buildOperatorWrite(
 		if len(p.OnCreate) > 0 {
 			actions := make([]exec.MergeRelAction, 0, len(p.OnCreate))
 			for _, kv := range p.OnCreate {
-				actions = append(actions, exec.MergeRelActionReplaceFromKV(kv.Key, kv.Value, kv.Replace, kv.RetainKeys))
+				actions = append(actions, exec.MergeRelActionReplaceFromKV(kv.Key, kv.Value, kv.Replace, kv.RetainKeys).At(kv.Ord))
 			}
 			op = op.WithOnCreate(p.RelVar, actions)
 		}
 		if len(p.OnMatch) > 0 {
 			actions := make([]exec.MergeRelAction, 0, len(p.OnMatch))
 			for _, kv := range p.OnMatch {
-				actions = append(actions, exec.MergeRelActionReplaceFromKV(kv.Key, kv.Value, kv.Replace, kv.RetainKeys))
+				actions = append(actions, exec.MergeRelActionReplaceFromKV(kv.Key, kv.Value, kv.Replace, kv.RetainKeys).At(kv.Ord))
 			}
 			op = op.WithOnMatch(p.RelVar, actions)
 		}
@@ -8570,7 +9044,13 @@ func buildOperatorWrite(
 		// MATCH branch fires; only zero matches drives the ON CREATE branch.
 		// Single-writer serialisation in the engine keeps concurrent MERGE
 		// callers from racing to a phantom zero-match result.
-		searchFn, sfErr := exec.NewMergeSearchFnFromPattern(labels, props, params, mutator, mergeLabelSource(labelSrc))
+		// The property-index access path (rmp #2812), under the same kill switch as
+		// the equality seek: with an index covering a (label, property) of the
+		// pattern the candidates come from that index, re-checked in full, and the
+		// probe itself declines whenever it cannot prove its answer complete for
+		// this transaction (see merge_index_probe.go).
+		prober := mergeIndexProberFor(mutator, bopts)
+		searchFn, sfErr := exec.NewMergeSearchFnWithProbe(labels, props, params, mutator, mergeLabelSource(labelSrc), prober)
 		if sfErr != nil {
 			return nil, sfErr
 		}
@@ -8598,6 +9078,9 @@ func buildOperatorWrite(
 		// Label posting list for the row-aware search, so a per-row MERGE key
 		// examines the label's population instead of the whole graph (#2217).
 		m.WithLabelSource(mergeLabelSource(labelSrc))
+		// The same index access path for the row-aware search (rmp #2812), which is
+		// the one the UNWIND-MERGE bulk-ingest idiom drives.
+		m.WithIndexProber(prober)
 		// p.Child == nil is the LEADING-clause plan shape: the MERGE has no
 		// driving clause, so buildOperatorWrite gave it a SingleRow leaf above
 		// and it owns the query's one initial empty row. Any other shape fires
@@ -8647,6 +9130,7 @@ func buildOperatorWrite(
 		for k := range schema {
 			preKeys[k] = struct{}{}
 		}
+		outerFacts := bopts.snapshotScopeFacts()
 		arg := exec.NewArgument()
 		if argByTag != nil {
 			argByTag[p.ArgTag] = arg
@@ -8665,6 +9149,7 @@ func buildOperatorWrite(
 				delete(schema, k)
 			}
 		}
+		bopts.restoreScopeFacts(outerFacts)
 		return exec.NewForeach(outer, inner, arg), nil
 
 	default:
@@ -9042,10 +9527,12 @@ func buildPropsEvalFn(
 		}
 	}
 
+	schemaCopy = writeEvalRowSchema(schemaCopy, vals...)
+	relSnap := edgeVarSnapshot(bopts, schemaCopy)
 	return func(row exec.Row) ([]exec.PropEntry, error) {
 		// Build a RowContext that can resolve variable bindings and node
 		// property accesses from the current row.
-		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
+		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap, relSnap)
 
 		var out []exec.PropEntry
 		for i, k := range keys {
@@ -9081,6 +9568,11 @@ func buildPropsEvalFn(
 				// rather than store an unserialisable value or drop it silently.
 				return nil, fmt.Errorf("exec: property %s: %w", k, exec.ErrNestedPropertyValue)
 			}
+			if listHasNullElement(v) {
+				// A stored list cannot contain null: refuse rather than drop the
+				// key (rmp #2941).
+				return nil, errNullListElementProperty("property", k)
+			}
 			pv, ok := exprValueToLPGProp(v)
 			if !ok {
 				// A node- or relationship-valued property is InvalidPropertyType
@@ -9100,10 +9592,13 @@ func buildPropsEvalFn(
 				// A PATH is equally unstorable and equally silent when dropped,
 				// so the guard classifies by [isEntityPropertyValue] — which also
 				// reaches an entity nested inside a list (rmp #2816).
-				if isEntityPropertyValue(v) && !valueExprIsScalarCol(vals[i], scalarSnap) {
-					return nil, errEntityPropertyValue("property", k)
+				if isEntityPropertyValue(v) {
+					if !valueExprIsScalarCol(vals[i], scalarSnap) {
+						return nil, errEntityPropertyValue("property", k)
+					}
+					continue // scalar-vs-NodeID mis-upgrade: drop, as before
 				}
-				continue
+				return nil, errUnstorablePropertyValue("property", k)
 			}
 			out = append(out, exec.PropEntry{Key: k, Value: pv})
 		}
@@ -9186,10 +9681,9 @@ func maybeMapEvalFn(
 // `SET x += {…}` operator. It mirrors [buildPropsEvalFn] but, instead of
 // silently omitting a key whose value evaluates to null, it reports that key in
 // nullKeys — SET-map semantics delete such keys from the target (openCypher:
-// `SET n += {k: null}` removes k). Runtime evaluation errors and invalid
-// property types (a map or nested collection) fail-stop; a node/relationship-
-// valued entry is dropped (consistent with [buildPropsEvalFn] and the shared
-// scalar-vs-NodeID guard). A nil ml produces a nil closure.
+// `SET n += {k: null}` removes k). Runtime evaluation errors and every invalid
+// property type fail-stop; only the shared scalar-vs-NodeID mis-upgrade is
+// dropped. A nil ml produces a nil closure.
 func buildMapEvalFn(
 	ml *ast.MapLiteral,
 	schemaCopy map[string]int,
@@ -9206,9 +9700,11 @@ func buildMapEvalFn(
 	vals := make([]ast.Expression, len(ml.Values))
 	copy(vals, ml.Values)
 	scalarSnap := scalarColSnapshot(bopts)
+	schemaCopy = writeEvalRowSchema(schemaCopy, vals...)
+	relSnap := edgeVarSnapshot(bopts, schemaCopy)
 
 	return func(row exec.Row) ([]exec.PropEntry, []string, error) {
-		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
+		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap, relSnap)
 		var entries []exec.PropEntry
 		var nullKeys []string
 		for i, k := range keys {
@@ -9237,9 +9733,15 @@ func buildMapEvalFn(
 				}
 				continue // scalar-vs-NodeID mis-upgrade: drop, as before
 			}
+			// A list with a null element is refused, not dropped: dropping it
+			// made `SET n += {k: [1, null]}` report success and keep the old
+			// value (rmp #2941).
+			if listHasNullElement(v) {
+				return nil, nil, errNullListElementProperty("property", k)
+			}
 			pv, ok := exprValueToLPGProp(v)
 			if !ok {
-				continue
+				return nil, nil, errUnstorablePropertyValue("property", k)
 			}
 			entries = append(entries, exec.PropEntry{Key: k, Value: pv})
 		}
@@ -9264,11 +9766,13 @@ func buildExprMapEvalFn(
 	bopts *buildOpts,
 ) exec.ExprValueEvalFn {
 	scalarSnap := scalarColSnapshot(bopts)
+	schemaCopy = writeEvalRowSchema(schemaCopy, exprAST)
+	relSnap := edgeVarSnapshot(bopts, schemaCopy)
 	return func(row exec.Row) (expr.Value, error) {
 		if exprAST == nil {
 			return expr.Null, nil
 		}
-		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
+		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap, relSnap)
 		// evalRow, not expr.Eval — same reason as [buildPropsEvalFn]. The RHS
 		// here is a whole map-valued expression (a CASE, a coalesce, a map
 		// projection), any sub-expression of which may be a subquery or a
@@ -9300,6 +9804,7 @@ func buildMergeSetAllActions(
 		out = append(out, exec.MergeSetAllAction{
 			TargetVar: it.TargetVar,
 			IsReplace: it.IsReplace,
+			Ord:       it.Ord,
 			Eval:      buildExprMapEvalFn(it.Value, schemaCopy, params, reg, mutator, bopts),
 		})
 	}
@@ -9443,6 +9948,145 @@ func scalarColSnapshot(bopts *buildOpts) map[string]struct{} {
 	return out
 }
 
+// edgeVarSnapshot copies, from bopts, the column triplets of the relationship
+// variables in schema, for a per-row write-path evaluator, so
+// [buildRowCtxFromMutator] resolves each to its value (rmp #2960). The copy is
+// taken when the evaluator is built because bopts.edgeVarMeta is cleared at the
+// next scope boundary, before the evaluator runs. schema is the evaluator's
+// pruned layout ([writeEvalRowSchema]), so a relationship no expression reads
+// is left out and costs nothing per row. Returns nil when none remains.
+func edgeVarSnapshot(bopts *buildOpts, schema map[string]int) map[string]edgeVarInfo {
+	if bopts == nil || len(bopts.edgeVarMeta) == 0 {
+		return nil
+	}
+	var out map[string]edgeVarInfo
+	for k, v := range bopts.edgeVarMeta {
+		if _, inSchema := schema[k]; !inSchema {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]edgeVarInfo, len(schema))
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// writeEvalRowSchema restricts schema to the variables exprs reference, so a
+// write-path evaluator's per-row context materialises only what it reads: a
+// node's property bag or a relationship's endpoints, type and properties cost
+// a read per row each, and an entity no expression names was paid for and then
+// discarded. When any expression carries a construct whose variable use the
+// walk cannot see ([exprVarRefs]), the full schema is kept.
+func writeEvalRowSchema(schema map[string]int, exprs ...ast.Expression) map[string]int {
+	refs := make(map[string]struct{}, 4)
+	for _, e := range exprs {
+		if !exprVarRefs(e, refs) {
+			return schema
+		}
+	}
+	out := make(map[string]int, len(refs))
+	for name := range refs {
+		if col, ok := schema[name]; ok {
+			out[name] = col
+		}
+	}
+	return out
+}
+
+// exprVarRefs adds to refs the name of every variable e references, and
+// reports whether the walk saw all of them. It is conservative by
+// construction: a subquery, a pattern predicate, a pattern comprehension, or any
+// node kind it does not know reports false, because such a construct reads row
+// variables through a pattern rather than through a *ast.Variable. A name bound
+// locally by a comprehension or reduce may be added as well; an extra name only
+// keeps a column that would otherwise have been pruned.
+func exprVarRefs(e ast.Expression, refs map[string]struct{}) bool {
+	switch n := e.(type) {
+	case nil:
+		return true
+	case *ast.Variable:
+		refs[n.Name] = struct{}{}
+		return true
+	case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral, *ast.BoolLiteral,
+		*ast.OverflowIntLit, *ast.NullLiteral, *ast.StarLiteral, *ast.Parameter:
+		return true
+	case *ast.Property:
+		return exprVarRefs(n.Receiver, refs)
+	case *ast.LabelPredicate:
+		return exprVarRefs(n.Receiver, refs)
+	case *ast.UnaryOp:
+		return exprVarRefs(n.Operand, refs)
+	case *ast.BinaryOp:
+		return exprVarRefs(n.Left, refs) && exprVarRefs(n.Right, refs)
+	case *ast.FunctionInvocation:
+		return exprVarRefsAll(n.Args, refs)
+	case *ast.ListLiteral:
+		return exprVarRefsAll(n.Elements, refs)
+	case *ast.MapLiteral:
+		return exprVarRefsAll(n.Values, refs)
+	case *ast.SubscriptExpr:
+		return exprVarRefs(n.Expr, refs) && exprVarRefs(n.Index, refs)
+	case *ast.SliceExpr:
+		return exprVarRefs(n.Expr, refs) && exprVarRefs(n.From, refs) && exprVarRefs(n.To, refs)
+	case *ast.CaseExpression:
+		if !exprVarRefs(n.Subject, refs) || !exprVarRefs(n.ElseExpr, refs) {
+			return false
+		}
+		for _, alt := range n.Alternatives {
+			if alt != nil && (!exprVarRefs(alt.Condition, refs) || !exprVarRefs(alt.Consequent, refs)) {
+				return false
+			}
+		}
+		return true
+	case *ast.ListComprehension:
+		return exprVarRefs(n.Source, refs) && exprVarRefs(n.Predicate, refs) && exprVarRefs(n.Projection, refs)
+	case *ast.ReduceExpr:
+		return exprVarRefs(n.Init, refs) && exprVarRefs(n.Source, refs) && exprVarRefs(n.Projection, refs)
+	case *ast.MapProjection:
+		if !exprVarRefs(n.Subject, refs) {
+			return false
+		}
+		for _, it := range n.Items {
+			if it != nil && !exprVarRefs(it.Value, refs) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// exprVarRefsAll is [exprVarRefs] over a list of expressions.
+func exprVarRefsAll(es []ast.Expression, refs map[string]struct{}) bool {
+	for _, e := range es {
+		if !exprVarRefs(e, refs) {
+			return false
+		}
+	}
+	return true
+}
+
+// relValueFromMutator resolves the relationship the Expand triplet info binds
+// in row to its [expr.RelationshipValue], through the mutator so a write path
+// reads its own pending writes. The type is the stored type the pattern
+// accepted, as on the read path ([pickEdgeType]). When the triplet does not
+// resolve, the value still carries the handle and the declared type, so it
+// stays a relationship: refused as a property value, never stored as an
+// integer.
+func relValueFromMutator(row exec.Row, info *edgeVarInfo, mutator exec.GraphMutator, handle expr.IntegerValue) expr.Value {
+	rv, types, ok := exec.RelationshipValueFromCols(mutator, exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol, EdgeCol: info.edgeCol}, row)
+	if !ok {
+		return expr.RelationshipValue{ID: uint64(handle), Type: info.edgeType}
+	}
+	rv.Type = info.edgeType
+	if len(types) > 0 {
+		rv.Type = pickEdgeType(types, info.acceptedTypes)
+	}
+	return rv
+}
+
 // buildMergeActionEvals builds the per-row RHS evaluator map for a MERGE
 // operator's ON CREATE / ON MATCH property-set items whose right-hand side is a
 // non-literal expression (e.g. `ON MATCH SET n.num = n.num + 1`). Each
@@ -9452,8 +10096,8 @@ func scalarColSnapshot(bopts *buildOpts) map[string]struct{} {
 // degrading to a no-op on an evaluation error or unstorable type exactly as
 // regular SET does, and reporting an unstorable map RHS as InvalidPropertyType.
 //
-// The returned map is keyed by [exec.MergeActionEvalKey] on the item's target
-// variable and property key, the same key the merge operators look up at apply
+// The returned map is keyed by [exec.MergeActionEvalKey] on the item's position,
+// target variable and property key, the same key the merge operators look up at apply
 // time. Returns nil when exprs is empty (all-literal action set), which keeps
 // the literal fast path byte-identical. #1965.
 func buildMergeActionEvals(
@@ -9472,8 +10116,10 @@ func buildMergeActionEvals(
 	for _, e := range exprs {
 		valAST := e.Value
 		propKey := e.Key
-		out[exec.MergeActionEvalKey(e.TargetVar, e.Key)] = func(row exec.Row) (lpg.PropertyValue, bool, bool, error) {
-			rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
+		itemSchema := writeEvalRowSchema(schemaCopy, valAST)
+		relSnap := edgeVarSnapshot(bopts, itemSchema)
+		out[exec.MergeActionEvalKey(e.Ord, e.TargetVar, e.Key)] = func(row exec.Row) (lpg.PropertyValue, bool, bool, error) {
+			rowCtx := buildRowCtxFromMutator(row, itemSchema, mutator, scalarSnap, relSnap)
 			// evalRow, not expr.Eval — same reason as [buildPropsEvalFn]: a
 			// MERGE ON CREATE / ON MATCH SET right-hand side is an ordinary
 			// expression and may carry a subquery or a pattern predicate
@@ -9489,7 +10135,7 @@ func buildMergeActionEvals(
 				return lpg.PropertyValue{}, true, false, nil
 			}
 			if !isStorableProperty(v) {
-				return lpg.PropertyValue{}, false, false, fmt.Errorf("exec: MERGE SET %s: InvalidPropertyType: maps cannot be stored as property values", propKey)
+				return lpg.PropertyValue{}, false, false, fmt.Errorf("exec: MERGE SET %s: maps cannot be stored as property values: %w", propKey, exec.ErrNestedPropertyValue)
 			}
 			// Entity-valued RHS: refuse, matching regular SET, rather than fall
 			// into the !hasValue no-op that reported success and wrote nothing
@@ -9500,9 +10146,14 @@ func buildMergeActionEvals(
 				}
 				return lpg.PropertyValue{}, false, false, nil
 			}
+			// A list with a null element is refused, matching regular SET
+			// (rmp #2941).
+			if listHasNullElement(v) {
+				return lpg.PropertyValue{}, false, false, errNullListElementProperty("MERGE SET", propKey)
+			}
 			pv, ok := exprValueToLPGProp(v)
 			if !ok {
-				return lpg.PropertyValue{}, false, false, nil
+				return lpg.PropertyValue{}, false, false, errUnstorablePropertyValue("MERGE SET", propKey)
 			}
 			return pv, false, true, nil
 		}
@@ -9519,13 +10170,37 @@ func buildMergeActionEvals(
 // When no mutator is available, or when the integer cannot be resolved to a
 // node, the raw IntegerValue is kept.
 //
+// schema is the row layout restricted to the variables the evaluated
+// expressions reference ([writeEvalRowSchema]), so a bound entity no expression
+// reads is never materialised.
+//
+// rels, when non-nil, maps each relationship variable bound by an Expand to
+// its column triplet ([edgeVarInfo], snapshot by [edgeVarSnapshot]). Such a
+// variable's column holds the relationship's handle, so it is resolved to the
+// full [expr.RelationshipValue] a read produces (type, stored orientation and
+// the instance's own properties) rather than left as an integer that r.p,
+// type(r) and properties(r) cannot read and a property write would store
+// (rmp #2960).
+//
 // scalarCols, when non-nil, lists variable names whose row values must pass
 // through unchanged: UNWIND element variables and EagerAggregation outputs
 // are scalar by construction and may numerically coincide with internal node
 // ids — upgrading them would silently corrupt downstream CREATE/SET property
 // writes.
-func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.GraphMutator, scalarCols map[string]struct{}) expr.RowContext {
+func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.GraphMutator, scalarCols map[string]struct{}, rels map[string]edgeVarInfo) expr.RowContext {
 	ctx := make(expr.RowContext, len(schema))
+	// A bound node's labels and properties are read through the writing
+	// transaction's view when the mutator carries one, exactly as a RETURN or a
+	// SET right-hand side in the same statement reads them (rmp #2974). The
+	// mutator's plain accessors read the PRESENT, so an explicit transaction
+	// evaluating `CREATE (r {date: c.date})` stored a value another transaction
+	// committed after BEGIN — a read outside the transaction's snapshot. A
+	// mutator without a view carries no transaction; for it the present IS its
+	// view.
+	var view *lpg.ReadView[string, float64]
+	if tv, ok := mutator.(txReadViewer); ok {
+		view = tv.txReadView()
+	}
 	for varName, colIdx := range schema {
 		if colIdx >= len(row) || row[colIdx] == nil {
 			continue
@@ -9539,14 +10214,30 @@ func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.Gr
 		}
 		if mutator != nil {
 			if iv, ok := v.(expr.IntegerValue); ok {
+				// A relationship variable's column holds its handle, not a
+				// node id: resolve it to the relationship value before the node
+				// upgrade below can mistake the handle for a node (rmp #2960).
+				if info, isRel := rels[varName]; isRel {
+					relMut := mutator
+					if view != nil {
+						relMut = txViewRelMutator{GraphMutator: mutator, view: view}
+					}
+					ctx[varName] = relValueFromMutator(row, &info, relMut, iv)
+					continue
+				}
 				nodeID := graph.NodeID(iv)
 				if key, resolved := mutator.ResolveNodeLabel(nodeID); resolved {
-					rawProps := mutator.NodeProperties(key)
+					var rawProps map[string]lpg.PropertyValue
+					var labels []string
+					if view != nil {
+						rawProps, labels = view.NodeProperties(key), view.NodeLabels(key)
+					} else {
+						rawProps, labels = mutator.NodeProperties(key), mutator.NodeLabels(key)
+					}
 					props := make(expr.MapValue, len(rawProps))
 					for k, pv := range rawProps {
 						props[k] = lpgPropToExpr(pv)
 					}
-					labels := mutator.NodeLabels(key)
 					ctx[varName] = expr.NodeValue{
 						ID:         uint64(nodeID),
 						Labels:     labels,
@@ -9559,6 +10250,47 @@ func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.Gr
 		ctx[varName] = v
 	}
 	return ctx
+}
+
+// txReadViewer is the optional mutator capability [buildRowCtxFromMutator] uses
+// to read a bound entity as the writing transaction sees it: its own writes
+// included, no commit later than its snapshot, and no other transaction's
+// unpublished work. Both engine mutator adapters implement it.
+type txReadViewer interface {
+	txReadView() *lpg.ReadView[string, float64]
+}
+
+// txViewRelMutator is a mutator whose relationship READS resolve through the
+// writing transaction's view (rmp #2974). It wraps the statement's mutator only
+// for the duration of resolving one relationship variable into an
+// [expr.RelationshipValue] for expression evaluation; every other method is the
+// wrapped mutator's own. Not safe for concurrent use beyond what the wrapped
+// mutator allows.
+type txViewRelMutator struct {
+	exec.GraphMutator
+	view *lpg.ReadView[string, float64]
+}
+
+// HasEdge reports whether the pair holds an edge in the transaction's view.
+func (m txViewRelMutator) HasEdge(src, dst string) bool { return m.view.HasEdge(src, dst) }
+
+// EdgeLabels returns the pair's types in the transaction's view.
+func (m txViewRelMutator) EdgeLabels(src, dst string) []string { return m.view.EdgeLabels(src, dst) }
+
+// EdgeLabelsByHandle returns one instance's types in the transaction's view.
+func (m txViewRelMutator) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
+	return m.view.EdgeLabelsByHandle(src, dst, handle)
+}
+
+// EdgeProperties returns the pair's properties in the transaction's view.
+func (m txViewRelMutator) EdgeProperties(src, dst string) map[string]lpg.PropertyValue {
+	return m.view.EdgeProperties(src, dst)
+}
+
+// EdgePropertiesByHandle returns one instance's properties in the transaction's
+// view.
+func (m txViewRelMutator) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
+	return m.view.EdgePropertiesByHandle(src, dst, handle)
 }
 
 // exprValueToLPGProp converts an [expr.Value] to an [lpg.PropertyValue].
@@ -9614,7 +10346,7 @@ func isStorableProperty(v expr.Value) bool {
 // spec-mandated outcome; the defect was refusing SILENTLY.
 func isEntityPropertyValue(v expr.Value) bool {
 	switch val := v.(type) {
-	case expr.NodeValue, expr.RelationshipValue, expr.PathValue:
+	case expr.NodeValue, *expr.LazyNodeValue, expr.RelationshipValue, *expr.LazyRelationshipValue, expr.PathValue:
 		return true
 	case expr.ListValue:
 		for _, el := range val {
@@ -9628,9 +10360,49 @@ func isEntityPropertyValue(v expr.Value) bool {
 
 // errEntityPropertyValue builds the InvalidPropertyType error a write path
 // raises for an entity-valued property, naming the clause and the key so the
-// diagnostic matches the shape the map case already produces (rmp #2816).
+// diagnostic matches the shape the map case already produces (rmp #2816). It
+// wraps [exec.ErrEntityPropertyValue], so a caller classifies it with
+// errors.Is rather than by its text.
 func errEntityPropertyValue(clause, key string) error {
-	return fmt.Errorf("exec: %s %s: InvalidPropertyType: a node, relationship or path is not a valid property value", clause, key)
+	return fmt.Errorf("exec: %s %s: %w", clause, key, exec.ErrEntityPropertyValue)
+}
+
+// errUnstorablePropertyValue builds the InvalidPropertyType error a write path
+// raises when [exprValueToLPGProp] cannot encode a value that no earlier check
+// classified. Every write path used to read that case as "no value produced" and
+// skip the key silently (rmp #2958); it is refused instead, in the shape
+// [errEntityPropertyValue] uses.
+func errUnstorablePropertyValue(clause, key string) error {
+	return fmt.Errorf("exec: %s %s: %w", clause, key, exec.ErrUnsupportedPropertyValue)
+}
+
+// listHasNullElement reports whether v is a list with a null element.
+//
+// A stored list cannot contain null (rmp #2941; TCK Set1 [10] classifies an
+// unstorable list as InvalidPropertyType). [exprValueToLPGProp] already refuses
+// to convert such a list, but reports the refusal as ok == false, which every
+// SET write path read as "no value produced" and turned into a silent no-op
+// that kept the old value. Each write path tests this first and raises
+// [exec.ErrNullListElement] instead. Nested lists are refused earlier by
+// [isStorableProperty], so only the top-level elements are inspected.
+func listHasNullElement(v expr.Value) bool {
+	lv, ok := v.(expr.ListValue)
+	if !ok {
+		return false
+	}
+	for _, el := range lv {
+		if el == nil || expr.IsNull(el) {
+			return true
+		}
+	}
+	return false
+}
+
+// errNullListElementProperty builds the InvalidPropertyType error a write path
+// raises for a list-valued property with a null element, naming the clause and
+// the key in the shape [errEntityPropertyValue] uses.
+func errNullListElementProperty(clause, key string) error {
+	return fmt.Errorf("exec: %s %s: %w", clause, key, exec.ErrNullListElement)
 }
 
 func exprValueToLPGProp(v expr.Value) (lpg.PropertyValue, bool) {
@@ -9897,10 +10669,14 @@ func buildPlanEngine(
 	// returned as the union's output schema — openCypher requires every
 	// branch of a UNION to expose the same column names in the same order.
 	if u, ok := plan.(*ir.UnionAll); ok {
+		// Each branch is a scope of its own: the right one must not inherit the
+		// facts of the left one's variables (see rowbind.go).
+		preFacts := bopts.snapshotScopeFacts()
 		leftOp, leftCols, lerr := buildPlanEngine(u.Left, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
 		if lerr != nil {
 			return nil, nil, lerr
 		}
+		bopts.restoreScopeFacts(preFacts)
 		rightOp, _, rerr := buildPlanEngine(u.Right, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
 		if rerr != nil {
 			return nil, nil, rerr
@@ -9913,10 +10689,14 @@ func buildPlanEngine(
 		return profileIntermediate(bopts, exec.NewUnionAll(leftOp, rightOp)), leftCols, nil
 	}
 	if u, ok := plan.(*ir.Union); ok {
+		// Each branch is a scope of its own: the right one must not inherit the
+		// facts of the left one's variables (see rowbind.go).
+		preFacts := bopts.snapshotScopeFacts()
 		leftOp, leftCols, lerr := buildPlanEngine(u.Left, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
 		if lerr != nil {
 			return nil, nil, lerr
 		}
+		bopts.restoreScopeFacts(preFacts)
 		rightOp, _, rerr := buildPlanEngine(u.Right, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
 		if rerr != nil {
 			return nil, nil, rerr
@@ -10057,6 +10837,9 @@ func buildOperator(
 	bopts *buildOpts,
 ) (exec.Operator, error) {
 	op, err := buildOperatorRec(plan, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+	if err == nil && bopts != nil {
+		endScopeAt(plan, bopts)
+	}
 	// ONE early-out for the ordinary query, which has neither an estimate collector
 	// nor a profiler. Keeping the common case on a single short-circuit chain is not
 	// cosmetic: this function runs once per operator of every query, and splitting
@@ -10080,6 +10863,75 @@ func buildOperator(
 		return op, err
 	}
 	return bopts.profiler.Wrap(op), nil
+}
+
+// endScopeAt closes the variable scope plan ends, when it ends one: a Projection
+// (WITH / RETURN) carries only its item aliases into the next scope, and an
+// EagerAggregation only its grouping keys and aggregate outputs, exactly as the
+// schema reset each one performs. Every other node is a no-op. See
+// [buildOpts.endScope] and rowbind.go.
+func endScopeAt(plan ir.LogicalPlan, bopts *buildOpts) {
+	switch p := plan.(type) {
+	case *ir.Projection:
+		// The outputs are decided before endScope drops the input facts they are
+		// read from, and registered by it after; the buffer keeps an ordinary
+		// projection off the heap on the per-execution read path.
+		var buf [8]string
+		scalarOut := buf[:0]
+		for i := range p.Items {
+			if boundaryItemIsScalar(p.Items[i].Expr, p.Items[i].Name, bopts) {
+				scalarOut = append(scalarOut, p.Items[i].Name)
+			}
+		}
+		bopts.endScope(func(name string) bool {
+			for i := range p.Items {
+				if p.Items[i].Name == name {
+					return true
+				}
+			}
+			return false
+		}, scalarOut)
+	case *ir.EagerAggregation:
+		var buf [8]string
+		scalarOut := buf[:0]
+		for i := range p.Aggregates {
+			scalarOut = append(scalarOut, p.Aggregates[i].OutputName)
+		}
+		for i, name := range p.GroupBy {
+			if i < len(p.GroupByExprs) && boundaryItemIsScalar(p.GroupByExprs[i], name, bopts) {
+				scalarOut = append(scalarOut, name)
+			}
+		}
+		bopts.endScope(func(name string) bool {
+			if slices.Contains(p.GroupBy, name) {
+				return true
+			}
+			for i := range p.Aggregates {
+				if p.Aggregates[i].OutputName == name {
+					return true
+				}
+			}
+			return false
+		}, scalarOut)
+	}
+}
+
+// boundaryItemIsScalar reports whether the output column name of a projection
+// item or grouping key, computed by e, holds a scalar. It must be asked BEFORE
+// [buildOpts.endScope] drops the input scope's facts. A computed expression is a
+// scalar: the evaluator returns a node or a relationship as a self-describing
+// value, never as a bare id. A variable is a scalar exactly when its input column
+// is one, which is what carries the fact across a rename such as `WITH y AS x`.
+// A nil e — a legacy string-only item — asserts nothing.
+func boundaryItemIsScalar(e ast.Expression, name string, bopts *buildOpts) bool {
+	switch v := e.(type) {
+	case nil:
+		return false
+	case *ast.Variable:
+		return v.Name != name && isScalarColumn(v.Name, bopts)
+	default:
+		return true
+	}
 }
 
 // profileIntermediate instruments an operator that [buildOperator]'s single wrap
@@ -10548,7 +11400,7 @@ func buildOperatorRec(
 		if fused := tryFuseCyclicIntersect(p, child, g, schema, bopts); fused != nil {
 			return fused, nil
 		}
-		exp := exec.NewExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), cfg)
+		exp := exec.NewExpand(child, traversalAdjacencySource(bopts, g, p.RelTypes, dir), cfg)
 		// Expand-into (#2206): when this hop's destination is a variable the row
 		// already carries, filter to edges landing on it INSIDE the operator instead
 		// of emitting one row per neighbour for the equality Selection above to
@@ -10627,6 +11479,8 @@ func buildOperatorRec(
 		if err != nil {
 			return nil, err
 		}
+		// Resolve the arm's plans before the rebase below (see rowbind.go).
+		bopts.flushBindPlans()
 		for k, v := range innerSchema {
 			schema[k] = v + outerWidth
 		}
@@ -10774,6 +11628,7 @@ func buildOperatorRec(
 		// introduced in an <ExistentialSubquery> are not available outside the
 		// subquery context".
 		outerSchemaSnap := copySchema(schema)
+		outerFacts := bopts.snapshotScopeFacts()
 		// Pre-allocate the exec.Argument and register it under the IR
 		// SemiApply's ArgTag so the inner subtree's matching Argument leaf
 		// resolves to this instance and receives the outer row per iteration.
@@ -10789,6 +11644,7 @@ func buildOperatorRec(
 			delete(argByTag, p.ArgTag)
 		}
 		restoreSchema(schema, outerSchemaSnap)
+		bopts.restoreScopeFacts(outerFacts)
 		return exec.NewSemiApply(outer, inner, arg), nil
 
 	case *ir.AntiSemiApply:
@@ -10800,6 +11656,7 @@ func buildOperatorRec(
 		// and for the same two reasons — [exec.AntiSemiApply] likewise forwards the
 		// outer row unchanged and discards the inner one. See that case's comment.
 		outerSchemaSnap := copySchema(schema)
+		outerFacts := bopts.snapshotScopeFacts()
 		arg := exec.NewArgument()
 		if argByTag != nil {
 			argByTag[p.ArgTag] = arg
@@ -10812,6 +11669,7 @@ func buildOperatorRec(
 			delete(argByTag, p.ArgTag)
 		}
 		restoreSchema(schema, outerSchemaSnap)
+		bopts.restoreScopeFacts(outerFacts)
 		return exec.NewAntiSemiApply(outer, inner, arg), nil
 
 	case *ir.RollUpApply:
@@ -10830,6 +11688,7 @@ func buildOperatorRec(
 		// name. Without this snapshot, downstream lookups for outer
 		// variables (n, b, …) miss the schema and return NULL.
 		outerSchemaSnap := copySchema(schema)
+		outerFacts := bopts.snapshotScopeFacts()
 		outerWidth := schemaWidth(schema)
 		// Pre-allocate the exec.Argument and register it under the IR
 		// RollUpApply's ArgTag so the inner subtree's matching
@@ -10858,6 +11717,7 @@ func buildOperatorRec(
 		for k, v := range outerSchemaSnap {
 			schema[k] = v
 		}
+		bopts.restoreScopeFacts(outerFacts)
 		schema[p.CollectVar] = outerWidth
 		// listEval is left nil — the inner subplan ends with a
 		// Projection that puts the comprehension's projected value at
@@ -11230,7 +12090,7 @@ func buildOperatorRec(
 			cfg.EdgeType = p.RelTypes[0]
 			// The filter travels with the adjacency; see the Expand case above.
 		}
-		return exec.NewOptionalExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), cfg), nil
+		return exec.NewOptionalExpand(child, traversalAdjacencySource(bopts, g, p.RelTypes, dir), cfg), nil
 
 	case *ir.ShortestPath:
 		return buildShortestPath(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -11348,7 +12208,7 @@ func buildOperatorRec(
 		}
 		// The filter travels with the adjacency, both resolved at execution time; see
 		// [expandAdjacencySource].
-		return exec.NewVarLengthExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), &cfg), nil
+		return exec.NewVarLengthExpand(child, traversalAdjacencySource(bopts, g, p.RelTypes, dir), &cfg), nil
 
 	case *ir.NamedPath:
 		// NamedPath is a pure pass-through: build the child, then register
@@ -11816,9 +12676,9 @@ func exprHasNonScalar(e ast.Expression) bool { // per-AST-node dispatch; no hidd
 //     and carries the identical hazard, so it is reset for the identical reason:
 //     edgeVarMeta below is nil'd so a worker rebuilds its own, which means a
 //     future widening of the fused shape to a relationship pattern would reach
-//     lazyRelResolverFor on the worker goroutine. fwdCSR / fwdCSRReady /
-//     edgeIDResolver are relationship-reconstruction caches the fused shape never
-//     touches; reset defensively.
+//     lazyRelResolverFor on the worker goroutine. fwdCSR / fwdCSRReady are
+//     relationship-reconstruction caches the fused shape never touches; reset
+//     defensively.
 //
 //   - BUILD-WRITTEN maps. The per-worker subtree rebuild runs buildOperator /
 //     buildIRProjection on the worker goroutine, and those WRITE bopts maps
@@ -11859,7 +12719,6 @@ func (b *buildOpts) forWorker() *buildOpts {
 	cp.relResolver = nil
 	cp.fwdCSR = nil
 	cp.fwdCSRReady = false
-	cp.edgeIDResolver = nil
 	// Build-written maps: nil so each worker allocates its own (no shared-map race).
 	cp.scalarCols = nil
 	cp.projAliasScalarCols = nil
@@ -11870,6 +12729,9 @@ func (b *buildOpts) forWorker() *buildOpts {
 	cp.pathVarChain = nil
 	cp.vleRelMeta = nil
 	cp.expandTripletSeq = nil
+	// Bind-plan log: a worker builds its subtree at execution time and must not
+	// append to the shared log's backing array; it keeps a log of its own.
+	cp.pendingBindPlans = nil
 	// SHARED INSTRUMENTATION. The profiler is a POINTER, so a value copy hands
 	// every worker the same *exec.Profiler and each one mutates it while building
 	// its sub-plan — the data race at cypher/exec/profile.go:93 (rmp #2664).
@@ -11968,9 +12830,7 @@ func (b *buildOpts) forWorker() *buildOpts {
 //     EXCLUSION and not merely by the key.
 //   - PLAN SHAPE is untouched. The field is read by no recogniser and no gate, and
 //     every consumer of it runs after the plan exists: the adjacency closures
-//     [expandAdjacencySource] and [intersectAdjacencySource] return, and
-//     [ensureEdgeIDResolver], which derives the path-reconstruction resolver from
-//     the same pair at eval time.
+//     [expandAdjacencySource] and [intersectAdjacencySource] return.
 //
 // # What it carries, and what it deliberately does not
 //
@@ -12008,6 +12868,11 @@ func (b *buildOpts) forSubquery() *buildOpts {
 		// The adjacency cache (rmp #2646). Keyed to graph state, not to this
 		// scope — see "Why the adjacency cache IS carried" above.
 		csrPairCache: b.csrPairCache,
+		// The statement's live-traversal journal (rmp #2883). Scope-independent in
+		// the same way: it describes the statement's writes, and an inner forward
+		// traversal must see them journaled exactly as an outer one does. Absent,
+		// the inner traversal would merely keep the whole-graph build.
+		liveTopo: b.liveTopo,
 		// The labelled-count differential-test seam (rmp #2654). Carried because a
 		// control arm that stops being a control inside a subquery is not a control:
 		// the field's whole purpose is to hold for the WHOLE build, and it is
@@ -13037,10 +13902,11 @@ func newAggregationEval(
 		// 46.8% was buildEdgeProps alone.
 		//
 		// analyseNodeScalarUse runs ONCE at build time and a bailout restores the
-		// previous eager path exactly. The context is built through
-		// buildRowCtxWithUse, whose arena is nil, so every value handed to the
-		// expression is independently allocated and may escape into the projected
-		// row — the property populateRowCtx documents for that path. The gate
+		// previous eager path exactly. The context is populated with a nil arena
+		// (evalRowPooledOwned on a gated plan, buildRowCtxWithUse otherwise), so
+		// every value handed to the expression is independently allocated and may
+		// escape into the projected row — the property populateRowCtx documents
+		// for that path. The gate
 		// therefore only ever OMITS variables the expression never names, and a
 		// variable it never names cannot appear in its result.
 		//
@@ -13054,6 +13920,27 @@ func newAggregationEval(
 			scalarUse = nil
 		}
 		bp := newRowBindPlan(rs, bopts, g, scalarUse)
+		if bp.gated {
+			// RECYCLE THE MAP CONTAINER (rmp #2890). A heap profile of
+			// examples/26_social_scale_bench at 127c012b attributed 22.2 GiB (44.4%
+			// of the run) to this closure, ~14 GiB of it the per-row RowContext map:
+			// its make, and the group Go allocates on the first insert.
+			//
+			// evalRowPooledOwned draws the map from rowCtxPool but passes a NIL lazy
+			// arena to populateRowCtx, so every VALUE placed in the map is allocated
+			// exactly as before — independently owned. That split is what makes the
+			// recycling sound on a path whose result flows into a group key or a
+			// collect() buffer: what escapes is the evaluator's result, and the
+			// result can be a value the map holds (a pass-through column, a lazy
+			// node) but never the map itself — expr.RowContext is not an
+			// expr.Value. A gated plan exists only when analyseNodeScalarUse did
+			// not bail, i.e. the expression has no subquery, comprehension,
+			// pattern, reduce or map projection, the only kinds whose evaluator
+			// could keep a reference to the RowContext past the call.
+			return func(row exec.Row) (expr.Value, error) {
+				return evalRowPooledOwned(astExpr, row, bp, params, reg)
+			}
+		}
 		return func(row exec.Row) (expr.Value, error) {
 			rowCtx := buildRowCtxWithUse(row, bp)
 			return evalRow(bopts, astExpr, rowCtx, params, reg)
@@ -13577,13 +14464,19 @@ func buildIndexSeekOperator(
 		return nil, fmt.Errorf("cypher: NodeByIndexSeek on %q.%q cannot verify the label: "+
 			"the label resolver supplies no per-node membership check", p.Label, p.Property)
 	}
+	// A resolver bound to a view carries the reader's snapshot, so this form
+	// guards its lookup exactly as the Selection rewrite does (rmp #2937).
+	guard := hashSeekGuard{admit: admit, label: p.Label, key: p.Property}
+	if r, ok := labelSrc.(*lpgLabelResolver); ok {
+		guard.snap = indexSeekSnapshotOf(r.g, false)
+	}
 	names := idxMgr.ListIndexes()
 	for _, name := range names {
 		sub, err := idxMgr.GetIndex(name)
 		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, p.Label, p.Property) {
 			continue
 		}
-		if op, ok := tryNewHashSeek(sub, seekVal, admit); ok {
+		if op, ok := tryNewHashSeekGuarded(sub, seekVal, guard); ok {
 			schema[p.NodeVar] = schemaWidth(schema)
 			return op, nil
 		}
@@ -13627,15 +14520,26 @@ func tryBuildIndexSeekFromSelection(
 	if err != nil || seekVal == nil {
 		return nil, false, err
 	}
-	admit, canVerify := labelAdmitFn(labelSrc, label)
-	if !canVerify {
-		return nil, false, nil
+	// The seek subsumes the Selection, so it has no residual value check: what it
+	// returns must be its reader's snapshot, which the guard proves after every
+	// lookup and falls back to when it cannot (rmp #2937). A guarded seek's label
+	// check is the guard's; only an unguarded build allocates the closure.
+	guard := hashSeekGuard{snap: bopts.idxSnap, label: label, key: propKey}
+	if !guard.snapshotBound() {
+		admit, canVerify := labelAdmitFn(labelSrc, label)
+		if !canVerify {
+			return nil, false, nil
+		}
+		guard.admit = admit
 	}
-	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal, admit, bopts.pendingIdx); ok {
+	// The statement's sole seek leaf is judged against the earlier statements'
+	// unflushed changes only; see [soleSeekLeaf] (rmp #3056).
+	pending := bopts.pendingIdx.forSeekFrom(sel)
+	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal, guard, pending); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
-	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal, admit, bopts.pendingIdx); ok {
+	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal, guard, pending); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
@@ -13691,15 +14595,36 @@ type boundNodeIndex interface {
 }
 
 // indexCoversNode reports whether sub may serve an equality seek for the
-// (label, propKey) predicate. A bound index covers exactly its declared
-// (label, property) pair — serving any other predicate would return the
-// wrong rows, because the NodeByIndexSeek rewrite replaces the label scan
-// and the filter entirely. An index without coverage metadata (a manually
-// registered Go-API index) is accepted, preserving the historical
-// name-convention contract for that wiring. Matching is case-sensitive:
-// openCypher labels and property keys are case-sensitive even though the
-// auto-generated index NAME is lowercased.
+// (label, propKey) predicate. Only a BOUND index qualifies, and it covers exactly
+// its declared (label, property) pair — serving any other predicate would return
+// the wrong rows, because the NodeByIndexSeek rewrite replaces the label scan and
+// the filter entirely. Matching is case-sensitive: openCypher labels and property
+// keys are case-sensitive even though the auto-generated index NAME is
+// lowercased.
+//
+// An index without a binding — one registered through the Go API with
+// [index.Manager.CreateIndex], whatever its name — is never covering (rmp #2938).
+// The engine's commit-time maintenance delivers a change only to a subscriber
+// whose [index.ChangeFilter] claims it, and an unbound hash or btree index claims
+// none, so its contents describe no state of the graph. Measured before this
+// rule: an empty unbound hash index registered under the auto-generated name, or
+// under any other name, made `MATCH (n:L {s: 'f7'})` return 0 rows while the
+// label scan returned 1.
 func indexCoversNode(sub index.Subscriber, label, propKey string) bool {
+	b, ok := sub.(boundNodeIndex)
+	if !ok {
+		return false
+	}
+	bl, bp, bound := b.BoundNode()
+	return bound && bl == label && bp == propKey
+}
+
+// indexDeclaresNodeKey reports whether sub declares the key type of the
+// (label, propKey) property for parameter type inference ([indexedPropKind]). It
+// keeps the coverage rule [indexCoversNode] had before rmp #2938, under which an
+// index with no binding is accepted: that change is confined to the access paths
+// that read an index's contents, and type inference reads only its key type.
+func indexDeclaresNodeKey(sub index.Subscriber, label, propKey string) bool {
 	b, ok := sub.(boundNodeIndex)
 	if !ok {
 		return true
@@ -13714,7 +14639,7 @@ func indexCoversNode(sub index.Subscriber, label, propKey string) bool {
 // tryNamedHashSeek looks up the auto-named hash index for a (label,
 // propKey) pair and returns the seek operator + true when present
 // and applicable to seekVal.
-func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool, pending *pendingIndexDelta) (exec.Operator, bool) {
+func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, guard hashSeekGuard, pending *pendingIndexDelta) (exec.Operator, bool) {
 	if label == "" || propKey == "" {
 		return nil, false
 	}
@@ -13731,13 +14656,13 @@ func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr
 	if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
 		return nil, false
 	}
-	return tryNewHashSeek(sub, seekVal, admit)
+	return tryNewHashSeekGuarded(sub, seekVal, guard)
 }
 
 // tryAnyHashSeek iterates every registered index and returns the
 // first hash index that both covers the (label, propKey) predicate and can
 // serve seekVal. It is the fallback when the named-index lookup misses.
-func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool, pending *pendingIndexDelta) (exec.Operator, bool) {
+func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, guard hashSeekGuard, pending *pendingIndexDelta) (exec.Operator, bool) {
 	// See [tryNamedHashSeek]: the same decline, applied before the listing walk so
 	// a blocked coordinate costs no GetIndex calls (rmp #2814).
 	if pending.blocksNodeIndex(label, propKey) {
@@ -13748,7 +14673,7 @@ func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.V
 		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
 			continue
 		}
-		if op, ok := tryNewHashSeek(sub, seekVal, admit); ok {
+		if op, ok := tryNewHashSeekGuarded(sub, seekVal, guard); ok {
 			return op, true
 		}
 	}
@@ -13947,8 +14872,46 @@ type hashInt64Lookup interface {
 	LookupAppend(value int64, dst []uint64) []uint64
 }
 
-// tryNewHashSeek attempts to build a NodeByIndexSeek operator using sub as the
-// hash index. It returns (nil, false) when sub is not a supported hash type, or
+// hashSeekGuard is what an equality seek over a labelled scan owes its reader:
+// the label check (rmp #2423) and, on a snapshot-bound build, the proof that the
+// index described the reader's snapshot (rmp #2937). It is passed by value so a
+// seek that is declined allocates nothing for it.
+type hashSeekGuard struct {
+	// admit is the label check of an unguarded build; a snapshot-bound build
+	// checks the label through its residual instead.
+	admit      func(uint64) bool
+	snap       seekSnapshot
+	label, key string
+}
+
+// snapshotBound reports whether the seek is built for a reader at a snapshot and
+// can fall back to that snapshot's label scan.
+func (g hashSeekGuard) snapshotBound() bool {
+	return g.snap.guarded() && g.label != "" && g.key != ""
+}
+
+// newHashSeekOp builds the seek operator with or without a residual predicate, so
+// the forms are chosen in ONE place and a future seek site cannot silently pick an
+// unguarded one (rmp #2423, rmp #2937).
+func newHashSeekOp(idx exec.HashLookup, seekVal expr.Value, guard hashSeekGuard) *exec.NodeByIndexSeek {
+	if guard.snapshotBound() {
+		return exec.NewNodeByIndexSeekAtSnapshot(idx, seekVal,
+			guard.snap.residualFor(guard.label, guard.key), guard.snap.proof, guard.snap.startTS)
+	}
+	if guard.admit == nil {
+		return exec.NewNodeByIndexSeek(idx, seekVal)
+	}
+	return exec.NewNodeByIndexSeekAdmitting(idx, seekVal, guard.admit)
+}
+
+// tryNewHashSeek is [tryNewHashSeekGuarded] with a label check and no snapshot
+// proof.
+func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value, admit func(uint64) bool) (*exec.NodeByIndexSeek, bool) {
+	return tryNewHashSeekGuarded(sub, seekVal, hashSeekGuard{admit: admit})
+}
+
+// tryNewHashSeekGuarded attempts to build a NodeByIndexSeek operator using sub as the
+// hash index, guarded by guard. It returns (nil, false) when sub is not a supported hash type, or
 // when seekVal's kind is incompatible with the index key type.
 //
 // The kind gate keeps the index a transparent optimisation: a string parameter
@@ -13957,22 +14920,12 @@ type hashInt64Lookup interface {
 // back to the scan+filter, which yields the same zero-row result a non-indexed
 // graph would — rather than building a seek that fails at Init with
 // [exec.ErrIndexTypeMismatch].
-// newHashSeekOp builds the seek operator with or without a residual predicate, so
-// the two forms are chosen in ONE place and a future seek site cannot silently pick
-// the unguarded one (rmp #2423).
-func newHashSeekOp(idx exec.HashLookup, seekVal expr.Value, admit func(uint64) bool) *exec.NodeByIndexSeek {
-	if admit == nil {
-		return exec.NewNodeByIndexSeek(idx, seekVal)
-	}
-	return exec.NewNodeByIndexSeekAdmitting(idx, seekVal, admit)
-}
-
-func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value, admit func(uint64) bool) (*exec.NodeByIndexSeek, bool) {
+func tryNewHashSeekGuarded(sub index.Subscriber, seekVal expr.Value, guard hashSeekGuard) (*exec.NodeByIndexSeek, bool) {
 	if sl, ok := sub.(hashStringLookup); ok {
 		if seekVal.Kind() != expr.KindString {
 			return nil, false
 		}
-		return newHashSeekOp(exec.NewStringHashIndex(sl), seekVal, admit), true
+		return newHashSeekOp(exec.NewStringHashIndex(sl), seekVal, guard), true
 	}
 	if il, ok := sub.(hashInt64Lookup); ok {
 		if seekVal.Kind() != expr.KindInteger {
@@ -13988,7 +14941,7 @@ func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value, admit func(uint64)
 		// it on float64 and keep a residual filter (as the range companion does),
 		// or gate this branch to decline cross-type — otherwise a float-valued node
 		// equal to an integer seek would be silently dropped.
-		return newHashSeekOp(exec.NewInt64HashIndex(il), seekVal, admit), true
+		return newHashSeekOp(exec.NewInt64HashIndex(il), seekVal, guard), true
 	}
 	return nil, false
 }
@@ -14007,7 +14960,7 @@ func indexedPropKind(idxMgr *index.Manager, label, property string) (expr.Kind, 
 	}
 	wantName := strings.ToLower(label) + "_" + strings.ToLower(property) + "_hash"
 	if sub, err := idxMgr.GetIndex(wantName); err == nil && sub.Kind() == "hash" &&
-		indexCoversNode(sub, label, property) {
+		indexDeclaresNodeKey(sub, label, property) {
 		if k, ok := hashIndexKind(sub); ok {
 			return k, true
 		}
@@ -14017,7 +14970,7 @@ func indexedPropKind(idxMgr *index.Manager, label, property string) (expr.Kind, 
 	// index for an unrelated label.
 	for _, name := range idxMgr.ListIndexes() {
 		sub, err := idxMgr.GetIndex(name)
-		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, property) {
+		if err != nil || sub.Kind() != "hash" || !indexDeclaresNodeKey(sub, label, property) {
 			continue
 		}
 		if k, ok := hashIndexKind(sub); ok {
@@ -14127,7 +15080,7 @@ func nodePropsToExprMap(g *lpg.ReadView[string, float64], id graph.NodeID) expr.
 // (srcKey -> dstKey) by streaming the latest-wins coalesced lpg property set
 // directly into the expr.MapValue, converting each value via lpgPropToExpr in the
 // streaming callback. It is the edge analogue of [nodePropsToExprMap] and the
-// allocation-fusing replacement for the former `rawEP := g.EdgeProperties(...);
+// allocation-fusing replacement for the former `rawEP := g.EdgePropertiesAsOf(..., nil);
 // m := make(expr.MapValue, len(rawEP)); for k, pv := range rawEP { m[k] =
 // lpgPropToExpr(pv) }` shape: that built a throwaway lpg map[string]PropertyValue
 // per relationship row only to copy it into the expr map. Streaming through
@@ -15075,7 +16028,7 @@ func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.ReadV
 		dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), g)
 		pathStart := nodes[len(nodes)-1].ID
 		pathEnd := dstNode.ID
-		reversed := leadingHopReversed(g, pathStart, pathEnd)
+		reversed := pathHopStoredInverted(g, pathStart, pathEnd, uint64(edgeIDVal))
 		rels = append(rels, resolveHopRel(bopts, g, pathStart, pathEnd, uint64(edgeIDVal), reversed, step.edgeType, nil))
 		nodes = append(nodes, dstNode)
 	}
@@ -15118,7 +16071,7 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.ReadView[
 		}
 		dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), g)
 		prevID := nodes[len(nodes)-1].ID
-		reversed := leadingHopReversed(g, prevID, dstNode.ID)
+		reversed := pathHopStoredInverted(g, prevID, dstNode.ID, uint64(edgeIDVal))
 		rels = append(rels, resolveHopRel(bopts, g, prevID, dstNode.ID, uint64(edgeIDVal), reversed, step.edgeType, nil))
 		nodes = append(nodes, dstNode)
 	}
@@ -15250,7 +16203,9 @@ type pooledRowCtx struct {
 
 // rowCtxPool recycles per-row [pooledRowCtx] units for the non-escaping
 // evaluation sites (the WHERE-predicate and scalar-projection closures), where
-// the map is built, passed to one [evalRow], and discarded. Reusing the outer
+// the map is built, passed to one [evalRow], and discarded. The aggregation
+// pre-projection recycles the map alone, without the arena
+// ([evalRowPooledOwned], rmp #2890), because its result may escape. Reusing the outer
 // map container removes the per-row map allocation that a heap profile of
 // `RETURN count(r)` flagged as a top allocator (#1575); reusing the co-located
 // lazy-node arena removes the per-row [expr.LazyNodeValue] allocation that a
@@ -15362,6 +16317,23 @@ func evalRowPooled(e ast.Expression, row exec.Row, bp *rowBindPlan, params map[s
 	defer releaseRowCtx(p)
 	populateRowCtx(p.ctx, row, bp, p)
 	return evalRow(bp.bopts, e, p.ctx, params, reg)
+}
+
+// evalRowPooledOwned is [evalRowPooled] for a GATED plan whose result may
+// escape into a result row — the aggregation pre-projection (rmp #2890). It
+// recycles only the map container: populateRowCtx receives a nil arena, so no
+// lazy node is borrowed and every value the map holds is independently
+// allocated, exactly as [buildRowCtxWithUse] allocates it. The map itself never
+// escapes (see [newAggregationEval] for the argument), so returning it to the
+// pool after the evaluation cannot recycle anything the result references.
+//
+// bp must be gated; an ungated plan has no non-escape guarantee for the map.
+func evalRowPooledOwned(e ast.Expression, row exec.Row, bp *rowBindPlan, params map[string]expr.Value, reg expr.FunctionRegistry) (expr.Value, error) {
+	p := acquireRowCtx(bp.rs.width)
+	populateRowCtx(p.ctx, row, bp, nil)
+	v, err := evalRow(bp.bopts, e, p.ctx, params, reg)
+	releaseRowCtx(p)
+	return v, err
 }
 
 // populateRowCtx fills ctx (which the caller sized/cleared) with the row's
@@ -15932,27 +16904,39 @@ func resolveHopRel(_ *buildOpts, g *lpg.ReadView[string, float64], prevID, dstID
 	return rel
 }
 
-// leadingHopReversed reports whether a fixed-length leading Expand hop from
-// prevID to dstID was traversed against storage direction, used to feed the
-// reversed flag of [resolveHopRel] for the leading-Expand hops that can precede
-// a VLE within the same named path (Match6 [14]). It mirrors the topology probe
-// in [buildRelationshipValueFromRow]: a hop is reversed when the forward edge
-// prevID -> dstID is absent but the reverse edge dstID -> prevID exists, so the
-// edge is stored as dstID -> prevID. When the forward edge exists (including
-// parallel-edge and self-loop cases) the hop is treated as forward. g is
-// assumed non-nil and the endpoints resolvable by the caller's contract.
-func leadingHopReversed(g *lpg.ReadView[string, float64], prevID, dstID uint64) bool {
+// pathHopStoredInverted reports whether the edge a named-path hop bound, identified
+// by its handle, is stored as dstID -> prevID rather than in the hop's path order
+// prevID -> dstID. It feeds the reversed flag of [resolveHopRel] on the three
+// named-path routes: [buildPathValueFromChainInfo], the leading fixed-length hops of
+// [buildPathValueFromVLEMeta], and the projection's fixed-length chain fast path.
+//
+// It is an adapter, not a recovery mechanism of its own: the question is exactly
+// the one [relStoredInverted] answers for a bound relationship variable, and it is
+// answered by the same ladder (by-handle type record, then topology, then the
+// adjacency's handle column), so a named path and a relationship variable over the
+// same edge cannot render different endpoints.
+//
+// It replaces two weaker mechanisms (rmp #2874, #2875). The first asked the
+// topology alone, which cannot tell the two edges of a RECIPROCAL pair apart and
+// answered "stored forward" for both — the defect rmp #2504 fixed for relationship
+// variables. The second read the handle as a forward-CSR position, which it
+// stopped being in rmp #2317, and derived the orientation from whichever edge
+// occupied that position. With a handle of 0 the ladder reduces to the topology
+// answer the first mechanism gave.
+//
+// Returns false when g is nil or an endpoint does not resolve, the value
+// [resolveHopRel] needs to keep its own degenerate behaviour for that case.
+func pathHopStoredInverted(g *lpg.ReadView[string, float64], prevID, dstID, handle uint64) bool {
 	if g == nil {
 		return false
 	}
-	prevKey, prevOK := g.AdjList().Mapper().Resolve(graph.NodeID(prevID))
-	dstKey, dstOK := g.AdjList().Mapper().Resolve(graph.NodeID(dstID))
+	mapper := g.AdjList().Mapper()
+	prevKey, prevOK := mapper.Resolve(graph.NodeID(prevID))
+	dstKey, dstOK := mapper.Resolve(graph.NodeID(dstID))
 	if !prevOK || !dstOK {
 		return false
 	}
-	// Versioned form: see buildRelationshipValueFromRow for why the direction
-	// probe must answer at this read's instant (rmp #2294).
-	return !g.HasEdge(prevKey, dstKey) && g.HasEdge(dstKey, prevKey)
+	return relStoredInverted(g, graph.NodeID(prevID), graph.NodeID(dstID), prevKey, dstKey, handle)
 }
 
 // relPresencePlaceholder is the non-null sentinel stamped under a presence-only
@@ -16656,24 +17640,17 @@ func buildIRProjection(
 								// when the graph carries edges in BOTH
 								// directions between the endpoint pair (Match6
 								// [12]'s `a:A -[:T1]-> b:B` + `b:B -[:T2]->
-								// a:A`), probing EdgeLabels(pathStart, pathEnd)
-								// alone returns whichever direction happens
-								// to be present, even when the row's edge ID
-								// references the OPPOSITE direction. Resolve
-								// the edge by ID via the bopts resolver to get
-								// the true storage endpoints, then derive the
-								// traversal direction from them and hydrate the
-								// hop's per-instance type/properties through the
-								// shared resolver (rmp #1685).
+								// a:A`), the pair alone cannot say which of the
+								// two the row bound. The row's edge id is the
+								// bound edge's HANDLE (rmp #2317), and
+								// pathHopStoredInverted resolves the stored
+								// orientation from it (rmp #2874, #2875); the
+								// hop's per-instance type/properties are then
+								// hydrated through the shared resolver (rmp
+								// #1685).
 								pathStart := nodes[len(nodes)-1].ID
 								pathEnd := dstNode.ID
-								storageStart := pathStart
-								if resolver := ensureEdgeIDResolver(capturedBopts, capturedG); resolver != nil {
-									if rss, _, ok := resolver(uint64(edgeIDVal)); ok {
-										storageStart = rss
-									}
-								}
-								reversed := storageStart != pathStart
+								reversed := pathHopStoredInverted(capturedG, pathStart, pathEnd, uint64(edgeIDVal))
 								rels = append(rels, resolveHopRel(capturedBopts, capturedG, pathStart, pathEnd, uint64(edgeIDVal), reversed, step.edgeType, nil))
 								nodes = append(nodes, dstNode)
 							}
@@ -16817,13 +17794,19 @@ func buildIRProjection(
 										storageStart, storageEnd = dstID, srcID
 									}
 									ets := capturedG.EdgeLabelsByHandle(propSrc, propDst, edgeID)
-									if len(ets) == 0 {
+									hasByHandleEntry := len(ets) > 0
+									if !hasByHandleEntry {
 										ets = capturedG.EdgeLabels(propSrc, propDst)
 									}
 									if len(ets) > 0 {
 										edgeType = pickEdgeType(ets, capturedMeta.acceptedTypes)
 									}
-									edgeProps = edgePropsToExprMap(capturedG, propSrc, propDst)
+									// The properties follow the SAME per-instance routing
+									// as the type: the bound edge's own by-handle bag when
+									// it has one, the per-pair store otherwise. Reading the
+									// per-pair store unconditionally reported the coalesced
+									// value of a parallel sibling (rmp #2910).
+									edgeProps = buildEdgeProps(capturedG, propSrc, propDst, edgeID, hasByHandleEntry, nil)
 								}
 							}
 							return expr.RelationshipValue{
@@ -16935,99 +17918,32 @@ func buildIRProjection(
 				if bopts != nil && bopts.edgeVarMeta != nil {
 					_, aliasIsBoundRel = bopts.edgeVarMeta[name]
 				}
-				// Narrow soundness guard: when the item is a property
-				// access whose alias EXACTLY equals the property's
-				// receiver name (e.g. `RETURN a.id AS a`, where
-				// schema[a] still holds the bound node), bypass the
-				// fast path so general eval computes the property
-				// value. Other Property shapes keep the fast path
-				// because they reuse the same alias name and the
-				// schema slot already carries the projected value.
-				//
-				// Map-literal extension: a projection item whose
-				// expression is a *ast.MapLiteral and whose alias
-				// collides with a pre-existing schema entry that
-				// holds a bound node (`WITH {first: m.id} AS m`) is
-				// the same shape — the schema-name fast path would
-				// return the original bound node, not the freshly
-				// constructed map.
+				// Colliding-alias guard: an item `<expr> AS name` whose
+				// name is already bound in the INPUT schema must read the
+				// slot only when that slot already holds THIS item's value.
+				// That is the case when an earlier projection projected the
+				// same item — it registered the expression string as a
+				// secondary key on the alias's column, so both keys name one
+				// column — or when the slot is precomputed for it: a grouping
+				// key of an EagerAggregation (preprojectedCols) or an
+				// aggregate output (the expression contains an aggregate,
+				// which general eval would re-run as a scalar function).
+				// Otherwise the slot holds the value of a DIFFERENT variable
+				// of that name, and reading it returned that variable: `RETURN
+				// a.id AS a` returned the node, and `MATCH (x) RETURN 1 AS x`
+				// returned x instead of 1 (rmp #2914) — the literal and
+				// parameter shapes were once exempted here on the claim that
+				// their value matches the slot, which holds only for the
+				// re-projection of the same item.
 				skipForCollidingAlias := false
-				// Preprojected schema slots already carry the projection-
-				// equivalent value (e.g. an EagerAggregation grouping key)
-				// — the fast path is sound and skipColliding must not fire.
 				isPreprojSlot := false
 				if bopts != nil && bopts.preprojectedCols != nil {
 					_, isPreprojSlot = bopts.preprojectedCols[name]
 				}
-				if prop, isProp := item.Expr.(*ast.Property); isProp && exprStr != name && !isPreprojSlot {
-					if recv, recvIsVar := prop.Receiver.(*ast.Variable); recvIsVar && recv.Name == name {
-						skipForCollidingAlias = true
-					}
-				} else if _, isMap := item.Expr.(*ast.MapLiteral); isMap && exprStr != name {
-					if _, exists := schema[name]; exists {
-						skipForCollidingAlias = true
-					}
-				} else if exprStr != name {
-					// Generalised colliding-alias guard: when the projection
-					// expression renames a value (`<expr> AS x`) and `x`
-					// already exists in the INPUT schema (typically because a
-					// prior WITH x... is being shadowed), the schema-name
-					// fast path would silently return the upstream value
-					// instead of computing the new expression. Route
-					// through the general eval path so the new value is
-					// projected.
-					//
-					// Aggregations are exempt: count/sum/avg/etc. are
-					// precomputed by EagerAggregation upstream and the
-					// schema slot already carries their evaluated value.
-					// Falling through to evalRow would re-evaluate them
-					// as scalar functions and return the per-row count
-					// (always 1) instead of the group's aggregate.
-					//
-					// Preprojected columns are also exempt: an
-					// EagerAggregation grouping key already carries the
-					// pre-evaluated grouping expression value in the row
-					// slot. The fast path returns that value directly;
-					// routing through general eval would re-interpret the
-					// variable as its pre-aggregation form.
-					//
-					// Only the BinaryOp / UnaryOp / arithmetic shapes are
-					// flagged here. A bare-Variable expression (`WITH x AS
-					// x`) takes the same value either way; a Property/
-					// MapLiteral has its own dedicated branch above.
-					isPreproj := false
-					if bopts != nil && bopts.preprojectedCols != nil {
-						_, isPreproj = bopts.preprojectedCols[name]
-					}
-					isScalar := false
-					if bopts != nil && bopts.scalarCols != nil {
-						_, isScalar = bopts.scalarCols[name]
-					}
-					if _, exists := schema[name]; exists && !isPreproj && !isScalar {
-						// Case A: the expression references the alias name —
-						// the fast path would return the OLD value, but the
-						// expression intends to read the OLD value as input
-						// and produce a NEW transformed value. Route to
-						// general eval (already covered by exprReferencesVarName).
-						if exprReferencesVarName(item.Expr, name) && !exprContainsAggregate(item.Expr) {
+				if exprStr != name && !isPreprojSlot && !exprContainsAggregate(item.Expr) {
+					if col, exists := schema[name]; exists {
+						if exprCol, same := schema[exprStr]; !same || exprCol != col {
 							skipForCollidingAlias = true
-						}
-						// Case B: the expression does NOT reference the alias
-						// name but still produces a new value (a WITH cascade
-						// of two projections that both bind `x`, where the
-						// second projection computes a fresh expression that
-						// happens to be independent of x). Route to general
-						// eval for any computed expression shape; bare
-						// Variable / Literal / Parameter projections keep the
-						// fast path because their value matches the slot.
-						if !skipForCollidingAlias && !exprContainsAggregate(item.Expr) {
-							switch item.Expr.(type) {
-							case *ast.BinaryOp, *ast.UnaryOp, *ast.FunctionInvocation,
-								*ast.SubscriptExpr, *ast.SliceExpr, *ast.CaseExpression,
-								*ast.ListComprehension, *ast.PatternComprehension,
-								*ast.ListLiteral, *ast.LabelPredicate:
-								skipForCollidingAlias = true
-							}
 						}
 					}
 				}
@@ -18540,6 +19456,19 @@ func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Read
 		scalarUse = nil
 	}
 	bp := newRowBindPlan(rs, bopts, g, scalarUse)
+	// Typed fast path (rmp #2892): a predicate in the columnar grammar — a node
+	// property compared with a constant, a label test, an IN over constants, or
+	// a conjunction of those — is decided per row without a RowContext, a lazy
+	// node or a boxed operand; an undecided row falls back to the boxed path
+	// below. See [rowTypedPredicate] for why the two are result-identical.
+	if rp, ok := newRowTypedPredicate(predExpr, bp, params, reg); ok {
+		return func(row exec.Row) (expr.Value, error) {
+			if v, decided := rp.eval(row); decided {
+				return v, nil
+			}
+			return evalRowPooled(predExpr, row, bp, params, reg)
+		}
+	}
 	return func(row exec.Row) (expr.Value, error) {
 		return evalRowPooled(predExpr, row, bp, params, reg)
 	}
@@ -18570,7 +19499,7 @@ func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Read
 // CIP2016-06-14 and the openCypher TCK).
 // Beyond the bare comparison it also accepts a CONJUNCTION of accepted shapes, a
 // LABEL test and an IN over a scalar literal list — see
-// [buildColumnarConjunction], [makeColumnarLabelPredicate] and
+// [parseTypedConjunction], [makeColumnarLabelPredicate] and
 // [makeColumnarInPredicate] (#2186). Each of those recurses through this function
 // (via the col0 resolver) so the accepted-shape set stays a single definition.
 func buildColumnarPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) (exec.ChunkPredicate, bool) {
@@ -18583,6 +19512,11 @@ func buildColumnarPredicate(predExpr ast.Expression, schema map[string]int, g *l
 // receiver may be a bound node at ANY chunk column, the row shape a traversal
 // produces). Keeping one implementation is what guarantees the two entry points
 // accept exactly the same predicate grammar — the round-3 audit found them drifting.
+//
+// The grammar itself is [parseTypedPredicate]; this function only turns the parsed
+// tree into its chunk evaluator. The row-at-a-time evaluator of rmp #2892
+// ([newRowTypedPredicate]) is built from the SAME parse, so the two cannot drift
+// either.
 func buildColumnarPredicateAt(
 	predExpr ast.Expression,
 	schema map[string]int,
@@ -18592,30 +19526,99 @@ func buildColumnarPredicateAt(
 	bopts *buildOpts,
 	anyCol bool,
 ) (exec.ChunkPredicate, bool) {
-	// resolve reports whether e is `node.prop` on an eligible bound NODE variable and
-	// returns the property key and the variable's chunk column.
-	resolve := func(e ast.Expression) (propName string, nodeCol int, ok bool) {
-		if anyCol {
-			return nodePropAtAnyCol(e, schema, bopts)
-		}
-		p, isProp := nodePropAtCol0(e, schema, bopts)
-		return p, 0, isProp
+	tp, ok := parseTypedPredicate(predExpr, schema, params, reg, bopts, anyCol)
+	if !ok {
+		return nil, false
 	}
-	// resolveNodeCol reports whether e is a bare bound NODE variable and returns its
-	// chunk column — the receiver shape a label test needs.
-	resolveNodeCol := func(e ast.Expression) (nodeCol int, ok bool) {
+	return tp.chunkPredicate(g), true
+}
+
+// typedPredKind is the node kind of a [typedPred].
+type typedPredKind uint8
+
+const (
+	// typedPredCompare is `node.prop op const`, op one of <, <=, >, >=, =, <>.
+	typedPredCompare typedPredKind = iota
+	// typedPredLabel is the conjunctive label test `node:A:B`.
+	typedPredLabel
+	// typedPredIn is `node.prop IN [const, …]`.
+	typedPredIn
+	// typedPredAnd is an n-way conjunction of the other kinds, never of itself.
+	typedPredAnd
+)
+
+// typedPred is a WHERE predicate parsed into the typed grammar the unboxed
+// evaluators decide: a comparison of a node property with a scalar constant, a
+// label test, an IN over scalar constants, or a flattened conjunction of those.
+// It is built once per plan and read-only afterwards, so the evaluators built from
+// it are safe for concurrent use.
+type typedPred struct {
+	kind typedPredKind
+	// varName and col are the receiver node variable and its row-schema column —
+	// under the columnar chain's alignment also its chunk column. Leaf kinds only.
+	varName string
+	col     int
+	// walkIdx is the receiver's index in the row walk; set by
+	// [typedPred.bindWalk] for the row evaluator only.
+	walkIdx int
+	op      string       // typedPredCompare
+	prop    string       // typedPredCompare, typedPredIn
+	cv      expr.Value   // typedPredCompare: the pre-evaluated constant
+	vals    []expr.Value // typedPredIn: the pre-evaluated constants
+	labels  []string     // typedPredLabel: a private copy of the AST's labels
+	kids    []typedPred  // typedPredAnd
+}
+
+// parseTypedPredicate parses predExpr into the typed grammar described on
+// [buildColumnarPredicate], or reports false. anyCol selects the receiver rule of
+// [buildColumnarPredicateAt].
+func parseTypedPredicate(
+	predExpr ast.Expression,
+	schema map[string]int,
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	bopts *buildOpts,
+	anyCol bool,
+) (typedPred, bool) {
+	// resolve reports whether e is `node.prop` on an eligible bound NODE variable and
+	// returns the property key, the variable and its column.
+	resolve := func(e ast.Expression) (propName, varName string, nodeCol int, ok bool) {
+		var p string
+		var col int
+		if anyCol {
+			p, col, ok = nodePropAtAnyCol(e, schema, bopts)
+		} else {
+			p, ok = nodePropAtCol0(e, schema, bopts)
+		}
+		if !ok {
+			return "", "", 0, false
+		}
+		// Both helpers accept only an *ast.Property over an *ast.Variable.
+		prop, isProp := e.(*ast.Property)
+		if !isProp {
+			return "", "", 0, false
+		}
+		recv, isVar := prop.Receiver.(*ast.Variable)
+		if !isVar {
+			return "", "", 0, false
+		}
+		return p, recv.Name, col, true
+	}
+	// resolveNodeCol reports whether e is a bare bound NODE variable and returns it
+	// and its column — the receiver shape a label test needs.
+	resolveNodeCol := func(e ast.Expression) (varName string, nodeCol int, ok bool) {
 		v, isVar := e.(*ast.Variable)
 		if !isVar {
-			return 0, false
+			return "", 0, false
 		}
 		col, inSchema := schema[v.Name]
 		if !inSchema || isNonNodeVar(v.Name, bopts) {
-			return 0, false
+			return "", 0, false
 		}
 		if !anyCol && col != 0 {
-			return 0, false
+			return "", 0, false
 		}
-		return col, true
+		return v.Name, col, true
 	}
 
 	switch e := predExpr.(type) {
@@ -18623,47 +19626,50 @@ func buildColumnarPredicateAt(
 		// `n:A:B` — a conjunctive label test, decided by a per-label roaring-bitmap
 		// membership check on the raw NodeID. Cheaper unboxed than boxed, and it is
 		// what an added pattern label becomes once the stacked Selections are fused.
-		nodeCol, ok := resolveNodeCol(e.Receiver)
+		varName, nodeCol, ok := resolveNodeCol(e.Receiver)
 		if !ok || len(e.Labels) == 0 {
-			return nil, false
+			return typedPred{}, false
 		}
-		return makeColumnarLabelPredicate(e.Labels, nodeCol, g), true
+		// Copy so a later mutation of the AST slice cannot change the built predicate.
+		labels := make([]string, len(e.Labels))
+		copy(labels, e.Labels)
+		return typedPred{kind: typedPredLabel, varName: varName, col: nodeCol, labels: labels}, true
 
 	case *ast.BinaryOp:
 		switch e.Operator {
 		case "AND":
-			return buildColumnarConjunction(e, schema, g, params, reg, bopts, anyCol)
+			return parseTypedConjunction(e, schema, params, reg, bopts, anyCol)
 		case "IN":
-			propName, nodeCol, isProp := resolve(e.Left)
+			propName, varName, nodeCol, isProp := resolve(e.Left)
 			if !isProp {
-				return nil, false
+				return typedPred{}, false
 			}
 			vals, isConstList := columnarConstList(e.Right, params, reg)
 			if !isConstList {
-				return nil, false
+				return typedPred{}, false
 			}
-			return makeColumnarInPredicate(propName, vals, nodeCol, g), true
+			return typedPred{kind: typedPredIn, varName: varName, col: nodeCol, prop: propName, vals: vals}, true
 		case "<", "<=", ">", ">=", "=", "<>":
-			if propName, nodeCol, isProp := resolve(e.Left); isProp {
+			if propName, varName, nodeCol, isProp := resolve(e.Left); isProp {
 				if cv, isConst := columnarConstValue(e.Right, params, reg); isConst {
-					return makeColumnarComparePredicate(e.Operator, propName, cv, nodeCol, g), true
+					return typedPred{kind: typedPredCompare, varName: varName, col: nodeCol, op: e.Operator, prop: propName, cv: cv}, true
 				}
 			}
-			if propName, nodeCol, isProp := resolve(e.Right); isProp {
+			if propName, varName, nodeCol, isProp := resolve(e.Right); isProp {
 				if cv, isConst := columnarConstValue(e.Left, params, reg); isConst {
-					return makeColumnarComparePredicate(flipComparisonOp(e.Operator), propName, cv, nodeCol, g), true
+					return typedPred{kind: typedPredCompare, varName: varName, col: nodeCol, op: flipComparisonOp(e.Operator), prop: propName, cv: cv}, true
 				}
 			}
-			return nil, false
+			return typedPred{}, false
 		default:
-			return nil, false
+			return typedPred{}, false
 		}
 	}
-	return nil, false
+	return typedPred{}, false
 }
 
-// buildColumnarConjunction combines the two operands of an `AND` into a single
-// [exec.ChunkPredicate] (#2186).
+// parseTypedConjunction parses the two operands of an `AND` into one flattened
+// conjunction (#2186).
 //
 // The combination rule follows directly from openCypher three-valued logic under a
 // WHERE: a row survives iff the conjunction evaluates to TRUE, which requires EVERY
@@ -18674,8 +19680,8 @@ func buildColumnarPredicateAt(
 // undecided, and the [exec.ColumnarFilter] falls back to the boxed row predicate for
 // that row, which is byte-identical by construction.
 //
-// EVERY conjunct must be a shape this builder recognises; one it does not decays the
-// whole conjunction to (nil, false), keeping the plain boxed predicate. That
+// EVERY conjunct must be a shape this parser recognises; one it does not decays the
+// whole conjunction to (zero, false), keeping the plain boxed predicate. That
 // restriction is what makes the identity argument complete rather than merely
 // plausible. Every recognised leaf is error-free by construction — a property read
 // plus a same-kind scalar comparison, a roaring-bitmap label membership test, or a
@@ -18684,38 +19690,237 @@ func buildColumnarPredicateAt(
 // boxed path would have raised. Admitting an arbitrary unrecognised conjunct as an
 // always-undecided leaf would forfeit that: the sibling's decided drop could
 // short-circuit past a conjunct whose boxed evaluation raises.
-func buildColumnarConjunction(
+func parseTypedConjunction(
 	bo *ast.BinaryOp,
 	schema map[string]int,
-	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
 	anyCol bool,
-) (exec.ChunkPredicate, bool) {
+) (typedPred, bool) {
 	// Flatten the conjunction so an n-way AND costs one predicate slice, not a tree
 	// of closures.
-	var leaves []exec.ChunkPredicate
+	var kids []typedPred
 	var flatten func(e ast.Expression) bool
 	flatten = func(e ast.Expression) bool {
 		if inner, isBO := e.(*ast.BinaryOp); isBO && inner.Operator == "AND" {
 			return flatten(inner.Left) && flatten(inner.Right)
 		}
-		cp, ok := buildColumnarPredicateAt(e, schema, g, params, reg, bopts, anyCol)
+		kid, ok := parseTypedPredicate(e, schema, params, reg, bopts, anyCol)
 		if !ok {
 			return false
 		}
-		leaves = append(leaves, cp)
+		kids = append(kids, kid)
 		return true
 	}
 	if !flatten(bo.Left) || !flatten(bo.Right) {
+		return typedPred{}, false
+	}
+	return typedPred{kind: typedPredAnd, kids: kids}, true
+}
+
+// chunkPredicate builds tp's [exec.ChunkPredicate] over g.
+func (tp *typedPred) chunkPredicate(g *lpg.ReadView[string, float64]) exec.ChunkPredicate {
+	switch tp.kind {
+	case typedPredLabel:
+		return makeColumnarLabelPredicate(tp.labels, tp.col, g)
+	case typedPredIn:
+		return makeColumnarInPredicate(tp.prop, tp.vals, tp.col, g)
+	case typedPredAnd:
+		leaves := make([]exec.ChunkPredicate, len(tp.kids))
+		for i := range tp.kids {
+			leaves[i] = tp.kids[i].chunkPredicate(g)
+		}
+		return makeColumnarConjunctionPredicate(leaves)
+	default: // typedPredCompare
+		return makeColumnarComparePredicate(tp.op, tp.prop, tp.cv, tp.col, g)
+	}
+}
+
+// triState is a typed-predicate verdict for one row: undecided, or one of the
+// three openCypher truth values.
+type triState uint8
+
+const (
+	// triUndecided defers the row to the boxed predicate.
+	triUndecided triState = iota
+	triFalse
+	triTrue
+	triNull
+)
+
+// rowTypedPredicate is the row-at-a-time evaluator of a [typedPred] (rmp #2892):
+// it decides a Filter predicate over the boxed row WITHOUT building a
+// RowContext, a lazy node or a boxed operand, and defers every row it cannot
+// decide to the boxed predicate.
+//
+// # Why it is result-identical
+//
+// It reads the same inputs, through the same calls, as the boxed path it
+// short-cuts. The boxed path binds a node variable by [populateRowCtx] — the
+// cell must be an [expr.IntegerValue] that [lpg.ReadView]'s mapper resolves,
+// and the variable must be bound as a plain node, which [rowBindPlan] records —
+// and then reads the property through [lpg.ReadView.NodePropertyByID] or tests
+// the label through [lpg.ReadView.HasNodeLabelByID] on the same view. The row
+// evaluator applies the same binding test to the same resolved plan and calls
+// the same two reads; any row where the test fails is undecided. The
+// comparison is [compareStoredScalar], the certified core of the columnar
+// filter (#1824), which decides only same-kind scalar pairs.
+//
+// The verdict is the exact openCypher value, not merely its truthiness: an
+// absent property is NULL, a conjunction is Kleene AND, and IN is TRUE on an
+// equal element, otherwise FALSE (a present property against non-null
+// constants never yields NULL). A conjunction is decided only when EVERY
+// conjunct is: an undecided conjunct defers the whole predicate, so a decided
+// FALSE can never short-circuit past a conjunct whose boxed evaluation would
+// raise (a cell holding a deleted-entity value, for instance).
+type rowTypedPredicate struct {
+	tp typedPred
+	bp *rowBindPlan
+}
+
+// newRowTypedPredicate parses predExpr into the typed grammar against bp's frozen
+// schema and binds every receiver to its row-walk entry, or reports false.
+func newRowTypedPredicate(predExpr ast.Expression, bp *rowBindPlan, params map[string]expr.Value, reg expr.FunctionRegistry) (*rowTypedPredicate, bool) {
+	if bp.g == nil {
 		return nil, false
 	}
-	return makeColumnarConjunctionPredicate(leaves), true
+	tp, ok := parseTypedPredicate(predExpr, bp.rs.cols, params, reg, bp.bopts, true)
+	if !ok || !tp.bindWalk(bp.rs.walk) {
+		return nil, false
+	}
+	return &rowTypedPredicate{tp: tp, bp: bp}, true
+}
+
+// bindWalk sets every leaf's walkIdx to its receiver's entry in walk, reporting
+// false when a receiver has no entry at the column the parse resolved.
+func (tp *typedPred) bindWalk(walk schemaWalk) bool {
+	if tp.kind == typedPredAnd {
+		for i := range tp.kids {
+			if !tp.kids[i].bindWalk(walk) {
+				return false
+			}
+		}
+		return true
+	}
+	for i, w := range walk {
+		if w.name == tp.varName && w.col == tp.col {
+			tp.walkIdx = i
+			return true
+		}
+	}
+	return false
+}
+
+// eval decides the predicate for row. decided is false when the boxed predicate
+// must evaluate the row.
+func (rp *rowTypedPredicate) eval(row exec.Row) (v expr.Value, decided bool) {
+	switch rp.tp.evalRow(row, rp.bp.resolved(), rp.bp) {
+	case triTrue:
+		return expr.BoolValue(true), true
+	case triFalse:
+		return expr.BoolValue(false), true
+	case triNull:
+		return expr.Null, true
+	}
+	return nil, false
+}
+
+// evalRow is the per-node evaluation behind [rowTypedPredicate.eval].
+func (tp *typedPred) evalRow(row exec.Row, vars []boundVar, bp *rowBindPlan) triState {
+	if tp.kind == typedPredAnd {
+		verdict := triTrue
+		for i := range tp.kids {
+			switch tp.kids[i].evalRow(row, vars, bp) {
+			case triUndecided:
+				return triUndecided
+			case triFalse:
+				verdict = triFalse
+			case triNull:
+				if verdict == triTrue {
+					verdict = triNull
+				}
+			}
+		}
+		return verdict
+	}
+	id, ok := rowNodeID(row, &vars[tp.walkIdx], bp)
+	if !ok {
+		return triUndecided
+	}
+	g := bp.g
+	switch tp.kind {
+	case typedPredLabel:
+		for _, name := range tp.labels {
+			if !g.HasNodeLabelByID(id, name) {
+				return triFalse
+			}
+		}
+		return triTrue
+	case typedPredIn:
+		pv, present := g.NodePropertyByID(id, tp.prop)
+		if !present {
+			return triNull // NULL IN [non-empty list] is NULL
+		}
+		verdict := triFalse
+		for _, c := range tp.vals {
+			keep, decided := compareStoredScalar("=", pv, c)
+			if !decided {
+				verdict = triUndecided
+				continue
+			}
+			if keep {
+				return triTrue
+			}
+		}
+		return verdict
+	default: // typedPredCompare
+		pv, present := g.NodePropertyByID(id, tp.prop)
+		if !present {
+			return triNull
+		}
+		keep, decided := compareStoredScalar(tp.op, pv, tp.cv)
+		if !decided {
+			return triUndecided
+		}
+		if keep {
+			return triTrue
+		}
+		return triFalse
+	}
+}
+
+// rowNodeID returns the NodeID bound to b in row when [populateRowCtx] would bind
+// b as a plain node read through bp.g — the precondition of every typed row leaf —
+// and reports false otherwise.
+func rowNodeID(row exec.Row, b *boundVar, bp *rowBindPlan) (graph.NodeID, bool) {
+	// An entity kind (relationship, path, VLE list) or a scalar pass-through
+	// column is not bound as a node; a gated plan leaves a variable its
+	// expression never names out of the context altogether.
+	if b.kind&(bindEntityKinds|bindScalarPassThrough) != 0 {
+		return 0, false
+	}
+	if bp.gated && b.kind&bindScalarUsed == 0 {
+		return 0, false
+	}
+	if b.col >= len(row) {
+		return 0, false
+	}
+	iv, ok := row[b.col].(expr.IntegerValue)
+	if !ok {
+		return 0, false
+	}
+	id := graph.NodeID(iv)
+	// The identity gate both node upgrades apply: an unresolved integer stays an
+	// integer in the boxed path, which the typed leaves do not model.
+	if _, resolved := bp.g.AdjList().Mapper().Resolve(id); !resolved {
+		return 0, false
+	}
+	return id, true
 }
 
 // makeColumnarConjunctionPredicate folds leaves into the single [exec.ChunkPredicate]
-// described on [buildColumnarConjunction]: a decided drop from any leaf decides the
+// described on [parseTypedConjunction]: a decided drop from any leaf decides the
 // conjunction FALSE-or-NULL; all leaves decided TRUE decides it TRUE; anything else
 // is undecided and defers to the boxed predicate.
 func makeColumnarConjunctionPredicate(leaves []exec.ChunkPredicate) exec.ChunkPredicate {
@@ -18970,51 +20175,62 @@ func makeColumnarComparePredicate(op, propName string, cv expr.Value, nodeCol in
 			// for every comparison operator.
 			return false, true
 		}
-		switch c := cv.(type) {
-		case expr.IntegerValue:
-			if pv.Kind() != lpg.PropInt64 {
-				return false, false
-			}
-			a, aok := pv.Int64()
-			if !aok {
-				return false, false
-			}
-			return cmpKeepOrdered(op, a, int64(c)), true
-		case expr.FloatValue:
-			if pv.Kind() != lpg.PropFloat64 {
-				return false, false
-			}
-			a, aok := pv.Float64()
-			if !aok {
-				return false, false
-			}
-			return cmpKeepOrdered(op, a, float64(c)), true
-		case expr.StringValue:
-			if pv.Kind() != lpg.PropString {
-				return false, false
-			}
-			s, sok := pv.String()
-			if !sok {
-				return false, false
-			}
-			// A property physically stored as a SOH-tagged string is a temporal, not
-			// text: the boxed path compares it as a temporal, so fall back.
-			if _, isTemporal := decodeTemporalString(s); isTemporal {
-				return false, false
-			}
-			return cmpKeepOrdered(op, s, string(c)), true
-		case expr.BoolValue:
-			if pv.Kind() != lpg.PropBool {
-				return false, false
-			}
-			b, bok := pv.Bool()
-			if !bok {
-				return false, false
-			}
-			return cmpKeepOrdered(op, boolToInt64(b), boolToInt64(bool(c))), true
-		}
-		return false, false
+		return compareStoredScalar(op, pv, cv)
 	}
+}
+
+// compareStoredScalar decides `stored op cv` for a PRESENT stored property pv and
+// a constant cv that [columnarConstValue] accepted. It decides only when both
+// share the same primitive kind, reproducing the openCypher comparison with Go's
+// native operators; every other pairing — cross-type numeric included, which the
+// boxed path resolves with lossy promotion, and a temporal stored as a SOH-tagged
+// string — is reported undecided. It is the single comparison core of the chunk
+// ([makeColumnarComparePredicate]) and row ([typedPred.evalRow]) evaluators.
+func compareStoredScalar(op string, pv lpg.PropertyValue, cv expr.Value) (keep, decided bool) {
+	switch c := cv.(type) {
+	case expr.IntegerValue:
+		if pv.Kind() != lpg.PropInt64 {
+			return false, false
+		}
+		a, aok := pv.Int64()
+		if !aok {
+			return false, false
+		}
+		return cmpKeepOrdered(op, a, int64(c)), true
+	case expr.FloatValue:
+		if pv.Kind() != lpg.PropFloat64 {
+			return false, false
+		}
+		a, aok := pv.Float64()
+		if !aok {
+			return false, false
+		}
+		return cmpKeepOrdered(op, a, float64(c)), true
+	case expr.StringValue:
+		if pv.Kind() != lpg.PropString {
+			return false, false
+		}
+		s, sok := pv.String()
+		if !sok {
+			return false, false
+		}
+		// A property physically stored as a SOH-tagged string is a temporal, not
+		// text: the boxed path compares it as a temporal, so fall back.
+		if _, isTemporal := decodeTemporalString(s); isTemporal {
+			return false, false
+		}
+		return cmpKeepOrdered(op, s, string(c)), true
+	case expr.BoolValue:
+		if pv.Kind() != lpg.PropBool {
+			return false, false
+		}
+		b, bok := pv.Bool()
+		if !bok {
+			return false, false
+		}
+		return cmpKeepOrdered(op, boolToInt64(b), boolToInt64(bool(c))), true
+	}
+	return false, false
 }
 
 // cmpKeepOrdered returns whether `a op b` holds for the openCypher comparison op,
@@ -19230,6 +20446,39 @@ func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return a.labelSrc.ResolveLabelBitmap(name)
 }
 
+// ResolveLabelBitmapContext forwards the cancellable resolution (rmp #3010) when
+// the underlying resolver offers it, and otherwise resolves without cancellation
+// exactly as [execLabelAdapter.ResolveLabelBitmap] does.
+func (a *execLabelAdapter) ResolveLabelBitmapContext(ctx context.Context, name string) (*roaring64.Bitmap, error) {
+	if cr, ok := a.labelSrc.(labelBitmapContextResolver); ok {
+		return cr.ResolveLabelBitmapContext(ctx, name)
+	}
+	return a.labelSrc.ResolveLabelBitmap(name), nil
+}
+
+// ResolveLabelsBitmapContext forwards the cancellable conjunction (rmp #3010),
+// falling back as [execLabelAdapter.ResolveLabelsBitmap] does.
+func (a *execLabelAdapter) ResolveLabelsBitmapContext(ctx context.Context, names []string) (*roaring64.Bitmap, error) {
+	if cr, ok := a.labelSrc.(interface {
+		ResolveLabelsBitmapContext(context.Context, []string) (*roaring64.Bitmap, error)
+	}); ok {
+		return cr.ResolveLabelsBitmapContext(ctx, names)
+	}
+	return a.ResolveLabelsBitmap(names), nil
+}
+
+// ResolveLabelCountAsOfContext forwards the cancellable snapshot count (rmp
+// #3010), falling back as [execLabelAdapter.ResolveLabelCountAsOf] does.
+func (a *execLabelAdapter) ResolveLabelCountAsOfContext(ctx context.Context, name string) (int64, bool, error) {
+	if lc, ok := a.labelSrc.(interface {
+		ResolveLabelCountAsOfContext(context.Context, string) (int64, bool, error)
+	}); ok {
+		return lc.ResolveLabelCountAsOfContext(ctx, name)
+	}
+	n, ok := a.ResolveLabelCountAsOf(name)
+	return n, ok, nil
+}
+
 // HasLabelByID forwards the per-node label check an index-driven rewrite needs
 // (rmp #2423) when the underlying resolver supports one. A resolver that does not
 // reports false for the SUPPORTED flag, and the rewrite then declines rather than
@@ -19315,6 +20564,23 @@ func (a *execLabelAdapter) ResolveLabelCountAsOf(name string) (int64, bool) {
 // RunInTx is safe for concurrent use (each call creates an independent
 // operator tree), subject to the per-operator-tree single-goroutine constraint on write queries.
 //
+// # Cross-statement visibility: no read-your-own-writes (rmp #2626)
+//
+// RunInTx gives each statement snapshot isolation and promises nothing ACROSS
+// statements; in particular it does NOT give read-your-own-writes. A statement's
+// snapshot is taken at the contiguous commit frontier ([mvcc.Clock.ReadTS]),
+// which cannot pass an older commit that is still in flight. A caller that
+// commits through RunInTx and then reads, through [Engine.Run] or a later
+// RunInTx, can therefore miss its own acknowledged commit while an earlier,
+// unrelated commit is still in flight — measured at 1 to 4 of every 4,000 reads under 16
+// concurrent writers (docs/mvcc-frontier-visibility.md). This DIVERGES from the
+// default of PostgreSQL and InnoDB, whose snapshot carries the set of in-flight
+// transactions, and of Memgraph, which reads its start timestamp under the
+// engine lock: all three show a connection its own commits. A caller that must
+// observe its own writes runs its statements through a [Session]
+// ([Engine.NewSession]), which waits for the frontier to reach its latest commit
+// before taking the next snapshot.
+//
 // If ctx is already cancelled or its deadline has elapsed when RunInTx is
 // called, it returns promptly — before any parse, plan, or [txn.Store.Begin]
 // work — with an error wrapping the context error (matchable via [errors.Is]
@@ -19330,12 +20596,34 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 // commit's instant onto it, which is what makes the caller's NEXT operation wait for
 // the frontier to reach it (rmp #2329). See [Session].
 func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, float64], query string, params map[string]expr.Value) (res *Result, err error) {
+	return e.runInTxSessionProfiled(ctx, sess, query, params, false)
+}
+
+// runInTxSessionProfiled is [Engine.runInTxSession] with an explicit request to
+// profile the statement. profile is true only for [Engine.Profile] /
+// [Engine.ProfileTable] of a writing statement; a statement written with the
+// PROFILE prefix is profiled whatever profile says. A profiled WRITING statement
+// executes exactly as the same statement does unprofiled — one transaction, one
+// commit, the same writes and counters — with the measuring wrapper installed by
+// the write builder (rmp #2790).
+//
+// It is also where an autocommit MERGE that lost a UNIQUE creation race is re-run
+// on a snapshot that sees the winner (rmp #2987); see [Engine.runInTxMergeRaceRetry].
+func (e *Engine) runInTxSessionProfiled(ctx context.Context, sess *lpg.Session[string, float64], query string, params map[string]expr.Value, profile bool) (res *Result, err error) {
 	defer cmetrics.Time("cypher.RunInTx").Stop()
 	defer func() {
 		if err != nil {
 			cmetrics.IncCounter("cypher.RunInTx.errors", 1)
 		}
 	}()
+	return e.runInTxMergeRaceRetry(ctx, sess, query, params, profile)
+}
+
+// runInTxAttempt is ONE execution of an autocommit statement as its own
+// transaction: parse, plan, open, run, and commit or roll back. Everything it
+// applies is either committed or rolled back before it returns, which is what
+// lets [Engine.runInTxMergeRaceRetry] run it again.
+func (e *Engine) runInTxAttempt(ctx context.Context, sess *lpg.Session[string, float64], query string, params map[string]expr.Value, profile bool) (res *Result, err error) {
 	// walTx holds the store's writer registration from Begin() (below) until it
 	// is rolled back or handed to the Result for Commit/Rollback in
 	// Result.Close. It is declared here, before the recover boundary registers,
@@ -19344,8 +20632,8 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// deadlock every future write (ACID atomicity + liveness). On the normal
 	// build-error path the explicit Rollback below still applies.
 	var walTx *txn.Tx[string, float64]
-	// Registered last so it runs first on unwind: a recovered panic rolls back
-	// walTx and sets err before the cypher.RunInTx.errors counter defer above
+	// A recovered panic rolls back walTx and sets err before this attempt returns,
+	// so the cypher.RunInTx.errors counter in [Engine.runInTxSessionProfiled]
 	// observes it. RunInTxAny delegates here, so it is covered transitively.
 	defer recoverWriteQueryPanic(&err, &walTx, "cypher.RunInTx", "cypher.RunInTx.panics")
 	// Honour an already-cancelled/expired context before any synchronous parse,
@@ -19355,6 +20643,9 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// so a caller that has already given up never pays for the parse and never
 	// opens a write transaction. O(1) and allocation-free on the happy path.
 	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	if err := e.failStopped(); err != nil {
 		return nil, err
 	}
 	// DDL queries don't require a write transaction.
@@ -19395,8 +20686,20 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// EXPLAIN must not open a write transaction, let alone apply one. This is the
 	// path RunAny takes for a prefixed WRITING statement, since its textual
 	// writing-clause classifier sees the CREATE/DELETE that follows the prefix.
-	if entry.planMode != parser.PlanModeNone {
+	//
+	// A PROFILE of a WRITING statement is the exception (rmp #2790): it is NOT
+	// diverted, because PROFILE executes the statement and a write executes only
+	// inside a transaction. It takes the ordinary write path below with a profiler
+	// installed in the write builder, so its writes apply exactly once, under the
+	// same transaction, commit and Atomicity machinery as the unprefixed statement.
+	if entry.planMode == parser.PlanModeProfile && entry.containsWrite {
+		profile = true
+	} else if entry.planMode != parser.PlanModeNone {
 		return e.runPlanPrefixed(ctx, entry, params, nil)
+	}
+	var prof *exec.Profiler
+	if profile {
+		prof = exec.NewProfiler()
 	}
 	plan := entry.plan
 
@@ -19431,7 +20734,15 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// exclude another writer — that is the point — but it does exclude a DDL, whose
 	// backfill scan and registration must not have a write land between them. See
 	// [Engine.schemaMu] for the index-backfill race that measured.
-	schemaTok := e.schemaGate.WeakLockAuto()
+	//
+	// The wait is bounded by ctx (rmp #2984): a DDL holds the gate exclusively for
+	// its whole backfill, and a write arriving behind it used to wait past its own
+	// deadline. A refused acquisition returns here, before the store transaction is
+	// opened and before any mutator exists, so it applies nothing and holds nothing.
+	schemaTok, err := e.schemaGate.WeakLockCtxAuto(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cypher: acquire schema gate: %w", err)
+	}
 	defer e.schemaGate.WeakUnlock(schemaTok)
 
 	// touched tracks the node keys this statement creates, labels, or strips a
@@ -19523,7 +20834,7 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 				return sess.ApplyVersionedCtx(ctx, apply)
 			}
 			return e.g.ApplyVersionedCtx(ctx, apply)
-		}, touched)
+		}, touched, prof)
 	if buildErr != nil {
 		if walTx != nil {
 			_ = walTx.Rollback()
@@ -19564,6 +20875,11 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		nnErr := r.notNullErr
 		_ = r.Close()
 		return nil, nnErr
+	}
+	if r != nil && entry.planMode == parser.PlanModeProfile {
+		// The plan-time advisories every prefixed statement carries; see
+		// [Engine.runPlanPrefixed], which attaches them for every other prefix.
+		r.notifications = entry.notifications
 	}
 	return r, nil
 }
@@ -19641,9 +20957,10 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 // Widening this bracket cannot move any of them.
 //
 // The re-entrancy constraint survives and is stricter than it looks: nothing inside
-// may call g.View / g.ApplyAtomically / g.ApplyVersioned, because visMu is
-// non-re-entrant and Go's RWMutex prefers a queued writer, so a nested SHARED
-// acquisition deadlocks the moment an exclusive acquirer queues.
+// may call g.ApplyAtomically / g.ApplyVersioned, because the schema barrier
+// (visGate, an mvcc.Gate) is not re-entrant: a nested SHARED acquisition deadlocks
+// the moment an exclusive acquirer waits. (g.View, the barrier's former read side,
+// was removed by rmp #2344.)
 //
 // commit selects the transaction-finalisation behaviour:
 //
@@ -19684,6 +21001,7 @@ func (e *Engine) execUnderBarrier(
 	commit bool,
 	applyFn func(func(lpg.WriteTx) error) error,
 	touched *touchedNodes,
+	prof *exec.Profiler,
 ) (r *Result, buildErr error) {
 	// The bracket's own error is captured, not discarded (rmp #2306). It used to be
 	// `_ =` because the closure always returned nil and the bracket itself could not
@@ -19705,6 +21023,25 @@ func (e *Engine) execUnderBarrier(
 		// unwinding or every inverse is refused and the rollback applies nothing
 		// (rmp #2320, see lpg.WriteTx.EnterUndo).
 		undo.bindTx(wtx)
+		// A FAILED AUTOCOMMIT STATEMENT ENDS AS AN ABORT (rmp #2976). This bracket
+		// closes the transaction when the closure returns, and it publishes it
+		// unless it is abandoned. A published failure is a COMMIT after the snapshot
+		// of every older transaction, so first-updater-wins refuses that
+		// transaction's later write to an object the failed statement touched,
+		// although nothing it can see changed. The handled failures abandon in
+		// [Result.rollbackUnderBarrier] and on the build error below; this covers a
+		// panic, which leaves the closure without reaching either. Registered
+		// before replayUndoOnPanic, so it runs after that replay, during the same
+		// unwind. An explicit transaction's statement is excluded: its bracket does
+		// not close the transaction, and its rollback paths abandon (rmp #2973).
+		returned := false
+		if commit {
+			defer func() {
+				if !returned && !resultWALDurable(r) {
+					wtx.Abandon()
+				}
+			}()
+		}
 		// Roll the in-memory graph back BEFORE this panic leaves the barrier; see
 		// the type-level note above and replayUndoOnPanic for why this must run
 		// while visMu is still held.
@@ -19766,10 +21103,16 @@ func (e *Engine) execUnderBarrier(
 			planGates{rangeSeek: e.rangeSeekEnabled, prefixSeek: e.prefixSeekEnabled,
 				minLabelScan: e.minLabelScanEnabled, bitmapIntersect: e.bitmapIntersectEnabled,
 				hashJoin: e.hashJoinEnabled, indexSeek: e.indexSeekEnabled,
-				pendingIdx: mutatorIndexDelta(mutator, plan)},
-			&evals)
+				pendingIdx:         mutatorIndexDelta(mutator, plan),
+				trustIndexSnapshot: e.trustIndexSnapshotForTest},
+			&evals, prof)
 		if berr != nil {
 			buildErr = berr
+			if commit {
+				// The statement fails and nothing is durable: abort (rmp #2976).
+				wtx.Abandon()
+			}
+			returned = true
 			return nil
 		}
 		rs := exec.Run(ctx, op, cols)
@@ -19800,12 +21143,14 @@ func (e *Engine) execUnderBarrier(
 			// only scope in which the handle exists.
 			r.mvccG, r.wtx = e.g, wtx
 			r.materialize()
+			attachWriteProfile(r, op, prof)
 			r.commitUnderBarrier()
 			// DROP THE HANDLE AT THE BRACKET BOUNDARY. Past this point the
 			// transaction's writeCtx is recycled, so keeping a reference would let a
 			// later path allocate through state another transaction now owns. See
 			// [Result.releaseTxHandle].
 			r.releaseTxHandle()
+			returned = true
 			return nil
 		}
 		// Explicit-tx statement: build a read-back-only Result (no buf, no tx, no
@@ -19818,6 +21163,7 @@ func (e *Engine) execUnderBarrier(
 		r.globalMem = e.globalMem
 		r.counters = mutatorCounters(mutator)
 		r.materialize()
+		attachWriteProfile(r, op, prof)
 		return nil
 	}); bracketErr != nil {
 		// The bracket never opened, so nothing was applied and there is nothing to
@@ -19838,6 +21184,22 @@ func (e *Engine) execUnderBarrier(
 // all, and a read-only mutator reaching here would have nothing to do with the
 // handle. Silently ignoring anything else is therefore the correct behaviour and
 // not a swallowed error.
+// attachWriteProfile captures the measured plan of a PROFILED writing statement
+// onto r (rmp #2790); with no profiler it does nothing.
+//
+// It runs immediately after r.materialize(), which has driven every operator to
+// exhaustion, so the counters are final — and before the commit and any Close,
+// so the capture cannot observe a torn-down tree. That is the same ordering the
+// read path's [Engine.profileMaterialised] keeps.
+func attachWriteProfile(r *Result, op exec.Operator, prof *exec.Profiler) {
+	if prof == nil || r == nil {
+		return
+	}
+	tree := exec.PlanTree(op)
+	r.planNode = &tree
+	r.planMode = parser.PlanModeProfile
+}
+
 func setMutatorWriteTx(m exec.GraphMutator, wtx lpg.WriteTx) {
 	switch a := m.(type) {
 	case *lpgMutatorAdapter:
@@ -19910,6 +21272,22 @@ func mutatorCounters(m exec.GraphMutator) *exec.QueryCounters {
 // ─────────────────────────────────────────────────────────────────────────────
 // lpgMutatorAdapter — exec.graphMutator backed by *lpg.Graph[string,float64]
 // ─────────────────────────────────────────────────────────────────────────────
+
+// checkedLabelID returns the registry id of a label, as the uint32 an
+// [index.Change] carries, for a name the calling mutator has already passed
+// through its token gate ([lpg.CheckToken] or [txn.CheckSchemaField]) at
+// entry. [lpg.LabelRegistry.Intern] refuses only a name over
+// [lpg.MaxTokenLen], so for such a name its error is structurally nil.
+func checkedLabelID(g *lpg.Graph[string, float64], name string) uint32 {
+	id, _ := g.Registry().Intern(name) // nil: name passed the entry token gate
+	return uint32(id)
+}
+
+// checkedKeyID is [checkedLabelID] for a property key.
+func checkedKeyID(g *lpg.Graph[string, float64], name string) uint32 {
+	id, _ := g.PropertyKeys().Intern(name) // nil: name passed the entry token gate
+	return uint32(id)
+}
 
 // lpgMutatorAdapter adapts *lpg.ReadView[string, float64] to the
 // exec.graphMutator interface used by write operators.
@@ -20022,6 +21400,10 @@ type lpgMutatorAdapter struct {
 	// when it gains an edge. Lazily allocated, so a pure node-create workload over
 	// an edgeless graph (the write benchmark) never allocates it.
 	fresh map[string]struct{}
+	// liveTopo journals this statement's adjacency-affecting writes for the live
+	// forward traversals it plans (rmp #2883). Held inline, so a statement pays
+	// nothing for it until a live traversal begins; see [liveTopoLog].
+	liveTopo liveTopoLog
 }
 
 // cs returns the engine's relationship count-store, or nil when the adapter has
@@ -20041,6 +21423,34 @@ type lpgMutatorAdapter struct {
 // A zero wtx yields a view that carries no transaction, which is exactly right
 // for the read-only adapter stubs that never open a bracket.
 func (a *lpgMutatorAdapter) w() lpg.WriteView[string, float64] { return a.g.Writer(a.wtx) }
+
+// effectMark samples the statement transaction's version count before an
+// in-memory write, so [lpgMutatorAdapter.tookEffect] can tell afterwards whether
+// the write changed anything.
+//
+// # The index fan-out records effects, not requests (rmp #2989)
+//
+// A write that changes nothing — a label already present, a property set to the
+// value it holds, a removal of something absent — writes no version and holds
+// no claim, so a concurrent transaction may change the same node and commit
+// first. Its index change, fanned out at this transaction's commit, then
+// described a state the node no longer had: a SET re-indexed the value a peer
+// had replaced, a REMOVE of an absent label deleted the entry a peer's label add
+// had made. Every node label and property change this adapter enqueues is
+// therefore gated on the write having written a version, exactly as
+// [walMutatorAdapter.effectMark] gates what the WAL records (rmp #2965).
+func (a *lpgMutatorAdapter) effectMark() (mark int64, counted bool) { return a.wtx.Versions() }
+
+// tookEffect reports whether the write since effectMark changed anything. A
+// transaction without version accounting (a disarmed graph) cannot tell, so it
+// reports true and the change is enqueued, as before.
+func (a *lpgMutatorAdapter) tookEffect(mark int64, counted bool) bool {
+	if !counted {
+		return true
+	}
+	n, _ := a.wtx.Versions()
+	return n != mark
+}
 
 // constraintReg returns the engine's constraint registry, or nil when the adapter
 // has no engine (a read-only test stub). A nil registry means nothing is declared,
@@ -20093,8 +21503,9 @@ func (a *lpgMutatorAdapter) countPropertySet() {
 // countPropertyRemoved records one property REMOVAL — openCypher's -properties, a
 // distinct side effect there (`REMOVE n.num` declares `-properties 1` in
 // cypher/tck/features/clauses/remove/Remove1.feature). Callers must invoke it only when
-// the property was actually PRESENT, because removing an absent property is a no-op that
-// counts nothing.
+// the property was actually PRESENT and the removal wrote a version, because removing an
+// absent property is a no-op that counts nothing and a refused removal removed nothing
+// (rmp #3003).
 func (a *lpgMutatorAdapter) countPropertyRemoved() {
 	if a.counters != nil && !a.countingOff {
 		a.counters.PropertiesRemoved++
@@ -20204,7 +21615,7 @@ func (a *lpgMutatorAdapter) countIsFresh(n string) bool {
 // rec returns the inverse-recording helper bound to this adapter's graph and
 // undo log.
 func (a *lpgMutatorAdapter) rec() mutationUndo {
-	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon}
+	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon, conReg: a.constraintReg()}
 }
 
 // resolveID translates n to its stable NodeID, returning graph.NodeID(0)
@@ -20219,12 +21630,13 @@ func (a *lpgMutatorAdapter) resolveID(n string) graph.NodeID {
 
 // AddNode interns n and returns its stable NodeID.
 func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
+	defer a.liveTopo.nodePost(n, a.liveTopo.nodePre(n)) // rmp #2883
 	idBefore, existed := a.g.AdjList().Mapper().Lookup(n)
 	// Capture the tombstone state BEFORE AddNode: AddNode now revives a
 	// tombstoned node (clears its tombstone), so checking afterwards would
 	// always observe the node live. Re-creating a removed key counts as a
 	// fresh creation for side-effect bookkeeping.
-	if existed && a.g.IsTombstoned(idBefore) {
+	if existed && a.g.IsTombstonedStored(idBefore) {
 		existed = false
 	}
 	if err := a.w().AddNode(n); err != nil {
@@ -20251,9 +21663,13 @@ var ErrParallelEdgeInSimpleGraph = errors.New("cypher: cannot create a parallel 
 
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
 func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
+	// rmp #2883: journal both endpoints' liveness and src's run before the write.
+	defer a.liveTopo.nodePost(src, a.liveTopo.nodePre(src))
+	defer a.liveTopo.nodePost(dst, a.liveTopo.nodePre(dst))
+	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.AdjList().HasEdge(src, dst)
+	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
@@ -20274,7 +21690,7 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	// [walMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+		a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, nil
@@ -20283,9 +21699,13 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 // AddEdgeH mirrors [lpgMutatorAdapter.AddEdge] but allocates and returns a
 // stable per-edge handle (see [exec.GraphMutator.AddEdgeH]).
 func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, graph.NodeID, uint64, error) {
+	// rmp #2883: journal both endpoints' liveness and src's run before the write.
+	defer a.liveTopo.nodePost(src, a.liveTopo.nodePre(src))
+	defer a.liveTopo.nodePost(dst, a.liveTopo.nodePre(dst))
+	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.AdjList().HasEdge(src, dst)
+	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
@@ -20307,7 +21727,7 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	// [walMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+		a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, handle, nil
@@ -20328,7 +21748,8 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 // the bulk path took at rmp #2694 — this was the loop they both missed, the one
 // DETACH DELETE uses for the victim's INBOUND arcs.
 func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
-	present := a.g.AdjList().HasEdge(src, dst)
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
+	present := a.g.HasEdgeAsOf(src, dst, nil)
 	r := a.rec()
 	var pre removedEdgePreimage
 	if r.active() {
@@ -20385,16 +21806,17 @@ func orientHandleEndpoints(g *lpg.Graph[string, float64], src, dst string, handl
 	if handle == 0 || g == nil {
 		return src, dst
 	}
-	if g.HasEdgeHandle(src, dst, handle) {
+	if g.HasEdgeHandleAsOf(src, dst, handle, nil) {
 		return src, dst
 	}
-	if g.HasEdgeHandle(dst, src, handle) {
+	if g.HasEdgeHandleAsOf(dst, src, handle, nil) {
 		return dst, src
 	}
 	return src, dst
 }
 
 func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	src, dst = orientHandleEndpoints(a.g, src, dst, handle)
 	r := a.rec()
 	var pre removedEdgePreimage
@@ -20409,7 +21831,7 @@ func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	if a.cs() != nil {
 		if handle != 0 {
 			countEdgeRemovedByHandle(a.g, a.cs(), a.countBuf(), src, dst, handle)
-		} else if a.g.AdjList().HasEdge(src, dst) {
+		} else if a.g.HasEdgeAsOf(src, dst, nil) {
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
@@ -20422,6 +21844,9 @@ func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 
 // SetNodeLabel attaches label to n.
 func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
+	if err := lpg.CheckToken("node label", label); err != nil {
+		return err
+	}
 	// UNIQUE enforcement lives HERE, at the write surface every operator must
 	// traverse, so a new label-write site cannot silently skip it (rmp #2358).
 	// Before the write, because the already-a-member guard reads the node's labels.
@@ -20429,29 +21854,38 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 		return err
 	}
 	r := a.rec()
-	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
+	hadLabel := r.active() && a.g.HasNodeLabelAsOf(n, label, nil)
 	// Count-store (#2082): the relabel affects D/T only when the label is newly
 	// added on a node that ALREADY participates in counted edges. The
 	// AdjList.Size()==0 check is the cheap CREATE (:N) fast path — evaluated first
 	// (an atomic load) so a bare labelled-node create short-circuits before any
 	// probe or buffer allocation; countIsFresh excludes a freshly created node
 	// whose initial labelling the edge-typing +delta already covers.
-	countNew := a.cs() != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabel(n, label)
+	countNew := a.cs() != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabelAsOf(n, label, nil)
 	// #2212: a label already present is a no-op and counts nothing. Probed
 	// independently of hadLabel, which is gated on the undo recorder being active.
-	labelIsNew := a.counters != nil && !a.g.HasNodeLabel(n, label)
+	labelIsNew := a.counters != nil && !a.g.HasNodeLabelAsOf(n, label, nil)
+	mark, counted := a.effectMark()
 	if err := a.w().SetNodeLabel(n, label); err != nil {
 		return err
 	}
 	if labelIsNew {
 		a.countLabelAdded()
 	}
+	// The undo follows the write's EFFECT, not the pre-call probe (rmp #2989):
+	// the probe runs outside the label shard's lock, so a peer can restore the
+	// label between the two, and the undo of an add that changed nothing then
+	// removed a label this transaction never added — the bag got it back when the
+	// abort was withdrawn, the label bitmap did not.
+	if counted {
+		hadLabel = !a.tookEffect(mark, counted)
+	}
 	r.recordSetNodeLabel(n, label, hadLabel)
-	if a.buf != nil {
+	if a.buf != nil && a.tookEffect(mark, counted) {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddNodeLabel,
 			Node:  a.resolveID(n),
-			Label: uint32(a.g.Registry().Intern(label)),
+			Label: checkedLabelID(a.g, label),
 		})
 	}
 	if countNew {
@@ -20461,33 +21895,45 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 }
 
 // RemoveNodeLabel detaches label from n.
-func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
+func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) error {
+	if err := lpg.CheckToken("node label", label); err != nil {
+		return err
+	}
 	// See SetNodeLabel: enforcement is at this surface (rmp #2358), and the release
 	// must precede the write because it reads both membership and property values.
 	exec.EnforceUniqueOnLabelRemove(a.constraintReg(), a, n, label)
 	r := a.rec()
-	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
+	hadLabel := r.active() && a.g.HasNodeLabelAsOf(n, label, nil)
 	// Count-store (#2082): decrement the OUT-scoped D/T cells before the removal
 	// (so a self-loop endpoint still carries the label), and dirty the IN X-scoped
 	// cells. Only when the label was actually present on a node in a non-edgeless
 	// graph; the Size()==0 fast path short-circuits first.
-	if a.cs() != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabel(n, label) {
+	if a.cs() != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabelAsOf(n, label, nil) {
 		countRelabel(a.g, a.cs(), a.countBuf(), n, label, -1)
 	}
 	// #2212: removing an absent label counts nothing.
-	labelWasPresent := a.counters != nil && a.g.HasNodeLabel(n, label)
-	a.w().RemoveNodeLabel(n, label)
+	labelWasPresent := a.counters != nil && a.g.HasNodeLabelAsOf(n, label, nil)
+	mark, counted := a.effectMark()
+	if err := a.w().RemoveNodeLabel(n, label); err != nil {
+		return err
+	}
 	if labelWasPresent {
 		a.countLabelRemoved()
 	}
+	// The undo follows the write's EFFECT, not the pre-call probe (rmp #2989);
+	// see SetNodeLabel.
+	if counted {
+		hadLabel = a.tookEffect(mark, counted)
+	}
 	r.recordRemoveNodeLabel(n, label, hadLabel)
-	if a.buf != nil {
+	if a.buf != nil && a.tookEffect(mark, counted) {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
 			Node:  a.resolveID(n),
-			Label: uint32(a.g.Registry().Intern(label)),
+			Label: checkedLabelID(a.g, label),
 		})
 	}
+	return nil
 }
 
 // RemoveNode tombstones n in the underlying graph. When the secondary-index
@@ -20495,11 +21941,12 @@ func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
 // removal changes so subscribed indexes drop every entry describing the node
 // (a deleted node must never be served by a NodeByIndexSeek, task #1340).
 func (a *lpgMutatorAdapter) RemoveNode(n string) {
+	a.liveTopo.beforeNodeRemove(n) // rmp #2883
 	id, ok := a.g.AdjList().Mapper().Lookup(n)
 	if !ok {
 		return
 	}
-	wasLive := !a.g.IsTombstoned(id)
+	wasLive := !a.g.IsTombstonedStored(id)
 	// The index fan-out captures the node's PRE-removal state, so it has to stay
 	// AHEAD of the removal. It is safe there even when the removal is refused:
 	// every refusal in [lpg.Graph.removeNodeInfo] dooms the transaction, and a
@@ -20508,7 +21955,10 @@ func (a *lpgMutatorAdapter) RemoveNode(n string) {
 	if wasLive && indexFanoutActive(a.g, a.buf) {
 		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
 	}
-	applied := a.w().RemoveNode(n)
+	// The error is the conflict the statement's transaction recorded on itself,
+	// which fails the statement at commit; [exec.GraphMutator.RemoveNode] returns
+	// nothing, so only the admission flag is used here.
+	applied, _ := a.w().RemoveNode(n)
 	// THE COUNTER AND THE INVERSE GATE TOGETHER, on the OUTCOME rather than on
 	// the pre-probe above (rmp #2726). Journalling an inverse for a retirement
 	// that never happened revives a node the conflicting peer went on to delete
@@ -20525,11 +21975,14 @@ func (a *lpgMutatorAdapter) RemoveNode(n string) {
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
 func (a *lpgMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
-	return a.g.IsTombstoned(id)
+	return a.g.IsTombstonedStored(id)
 }
 
 // SetNodeProperty sets the named property on n.
 func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
+	if err := lpg.CheckToken("node property key", key); err != nil {
+		return err
+	}
 	// UNIQUE enforcement lives HERE, at the write surface every operator must
 	// traverse, so a new property-write site cannot silently skip it (rmp #2358).
 	// Before the write: it releases this node's own old value and reserves the new
@@ -20547,22 +22000,28 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() || fanout || statsActive {
-		prev, had = a.g.GetNodeProperty(n, key)
+		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
+	idxOld, idxHad := indexOldValue(a.g, a.wtx, a.buf, r.active() || fanout || statsActive, n, key)
+	mark, counted := a.effectMark()
 	if err := a.w().SetNodeProperty(n, key, value); err != nil {
 		return err
 	}
 	a.countPropertySet()
-	r.recordSetNodeProperty(n, key, prev, had)
-	if a.buf != nil {
+	// The effect is read BEFORE the inverse is recorded: recording may stamp the
+	// node's constraint slot, and that stamp is itself a version, which made a
+	// no-op SET read as effective (rmp #3008).
+	took := a.tookEffect(mark, counted)
+	r.recordSetNodeProperty(n, key, prev, had, took)
+	if a.buf != nil && took {
 		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
 			Node:     a.resolveID(n),
-			Property: uint32(a.g.PropertyKeys().Intern(key)),
+			Property: checkedKeyID(a.g, key),
 			NewValue: value,
 		}
-		if had {
-			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
+		if idxHad {
+			ch.OldValue = idxOld // lets a bound index drop the stale entry (task #1340)
 		}
 		a.buf.Enqueue(ch)
 	}
@@ -20571,13 +22030,16 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 		// (label, property) the node carries (design docs/statistics-design.md §2).
 		// had marks a value replacement, the direction that makes NDV over-estimate.
 		recordStatsNodePropertyWrite(sc, a.g.NodeIndex(), a.resolveID(n),
-			uint32(a.g.PropertyKeys().Intern(key)), had)
+			checkedKeyID(a.g, key), had)
 	}
 	return nil
 }
 
 // DelNodeProperty removes the named property from n.
-func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
+func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) error {
+	if err := lpg.CheckToken("node property key", key); err != nil {
+		return err
+	}
 	// See SetNodeProperty (rmp #2358); the release must precede the removal because
 	// it reads the value it gives back.
 	exec.EnforceUniqueOnPropertyDelete(a.constraintReg(), a, n, key)
@@ -20588,43 +22050,62 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() || fanout || statsActive {
-		prev, had = a.g.GetNodeProperty(n, key)
+		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
+	idxOld, idxHad := indexOldValue(a.g, a.wtx, a.buf, r.active() || fanout || statsActive, n, key)
 	// #2212: removing an absent property is a no-op and counts nothing.
+	var present bool
 	if a.counters != nil {
-		if _, present := a.g.GetNodeProperty(n, key); present {
-			a.countPropertyRemoved()
-		}
+		_, present = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
-	a.w().DelNodeProperty(n, key)
-	r.recordDelNodeProperty(n, key, prev, had)
-	if a.buf != nil {
+	mark, counted := a.effectMark()
+	if err := a.w().DelNodeProperty(n, key); err != nil {
+		return err
+	}
+	// The removal is a void primitive: a REFUSED one (a peer's uncommitted write
+	// heads the chain) dooms the transaction and returns nil, while prev and
+	// present describe the peer's value. Only a removal that wrote a version is
+	// counted and inverted (rmp #3003); see [lpgMutatorAdapter.effectMark].
+	took := a.tookEffect(mark, counted)
+	if present && took {
+		a.countPropertyRemoved()
+	}
+	r.recordDelNodeProperty(n, key, prev, had && took)
+	if a.buf != nil && took {
 		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
 			Node:     a.resolveID(n),
-			Property: uint32(a.g.PropertyKeys().Intern(key)),
+			Property: checkedKeyID(a.g, key),
 		}
-		if had {
-			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
+		if idxHad {
+			ch.OldValue = idxOld // lets a bound index drop the stale entry (task #1340)
 		}
 		a.buf.Enqueue(ch)
 	}
-	if statsActive && had {
+	if statsActive && had && took {
 		// A removed value: bump Δ and the delete counter for every tracked
 		// (label, property) the node carries (design docs/statistics-design.md §2).
+		// Gated on the removal's effect (rmp #3005): had describes the present
+		// state, which for a refused removal is a peer's uncommitted value.
 		recordStatsNodePropertyWrite(sc, a.g.NodeIndex(), a.resolveID(n),
-			uint32(a.g.PropertyKeys().Intern(key)), true)
+			checkedKeyID(a.g, key), true)
 	}
+	return nil
+}
+
+// txReadView returns THIS transaction's view; see [txReadViewer].
+func (a *lpgMutatorAdapter) txReadView() *lpg.ReadView[string, float64] {
+	return a.g.WriterViewOf(a.wtx)
 }
 
 // NodeProperties returns a snapshot of all properties on n.
 func (a *lpgMutatorAdapter) NodeProperties(n string) map[string]lpg.PropertyValue {
-	return a.g.NodeProperties(n)
+	return a.g.NodePropertiesAsOf(n, nil)
 }
 
 // NodeLabels returns a snapshot of all labels on n.
 func (a *lpgMutatorAdapter) NodeLabels(n string) []string {
-	return a.g.NodeLabels(n)
+	return a.g.NodeLabelsAsOf(n, nil)
 }
 
 // HasNodeLabelInTx reports whether n carries label in THIS transaction's view.
@@ -20649,6 +22130,20 @@ func (a *lpgMutatorAdapter) NodeLabelsInTx(n string) []string {
 	return a.g.WriterViewOf(a.wtx).NodeLabels(n)
 }
 
+// NodePropertiesInTx returns n's properties in THIS transaction's view. A
+// whole-entity replace enumerates them alongside the raw present so a peer's
+// uncommitted removal cannot hide a key from it (rmp #2943; see
+// [exec.nodeClearKeys]).
+func (a *lpgMutatorAdapter) NodePropertiesInTx(n string) map[string]lpg.PropertyValue {
+	return a.g.WriterViewOf(a.wtx).NodeProperties(n)
+}
+
+// EdgePropertiesByHandleInTx is [lpgMutatorAdapter.NodePropertiesInTx] for one
+// relationship instance's by-handle bag (rmp #2943; see [exec.relClearKeys]).
+func (a *lpgMutatorAdapter) EdgePropertiesByHandleInTx(src, dst string, handle uint64) map[string]lpg.PropertyValue {
+	return a.g.WriterViewOf(a.wtx).EdgePropertiesByHandle(src, dst, handle)
+}
+
 // NodePropertyInTx returns n's value for key in THIS transaction's view. See
 // [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph.
 func (a *lpgMutatorAdapter) NodePropertyInTx(n, key string) (lpg.PropertyValue, bool) {
@@ -20657,32 +22152,42 @@ func (a *lpgMutatorAdapter) NodePropertyInTx(n, key string) (lpg.PropertyValue, 
 
 // HasEdge reports whether a directed edge from src to dst is present.
 func (a *lpgMutatorAdapter) HasEdge(src, dst string) bool {
-	return a.g.AdjList().HasEdge(src, dst)
+	return a.g.HasEdgeAsOf(src, dst, nil)
 }
 
 // SetEdgeLabel attaches label to the directed edge (src, dst).
-func (a *lpgMutatorAdapter) SetEdgeLabel(src, dst, label string) {
+func (a *lpgMutatorAdapter) SetEdgeLabel(src, dst, label string) error {
+	if err := lpg.CheckToken("relationship type", label); err != nil {
+		return err
+	}
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
-	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
-	a.w().SetEdgeLabel(src, dst, label)
+	hadLabel := r.active() && a.g.HasEdgeLabelAsOf(src, dst, label, nil)
+	if err := a.w().SetEdgeLabel(src, dst, label); err != nil {
+		return err
+	}
 	r.recordSetEdgeLabel(src, dst, label, hadLabel)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddEdgeLabel,
 			Node:  a.resolveID(src),
 			Dst:   a.resolveID(dst),
-			Label: uint32(a.g.Registry().Intern(label)),
+			Label: checkedLabelID(a.g, label),
 		})
 	}
+	return nil
 }
 
 // SetEdgeProperty sets the named property on the directed edge (src, dst).
 func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) error {
+	if err := lpg.CheckToken("edge property key", key); err != nil {
+		return err
+	}
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() {
-		prev, had = a.g.GetEdgeProperty(src, dst, key)
+		prev, had = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
 	if err := a.w().SetEdgeProperty(src, dst, key, value); err != nil {
 		return err
@@ -20694,7 +22199,7 @@ func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 			Op:       index.OpSetEdgeProperty,
 			Node:     a.resolveID(src),
 			Dst:      a.resolveID(dst),
-			Property: uint32(a.g.PropertyKeys().Intern(key)),
+			Property: checkedKeyID(a.g, key),
 			NewValue: value,
 		})
 	}
@@ -20702,36 +22207,62 @@ func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 }
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
-func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) {
-	// #2212: removing an absent property is a no-op and counts nothing.
-	if a.counters != nil {
-		if _, present := a.g.GetEdgeProperty(src, dst, key); present {
-			a.countPropertyRemoved()
-		}
+func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) error {
+	if err := lpg.CheckToken("edge property key", key); err != nil {
+		return err
 	}
-	a.delEdgePropertyUncounted(src, dst, key)
+	// #2212: removing an absent property is a no-op and counts nothing; nor does
+	// a refused one (rmp #3003, see delEdgePropertyUncounted).
+	var present bool
+	if a.counters != nil {
+		_, present = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
+	}
+	took, err := a.delEdgePropertyUncounted(src, dst, key)
+	if err != nil {
+		return err
+	}
+	if present && took {
+		a.countPropertyRemoved()
+	}
+	return nil
 }
 
 // delEdgePropertyUncounted is [lpgMutatorAdapter.DelEdgeProperty] without the
 // -properties gate, so DelEdgePropertyOnInstance can attribute the counter by
 // the targeted instance's own bag instead of the per-pair aggregate (#2500).
-func (a *lpgMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) {
+//
+// It reports whether the removal wrote a version. The lpg primitive is void, so a
+// REFUSED removal — a peer's uncommitted write heads the entry — dooms the
+// transaction and returns nil while prev still holds the peer's value; such a
+// removal records no inverse (rmp #3003).
+func (a *lpgMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) (took bool, err error) {
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
-	if r.active() {
-		prev, had = a.g.GetEdgeProperty(src, dst, key)
+	if r.active() || a.buf != nil {
+		prev, had = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
-	a.w().DelEdgeProperty(src, dst, key)
-	r.recordDelEdgeProperty(src, dst, key, prev, had)
-	if a.buf != nil {
+	mark, counted := a.effectMark()
+	if err := a.w().DelEdgeProperty(src, dst, key); err != nil {
+		return false, err
+	}
+	took = a.tookEffect(mark, counted)
+	r.recordDelEdgeProperty(src, dst, key, prev, had && took)
+	// The index change is gated on the same effect as the inverse (rmp #3005): a
+	// removal of an absent property, or a refused one, changed nothing to index.
+	// A removal of an absent key takes no claim and writes no version (rmp
+	// #3006), so took is already false for it; had is kept beside it as the
+	// presence half of the gate, and it is exact whenever took is true, because a
+	// claimed entry carries no other transaction's uncommitted write.
+	if a.buf != nil && had && took {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,
 			Node:     a.resolveID(src),
 			Dst:      a.resolveID(dst),
-			Property: uint32(a.g.PropertyKeys().Intern(key)),
+			Property: checkedKeyID(a.g, key),
 		})
 	}
+	return took, nil
 }
 
 // DelEdgePropertyOnInstance removes key from the (src, dst) per-pair store and
@@ -20741,31 +22272,45 @@ func (a *lpgMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) {
 // once per pair — a REMOVE that strips a present property from a sibling
 // instance must still count 1, and a REMOVE of a property absent on the
 // targeted instance must count 0 (openCypher: a no-op).
-func (a *lpgMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle uint64, key string) {
-	if a.counters != nil {
-		if _, present := a.g.EdgePropertiesByHandle(src, dst, handle)[key]; present {
-			a.countPropertyRemoved()
-		}
+func (a *lpgMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle uint64, key string) error {
+	if err := lpg.CheckToken("edge property key", key); err != nil {
+		return err
 	}
-	a.delEdgePropertyUncounted(src, dst, key)
-	a.DelEdgePropertyByHandle(src, dst, handle, key)
+	var present bool
+	if a.counters != nil {
+		_, present = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
+	}
+	if _, err := a.delEdgePropertyUncounted(src, dst, key); err != nil {
+		return err
+	}
+	took, err := a.delEdgePropertyByHandle(src, dst, handle, key)
+	if err != nil {
+		return err
+	}
+	// Counted on the targeted instance's own removal having written a version: a
+	// refused removal counts nothing (rmp #3003).
+	if present && took {
+		a.countPropertyRemoved()
+	}
+	return nil
 }
 
 // EdgeProperties returns a snapshot of every property currently set on the
 // directed edge (src, dst).
 func (a *lpgMutatorAdapter) EdgeProperties(src, dst string) map[string]lpg.PropertyValue {
-	return a.g.EdgeProperties(src, dst)
+	return a.g.EdgePropertiesAsOf(src, dst, nil)
 }
 
 // EdgeLabels returns a snapshot of every label currently attached to the
 // directed edge (src, dst).
 func (a *lpgMutatorAdapter) EdgeLabels(src, dst string) []string {
-	return a.g.EdgeLabels(src, dst)
+	return a.g.EdgeLabelsAsOf(src, dst, nil)
 }
 
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
 // the underlying [lpg.Graph] CREATE-multiplicity counter.
 func (a *lpgMutatorAdapter) IncEdgeCreateCount(src, dst string) int64 {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	n := a.g.IncEdgeCreateCount(src, dst)
 	a.rec().recordIncEdgeCreateCount(src, dst)
 	return n
@@ -20774,6 +22319,7 @@ func (a *lpgMutatorAdapter) EdgeCreateCount(src, dst string) int64 {
 	return a.g.EdgeCreateCount(src, dst)
 }
 func (a *lpgMutatorAdapter) DecEdgeCreateCount(src, dst string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	had := r.active() && a.g.EdgeCreateCount(src, dst) > 0
 	a.g.DecEdgeCreateCount(src, dst)
@@ -20783,20 +22329,31 @@ func (a *lpgMutatorAdapter) DecEdgeCreateCount(src, dst string) {
 // SetEdgeLabelAt / EdgeLabelsAt / SetEdgePropertyAt / EdgePropertiesAt /
 // RemoveEdgeInstance delegate to the per-instance metadata stores on
 // the underlying [lpg.Graph].
-func (a *lpgMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
-	a.w().SetEdgeLabelAt(src, dst, idx, label)
+func (a *lpgMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) error {
+	if err := lpg.CheckToken("relationship type", label); err != nil {
+		return err
+	}
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
+	if err := a.w().SetEdgeLabelAt(src, dst, idx, label); err != nil {
+		return err
+	}
+	return nil
 }
 func (a *lpgMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
-	return a.g.EdgeLabelsAt(src, dst, idx)
+	return a.g.EdgeLabelsAtAsOf(src, dst, idx, nil)
 }
 func (a *lpgMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) error {
+	if err := lpg.CheckToken("edge property key", key); err != nil {
+		return err
+	}
 	return a.w().SetEdgePropertyAt(src, dst, idx, key, value)
 }
 func (a *lpgMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue {
-	return a.g.EdgePropertiesAt(src, dst, idx)
+	return a.g.EdgePropertiesAtAsOf(src, dst, idx, nil)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
-	a.w().RemoveEdgeInstance(src, dst, idx)
+	a.liveTopo.beforeAdjWrite(src)              // rmp #2883: journal the Init-instant run first
+	_ = a.w().RemoveEdgeInstance(src, dst, idx) // rmp #2947: the adapter carries its statement's transaction, so the direct-write refusal, the only error, cannot occur; [exec.GraphMutator] returns nothing.
 }
 
 // SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
@@ -20808,8 +22365,14 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // the visibility barrier — there is no enclosing edge-removal to lean on as
 // there is on the CREATE path (#1686/#1282). The store-less engine has no WAL,
 // so these buffer no transaction op; their durability is the in-memory graph.
-func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
-	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
+func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) error {
+	if err := lpg.CheckToken("relationship type", label); err != nil {
+		return err
+	}
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
+	if err := a.w().SetEdgeLabelByHandle(src, dst, handle, label); err != nil {
+		return err
+	}
 	// Count-store (#2082): SetEdgeLabelByHandle is the single authoritative
 	// once-per-edge typing hook (create_relationship.go also fires SetEdgeLabel and
 	// SetEdgeLabelAt for the same edge; only the by-handle form is counted, so the
@@ -20818,16 +22381,20 @@ func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64,
 	if a.cs() != nil {
 		countEdgeTyped(a.g, a.cs(), a.countBuf(), src, dst, label)
 	}
+	return nil
 }
 func (a *lpgMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
-	return a.g.EdgeLabelsByHandle(src, dst, handle)
+	return a.g.EdgeLabelsByHandleAsOf(src, dst, handle, nil)
 }
 func (a *lpgMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error {
+	if err := lpg.CheckToken("edge property key", key); err != nil {
+		return err
+	}
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() && handle != 0 {
-		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
+		prev, had = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
 	}
 	if err := a.w().SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
 		return err
@@ -20835,21 +22402,38 @@ func (a *lpgMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
 	return nil
 }
-func (a *lpgMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) {
+func (a *lpgMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) error {
+	_, err := a.delEdgePropertyByHandle(src, dst, handle, key)
+	return err
+}
+
+// delEdgePropertyByHandle is [lpgMutatorAdapter.DelEdgePropertyByHandle]
+// reporting whether the removal wrote a version. The lpg primitive is void, so a
+// refused removal returns nil; it records no inverse (rmp #3003).
+func (a *lpgMutatorAdapter) delEdgePropertyByHandle(src, dst string, handle uint64, key string) (took bool, err error) {
+	if err := lpg.CheckToken("edge property key", key); err != nil {
+		return false, err
+	}
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() && handle != 0 {
-		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
+		prev, had = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
 	}
-	a.w().DelEdgePropertyByHandle(src, dst, handle, key)
-	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
+	mark, counted := a.effectMark()
+	if err := a.w().DelEdgePropertyByHandle(src, dst, handle, key); err != nil {
+		return false, err
+	}
+	took = a.tookEffect(mark, counted)
+	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had && took)
+	return took, nil
 }
 func (a *lpgMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
-	return a.g.EdgePropertiesByHandle(src, dst, handle)
+	return a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
-	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
+	a.liveTopo.beforeAdjWrite(src)                         // rmp #2883: journal the Init-instant run first
+	_ = a.w().RemoveEdgeInstanceByHandle(src, dst, handle) // rmp #2947: the adapter carries its statement's transaction, so the direct-write refusal, the only error, cannot occur; [exec.GraphMutator] returns nothing.
 }
 
 // RecordConstraintInverse appends inv to this statement's undo log so a rollback
@@ -20873,16 +22457,24 @@ func (a *lpgMutatorAdapter) ConstraintTxn() *exec.ConstraintTxn { return a.conTx
 // edge's by-handle store. The boolean is false (and the handle 0) when no
 // handled src→dst slot exists.
 func (a *lpgMutatorAdapter) FirstEdgeHandle(src, dst string) (uint64, bool) {
-	return a.g.FirstEdgeHandle(src, dst)
+	return a.g.FirstEdgeHandleAsOf(src, dst, nil)
+}
+
+// EdgeHandles appends the handle of every stored src→dst slot to buf,
+// delegating to [lpg.Graph.AppendEdgeHandles]. See [exec.GraphMutator.EdgeHandles].
+func (a *lpgMutatorAdapter) EdgeHandles(src, dst string, buf []uint64) []uint64 {
+	return a.g.AppendEdgeHandlesAsOf(src, dst, buf, nil)
+}
+
+// HasEdgeHandle reports whether a stored src→dst slot carries handle,
+// delegating to [lpg.Graph.HasEdgeHandle]. See [exec.GraphMutator.HasEdgeHandle].
+func (a *lpgMutatorAdapter) HasEdgeHandle(src, dst string, handle uint64) bool {
+	return a.g.HasEdgeHandleAsOf(src, dst, handle, nil)
 }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *lpgMutatorAdapter) OutNeighbours(n string) []string {
-	var out []string
-	for nb := range a.g.AdjList().Neighbours(n) {
-		out = append(out, nb)
-	}
-	return out
+	return storedOutNeighbours(a.g, n)
 }
 
 // InNeighbours returns a snapshot of the incoming neighbour keys of n by
@@ -20899,13 +22491,35 @@ func (a *lpgMutatorAdapter) InNeighbours(n string) []string {
 	// live graph: five seed-and-wipe cycles of the same 20 000 nodes measured
 	// 895 ms, 1.635 s, 2.393 s, 3.143 s, 3.924 s for identical work, at exactly
 	// one core. That is rmp #2400, and the walk was 78% of its CPU profile.
-	return a.g.AdjList().InNeighbours(n)
+	return storedInNeighbours(a.g, n)
+}
+
+// InNeighboursInTx returns one source key per incoming arc of n in THIS
+// transaction's view: its snapshot plus its own writes (rmp #2884). A source
+// holding k parallel arcs into n appears k times (rmp #2988). It satisfies the
+// exec package's optional transaction-visible adjacency reader, which the
+// DELETE guard and DETACH DELETE decide through; see [inArcSourcesInTx].
+func (a *lpgMutatorAdapter) InNeighboursInTx(n string) []string {
+	return inArcSourcesInTx(a.g, a.g.WriterViewOf(a.wtx), n)
+}
+
+// HasInNeighbourInTx reports whether n has an incoming neighbour in THIS
+// transaction's view. See [lpgMutatorAdapter.InNeighboursInTx].
+func (a *lpgMutatorAdapter) HasInNeighbourInTx(n string) bool {
+	return a.g.WriterViewOf(a.wtx).HasInNeighbour(n)
+}
+
+// OutDegreeInTx returns n's outgoing edge-slot count in THIS transaction's
+// view. See [lpgMutatorAdapter.InNeighboursInTx].
+func (a *lpgMutatorAdapter) OutDegreeInTx(n string) int {
+	return a.g.WriterViewOf(a.wtx).OutDegree(n)
 }
 
 // RemoveAllEdgesFrom removes all outgoing edges from n in O(degree) time.
 // Per-edge undo entries are recorded before the bulk removal so the undo log
 // can reverse the operation edge-by-edge on rollback.
 func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
+	a.liveTopo.beforeAdjWrite(n) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	// Snapshot outgoing neighbours for undo recording and side-effect counting.
 	outgoing := a.OutNeighbours(n)
@@ -20944,19 +22558,85 @@ func (a *lpgMutatorAdapter) ResolveNodeID(n string) (graph.NodeID, bool) {
 	return a.g.AdjList().Mapper().Lookup(n)
 }
 
+// KeySequence returns the graph's synthetic node-key sequence.
+func (a *lpgMutatorAdapter) KeySequence() *lpg.KeySequence { return a.g.KeySequence() }
+
 // ResolveNodeLabel translates a NodeID back to its node key.
 func (a *lpgMutatorAdapter) ResolveNodeLabel(id graph.NodeID) (string, bool) {
 	return a.g.AdjList().Mapper().Resolve(id)
 }
 
-// WalkNodeIDs calls fn for every interned, non-tombstoned node.
+// WalkNodeIDs calls fn for every interned, non-tombstoned node. fn may call
+// back into the adapter; see [walkMutatorNodeIDs].
 func (a *lpgMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
-	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
-		if a.g.IsTombstoned(id) {
-			return true
-		}
-		return fn(id)
+	walkMutatorNodeIDs(a.g, fn)
+}
+
+// walkMutatorNodeIDs is the shared body of both mutator adapters' WalkNodeIDs.
+//
+// It collects the interned ids first and calls fn only after [graph.Mapper.Walk]
+// has released its last shard lock (rmp #2897). Every consumer of WalkNodeIDs —
+// the label-less MERGE candidate walk and seedGlobalNodeCounter — resolves each id
+// back through the Mapper (ResolveNodeLabel, then labels and properties by key),
+// and Walk's contract forbids exactly that inside its callback while a writer may
+// run: the nested read lock on the walked shard deadlocks against a writer queued
+// on its write lock, and concurrent writers are the engine's normal mode since
+// rmp #2306. The walked set and the liveness test are the same as before; only the
+// point at which fn runs moves past the lock.
+//
+// The id buffer is pooled ([walkIDPool]), so the collection costs no allocation
+// in the steady state.
+func walkMutatorNodeIDs(g *lpg.Graph[string, float64], fn func(graph.NodeID) bool) {
+	mapper := g.AdjList().Mapper()
+	bp := getWalkIDs(mapper.Len())
+	defer putWalkIDs(bp)
+	ids := *bp
+	mapper.Walk(func(id graph.NodeID, _ string) bool {
+		ids = append(ids, id)
+		return true
 	})
+	*bp = ids
+	for _, id := range ids {
+		if g.IsTombstonedStored(id) {
+			continue
+		}
+		if !fn(id) {
+			return
+		}
+	}
+}
+
+// walkPoolMaxCap bounds the capacity of a buffer [putWalkIDs] and
+// [putStatsNodeRefs] return to their pools, in elements. A walk of a larger
+// graph still works — its buffer is simply left to the GC — so a pool never
+// pins more than walkPoolMaxCap elements per pooled buffer after one very large
+// walk. 1<<20 ids is 8 MiB; 1<<20 (key, id) pairs is 24 MiB.
+const walkPoolMaxCap = 1 << 20
+
+// walkIDPool recycles the NodeID buffers [walkMutatorNodeIDs] collects a Mapper
+// walk into. It holds *[]graph.NodeID so a Put does not allocate.
+var walkIDPool = sync.Pool{New: func() any { return new([]graph.NodeID) }}
+
+// getWalkIDs returns an empty pooled id buffer with capacity for at least n ids.
+func getWalkIDs(n int) *[]graph.NodeID {
+	bp, _ := walkIDPool.Get().(*[]graph.NodeID)
+	if bp == nil {
+		bp = new([]graph.NodeID)
+	}
+	if cap(*bp) < n {
+		*bp = make([]graph.NodeID, 0, n)
+	}
+	*bp = (*bp)[:0]
+	return bp
+}
+
+// putWalkIDs returns bp to the pool unless it outgrew [walkPoolMaxCap].
+func putWalkIDs(bp *[]graph.NodeID) {
+	if cap(*bp) > walkPoolMaxCap {
+		return
+	}
+	*bp = (*bp)[:0]
+	walkIDPool.Put(bp)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -20978,31 +22658,31 @@ func (a *lpgMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
 // index buffer, which roll back through their own mechanisms; the undo log
 // closes only the in-memory-vs-durable divergence.
 //
-// # The discard note (rmp #2747)
+// # Token refusals are propagated, never discarded (rmp #2747, #2956)
 //
 // Every method below buffers its op with a call on a.tx whose error must be
-// accounted for. Eighteen of those calls used to discard it under a comment
-// asserting "ErrTxFinished impossible here". Seven sit in methods that return
-// an error and now PROPAGATE it. Eleven sit in [exec.GraphMutator] methods that
-// return NOTHING, so there is no return path to propagate along; each of those
-// carries, on its own line, the set its callee can actually return, read from
-// store/txn/txn.go rather than inherited.
+// accounted for. Every method that stages a label, a relationship type or a
+// property key returns an error and propagates the buffering error, and it
+// refuses a token over [lpg.MaxTokenLen] at ENTRY, through
+// [txn.CheckSchemaField], before the in-memory write, the undo record, the
+// counters or the constraint reservations.
 //
-// Six of the eleven CAN now raise [txn.ErrFieldTooLong] — RemoveNodeLabel,
-// DelNodeProperty, SetEdgeLabel, DelEdgeProperty, SetEdgeLabelByHandle and
-// DelEdgePropertyByHandle all stage a uint16-prefixed label or property key.
-// For those the encoder backstop at Commit remains the refusal, exactly as it
-// was before rmp #2747: the statement succeeds, the commit is refused, and
-// [Result.commitUnderBarrier] rolls the whole transaction back. Nothing is
-// silently lost. What they do NOT get is the early refusal the seven with a
-// return path now have, and closing that gap means widening
-// [exec.GraphMutator] — an interface change across every implementation and
-// call site in cypher/exec, which is a decision for the user, not for this
-// fix.
+// That is a change of contract. Six of these methods used to return NOTHING
+// and discarded the buffering error, trusting the encoder to refuse the field
+// at Commit. For SetEdgeLabel and SetEdgeLabelByHandle that trust was wrong:
+// [txn.Tx.SetEdgeLabel] refuses an over-long type as it is STAGED and buffers
+// nothing, so the encoder never saw it — the statement and its commit
+// succeeded, the in-memory relationship carried the type, and recovery read it
+// back with no type at all (rmp #2956). [exec.GraphMutator] was widened so the
+// refusal has a path back to the statement.
 //
-// A discard here is never to be "fixed" with a panic: CLAUDE.md forbids a panic
-// on a recoverable condition, and a refused buffering is recoverable by
-// construction — the encoder refuses the same field at Commit.
+// The calls still written `_ = a.tx.…` (RemoveEdge, RemoveEdgeByHandle,
+// RemoveNode, RemoveEdgeInstanceByHandle, RemoveAllEdgesFrom) stage no token
+// and can return only ErrTxFinished, which this adapter is never reached with;
+// each says so on its own line.
+//
+// A refusal here is never to be "fixed" with a panic: CLAUDE.md forbids a panic
+// on a recoverable condition.
 type walMutatorAdapter struct {
 	// counters accumulates this statement's openCypher write effects (#2212), exactly
 	// as on [lpgMutatorAdapter]. Both adapters carry it because both are reachable
@@ -21069,6 +22749,10 @@ type walMutatorAdapter struct {
 	// (#2082), so initial CREATE labelling is not mistaken for a relabel; see the
 	// lpgMutatorAdapter twin.
 	fresh map[string]struct{}
+	// liveTopo journals this statement's adjacency-affecting writes for the live
+	// forward traversals it plans (rmp #2883). Held inline, so a statement pays
+	// nothing for it until a live traversal begins; see [liveTopoLog].
+	liveTopo liveTopoLog
 }
 
 // constraintReg mirrors [lpgMutatorAdapter.constraintReg].
@@ -21114,8 +22798,9 @@ func (a *walMutatorAdapter) countPropertySet() {
 // countPropertyRemoved records one property REMOVAL — openCypher's -properties, a
 // distinct side effect there (`REMOVE n.num` declares `-properties 1` in
 // cypher/tck/features/clauses/remove/Remove1.feature). Callers must invoke it only when
-// the property was actually PRESENT, because removing an absent property is a no-op that
-// counts nothing.
+// the property was actually PRESENT and the removal wrote a version, because removing an
+// absent property is a no-op that counts nothing and a refused removal removed nothing
+// (rmp #3003).
 func (a *walMutatorAdapter) countPropertyRemoved() {
 	if a.counters != nil && !a.countingOff {
 		a.counters.PropertiesRemoved++
@@ -21227,8 +22912,36 @@ func (a *walMutatorAdapter) countIsFresh(n string) bool {
 // for the read-only adapter stubs that never open a bracket.
 func (a *walMutatorAdapter) w() lpg.WriteView[string, float64] { return a.g.Writer(a.wtx) }
 
+// effectMark samples the statement transaction's version count before an
+// in-memory write, so [walMutatorAdapter.tookEffect] can tell afterwards whether
+// the write changed anything.
+//
+// # The WAL records effects, not requests (rmp #2965, round 5)
+//
+// A write that changes nothing — a label already present, a property set to
+// the value it holds, a removal of something absent, a create of a live node —
+// writes no version, so it holds no claim, and a concurrent commit may change
+// the same object and log before this transaction does. Logging the no-op
+// would let replay evaluate it AFTER that commit, where it is no longer a
+// no-op, and recovery would rebuild a graph memory never held: `SET n:L` on a
+// node already labelled L, committed after an autocommit `REMOVE n:L`, came
+// back from recovery labelled L. Every frame this adapter buffers is therefore
+// gated on the write having written a version; see [lpg.WriteTx.Versions].
+func (a *walMutatorAdapter) effectMark() (mark int64, counted bool) { return a.wtx.Versions() }
+
+// tookEffect reports whether the write since effectMark changed anything. A
+// transaction without version accounting (a disarmed graph) cannot tell, so it
+// reports true and the frame is buffered, as before.
+func (a *walMutatorAdapter) tookEffect(mark int64, counted bool) bool {
+	if !counted {
+		return true
+	}
+	n, _ := a.wtx.Versions()
+	return n != mark
+}
+
 func (a *walMutatorAdapter) rec() mutationUndo {
-	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon}
+	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon, conReg: a.constraintReg()}
 }
 
 func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
@@ -21241,14 +22954,16 @@ func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
 
 // AddNode interns n and returns its stable NodeID.
 func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
+	defer a.liveTopo.nodePost(n, a.liveTopo.nodePre(n)) // rmp #2883
 	idBefore, existed := a.g.AdjList().Mapper().Lookup(n)
 	// Capture the tombstone state BEFORE AddNode: AddNode now revives a
 	// tombstoned node, so checking afterwards would always observe it live.
 	// Re-creating a removed key counts as a fresh creation for side-effect
 	// bookkeeping.
-	if existed && a.g.IsTombstoned(idBefore) {
+	if existed && a.g.IsTombstonedStored(idBefore) {
 		existed = false
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().AddNode(n); err != nil {
 		return 0, err
 	}
@@ -21259,7 +22974,13 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	// is nil — [txn.Tx.AddNode] returns ErrTxFinished alone, and this adapter is
 	// never reached on a finished transaction — so nothing that runs today
 	// changes; what goes is the trap that made a NEW error class disappear.
-	txErr := a.tx.AddNode(n)
+	//
+	// Buffered only when the create took effect: a node that was already live
+	// writes nothing (see [walMutatorAdapter.effectMark]).
+	var txErr error
+	if a.tookEffect(mark, counted) {
+		txErr = a.tx.AddNode(n)
+	}
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
 	if !existed {
 		a.countNodeCreated()
@@ -21274,12 +22995,17 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
 func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
+	// rmp #2883: journal both endpoints' liveness and src's run before the write.
+	defer a.liveTopo.nodePost(src, a.liveTopo.nodePre(src))
+	defer a.liveTopo.nodePost(dst, a.liveTopo.nodePre(dst))
+	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.AdjList().HasEdge(src, dst)
+	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
@@ -21292,7 +23018,10 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	// [NewEngineWithStore] accepts ANY [txn.Store], including one built by
 	// [txn.NewStoreWithCodec], which has no weight codec. On such a store this
 	// call refuses every non-zero weight.
-	txErr := a.tx.AddEdge(src, dst, w)
+	var txErr error
+	if a.tookEffect(mark, counted) {
+		txErr = a.tx.AddEdge(src, dst, w)
+	}
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -21311,7 +23040,7 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	// line already implies !edgeExisted.
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+		a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	if txErr != nil {
@@ -21329,12 +23058,17 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 // ([lpg.Graph.AddEdgeHIfAbsent]), so snapshot + full-WAL recovery does not
 // double the edge. See graph/lpg/edge_handle.go for the durability contract.
 func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, graph.NodeID, uint64, error) {
+	// rmp #2883: journal both endpoints' liveness and src's run before the write.
+	defer a.liveTopo.nodePost(src, a.liveTopo.nodePre(src))
+	defer a.liveTopo.nodePost(dst, a.liveTopo.nodePre(dst))
+	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.AdjList().HasEdge(src, dst)
+	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
+	mark, counted := a.effectMark()
 	handle, err := a.w().AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
@@ -21351,7 +23085,10 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	// endpoints, their labels and their properties, and no relationship between
 	// them. Measured on this tree before the fix — see
 	// TestRelationshipDurability_NoWeightCodec_2747.
-	txErr := a.tx.AddEdgeWithHandle(src, dst, w, handle)
+	var txErr error
+	if a.tookEffect(mark, counted) {
+		txErr = a.tx.AddEdgeWithHandle(src, dst, w, handle)
+	}
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -21366,7 +23103,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	// [lpgMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+		a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	if txErr != nil {
@@ -21380,7 +23117,8 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 // disconnected, so re-creating an edge between the same endpoints does not
 // resurrect the deleted relationship's type or properties.
 func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
-	present := a.g.AdjList().HasEdge(src, dst)
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
+	present := a.g.HasEdgeAsOf(src, dst, nil)
 	r := a.rec()
 	var pre removedEdgePreimage
 	if r.active() {
@@ -21439,13 +23177,14 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	// emits no durable record. Neo4j sidesteps the question by traversing a node's
 	// single relationship chain once, direction-agnostically
 	// (`Operations.nodeDetachDelete`). Structure taken as evidence, never code.
+	mark, counted := a.effectMark()
 	if !a.w().RemoveEdge(src, dst) {
 		return
 	}
 	if present {
 		a.countRelDeleted()
 	}
-	if present || a.mustDescribeNoOpRemoval() {
+	if (present && a.tookEffect(mark, counted)) || a.mustDescribeNoOpRemoval() {
 		_ = a.tx.RemoveEdge(src, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, and this adapter is never reached on a finished transaction. Discarded because [exec.GraphMutator.RemoveEdge] returns nothing — see the discard note on [walMutatorAdapter].
 	}
 	r.recordRemoveEdge(&pre, present)
@@ -21460,6 +23199,7 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 // instance. The edges-removed counter, the durable frame and the undo record are
 // all gated on the actual removal result (rmp #2018, rmp #2734).
 func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	src, dst = orientHandleEndpoints(a.g, src, dst, handle)
 	r := a.rec()
 	var pre removedEdgePreimage
@@ -21471,7 +23211,7 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	if a.cs() != nil {
 		if handle != 0 {
 			countEdgeRemovedByHandle(a.g, a.cs(), a.countBuf(), src, dst, handle)
-		} else if a.g.AdjList().HasEdge(src, dst) {
+		} else if a.g.HasEdgeAsOf(src, dst, nil) {
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
@@ -21537,9 +23277,9 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 	// interned for the life of the process. Both measured on this tree; see
 	// TestOverlongLabelRefusedBeforeInMemoryWrite_2747.
 	//
-	// This gate is on the WAL-backed adapter only. The in-memory engine has no
-	// WAL frame to overflow, so bounding a label there would be a new policy,
-	// not this defect (rmp #2747 scope note).
+	// The in-memory engine refuses the same labels at the same point
+	// ([lpgMutatorAdapter.SetNodeLabel], [lpg.CheckToken]): the limit is
+	// [lpg.MaxTokenLen] on every layer (rmp #2748).
 	if err := txn.CheckSchemaField("node label", label); err != nil {
 		return err
 	}
@@ -21549,32 +23289,48 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 		return err
 	}
 	r := a.rec()
-	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
+	hadLabel := r.active() && a.g.HasNodeLabelAsOf(n, label, nil)
 	// Count-store (#2082): see the lpgMutatorAdapter twin; Size()==0 short-circuits
 	// the CREATE (:N) fast path and countIsFresh excludes a freshly created node's
 	// initial labelling (covered by the edge-typing +delta).
-	countNew := a.cs() != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabel(n, label)
+	countNew := a.cs() != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabelAsOf(n, label, nil)
 	// #2212: a label already present is a no-op and counts nothing. Probed
 	// independently of hadLabel, which is gated on the undo recorder being active.
-	labelIsNew := a.counters != nil && !a.g.HasNodeLabel(n, label)
+	labelIsNew := a.counters != nil && !a.g.HasNodeLabelAsOf(n, label, nil)
+	mark, counted := a.effectMark()
 	if err := a.w().SetNodeLabel(n, label); err != nil {
 		return err
 	}
 	if labelIsNew {
 		a.countLabelAdded()
 	}
+	// The undo follows the write's EFFECT, not the pre-call probe (rmp #2989):
+	// the probe runs outside the label shard's lock, so a peer can restore the
+	// label between the two, and the undo of an add that changed nothing then
+	// removed a label this transaction never added — the bag got it back when the
+	// abort was withdrawn, the label bitmap did not.
+	if counted {
+		hadLabel = !a.tookEffect(mark, counted)
+	}
 	r.recordSetNodeLabel(n, label, hadLabel)
 	// rmp #2747: propagated, never discarded — held until the bookkeeping below
 	// has run, as in [walMutatorAdapter.AddNode]. [txn.Tx.SetNodeLabel] returns
 	// ErrTxFinished (unreachable here) or ErrFieldTooLong, and the gate at the
 	// top of this method has already refused every label that could raise the
-	// second, so nil is the only value reachable today.
-	txErr := a.tx.SetNodeLabel(n, label)
-	if a.buf != nil {
+	// second, so nil is the only value reachable today. Buffered only when the
+	// label was not already present (see [walMutatorAdapter.effectMark]).
+	var txErr error
+	took := a.tookEffect(mark, counted)
+	if took {
+		txErr = a.tx.SetNodeLabel(n, label)
+	}
+	// The index change is gated on the same effect (rmp #2989); see
+	// [lpgMutatorAdapter.effectMark].
+	if a.buf != nil && took {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddNodeLabel,
 			Node:  a.resolveID(n),
-			Label: uint32(a.g.Registry().Intern(label)),
+			Label: checkedLabelID(a.g, label),
 		})
 	}
 	if countNew {
@@ -21584,31 +23340,53 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 }
 
 // RemoveNodeLabel detaches label from n.
-func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
+func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) error {
+	if err := txn.CheckSchemaField("node label", label); err != nil {
+		return err
+	}
 	// See the lpgMutatorAdapter twin (rmp #2358).
 	exec.EnforceUniqueOnLabelRemove(a.constraintReg(), a, n, label)
 	r := a.rec()
-	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
+	hadLabel := r.active() && a.g.HasNodeLabelAsOf(n, label, nil)
 	// Count-store (#2082): decrement OUT-scoped cells before the removal, dirty
 	// the IN X-scoped cells; see the lpgMutatorAdapter twin.
-	if a.cs() != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabel(n, label) {
+	if a.cs() != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabelAsOf(n, label, nil) {
 		countRelabel(a.g, a.cs(), a.countBuf(), n, label, -1)
 	}
 	// #2212: removing an absent label counts nothing.
-	labelWasPresent := a.counters != nil && a.g.HasNodeLabel(n, label)
-	a.w().RemoveNodeLabel(n, label)
+	labelWasPresent := a.counters != nil && a.g.HasNodeLabelAsOf(n, label, nil)
+	mark, counted := a.effectMark()
+	if err := a.w().RemoveNodeLabel(n, label); err != nil {
+		return err
+	}
 	if labelWasPresent {
 		a.countLabelRemoved()
 	}
+	// The undo follows the write's EFFECT, not the pre-call probe (rmp #2989);
+	// see SetNodeLabel.
+	if counted {
+		hadLabel = a.tookEffect(mark, counted)
+	}
 	r.recordRemoveNodeLabel(n, label, hadLabel)
-	_ = a.tx.RemoveNodeLabel(n, label) // rmp #2747: [txn.Tx.RemoveNodeLabel] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a label over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.RemoveNodeLabel] returns nothing, so the encoder backstop at Commit is what refuses it — see the discard note on [walMutatorAdapter].
-	if a.buf != nil {
+	// rmp #2956: propagated, never discarded. The token gate at the top of this
+	// method refuses every name the WAL cannot carry before any write, so the
+	// in-memory write and this staged op succeed or fail together. Buffered only
+	// when the label was present (see [walMutatorAdapter.effectMark]).
+	var txErr error
+	took := a.tookEffect(mark, counted)
+	if took {
+		txErr = a.tx.RemoveNodeLabel(n, label)
+	}
+	// The index change is gated on the same effect (rmp #2989); see
+	// [lpgMutatorAdapter.effectMark].
+	if a.buf != nil && took {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
 			Node:  a.resolveID(n),
-			Label: uint32(a.g.Registry().Intern(label)),
+			Label: checkedLabelID(a.g, label),
 		})
 	}
+	return txErr
 }
 
 // RemoveNode tombstones n in the underlying graph. When the secondary-index
@@ -21616,11 +23394,12 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 // removal changes so subscribed indexes drop every entry describing the node
 // (a deleted node must never be served by a NodeByIndexSeek, task #1340).
 func (a *walMutatorAdapter) RemoveNode(n string) {
+	a.liveTopo.beforeNodeRemove(n) // rmp #2883
 	id, ok := a.g.AdjList().Mapper().Lookup(n)
 	if !ok {
 		return
 	}
-	wasLive := !a.g.IsTombstoned(id)
+	wasLive := !a.g.IsTombstonedStored(id)
 	// The index fan-out captures the node's PRE-removal state, so it has to stay
 	// AHEAD of the removal. It is safe there even when the removal is refused:
 	// every refusal in [lpg.Graph.removeNodeInfo] dooms the transaction, and a
@@ -21629,7 +23408,11 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 	if wasLive && indexFanoutActive(a.g, a.buf) {
 		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
 	}
-	applied := a.w().RemoveNode(n)
+	mark, counted := a.effectMark()
+	// The error is the conflict the statement's transaction recorded on itself,
+	// which fails the statement at commit; [exec.GraphMutator.RemoveNode] returns
+	// nothing, so only the admission flag is used here.
+	applied, _ := a.w().RemoveNode(n)
 	if !applied {
 		// See the lpgMutatorAdapter twin (rmp #2726). The WAL frame is gated too,
 		// for the reason rmp #2725 gated the edge one: a frame for a retirement
@@ -21641,12 +23424,15 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 		a.countNodeDeleted()
 		a.rec().recordRemoveNode(n, true)
 	}
+	if !a.tookEffect(mark, counted) {
+		return // already gone: nothing to describe (see [walMutatorAdapter.effectMark])
+	}
 	_ = a.tx.RemoveNode(n) // rmp #2747: [txn.Tx.RemoveNode] returns ErrTxFinished and nothing else, unreachable here; it stages no schema string, so no field bound applies. Discarded: [exec.GraphMutator.RemoveNode] returns nothing.
 }
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
 func (a *walMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
-	return a.g.IsTombstoned(id)
+	return a.g.IsTombstonedStored(id)
 }
 
 // SetNodeProperty sets the named property on n.
@@ -21670,40 +23456,55 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() || fanout || statsActive {
-		prev, had = a.g.GetNodeProperty(n, key)
+		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
+	idxOld, idxHad := indexOldValue(a.g, a.wtx, a.buf, r.active() || fanout || statsActive, n, key)
+	mark, counted := a.effectMark()
 	if err := a.w().SetNodeProperty(n, key, value); err != nil {
 		return err
 	}
 	a.countPropertySet()
-	r.recordSetNodeProperty(n, key, prev, had)
+	// The effect is read BEFORE the inverse is recorded: recording may stamp the
+	// node's constraint slot, and that stamp is itself a version, which made a
+	// no-op SET read as effective (rmp #3008).
+	took := a.tookEffect(mark, counted)
+	r.recordSetNodeProperty(n, key, prev, had, took)
 	// PreValidated: a.w().SetNodeProperty above already ran the schema validator
 	// on this value, and a stateful validator must not see it twice (rmp #2602).
 	// rmp #2747: propagated, never discarded.
 	// [txn.Tx.SetNodePropertyPreValidated] returns ErrTxFinished (unreachable
 	// here) or ErrFieldTooLong, which the gate at the top has already refused.
-	txErr := a.tx.SetNodePropertyPreValidated(n, key, value)
-	if a.buf != nil {
+	// Buffered only when the value changed (see [walMutatorAdapter.effectMark]).
+	var txErr error
+	if took {
+		txErr = a.tx.SetNodePropertyPreValidated(n, key, value)
+	}
+	// The index change is gated on the same effect (rmp #2989); see
+	// [lpgMutatorAdapter.effectMark].
+	if a.buf != nil && took {
 		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
 			Node:     a.resolveID(n),
-			Property: uint32(a.g.PropertyKeys().Intern(key)),
+			Property: checkedKeyID(a.g, key),
 			NewValue: value,
 		}
-		if had {
-			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
+		if idxHad {
+			ch.OldValue = idxOld // lets a bound index drop the stale entry (task #1340)
 		}
 		a.buf.Enqueue(ch)
 	}
 	if statsActive {
 		recordStatsNodePropertyWrite(sc, a.g.NodeIndex(), a.resolveID(n),
-			uint32(a.g.PropertyKeys().Intern(key)), had)
+			checkedKeyID(a.g, key), had)
 	}
 	return txErr
 }
 
 // DelNodeProperty removes the named property from n.
-func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
+func (a *walMutatorAdapter) DelNodeProperty(n, key string) error {
+	if err := txn.CheckSchemaField("node property key", key); err != nil {
+		return err
+	}
 	// See the lpgMutatorAdapter twin (rmp #2358).
 	exec.EnforceUniqueOnPropertyDelete(a.constraintReg(), a, n, key)
 	r := a.rec()
@@ -21713,42 +23514,68 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() || fanout || statsActive {
-		prev, had = a.g.GetNodeProperty(n, key)
+		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
+	idxOld, idxHad := indexOldValue(a.g, a.wtx, a.buf, r.active() || fanout || statsActive, n, key)
 	// #2212: removing an absent property is a no-op and counts nothing.
+	var present bool
 	if a.counters != nil {
-		if _, present := a.g.GetNodeProperty(n, key); present {
-			a.countPropertyRemoved()
-		}
+		_, present = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
-	a.w().DelNodeProperty(n, key)
-	r.recordDelNodeProperty(n, key, prev, had)
-	_ = a.tx.DelNodeProperty(n, key) // rmp #2747: [txn.Tx.DelNodeProperty] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a key over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.DelNodeProperty] returns nothing; the encoder backstop refuses it at Commit.
-	if a.buf != nil {
+	mark, counted := a.effectMark()
+	if err := a.w().DelNodeProperty(n, key); err != nil {
+		return err
+	}
+	// The removal is a void primitive: a REFUSED one (a peer's uncommitted write
+	// heads the chain) dooms the transaction and returns nil, while prev and
+	// present describe the peer's value. Only a removal that wrote a version is
+	// counted and inverted (rmp #3003); see [lpgMutatorAdapter.effectMark].
+	took := a.tookEffect(mark, counted)
+	if present && took {
+		a.countPropertyRemoved()
+	}
+	r.recordDelNodeProperty(n, key, prev, had && took)
+	// rmp #2956: propagated, never discarded. The token gate at the top of this
+	// method refuses every name the WAL cannot carry before any write, so the
+	// in-memory write and this staged op succeed or fail together. Buffered only
+	// when the property was present (see [walMutatorAdapter.effectMark]).
+	var txErr error
+	if took {
+		txErr = a.tx.DelNodeProperty(n, key)
+	}
+	// The index change is gated on the same effect (rmp #2989); see
+	// [lpgMutatorAdapter.effectMark].
+	if a.buf != nil && took {
 		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
 			Node:     a.resolveID(n),
-			Property: uint32(a.g.PropertyKeys().Intern(key)),
+			Property: checkedKeyID(a.g, key),
 		}
-		if had {
-			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
+		if idxHad {
+			ch.OldValue = idxOld // lets a bound index drop the stale entry (task #1340)
 		}
 		a.buf.Enqueue(ch)
 	}
-	if statsActive && had {
+	if statsActive && had && took { // see the lpgMutatorAdapter twin (rmp #3005)
 		recordStatsNodePropertyWrite(sc, a.g.NodeIndex(), a.resolveID(n),
-			uint32(a.g.PropertyKeys().Intern(key)), true)
+			checkedKeyID(a.g, key), true)
 	}
+	return txErr
+}
+
+// txReadView returns THIS transaction's view; see [txReadViewer].
+func (a *walMutatorAdapter) txReadView() *lpg.ReadView[string, float64] {
+	return a.g.WriterViewOf(a.wtx)
 }
 
 // NodeProperties returns a snapshot of all properties on n.
 func (a *walMutatorAdapter) NodeProperties(n string) map[string]lpg.PropertyValue {
-	return a.g.NodeProperties(n)
+	return a.g.NodePropertiesAsOf(n, nil)
 }
 
 // NodeLabels returns a snapshot of all labels on n.
 func (a *walMutatorAdapter) NodeLabels(n string) []string {
-	return a.g.NodeLabels(n)
+	return a.g.NodeLabelsAsOf(n, nil)
 }
 
 // HasNodeLabelInTx reports whether n carries label in THIS transaction's view.
@@ -21764,6 +23591,18 @@ func (a *walMutatorAdapter) NodeLabelsInTx(n string) []string {
 	return a.g.WriterViewOf(a.wtx).NodeLabels(n)
 }
 
+// NodePropertiesInTx is [lpgMutatorAdapter.NodePropertiesInTx] for the durable
+// write path (rmp #2943).
+func (a *walMutatorAdapter) NodePropertiesInTx(n string) map[string]lpg.PropertyValue {
+	return a.g.WriterViewOf(a.wtx).NodeProperties(n)
+}
+
+// EdgePropertiesByHandleInTx is [lpgMutatorAdapter.EdgePropertiesByHandleInTx]
+// for the durable write path (rmp #2943).
+func (a *walMutatorAdapter) EdgePropertiesByHandleInTx(src, dst string, handle uint64) map[string]lpg.PropertyValue {
+	return a.g.WriterViewOf(a.wtx).EdgePropertiesByHandle(src, dst, handle)
+}
+
 // NodePropertyInTx returns n's value for key in THIS transaction's view. See
 // [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph.
 func (a *walMutatorAdapter) NodePropertyInTx(n, key string) (lpg.PropertyValue, bool) {
@@ -21772,24 +23611,38 @@ func (a *walMutatorAdapter) NodePropertyInTx(n, key string) (lpg.PropertyValue, 
 
 // HasEdge reports whether a directed edge from src to dst is present.
 func (a *walMutatorAdapter) HasEdge(src, dst string) bool {
-	return a.g.AdjList().HasEdge(src, dst)
+	return a.g.HasEdgeAsOf(src, dst, nil)
 }
 
 // SetEdgeLabel attaches label to the directed edge (src, dst).
-func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
+func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) error {
+	if err := txn.CheckSchemaField("relationship type", label); err != nil {
+		return err
+	}
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
-	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
-	a.w().SetEdgeLabel(src, dst, label)
+	hadLabel := r.active() && a.g.HasEdgeLabelAsOf(src, dst, label, nil)
+	mark, counted := a.effectMark()
+	if err := a.w().SetEdgeLabel(src, dst, label); err != nil {
+		return err
+	}
 	r.recordSetEdgeLabel(src, dst, label, hadLabel)
-	_ = a.tx.SetEdgeLabel(src, dst, label) // rmp #2747: [txn.Tx.SetEdgeLabel] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a label over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.SetEdgeLabel] returns nothing; the encoder backstop refuses it at Commit.
+	// rmp #2956: propagated, never discarded. The token gate at the top of this
+	// method refuses every name the WAL cannot carry before any write, so the
+	// in-memory write and this staged op succeed or fail together.
+	var txErr error
+	if a.tookEffect(mark, counted) { // see [walMutatorAdapter.effectMark]
+		txErr = a.tx.SetEdgeLabel(src, dst, label)
+	}
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddEdgeLabel,
 			Node:  a.resolveID(src),
 			Dst:   a.resolveID(dst),
-			Label: uint32(a.g.Registry().Intern(label)),
+			Label: checkedLabelID(a.g, label),
 		})
 	}
+	return txErr
 }
 
 // SetEdgeProperty sets the named property on the directed edge (src, dst).
@@ -21803,8 +23656,9 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() {
-		prev, had = a.g.GetEdgeProperty(src, dst, key)
+		prev, had = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().SetEdgeProperty(src, dst, key, value); err != nil {
 		return err
 	}
@@ -21814,13 +23668,16 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	// rmp #2747: propagated, never discarded.
 	// [txn.Tx.SetEdgePropertyPreValidated] returns ErrTxFinished (unreachable
 	// here) or ErrFieldTooLong, which the gate at the top has already refused.
-	txErr := a.tx.SetEdgePropertyPreValidated(src, dst, key, value)
+	var txErr error
+	if a.tookEffect(mark, counted) { // see [walMutatorAdapter.effectMark]
+		txErr = a.tx.SetEdgePropertyPreValidated(src, dst, key, value)
+	}
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpSetEdgeProperty,
 			Node:     a.resolveID(src),
 			Dst:      a.resolveID(dst),
-			Property: uint32(a.g.PropertyKeys().Intern(key)),
+			Property: checkedKeyID(a.g, key),
 			NewValue: value,
 		})
 	}
@@ -21828,68 +23685,112 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 }
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
-func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) {
-	// #2212: removing an absent property is a no-op and counts nothing.
-	if a.counters != nil {
-		if _, present := a.g.GetEdgeProperty(src, dst, key); present {
-			a.countPropertyRemoved()
-		}
+func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) error {
+	if err := txn.CheckSchemaField("edge property key", key); err != nil {
+		return err
 	}
-	a.delEdgePropertyUncounted(src, dst, key)
+	// #2212: removing an absent property is a no-op and counts nothing; nor does
+	// a refused one (rmp #3003, see delEdgePropertyUncounted).
+	var present bool
+	if a.counters != nil {
+		_, present = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
+	}
+	took, err := a.delEdgePropertyUncounted(src, dst, key)
+	if err != nil {
+		return err
+	}
+	if present && took {
+		a.countPropertyRemoved()
+	}
+	return nil
 }
 
 // delEdgePropertyUncounted is [walMutatorAdapter.DelEdgeProperty] without the
 // -properties gate, so DelEdgePropertyOnInstance can attribute the counter by
 // the targeted instance's own bag instead of the per-pair aggregate (#2500).
-func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) {
+//
+// It reports whether the removal wrote a version; a refused one records no
+// inverse (rmp #3003, see [lpgMutatorAdapter.delEdgePropertyUncounted]).
+func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) (took bool, err error) {
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
-	if r.active() {
-		prev, had = a.g.GetEdgeProperty(src, dst, key)
+	if r.active() || a.buf != nil {
+		prev, had = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
-	a.w().DelEdgeProperty(src, dst, key)
-	r.recordDelEdgeProperty(src, dst, key, prev, had)
-	_ = a.tx.DelEdgeProperty(src, dst, key) // rmp #2747: [txn.Tx.DelEdgeProperty] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a key over 65535 bytes. The SECOND is reachable and is DISCARDED: this helper and both its callers ([walMutatorAdapter.DelEdgeProperty], [walMutatorAdapter.DelEdgePropertyOnInstance]) return nothing; the encoder backstop refuses it at Commit.
-	if a.buf != nil {
+	mark, counted := a.effectMark()
+	if err := a.w().DelEdgeProperty(src, dst, key); err != nil {
+		return false, err
+	}
+	took = a.tookEffect(mark, counted)
+	r.recordDelEdgeProperty(src, dst, key, prev, had && took)
+	// rmp #2956: propagated, never discarded. The token gate at the top of this
+	// method refuses every name the WAL cannot carry before any write, so the
+	// in-memory write and this staged op succeed or fail together.
+	var txErr error
+	if took { // see [walMutatorAdapter.effectMark]
+		txErr = a.tx.DelEdgeProperty(src, dst, key)
+	}
+	// The index change is gated on the same effect as the inverse (rmp #3005): a
+	// removal of an absent property, or a refused one, changed nothing to index.
+	// A removal of an absent key takes no claim and writes no version (rmp
+	// #3006), so took is already false for it; had is kept beside it as the
+	// presence half of the gate, and it is exact whenever took is true, because a
+	// claimed entry carries no other transaction's uncommitted write.
+	if a.buf != nil && had && took {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,
 			Node:     a.resolveID(src),
 			Dst:      a.resolveID(dst),
-			Property: uint32(a.g.PropertyKeys().Intern(key)),
+			Property: checkedKeyID(a.g, key),
 		})
 	}
+	return took, txErr
 }
 
 // DelEdgePropertyOnInstance is [lpgMutatorAdapter.DelEdgePropertyOnInstance]
 // for the durable write path (#2500): the per-pair removal, the by-handle
 // removal, and their WAL ops all land as before; only the -properties gate
 // moves from the per-pair aggregate probe to the targeted instance's own bag.
-func (a *walMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle uint64, key string) {
-	if a.counters != nil {
-		if _, present := a.g.EdgePropertiesByHandle(src, dst, handle)[key]; present {
-			a.countPropertyRemoved()
-		}
+func (a *walMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle uint64, key string) error {
+	if err := txn.CheckSchemaField("edge property key", key); err != nil {
+		return err
 	}
-	a.delEdgePropertyUncounted(src, dst, key)
-	a.DelEdgePropertyByHandle(src, dst, handle, key)
+	var present bool
+	if a.counters != nil {
+		_, present = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
+	}
+	if _, err := a.delEdgePropertyUncounted(src, dst, key); err != nil {
+		return err
+	}
+	took, err := a.delEdgePropertyByHandle(src, dst, handle, key)
+	if err != nil {
+		return err
+	}
+	// Counted on the targeted instance's own removal having written a version: a
+	// refused removal counts nothing (rmp #3003).
+	if present && took {
+		a.countPropertyRemoved()
+	}
+	return nil
 }
 
 // EdgeProperties returns a snapshot of every property currently set on the
 // directed edge (src, dst).
 func (a *walMutatorAdapter) EdgeProperties(src, dst string) map[string]lpg.PropertyValue {
-	return a.g.EdgeProperties(src, dst)
+	return a.g.EdgePropertiesAsOf(src, dst, nil)
 }
 
 // EdgeLabels returns a snapshot of every label currently attached to the
 // directed edge (src, dst).
 func (a *walMutatorAdapter) EdgeLabels(src, dst string) []string {
-	return a.g.EdgeLabels(src, dst)
+	return a.g.EdgeLabelsAsOf(src, dst, nil)
 }
 
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
 // the underlying [lpg.Graph] CREATE-multiplicity counter.
 func (a *walMutatorAdapter) IncEdgeCreateCount(src, dst string) int64 {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	n := a.g.IncEdgeCreateCount(src, dst)
 	a.rec().recordIncEdgeCreateCount(src, dst)
 	return n
@@ -21898,42 +23799,56 @@ func (a *walMutatorAdapter) EdgeCreateCount(src, dst string) int64 {
 	return a.g.EdgeCreateCount(src, dst)
 }
 func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	had := r.active() && a.g.EdgeCreateCount(src, dst) > 0
 	a.g.DecEdgeCreateCount(src, dst)
 	r.recordDecEdgeCreateCount(src, dst, had)
 }
 
-// SetEdgeLabelAt / EdgeLabelsAt / SetEdgePropertyAt / EdgePropertiesAt /
-// RemoveEdgeInstance delegate to the per-instance metadata stores on
-// the underlying [lpg.Graph].
+// SetEdgeLabelAt, SetEdgePropertyAt and RemoveEdgeInstance address the
+// per-CREATE-ordinal edge side store. On the durable engine that store is
+// RETIRED, and these write nothing (rmp #2968).
 //
-// These per-instance / per-handle setters intentionally record NO separate undo
-// entry: CreateRelationship is their only caller and always invokes them on a
-// handle/instance it allocated via AddEdgeH in the SAME operator, so the matching
-// recordAddEdge inverse already removes that edge — and [Graph.RemoveEdge] →
-// clearEdgePairState drops the pair's per-handle and per-instance metadata once
-// the last edge between the endpoints is gone. The exotic case (a per-handle
-// metadata set on an edge that a later failed row removes while a parallel edge
-// survives) is handled by the edge-removal undo itself: captureRemovedEdge
-// snapshots the removed slot's handle and its per-handle labels/properties, and
-// recordRemoveEdge re-adds the instance with that handle and restores them
-// (#1327).
-func (a *walMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
-	a.w().SetEdgeLabelAt(src, dst, idx, label)
+// # Why nothing is lost
+//
+// The ordinal store has no WAL frame, so before this a write to it was in
+// memory only, and a deleted relationship's entry outlived the relationship.
+// Every reader of it is a fallback that the handle store pre-empts whenever the
+// relationship has a handle-keyed type record, and every relationship this
+// engine creates has one: CREATE (exec/create_relationship.go), MERGE of a
+// pattern (exec/merge_pattern.go) and MERGE of a relationship
+// (exec/merge_relationship.go) each add the edge with [lpg.Graph.AddEdgeH] and
+// then record its mandatory type with SetEdgeLabelByHandle, and its properties
+// with SetEdgePropertyByHandle, which are WAL-described. The readers:
+//
+//   - the relationship materialiser reads [lpg.ReadView.EdgeLabelsAt] only when
+//     the slot's handle has no by-handle type record (the `!handled` branch of
+//     the edge-value builder);
+//   - the per-slot type resolver reads it only for a position whose handle has
+//     no by-handle record AND that matches no column-typed slot, through the
+//     positional inference and collectAllInstanceLabels;
+//   - nothing in the executor reads EdgePropertiesAt or calls this adapter's
+//     EdgeLabelsAt / EdgePropertiesAt (exec.GraphMutator declares them; no
+//     operator calls them).
+//
+// A recovered graph has never had the ordinal store: recovery replays the
+// handle frames only. Retiring it here makes the live engine equal to the
+// recovered one by construction. The CREATE-multiplicity counter
+// ([lpg.Graph.IncEdgeCreateCount]) is unaffected.
+func (a *walMutatorAdapter) SetEdgeLabelAt(_, _ string, _ int64, label string) error {
+	return txn.CheckSchemaField("relationship type", label)
 }
 func (a *walMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
-	return a.g.EdgeLabelsAt(src, dst, idx)
+	return a.g.EdgeLabelsAtAsOf(src, dst, idx, nil)
 }
-func (a *walMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) error {
-	return a.w().SetEdgePropertyAt(src, dst, idx, key, value)
+func (a *walMutatorAdapter) SetEdgePropertyAt(_, _ string, _ int64, key string, _ lpg.PropertyValue) error {
+	return txn.CheckSchemaField("edge property key", key)
 }
 func (a *walMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue {
-	return a.g.EdgePropertiesAt(src, dst, idx)
+	return a.g.EdgePropertiesAtAsOf(src, dst, idx, nil)
 }
-func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
-	a.w().RemoveEdgeInstance(src, dst, idx)
-}
+func (a *walMutatorAdapter) RemoveEdgeInstance(string, string, int64) {}
 
 // SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
 // DelEdgePropertyByHandle / EdgePropertiesByHandle / RemoveEdgeInstanceByHandle
@@ -21951,16 +23866,30 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // mutation, the buffered WAL op, and the undo entry all land inside the one
 // [lpg.Graph.ApplyAtomically] window and the one transaction the per-pair write
 // uses, so the per-pair and per-handle stores stay atomic together.
-func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
-	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
-	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) // rmp #2747: [txn.Tx.SetEdgeLabelByHandle] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a label over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.SetEdgeLabelByHandle] returns nothing; the encoder backstop refuses it at Commit.
+func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) error {
+	if err := txn.CheckSchemaField("relationship type", label); err != nil {
+		return err
+	}
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
+	mark, counted := a.effectMark()
+	if err := a.w().SetEdgeLabelByHandle(src, dst, handle, label); err != nil {
+		return err
+	}
+	// rmp #2956: propagated, never discarded. The token gate at the top of this
+	// method refuses every name the WAL cannot carry before any write, so the
+	// in-memory write and this staged op succeed or fail together.
+	var txErr error
+	if a.tookEffect(mark, counted) { // see [walMutatorAdapter.effectMark]
+		txErr = a.tx.SetEdgeLabelByHandle(src, dst, handle, label)
+	}
 	// Count-store (#2082): the single authoritative once-per-edge typing hook.
 	if a.cs() != nil {
 		countEdgeTyped(a.g, a.cs(), a.countBuf(), src, dst, label)
 	}
+	return txErr
 }
 func (a *walMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
-	return a.g.EdgeLabelsByHandle(src, dst, handle)
+	return a.g.EdgeLabelsByHandleAsOf(src, dst, handle, nil)
 }
 func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error {
 	// Reject at the API, backstop at the encoder — see
@@ -21972,8 +23901,9 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() && handle != 0 {
-		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
+		prev, had = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
 		return err
 	}
@@ -21983,25 +23913,54 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	// [txn.Tx.SetEdgePropertyByHandlePreValidated] returns ErrTxFinished
 	// (unreachable here) or ErrFieldTooLong, which the gate at the top has
 	// already refused.
+	if !a.tookEffect(mark, counted) { // see [walMutatorAdapter.effectMark]
+		return nil
+	}
 	return a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value)
 }
-func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) {
+func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) error {
+	_, err := a.delEdgePropertyByHandle(src, dst, handle, key)
+	return err
+}
+
+// delEdgePropertyByHandle is [walMutatorAdapter.DelEdgePropertyByHandle]
+// reporting whether the removal wrote a version; a refused one records no
+// inverse (rmp #3003, see [lpgMutatorAdapter.delEdgePropertyByHandle]).
+func (a *walMutatorAdapter) delEdgePropertyByHandle(src, dst string, handle uint64, key string) (took bool, err error) {
+	if err := txn.CheckSchemaField("edge property key", key); err != nil {
+		return false, err
+	}
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() && handle != 0 {
-		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
+		prev, had = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
 	}
-	a.w().DelEdgePropertyByHandle(src, dst, handle, key)
-	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
-	_ = a.tx.DelEdgePropertyByHandle(src, dst, handle, key) // rmp #2747: [txn.Tx.DelEdgePropertyByHandle] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a key over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.DelEdgePropertyByHandle] returns nothing; the encoder backstop refuses it at Commit.
+	mark, counted := a.effectMark()
+	if err := a.w().DelEdgePropertyByHandle(src, dst, handle, key); err != nil {
+		return false, err
+	}
+	took = a.tookEffect(mark, counted)
+	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had && took)
+	// rmp #2956: propagated, never discarded. The token gate at the top of this
+	// method refuses every name the WAL cannot carry before any write, so the
+	// in-memory write and this staged op succeed or fail together.
+	var txErr error
+	if took { // see [walMutatorAdapter.effectMark]
+		txErr = a.tx.DelEdgePropertyByHandle(src, dst, handle, key)
+	}
+	return took, txErr
 }
 func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
-	return a.g.EdgePropertiesByHandle(src, dst, handle)
+	return a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
-	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
-	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeInstanceByHandle] returns ErrTxFinished and nothing else, unreachable here; it stages no schema string. Discarded: [exec.GraphMutator.RemoveEdgeInstanceByHandle] returns nothing.
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
+	mark, counted := a.effectMark()
+	_ = a.w().RemoveEdgeInstanceByHandle(src, dst, handle) // rmp #2947: the adapter carries its statement's transaction, so the direct-write refusal, the only error, cannot occur; [exec.GraphMutator] returns nothing.
+	if a.tookEffect(mark, counted) {                       // see [walMutatorAdapter.effectMark]
+		_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeInstanceByHandle] returns ErrTxFinished and nothing else, unreachable here; it stages no schema string. Discarded: [exec.GraphMutator.RemoveEdgeInstanceByHandle] returns nothing.
+	}
 }
 
 // RecordConstraintInverse is [lpgMutatorAdapter.RecordConstraintInverse] for the
@@ -22018,29 +23977,56 @@ func (a *walMutatorAdapter) ConstraintTxn() *exec.ConstraintTxn { return a.conTx
 // edge's by-handle store. The boolean is false (and the handle 0) when no
 // handled src→dst slot exists.
 func (a *walMutatorAdapter) FirstEdgeHandle(src, dst string) (uint64, bool) {
-	return a.g.FirstEdgeHandle(src, dst)
+	return a.g.FirstEdgeHandleAsOf(src, dst, nil)
+}
+
+// EdgeHandles appends the handle of every stored src→dst slot to buf,
+// delegating to [lpg.Graph.AppendEdgeHandles]. See [exec.GraphMutator.EdgeHandles].
+func (a *walMutatorAdapter) EdgeHandles(src, dst string, buf []uint64) []uint64 {
+	return a.g.AppendEdgeHandlesAsOf(src, dst, buf, nil)
+}
+
+// HasEdgeHandle reports whether a stored src→dst slot carries handle,
+// delegating to [lpg.Graph.HasEdgeHandle]. See [exec.GraphMutator.HasEdgeHandle].
+func (a *walMutatorAdapter) HasEdgeHandle(src, dst string, handle uint64) bool {
+	return a.g.HasEdgeHandleAsOf(src, dst, handle, nil)
 }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *walMutatorAdapter) OutNeighbours(n string) []string {
-	var out []string
-	for nb := range a.g.AdjList().Neighbours(n) {
-		out = append(out, nb)
-	}
-	return out
+	return storedOutNeighbours(a.g, n)
 }
 
 // InNeighbours returns a snapshot of the incoming neighbour keys of n, read
 // from the adjacency's live in-edge index in O(in-degree). See
 // [lpgMutatorAdapter.InNeighbours] for why this is not a graph walk.
 func (a *walMutatorAdapter) InNeighbours(n string) []string {
-	return a.g.AdjList().InNeighbours(n)
+	return storedInNeighbours(a.g, n)
+}
+
+// InNeighboursInTx is [lpgMutatorAdapter.InNeighboursInTx] for the durable
+// write path.
+func (a *walMutatorAdapter) InNeighboursInTx(n string) []string {
+	return inArcSourcesInTx(a.g, a.g.WriterViewOf(a.wtx), n)
+}
+
+// HasInNeighbourInTx is [lpgMutatorAdapter.HasInNeighbourInTx] for the
+// durable write path.
+func (a *walMutatorAdapter) HasInNeighbourInTx(n string) bool {
+	return a.g.WriterViewOf(a.wtx).HasInNeighbour(n)
+}
+
+// OutDegreeInTx is [lpgMutatorAdapter.OutDegreeInTx] for the durable write
+// path.
+func (a *walMutatorAdapter) OutDegreeInTx(n string) int {
+	return a.g.WriterViewOf(a.wtx).OutDegree(n)
 }
 
 // RemoveAllEdgesFrom removes all outgoing edges from n in O(degree) time.
 // Per-edge undo entries and WAL records are emitted before the bulk adjacency
 // removal, exactly mirroring what d sequential RemoveEdge calls would produce.
 func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
+	a.liveTopo.beforeAdjWrite(n) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	// Snapshot outgoing neighbours for undo recording, WAL emission, and
 	// side-effect counting before the bulk removal clears the adjacency.
@@ -22055,6 +24041,7 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 		countAllOutEdgesRemoved(a.g, a.cs(), a.countBuf(), n)
 	}
 	// Bulk-remove from the in-memory graph (O(d) instead of O(d²)).
+	mark, counted := a.effectMark()
 	if !a.w().RemoveAllEdgesFrom(n) {
 		return
 	}
@@ -22063,8 +24050,13 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// record a deletion this transaction never performed. A refused transaction
 	// cannot commit, but the frames must not be written on the strength of that
 	// alone — the WAL is the durable truth and it may only describe work done.
-	for _, dst := range outgoing {
-		_ = a.tx.RemoveEdge(n, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveAllEdgesFrom] returns nothing.
+	// Only a removal that took effect is described (see
+	// [walMutatorAdapter.effectMark]); on an undirected graph every frame is
+	// kept, as [walMutatorAdapter.mustDescribeNoOpRemoval] explains.
+	if a.tookEffect(mark, counted) || a.mustDescribeNoOpRemoval() {
+		for _, dst := range outgoing {
+			_ = a.tx.RemoveEdge(n, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveAllEdgesFrom] returns nothing.
+		}
 	}
 	journalAllOutEdgesRemoved(r, a, pre)
 }
@@ -22084,19 +24076,18 @@ func (a *walMutatorAdapter) ResolveNodeID(n string) (graph.NodeID, bool) {
 	return a.g.AdjList().Mapper().Lookup(n)
 }
 
+// KeySequence returns the graph's synthetic node-key sequence.
+func (a *walMutatorAdapter) KeySequence() *lpg.KeySequence { return a.g.KeySequence() }
+
 // ResolveNodeLabel translates a NodeID back to its node key.
 func (a *walMutatorAdapter) ResolveNodeLabel(id graph.NodeID) (string, bool) {
 	return a.g.AdjList().Mapper().Resolve(id)
 }
 
-// WalkNodeIDs calls fn for every interned, non-tombstoned node.
+// WalkNodeIDs calls fn for every interned, non-tombstoned node. fn may call
+// back into the adapter; see [walkMutatorNodeIDs].
 func (a *walMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
-	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
-		if a.g.IsTombstoned(id) {
-			return true
-		}
-		return fn(id)
-	})
+	walkMutatorNodeIDs(a.g, fn)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -22174,53 +24165,11 @@ func csrPairFromGraphAt(g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[flo
 	return fwd, rev, key
 }
 
-// ensureEdgeIDResolver makes sure bopts.edgeIDResolver is populated and
-// returns it. The resolver maps a forward-CSR edge position (the
-// IntegerValue Expand emits) to the edge's storage endpoints
-// (storage_src, storage_dst). Path-reconstruction fast paths use it to
-// determine the relationship's storage direction when the row's
-// traversal columns disagree (undirected MATCH reverse-pass rows
-// carry traversal_src ≠ storage_src).
-//
-// The resolver is built lazily on first use because most queries never
-// reconstruct paths. CSR construction is O(V+E) but happens at most
-// once per query.
-func ensureEdgeIDResolver(bopts *buildOpts, g *lpg.ReadView[string, float64]) func(uint64) (uint64, uint64, bool) {
-	if bopts == nil || g == nil {
-		return nil
-	}
-	if bopts.edgeIDResolver != nil {
-		return bopts.edgeIDResolver
-	}
-	fwd, _ := csrPairCachedFor(bopts, g)
-	verts := fwd.VerticesSlice()
-	edges := fwd.EdgesSlice()
-	nEdges := uint64(len(edges))
-	bopts.edgeIDResolver = func(edgeID uint64) (uint64, uint64, bool) {
-		if edgeID >= nEdges {
-			return 0, 0, false
-		}
-		storageDst := uint64(edges[edgeID])
-		// Binary search for the largest src such that verts[src] <= edgeID.
-		lo, hi := 0, len(verts)-1
-		for lo < hi {
-			mid := (lo + hi + 1) / 2
-			if verts[mid] <= edgeID {
-				lo = mid
-			} else {
-				hi = mid - 1
-			}
-		}
-		return uint64(lo), storageDst, true
-	}
-	return bopts.edgeIDResolver
-}
-
 // ensureFwdCSR returns the forward CSR snapshot for relationship reconstruction,
-// building it at most once per query and caching it on bopts. It mirrors
-// [ensureEdgeIDResolver]: the snapshot is built lazily on first use so queries
-// that never project a relationship pay nothing, and reused for every result
-// row thereafter so the O(V+E) build leaves the per-row path (the #1574 fix).
+// building it at most once per query and caching it on bopts. The snapshot is
+// built lazily on first use so queries that never project a relationship pay
+// nothing, and reused for every result row thereafter so the O(V+E) build leaves
+// the per-row path (the #1574 fix).
 //
 // When bopts is nil (no per-query cache is available — the helpers are only
 // reached with a non-nil bopts today, but the guard keeps them safe in
@@ -22359,31 +24308,9 @@ func forEachResolvedSlotType(
 	handles := fwdCSR.HandlesSlice()
 	mapper := adj.Mapper()
 
-	// slotTypes collects the relationship types of ONE adjacency slot for the
-	// per-slot resolution below, and appendSlotType is the visitor that fills it.
-	// Both are declared ONCE for the whole sweep — the buffer is truncated per slot
-	// rather than reallocated, and the closure is not rebuilt per CSR position — so
-	// the fallback costs one small buffer instead of a []string and a closure per
-	// edge. That is the cold-path allocation hot spot the profile attributed to
-	// EdgeLabelsByID (rmp #1877), and it applies to a closure declared inside the
-	// loop just as much as to a returned slice.
-	var slotTypes []string
-	appendSlotType := func(name string) { slotTypes = append(slotTypes, name) }
-
-	// slotLabs is the scratch behind that resolution: slotLabs[dst] is the ordered
-	// list of the adjacency label-column entries of that pair's COLUMN-TYPED slots —
-	// the slots whose relationship type is not recorded against a stable per-edge
-	// handle. slotFallbackSeen counts how many of each pair's CSR positions have
-	// already consumed one, so the next resolves against the next slot.
-	//
-	// All three are created on the FIRST source that actually needs them and then
-	// reused for every later source, reset through slotLabsTouched rather than
-	// reallocated or swept. A graph whose every slot resolves by handle — anything
-	// Cypher built — therefore allocates none of them, and a graph that does need
-	// them allocates each once for the whole O(V+E) sweep instead of once per source.
-	var slotLabs map[graph.NodeID][]uint32
-	var slotFallbackSeen map[graph.NodeID]int
-	var slotLabsTouched []graph.NodeID
+	// The per-slot scratch is created ONCE for the whole sweep and reused for every
+	// source; see [slotTypeScratch] for what it holds and why.
+	sc := newSlotTypeScratch()
 
 	// Bound the loop on the SNAPSHOT CSR, not the live graph. fwdCSR was
 	// built from a point-in-time copy of adj above; verts has a fixed length
@@ -22395,141 +24322,264 @@ func forEachResolvedSlotType(
 	for srcID := uint64(0); srcID < maxID; srcID++ {
 		start := verts[srcID]
 		end := verts[srcID+1]
-		srcStr, ok := mapper.Resolve(graph.NodeID(srcID))
+		// The handle column is sliced to this source's run only where it covers
+		// it, which keeps the per-slot "pos < len(handles)" test meaning exactly
+		// what it meant against the whole column.
+		var runHandles []uint64
+		switch {
+		case uint64(len(handles)) >= end:
+			runHandles = handles[start:end]
+		case uint64(len(handles)) > start:
+			runHandles = handles[start:]
+		}
+		resolveSourceSlotTypes(g, mapper, sc, graph.NodeID(srcID), edges[start:end], runHandles, start, visit)
+	}
+}
+
+// slotTypeScratch is the reusable state behind [resolveSourceSlotTypes], held
+// across sources so a sweep allocates it once.
+//
+// slotTypes collects the relationship types of ONE adjacency slot for the
+// per-slot resolution, and appendSlotType is the visitor that fills it. Both are
+// created ONCE — the buffer is truncated per slot rather than reallocated, and the
+// closure is not rebuilt per CSR position — so the fallback costs one small buffer
+// instead of a []string and a closure per edge. That is the cold-path allocation
+// hot spot the profile attributed to EdgeLabelsByID (rmp #1877), and it applies to
+// a closure declared inside the loop just as much as to a returned slice.
+//
+// slotLabs is the scratch behind that resolution: slotLabs[dst] is the ordered
+// list of the adjacency label-column entries of that pair's COLUMN-TYPED slots —
+// the slots whose relationship type is not recorded against a stable per-edge
+// handle. slotFallbackSeen counts how many of each pair's CSR positions have
+// already consumed one, so the next resolves against the next slot.
+//
+// All three are created on the FIRST source that actually needs them and then
+// reused for every later source, reset through slotLabsTouched rather than
+// reallocated or swept. A graph whose every slot resolves by handle — anything
+// Cypher built — therefore allocates none of them, and a graph that does need
+// them allocates each once for the whole O(V+E) sweep instead of once per source.
+//
+// NOT safe for concurrent use.
+type slotTypeScratch struct {
+	slotTypes        []string
+	appendSlotType   func(name string)
+	slotLabs         map[graph.NodeID][]uint32
+	slotFallbackSeen map[graph.NodeID]int
+	slotLabsTouched  []graph.NodeID
+
+	// dstParallelTotal and dstSeen are the positional inference's per-source
+	// counters: dstParallelTotal[dst] is how many slots of the source's run
+	// point at dst, and dstSeen[dst] how many of them the sweep has reached so
+	// far, the current slot included. They are built on the FIRST slot of a
+	// source that reaches the positional inference, and emptied by that
+	// source's own run before the next source, so a source that never reaches
+	// it — every source of a Cypher-built graph — touches neither (rmp #2889).
+	dstParallelTotal map[graph.NodeID]int64
+	dstSeen          map[graph.NodeID]int64
+}
+
+// startPositionalCounts builds the positional inference's counters for a source
+// whose run is edges, on reaching that inference at position pos. dstSeen must
+// then read exactly what counting every resolvable slot up to and including pos
+// would have given, so the slots before pos are counted here under the same
+// Resolve test the sweep applies, and every later slot is counted by the sweep.
+func (sc *slotTypeScratch) startPositionalCounts(mapper *graph.Mapper[string], edges []graph.NodeID, pos uint64) {
+	if sc.dstParallelTotal == nil {
+		sc.dstParallelTotal = make(map[graph.NodeID]int64, len(edges))
+		sc.dstSeen = make(map[graph.NodeID]int64, len(edges))
+	}
+	for _, d := range edges {
+		sc.dstParallelTotal[d]++
+	}
+	for _, d := range edges[:pos+1] {
+		if _, ok := mapper.Resolve(d); ok {
+			sc.dstSeen[d]++
+		}
+	}
+}
+
+// endPositionalCounts empties the counters [slotTypeScratch.startPositionalCounts]
+// built for a source whose run is edges. Deleting the run's own keys keeps the
+// reset O(run) however many keys the maps have held before.
+func (sc *slotTypeScratch) endPositionalCounts(edges []graph.NodeID) {
+	for _, d := range edges {
+		delete(sc.dstParallelTotal, d)
+		delete(sc.dstSeen, d)
+	}
+}
+
+// newSlotTypeScratch returns an empty scratch whose visitor appends to its own
+// buffer.
+func newSlotTypeScratch() *slotTypeScratch {
+	sc := &slotTypeScratch{}
+	sc.appendSlotType = func(name string) { sc.slotTypes = append(sc.slotTypes, name) }
+	return sc
+}
+
+// resolveSourceSlotTypes is the per-source body of [forEachResolvedSlotType],
+// moved out verbatim so the live per-source runs of a write transaction resolve
+// their slots by exactly the same rules as the whole-graph column (rmp #2883). Read
+// [forEachResolvedSlotType] before changing it.
+//
+// edges is src's run in its FINAL order and handles the handle column aligned with
+// it (nil, or shorter than edges, exactly where the whole column did not cover a
+// slot). visit receives base+i for the run's i-th slot, which is the absolute
+// position for the whole-graph sweep and the run index for a live run.
+func resolveSourceSlotTypes(
+	g *lpg.ReadView[string, float64],
+	mapper *graph.Mapper[string],
+	sc *slotTypeScratch,
+	src graph.NodeID,
+	edges []graph.NodeID,
+	handles []uint64,
+	base uint64,
+	visit func(pos uint64, types []string),
+) {
+	srcStr, ok := mapper.Resolve(src)
+	if !ok {
+		return
+	}
+	// sc.dstSeen drives only the positional fallback (handle-less /
+	// MERGE slots): it counts parallel CSR occurrences per dst so a
+	// fallback slot maps to its CREATE-instance idx. The
+	// handle-driven path below ignores it entirely. sc.dstParallelTotal
+	// lets the fallback tell multigraph (N_csr == N_create) from
+	// simple-graph (N_csr < N_create) storage for each pair. Both are
+	// built only once a slot of this source reaches that fallback; see
+	// [slotTypeScratch.startPositionalCounts].
+	positionalReady := false
+	// slotLabsReady defers the adjacency read until a slot of THIS source
+	// actually needs it: a Cypher-built graph resolves every slot by handle and
+	// must not pay for a resolution it never reaches.
+	slotLabsReady := false
+	for pos := uint64(0); pos < uint64(len(edges)); pos++ {
+		dst := edges[pos]
+		dstStr, ok := mapper.Resolve(dst)
 		if !ok {
 			continue
 		}
-		// dstSeen drives only the positional fallback (handle-less /
-		// MERGE slots): it counts parallel CSR occurrences per dst so a
-		// fallback slot maps to its CREATE-instance idx. The
-		// handle-driven path below ignores it entirely. dstParallelTotal
-		// lets the fallback tell multigraph (N_csr == N_create) from
-		// simple-graph (N_csr < N_create) storage for each pair.
-		dstParallelTotal := make(map[graph.NodeID]int64, end-start)
-		for pos := start; pos < end; pos++ {
-			dstParallelTotal[edges[pos]]++
+		if positionalReady {
+			sc.dstSeen[dst]++
 		}
-		dstSeen := make(map[graph.NodeID]int64, len(dstParallelTotal))
-		// slotLabsReady defers the adjacency read until a slot of THIS source
-		// actually needs it: a Cypher-built graph resolves every slot by handle and
-		// must not pay for a resolution it never reaches.
-		slotLabsReady := false
-		for pos := start; pos < end; pos++ {
-			dst := edges[pos]
-			dstStr, ok := mapper.Resolve(dst)
-			if !ok {
-				continue
-			}
-			dstSeen[dst]++
-			var labels []string
-			// slotResolved records that this position was matched to a real
-			// column-typed adjacency slot below, so its type — including the absence
-			// of one — is settled and the positional inference must not guess.
-			slotResolved := false
-			if pos < uint64(len(handles)) && handles[pos] != 0 {
-				// Stable-handle path: resolve this slot's type by the
-				// explicit per-edge handle read directly from the CSR
-				// position. This is delete-stable — removing a parallel
-				// sibling compacts the neighbour slice but the surviving
-				// slot keeps its original handle, so the type no longer
-				// mis-maps the way the positional idx did (Match2 [6] /
-				// Match7 [29]).
-				labels = g.EdgeLabelsByHandle(srcStr, dstStr, handles[pos])
-			}
-			if len(labels) == 0 {
-				// PER-SLOT resolution, for a slot with no by-handle type record.
-				// This CSR position is the n-th of its pair to reach here, so it
-				// resolves against the n-th COLUMN-TYPED adjacency slot of that pair
-				// and asks lpg only what THAT slot carries — its own inline type plus
-				// the pair's overflow.
-				//
-				// The pair's derived union is deliberately NOT consulted. It reports
-				// every type any parallel slot of the pair carries, so on a pair
-				// holding one :K edge and one untyped edge it matched `[r:K]` twice
-				// where once is correct, and on a 12-slot self-loop with a single
-				// typed slot it matched twelve times where once is correct (rmp
-				// #2258). Resolving per slot is also what makes this agree with the
-				// typed-degree rewrite, which resolves per slot in
-				// [lpg.Graph.slotCarriesType]: the two now answer the same question
-				// from the same state, so a count and its enumeration cannot differ.
-				//
-				// It runs BEFORE the positional inference below, and that order is
-				// load-bearing. The positional index is a per-PAIR ordinal: on a
-				// multigraph pair mixing a Cypher-created slot with a Go-API slot it
-				// handed the Go-API slot the CREATE's per-instance type, so an
-				// untyped edge matched `[r:K]` and an edge typed :K by the Go API
-				// reported the sibling's :M. The column is the authoritative source
-				// for such a slot, so it decides first — and it decides even when the
-				// type it finds is NOT accepted, because "this slot is an :M" is an
-				// answer, not a failure to resolve.
-				//
-				// A position beyond the pair's column-typed slots (possible only
-				// against a snapshot the adjacency has since changed under) resolves
-				// as carrying no inline type, which the overflow half of
-				// ForEachSlotRelTypeByID may still qualify — never as inheriting a
-				// sibling's type.
-				if !slotLabsReady {
-					if slotLabs == nil {
-						slotLabs = make(map[graph.NodeID][]uint32)
-						slotFallbackSeen = make(map[graph.NodeID]int)
-					}
-					slotLabsTouched = fillSlotLabs(
-						g, graph.NodeID(srcID), slotLabs, slotFallbackSeen, slotLabsTouched)
-					slotLabsReady = true
-				}
-				var encoded uint32
-				// The counter is advanced only for a pair that HAS column-typed
-				// slots, which keeps slotFallbackSeen's key set inside
-				// slotLabsTouched and so resettable in O(touched).
-				if ls := slotLabs[dst]; len(ls) > 0 {
-					if k := slotFallbackSeen[dst]; k < len(ls) {
-						encoded = ls[k]
-						slotResolved = true
-					}
-					slotFallbackSeen[dst]++
-				}
-				slotTypes = slotTypes[:0]
-				g.ForEachSlotRelTypeByID(graph.NodeID(srcID), dst, encoded, appendSlotType)
-				labels = slotTypes
-			}
-			if len(labels) == 0 && !slotResolved {
-				// Positional inference, reached only when the position could not be
-				// matched to a column-typed adjacency slot at all — legacy pre-handle
-				// storage, and a CSR snapshot the adjacency has since changed under.
-				//
-				// A position that WAS matched to such a slot never gets here, and that
-				// is the point: the slot's own emptiness means the relationship has no
-				// type, and the per-PAIR ordinal would answer with a sibling CREATE's
-				// type instead. On a multigraph pair mixing a Cypher-created :K slot
-				// with an untyped Go-API slot that made the untyped edge match
-				// `[r:K]`, so a bare MATCH counted two where one was correct.
-				totalCreates := g.EdgeCreateCount(srcStr, dstStr)
-				parallel := dstParallelTotal[dst]
-				if parallel >= totalCreates && totalCreates > 0 {
-					// Multigraph: one CSR slot per CREATE. Use the
-					// per-instance label set for this specific slot.
-					labels = g.EdgeLabelsAt(srcStr, dstStr, dstSeen[dst])
-				} else {
-					// Simple-graph (or no per-instance store): merge every
-					// instance's labels with the per-pair union so a
-					// filter targeting any CREATE's label still matches.
-					labels = collectAllInstanceLabels(g, srcStr, dstStr, totalCreates)
-				}
-			}
-			if len(labels) == 0 {
-				// The slot carries no relationship type at all, so it matches no
-				// type filter and is not visited.
-				continue
-			}
-			// The ONLY step removed from the original [buildEdgeTypeFilter] is the
-			// accept-set filtering that used to happen here. Everything above is the
-			// resolution, verbatim, and the caller now decides what to do with the
-			// answer — which is what makes the result type-set INDEPENDENT.
+		var labels []string
+		// slotResolved records that this position was matched to a real
+		// column-typed adjacency slot below, so its type — including the absence
+		// of one — is settled and the positional inference must not guess.
+		slotResolved := false
+		if pos < uint64(len(handles)) && handles[pos] != 0 {
+			// Stable-handle path: resolve this slot's type by the
+			// explicit per-edge handle read directly from the CSR
+			// position. This is delete-stable — removing a parallel
+			// sibling compacts the neighbour slice but the surviving
+			// slot keeps its original handle, so the type no longer
+			// mis-maps the way the positional idx did (Match2 [6] /
+			// Match7 [29]).
 			//
-			// types aliases a buffer reused across slots (see slotTypes above), so a
-			// visitor that keeps it must copy.
-			visit(pos, labels)
+			// It reads by NodeID: the Mapper is append-only and bijective, so
+			// src and dst are exactly what their resolved keys look up to,
+			// and the key round trip bought nothing (rmp #2888).
+			labels = g.EdgeLabelsByHandleID(src, dst, handles[pos])
 		}
+		if len(labels) == 0 {
+			// PER-SLOT resolution, for a slot with no by-handle type record.
+			// This CSR position is the n-th of its pair to reach here, so it
+			// resolves against the n-th COLUMN-TYPED adjacency slot of that pair
+			// and asks lpg only what THAT slot carries — its own inline type plus
+			// the pair's overflow.
+			//
+			// The pair's derived union is deliberately NOT consulted. It reports
+			// every type any parallel slot of the pair carries, so on a pair
+			// holding one :K edge and one untyped edge it matched `[r:K]` twice
+			// where once is correct, and on a 12-slot self-loop with a single
+			// typed slot it matched twelve times where once is correct (rmp
+			// #2258). Resolving per slot is also what makes this agree with the
+			// typed-degree rewrite, which resolves per slot in
+			// [lpg.Graph.slotCarriesType]: the two now answer the same question
+			// from the same state, so a count and its enumeration cannot differ.
+			//
+			// It runs BEFORE the positional inference below, and that order is
+			// load-bearing. The positional index is a per-PAIR ordinal: on a
+			// multigraph pair mixing a Cypher-created slot with a Go-API slot it
+			// handed the Go-API slot the CREATE's per-instance type, so an
+			// untyped edge matched `[r:K]` and an edge typed :K by the Go API
+			// reported the sibling's :M. The column is the authoritative source
+			// for such a slot, so it decides first — and it decides even when the
+			// type it finds is NOT accepted, because "this slot is an :M" is an
+			// answer, not a failure to resolve.
+			//
+			// A position beyond the pair's column-typed slots (possible only
+			// against a snapshot the adjacency has since changed under) resolves
+			// as carrying no inline type, which the overflow half of
+			// ForEachSlotRelTypeByID may still qualify — never as inheriting a
+			// sibling's type.
+			if !slotLabsReady {
+				if sc.slotLabs == nil {
+					sc.slotLabs = make(map[graph.NodeID][]uint32)
+					sc.slotFallbackSeen = make(map[graph.NodeID]int)
+				}
+				sc.slotLabsTouched = fillSlotLabs(
+					g, src, sc.slotLabs, sc.slotFallbackSeen, sc.slotLabsTouched)
+				slotLabsReady = true
+			}
+			var encoded uint32
+			// The counter is advanced only for a pair that HAS column-typed
+			// slots, which keeps sc.slotFallbackSeen's key set inside
+			// sc.slotLabsTouched and so resettable in O(touched).
+			if ls := sc.slotLabs[dst]; len(ls) > 0 {
+				if k := sc.slotFallbackSeen[dst]; k < len(ls) {
+					encoded = ls[k]
+					slotResolved = true
+				}
+				sc.slotFallbackSeen[dst]++
+			}
+			sc.slotTypes = sc.slotTypes[:0]
+			g.ForEachSlotRelTypeByID(src, dst, encoded, sc.appendSlotType)
+			labels = sc.slotTypes
+		}
+		if len(labels) == 0 && !slotResolved {
+			// Positional inference, reached only when the position could not be
+			// matched to a column-typed adjacency slot at all — legacy pre-handle
+			// storage, and a CSR snapshot the adjacency has since changed under.
+			//
+			// A position that WAS matched to such a slot never gets here, and that
+			// is the point: the slot's own emptiness means the relationship has no
+			// type, and the per-PAIR ordinal would answer with a sibling CREATE's
+			// type instead. On a multigraph pair mixing a Cypher-created :K slot
+			// with an untyped Go-API slot that made the untyped edge match
+			// `[r:K]`, so a bare MATCH counted two where one was correct.
+			if !positionalReady {
+				sc.startPositionalCounts(mapper, edges, pos)
+				positionalReady = true
+			}
+			totalCreates := g.EdgeCreateCount(srcStr, dstStr)
+			parallel := sc.dstParallelTotal[dst]
+			if parallel >= totalCreates && totalCreates > 0 {
+				// Multigraph: one CSR slot per CREATE. Use the
+				// per-instance label set for this specific slot.
+				labels = g.EdgeLabelsAt(srcStr, dstStr, sc.dstSeen[dst])
+			} else {
+				// Simple-graph (or no per-instance store): merge every
+				// instance's labels with the per-pair union so a
+				// filter targeting any CREATE's label still matches.
+				labels = collectAllInstanceLabels(g, srcStr, dstStr, totalCreates)
+			}
+		}
+		if len(labels) == 0 {
+			// The slot carries no relationship type at all, so it matches no
+			// type filter and is not visited.
+			continue
+		}
+		// The ONLY step removed from the original [buildEdgeTypeFilter] is the
+		// accept-set filtering that used to happen here. Everything above is the
+		// resolution, verbatim, and the caller now decides what to do with the
+		// answer — which is what makes the result type-set INDEPENDENT.
+		//
+		// types aliases a buffer reused across slots (see sc.slotTypes above), so a
+		// visitor that keeps it must copy.
+		visit(base+pos, labels)
+	}
+	if positionalReady {
+		sc.endPositionalCounts(edges)
 	}
 }
 
@@ -23061,4 +25111,83 @@ func tryFuseCyclicIntersect(
 	}
 	// Both filters travel with the adjacency, all resolved at execution time.
 	return exec.NewExpandIntersect(kids[0], intersectAdjacencySource(bopts, g, mid.RelTypes, p.RelTypes), cfg)
+}
+
+// storedOutNeighbours returns the out-neighbour keys of n in the STORED
+// adjacency, including uncommitted writes, as the mutator adapters' bulk
+// removals need (they must see what their own statement added). The graph's
+// present-state readers return the newest committed state instead
+// (rmp #2965, round 5); this is the read those readers performed before.
+func storedOutNeighbours(g *lpg.Graph[string, float64], n string) []string {
+	id, ok := g.AdjList().Mapper().Lookup(n)
+	if !ok {
+		return nil
+	}
+	nbs, _ := g.AdjList().LoadEntry(id)
+	var out []string
+	for _, nb := range nbs {
+		if k, ok := g.AdjList().Mapper().Resolve(nb); ok {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// inArcSourcesInTx returns one source key per incoming arc of n in view v,
+// self-loops excluded: a source holding k parallel arcs into n appears k times.
+//
+// The in-edge index records DISTINCT sources ([lpg.ReadView.InNeighbours]), and
+// [exec.GraphMutator.RemoveEdge] takes out ONE src→n slot per call, so a DETACH
+// DELETE that removed once per distinct source left every parallel arc after the
+// first in place, pointing at the deleted node (rmp #2988). The multiplicity is
+// read from the source's own entry in the same view, so it counts exactly the
+// slots the transaction can see. The cost is one scan of each in-neighbour's
+// entry, the same order as the per-slot removal that follows it.
+//
+// A source the index names but whose entry holds no visible arc into n is
+// listed once, as before: its removal is the caller's presence-gated no-op.
+func inArcSourcesInTx(g *lpg.Graph[string, float64], v *lpg.ReadView[string, float64], n string) []string {
+	srcs := v.InNeighbours(n)
+	if len(srcs) == 0 {
+		return nil
+	}
+	m := g.AdjList().Mapper()
+	dstID, ok := m.Lookup(n)
+	if !ok {
+		return srcs
+	}
+	out := make([]string, 0, len(srcs))
+	for _, src := range srcs {
+		k := 0
+		if srcID, ok := m.Lookup(src); ok {
+			for _, nb := range v.EntryView(srcID).Neighbours {
+				if nb == dstID {
+					k++
+				}
+			}
+		}
+		for range max(k, 1) {
+			out = append(out, src)
+		}
+	}
+	return out
+}
+
+// storedInNeighbours is [storedOutNeighbours] for the in-edge index.
+func storedInNeighbours(g *lpg.Graph[string, float64], n string) []string {
+	id, ok := g.AdjList().Mapper().Lookup(n)
+	if !ok {
+		return nil
+	}
+	ids := g.InNeighbourIDsAsOf(id, nil)
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ids))
+	for _, x := range ids {
+		if k, ok := g.AdjList().Mapper().Resolve(x); ok {
+			out = append(out, k)
+		}
+	}
+	return out
 }

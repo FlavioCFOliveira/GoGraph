@@ -45,11 +45,36 @@ The subject arm runs 4 000 rounds rather than the 400 the task asked for, becaus
 that rate 400 rounds would expect ~0.2 stale reads from a BROKEN Session and would
 usually miss it — roughly 20% power. 4 000 raises the expected count to ~2.
 
-What remains open is ONE question, and it is about API ergonomics rather than
-correctness: whether the DEFAULT surface should give read-your-own-writes without the
-caller opting in, since every reference engine does so on an ordinary connection. The
-livelock in rmp #2368 is unaffected by this retraction: a write that cannot progress
-after 64 fresh attempts is not explained by any isolation contract.
+That question — whether the DEFAULT surface should give read-your-own-writes without the
+caller opting in, since every reference engine does so on an ordinary connection — is
+DECIDED (rmp #2626): the default is kept and the divergence is documented; see
+[The declared divergence](#the-declared-divergence-rmp-2626). The livelock in rmp #2368
+is unaffected by this retraction: a write that cannot progress after 64 fresh attempts
+is not explained by any isolation contract.
+
+## The declared divergence (rmp #2626)
+
+**`Engine.Run` and `Engine.RunInTx` do not give read-your-own-writes across statements.**
+Each statement gets snapshot isolation and nothing more. A new statement's snapshot is
+taken at the contiguous frontier (`mvcc.Clock.ReadTS`, read by `lpg.Graph.BeginRead`),
+and the frontier cannot pass an older commit that is still in flight. So a caller that
+commits through `RunInTx` and then reads — through `Run` or another `RunInTx` — can miss
+its own acknowledged commit while an unrelated, earlier commit is in flight: 1 to 4 of
+every 4 000 reads under 16 concurrent writers, as measured above.
+
+This **diverges from the reference engines' default**. PostgreSQL and InnoDB take a
+snapshot that holds the in-flight transaction set, and Memgraph reads its start
+timestamp under the engine lock, so all three show an ordinary connection its own
+commits. GoGraph keeps the scalar frontier, for the read-path and commit-path reasons
+under [Options](#options-if-the-default-is-to-change--architecture-change-needs-sign-off),
+and states the gap in the godoc of `Engine.Run` and `Engine.RunInTx`.
+
+**Read-your-own-writes is delivered by `cypher.Session`** (`Engine.NewSession`): its
+`Run`, `RunInTx`, `RunAny`, `BeginTx` and `BeginReadTx` wait for the frontier to reach the
+session's latest commit before the next snapshot is taken, and measured 0 stale reads in
+16 000 rounds under the same load. A caller that reads what it wrote uses a `Session`;
+the Bolt server gives each connection one. The examples under `examples/` that read their
+own prior writes run through a `Session` for this reason.
 
 ## The reproduction, at the primitive level
 

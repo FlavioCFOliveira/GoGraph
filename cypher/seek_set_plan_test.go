@@ -88,9 +88,13 @@ func TestSeekSet_AccessPath(t *testing.T) {
 			wantOp: "NodeByIndexSeekSet",
 		},
 		{
-			name:   "a type-incompatible key does not prevent the seek",
-			query:  `UNWIND ['name-7', 7] AS k MATCH (a:P {name: k}) RETURN a`,
-			wantOp: "NodeByIndexSeekSet",
+			// The string index does not hold a node whose name is the integer 7,
+			// yet `a.name = 7` is true for it, so the seek alone would lose it
+			// (rmp #2954): the set is declined and scanned.
+			name:    "a non-string key declines the seek",
+			query:   `UNWIND ['name-7', 7] AS k MATCH (a:P {name: k}) RETURN a`,
+			wantOp:  "NodeByLabelScan",
+			absentO: "NodeByIndexSeekSet",
 		},
 		{
 			name:   "a NULL key does not prevent the seek",
@@ -127,6 +131,32 @@ func TestSeekSet_AccessPath(t *testing.T) {
 				t.Errorf("did not want %s in the plan\n%s", tc.absentO, plan)
 			}
 		})
+	}
+}
+
+// TestSeekSet_AllAbsentKeysSeek pins rmp #3062: a key set none of whose keys is
+// in the hash index seeks and returns zero rows, for literal keys and for
+// parameter keys alike. Before the fix the gate declined an empty merged posting
+// count and the plan scanned the whole label to return the same zero rows.
+func TestSeekSet_AllAbsentKeysSeek(t *testing.T) {
+	eng := seekSetFixture(t)
+	params, err := cypher.BindParams(map[string]any{"k1": "absent-1", "k2": "absent-2"})
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	for _, q := range []string{
+		`UNWIND ['absent-1','absent-2'] AS k MATCH (a:P {name: k}) RETURN a.name AS nm`,
+		`MATCH (a:P) WHERE a.name = 'absent-1' OR a.name = 'absent-2' RETURN a.name AS nm`,
+		`MATCH (a:P) WHERE a.name = $k1 OR a.name = $k2 RETURN a.name AS nm`,
+	} {
+		prof, err := eng.Profile(context.Background(), q, params)
+		if err != nil {
+			t.Fatalf("Profile %q: %v", q, err)
+		}
+		if !strings.Contains(prof, "NodeByIndexSeekSet (rows=0,") {
+			t.Errorf("%q: a key set with every key absent must seek the index and return "+
+				"zero rows, not scan the label:\n%s", q, prof)
+		}
 	}
 }
 

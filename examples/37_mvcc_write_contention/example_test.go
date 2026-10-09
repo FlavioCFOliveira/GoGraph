@@ -13,8 +13,9 @@ package main
 // would teach the next reader to ignore a red test.
 //
 // The workload is shrunk so the gate fits the short layer. That is a size change,
-// not a shape change: every phase still runs, with concurrent writers, readers
-// beside them, contention on the shared set, and a real restart.
+// not a shape change: phases 1 to 4 run with concurrent writers, readers beside
+// them, contention on the shared set, and a real restart. Phases 5, 6 and 7 are
+// held by their own tests (TestCatalogue, TestLadder, TestDurability).
 
 import (
 	"bytes"
@@ -33,6 +34,15 @@ func testConfig() config {
 	c.opsPerProd = 25
 	c.producers = 4
 	c.readers = 2
+	// Phase 6 has its own gates (ladder_test.go); running it here would run it twice.
+	c.ladder.levels = nil
+	// Phase 7 likewise (durability_test.go).
+	c.durability.levels = nil
+	// Phase 5 likewise (TestCatalogue): the same scenarios through the same
+	// runner, with each transcript diffed against its golden. Run here it cost
+	// about 29 s of this test and detected less: with rmp #2986's fix reverted,
+	// TestCatalogue failed (GG06) and this test passed (rmp #2993).
+	c.skipCatalogue = true
 	return c
 }
 
@@ -62,13 +72,14 @@ func mustLine(t *testing.T, out, want string) {
 func TestRun(t *testing.T) {
 	out := runExample(t)
 
-	// Phase 1 — every scaling level ran.
-	mustLine(t, out, "scaling.levels=5")
+	// Phase 1 — every order of every scaling level committed within its retry
+	// budget, and no level ran out of its hang budget.
+	mustLine(t, out, "scaling.unrecovered_conflicts=0")
 
-	// Phase 2 — no order vanished, and the readers actually sampled. The second is
-	// the non-degeneracy guard: a reader that never ran would leave the latency
+	// Phase 2 — every order committed, and the readers actually sampled. The second
+	// is the non-degeneracy guard: a reader that never ran would leave the latency
 	// percentiles at zero and report nothing, while the phase still "passed".
-	mustLine(t, out, "contention.accounted=true")
+	mustLine(t, out, "contention.unrecovered_conflicts=0")
 	mustLine(t, out, "contention.readers_sampled=true")
 	// The version sampler needs the same non-degeneracy guard, and did not have it.
 	// With a 2 ms tick against a 2 ms phase, seven runs in twelve of the documented
@@ -94,6 +105,8 @@ func TestRun(t *testing.T) {
 	mustLine(t, out, "restart.all_nodes_recovered=true")
 	mustLine(t, out, "restart.clock_not_rewound=true")
 	mustLine(t, out, "restart.post_restart_instant_is_new=true")
+
+	// Phase 5 is TestCatalogue's (see testConfig).
 }
 
 // TestConservationCheckCanFail validates the INSTRUMENT rather than the engine.

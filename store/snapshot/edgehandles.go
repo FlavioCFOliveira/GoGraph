@@ -564,18 +564,30 @@ func readEdgeHandleProp(br *bufio.Reader, keys []string) (string, lpg.PropertyVa
 // re-attached harmlessly. The handle high-water counter is re-seeded for every
 // record so a post-recovery edge creation never re-mints a live handle
 // (invariant I5).
-func ApplyEdgeHandlesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb EdgeHandlesReadback) {
+//
+// It returns an error wrapping [lpg.ErrTokenTooLong] when a record carries a
+// relationship type or property key longer than [lpg.MaxTokenLen] bytes (rmp
+// #2748): the engine refuses such a token on every write path, so a snapshot
+// carrying one predates that bound, and loading it silently would hide the data
+// it names. The error result is a breaking change: this function used to return
+// nothing.
+func ApplyEdgeHandlesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb EdgeHandlesReadback) error {
 	defer metrics.Time("store.snapshot.ApplyEdgeHandlesToGraph").Stop()
 	for i := range rb.Records {
 		rec := &rb.Records[i]
 		srcID := graph.NodeID(rec.Src)
 		dstID := graph.NodeID(rec.Dst)
 		for _, name := range rec.Labels {
-			g.SetEdgeLabelByHandleID(srcID, dstID, rec.Handle, name)
+			if err := g.SetEdgeLabelByHandleID(srcID, dstID, rec.Handle, name); err != nil {
+				return fmt.Errorf("snapshot.ApplyEdgeHandlesToGraph: %w", err)
+			}
 		}
 		for key, val := range rec.Properties {
-			g.SetEdgePropertyByHandleID(srcID, dstID, rec.Handle, key, val)
+			if err := g.SetEdgePropertyByHandleID(srcID, dstID, rec.Handle, key, val); err != nil {
+				return fmt.Errorf("snapshot.ApplyEdgeHandlesToGraph: %w", err)
+			}
 		}
 		g.SeedEdgeHandle(rec.Handle + 1)
 	}
+	return nil
 }

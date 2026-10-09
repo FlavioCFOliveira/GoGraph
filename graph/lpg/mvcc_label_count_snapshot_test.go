@@ -45,7 +45,7 @@ func newLabelCountProbeGraph(t *testing.T, seeded, spare int) (*Graph[string, fl
 		t.Fatalf("seed labels: %v", err)
 	}
 	g.ReclaimNow()
-	return g, g.reg.Intern("P")
+	return g, g.reg.intern("P")
 }
 
 // labelOne commits one node's label in its own transaction.

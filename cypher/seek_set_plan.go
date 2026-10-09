@@ -71,10 +71,12 @@ import (
 //
 // The retained outer Selection is never removed, so this can only narrow what
 // that filter examines — the same argument correlated_seek_plan.go relies on. The
-// seek must therefore not UNDER-return, which is what the skip rules in
-// [exec.NodeByIndexSeekSet.Init] establish: a NULL key matches nothing under
-// openCypher, and a key whose type the index cannot hold matches nothing because
-// equality across type groups is FALSE.
+// seek must therefore not UNDER-return. A NULL key matches nothing under
+// openCypher, so [exec.NodeByIndexSeekSet.Init] skips it. A key of any other
+// non-string kind is NOT skippable: the string hash index holds only the
+// string-valued nodes, so a node whose property is the integer 5 is absent from
+// it while `n.s = 5` (or `n.s = 5.0`) is true for it. A set carrying such a key
+// is therefore declined, and the scan answers it (rmp #2954).
 
 // tryBuildIndexSeekSetFromSelection inspects a Selection whose predicate is a
 // disjunction of equalities on one property of a scanned node, and returns a
@@ -132,17 +134,38 @@ func tryBuildIndexSeekSetFromSelection(
 		return nil, false
 	}
 	propKey, keys, ok := extractKeySetFromAST(sel.PredicateExpr, nodeVar, params)
-	if !ok {
+	if !ok || !stringOrNullKeys(keys) {
 		return nil, false
 	}
 	// The label the subsumed scan leaf carried must still qualify every candidate
 	// (rmp #2423); a set seek that cannot verify it declines, exactly as the
 	// single-key seek does.
-	admit, canVerify := labelAdmitFn(labelSrcFromView(g), label)
-	if !canVerify {
-		return nil, false
+	//
+	// On a snapshot-bound build the guard checks the label, and also proves after
+	// the probes that the index described the reader's snapshot, answering from
+	// that snapshot when it cannot (rmp #2937).
+	guard := hashSeekGuard{snap: bopts.idxSnap, label: label, key: propKey}
+	if !guard.snapshotBound() {
+		admit, canVerify := labelAdmitFn(labelSrcFromView(g), label)
+		if !canVerify {
+			return nil, false
+		}
+		guard.admit = admit
 	}
-	return buildSeekSetOperator(idxMgr, label, propKey, keys, budget, nodeVar, schema, admit, bopts.pendingIdx)
+	return buildSeekSetOperator(idxMgr, label, propKey, keys, budget, nodeVar, schema, guard, bopts.pendingIdx)
+}
+
+// stringOrNullKeys reports whether every key is a string or NULL — the only
+// kinds the string hash index answers completely. A numeric, boolean, list or
+// temporal key can equal a node the index does not hold, so a set carrying one
+// must not be served by the seek alone (rmp #2954).
+func stringOrNullKeys(keys []expr.Value) bool {
+	for _, k := range keys {
+		if k != nil && k.Kind() != expr.KindString && k.Kind() != expr.KindNull {
+			return false
+		}
+	}
+	return true
 }
 
 // countOrDisjuncts counts the operands of a chain of OR without allocating.
@@ -176,7 +199,13 @@ const maxSeekSetDisjuncts = 1 << 20
 // This is the plan-time half of the gate; [exec.NodeByIndexSeekSet] enforces the
 // budget itself once the exact count is known.
 func seekSetBudget(g *lpg.ReadView[string, float64], label string) (uint64, bool) {
-	nLabel := g.NodeIndex().Count(uint32(g.Registry().Intern(label)))
+	lid, err := g.Registry().Intern(label)
+	if err != nil {
+		// A label over lpg.MaxTokenLen cannot exist, so its population is zero
+		// and no seek can win (rmp #2748).
+		return 0, false
+	}
+	nLabel := g.NodeIndex().Count(uint32(lid))
 	if nLabel < rangeSeekMinLabelPopulation {
 		return 0, false
 	}
@@ -203,7 +232,7 @@ func buildSeekSetOperator(
 	budget uint64,
 	nodeVar string,
 	schema map[string]int,
-	admit func(uint64) bool,
+	guard hashSeekGuard,
 	pending *pendingIndexDelta,
 ) (exec.Operator, bool) {
 	// The transaction has already moved this coordinate in the graph without the
@@ -226,28 +255,35 @@ func buildSeekSetOperator(
 		if !hasCard {
 			continue
 		}
-		total, servable := mergedPostingCount(card, keys, budget)
-		// Over budget, or no key this index can serve. An empty result is correct
-		// but pointless to seek: the scan reaches the same zero rows without an
-		// index descent, which is the range seek's rule too.
-		if !servable || total == 0 {
+		// Over budget: the scan is the cheaper answer. An EMPTY result seeks (rmp
+		// #3062): the per-key cardinalities that proved it empty have already paid
+		// the probes, and the scan it used to fall back to reads every node of the
+		// label to return the same zero rows. The range seek's gate follows the same
+		// rule (rmp #3061).
+		if !mergedPostingCountWithinBudget(card, keys, budget) {
 			return nil, false
 		}
-		op := exec.NewNodeByIndexSeekSet(exec.NewStringHashIndex(sl), keys, budget).Admitting(admit)
+		op := exec.NewNodeByIndexSeekSet(exec.NewStringHashIndex(sl), keys, budget)
+		if guard.snapshotBound() {
+			op.AtSnapshot(guard.snap.residualFor(guard.label, guard.key), guard.snap.proof, guard.snap.startTS)
+		} else {
+			op.Admitting(guard.admit)
+		}
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true
 	}
 	return nil, false
 }
 
-// mergedPostingCount sums the exact posting counts of the distinct string keys,
-// stopping as soon as the running total exceeds budget.
+// mergedPostingCountWithinBudget sums the exact posting counts of the distinct
+// string keys, stopping as soon as the running total exceeds budget, and reports
+// whether the total stays within budget.
 //
-// Keys that this index cannot hold contribute nothing and are skipped, mirroring
-// [exec.NodeByIndexSeekSet.Init] — a non-string or NULL key matches nothing on a
-// string-keyed index, so it neither adds postings nor invalidates the seek.
-// servable is false only when the budget is exceeded.
-func mergedPostingCount(card hashStringCardinality, keys []expr.Value, budget uint64) (total uint64, servable bool) {
+// A NULL key contributes nothing and is skipped, mirroring
+// [exec.NodeByIndexSeekSet.Init]. Every other key is a string: a set carrying a
+// key of another kind was declined by [stringOrNullKeys] before this runs.
+func mergedPostingCountWithinBudget(card hashStringCardinality, keys []expr.Value, budget uint64) bool {
+	var total uint64
 	seen := make(map[string]struct{}, len(keys))
 	for _, k := range keys {
 		if k == nil || k.Kind() != expr.KindString {
@@ -261,10 +297,10 @@ func mergedPostingCount(card hashStringCardinality, keys []expr.Value, budget ui
 		seen[s] = struct{}{}
 		total += card.Cardinality(s)
 		if total > budget {
-			return total, false
+			return false
 		}
 	}
-	return total, true
+	return true
 }
 
 // extractKeySetFromAST returns the property and the key values of a predicate

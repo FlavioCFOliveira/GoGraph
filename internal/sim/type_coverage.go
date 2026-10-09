@@ -632,14 +632,14 @@ func compareTypedListCols(tick, id int64, op string, want []typedListCol, got []
 		if gv == nil {
 			vs = append(vs, Violation{
 				Kind: ViolationGraphIntegrity, Tick: tick, Op: op,
-				Message: fmt.Sprintf("Typed{id:%d}: `%s` returned no value", id, w.what),
+				Message: fmt.Sprintf("Typed{id:%d}: %#q returned no value", id, w.what),
 			})
 			continue
 		}
 		if gv.Kind() != w.kind {
 			vs = append(vs, Violation{
 				Kind: ViolationOracleDeviation, Tick: tick, Op: op,
-				Message: fmt.Sprintf("Typed{id:%d}: `%s` has kind %v (value %s), want kind %v",
+				Message: fmt.Sprintf("Typed{id:%d}: %#q has kind %v (value %s), want kind %v",
 					id, w.what, gv.Kind(), gv.String(), w.kind),
 			})
 			continue
@@ -647,7 +647,7 @@ func compareTypedListCols(tick, id int64, op string, want []typedListCol, got []
 		if gv.String() != w.text {
 			vs = append(vs, Violation{
 				Kind: ViolationOracleDeviation, Tick: tick, Op: op,
-				Message: fmt.Sprintf("Typed{id:%d}: `%s` = %s, oracle computed %s from its modelled list",
+				Message: fmt.Sprintf("Typed{id:%d}: %#q = %s, oracle computed %s from its modelled list",
 					id, w.what, gv.String(), w.text),
 			})
 		}

@@ -210,11 +210,12 @@ func noopFrameRecoverEdges(t *testing.T, dir string, dropFrame int) []string {
 	return edges
 }
 
-// TestDeleteRelationship_PerPairRemovalThatTookNothingWritesNoWALFrame drives the
-// per-pair [walMutatorAdapter.RemoveEdge] path. The WITH projection drops the
-// bound edge position, so the delete cannot resolve a stable handle and falls to
-// the endpoint-pair removal; the undirected pattern binds the one stored
-// relationship twice and the UNWIND doubles that again.
+// TestDeleteRelationship_PerPairRemovalThatTookNothingWritesNoWALFrame drives a
+// DELETE through a WITH projection: the undirected pattern binds the one stored
+// relationship twice and the UNWIND doubles that again. The projected value
+// carries the relationship's stable handle, so the delete removes that instance
+// by handle (rmp #2940); it used to fall to the endpoint-pair removal, which in a
+// multigraph removed the pair's FIRST relationship instead of the bound one.
 //
 // Before rmp #2734 this wrote FOUR OpRemoveEdge frames for the one relationship
 // it removed — three of them removing nothing, 64.7% of the delete transaction's
@@ -243,8 +244,8 @@ func TestDeleteRelationship_PerPairRemovalThatTookNothingWritesNoWALFrame(t *tes
 	if len(removals) != 1 {
 		t.Fatalf("the WAL holds %d edge-removal frames for 1 relationship removed, want 1: %v", len(removals), removals)
 	}
-	if removals[0].kind != txn.OpRemoveEdge {
-		t.Fatalf("removal frame is %v, want an OpRemoveEdge (the per-pair path this test drives)", removals[0])
+	if removals[0].kind != txn.OpRemoveEdgeByHandle {
+		t.Fatalf("removal frame is %v, want an OpRemoveEdgeByHandle (the projected value names its instance, rmp #2940)", removals[0])
 	}
 }
 

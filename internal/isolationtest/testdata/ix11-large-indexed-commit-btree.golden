@@ -1,0 +1,167 @@
+spec ix11-large-indexed-commit-btree: 3 sessions, 3 permutations
+# IX11, btree index (Turso tests.rs:4940, :5550; MIT). s1 re-values s on all 1 100
+# :L nodes in one transaction, each to its successor's value, and commits. s2 is a
+# read-only transaction pinned at BEGIN; s3 reads in autocommit statements. The equality seek of 'v5' finds n5 before
+# the rewrite and n4 after; of 'v500', n500 before and n499 after.
+# Every seek equals its own scan at every instant: the old counts before the
+# publish, the new counts after it, never a mix (a seek declines to the scan while
+# the index cannot prove the reader's instant, F12).
+
+starting permutation: s2o s1w s3o s2n s3n s2m s3m s1c
+step s2o: MATCH (n:L {s:'v5'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, collect(m.name) AS scan
+seek  |scan  
+------+------
+["n5"]|["n5"]
+(1 row)
+step s1w: MATCH (n:L) SET n.s = 'v' + toString(n.k / 2 + 1) RETURN count(n) AS rewritten
+rewritten
+---------
+1100     
+(1 row)
+step s3o: MATCH (n:L {s:'v5'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, collect(m.name) AS scan
+seek  |scan  
+------+------
+["n5"]|["n5"]
+(1 row)
+step s2n: MATCH (n:L {s:'v500'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v500' RETURN seek, collect(m.name) AS scan
+seek    |scan    
+--------+--------
+["n500"]|["n500"]
+(1 row)
+step s3n: MATCH (n:L {s:'v500'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v500' RETURN seek, collect(m.name) AS scan
+seek    |scan    
+--------+--------
+["n500"]|["n500"]
+(1 row)
+step s2m: MATCH (n:L) RETURN sum(CASE WHEN n.s = 'v' + toString(n.k / 2 + 1) THEN 1 ELSE 0 END) AS rewritten, count(n) AS total
+rewritten|total
+---------+-----
+0        |1100 
+(1 row)
+step s3m: MATCH (n:L) RETURN sum(CASE WHEN n.s = 'v' + toString(n.k / 2 + 1) THEN 1 ELSE 0 END) AS rewritten, count(n) AS total
+rewritten|total
+---------+-----
+0        |1100 
+(1 row)
+step s1c: COMMIT
+final fo: MATCH (n:L {s:'v5'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, collect(m.name) AS scan
+seek  |scan  
+------+------
+["n4"]|["n4"]
+(1 row)
+final fn: MATCH (n:L {s:'v500'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v500' RETURN seek, collect(m.name) AS scan
+seek    |scan    
+--------+--------
+["n499"]|["n499"]
+(1 row)
+final fm: MATCH (n:L) RETURN sum(CASE WHEN n.s = 'v' + toString(n.k / 2 + 1) THEN 1 ELSE 0 END) AS rewritten, count(n) AS total
+rewritten|total
+---------+-----
+1100     |1100 
+(1 row)
+
+starting permutation: s2o s1w s1c s2n s2m s3o s3n s3m
+step s2o: MATCH (n:L {s:'v5'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, collect(m.name) AS scan
+seek  |scan  
+------+------
+["n5"]|["n5"]
+(1 row)
+step s1w: MATCH (n:L) SET n.s = 'v' + toString(n.k / 2 + 1) RETURN count(n) AS rewritten
+rewritten
+---------
+1100     
+(1 row)
+step s1c: COMMIT
+step s2n: MATCH (n:L {s:'v500'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v500' RETURN seek, collect(m.name) AS scan
+seek    |scan    
+--------+--------
+["n500"]|["n500"]
+(1 row)
+step s2m: MATCH (n:L) RETURN sum(CASE WHEN n.s = 'v' + toString(n.k / 2 + 1) THEN 1 ELSE 0 END) AS rewritten, count(n) AS total
+rewritten|total
+---------+-----
+0        |1100 
+(1 row)
+step s3o: MATCH (n:L {s:'v5'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, collect(m.name) AS scan
+seek  |scan  
+------+------
+["n4"]|["n4"]
+(1 row)
+step s3n: MATCH (n:L {s:'v500'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v500' RETURN seek, collect(m.name) AS scan
+seek    |scan    
+--------+--------
+["n499"]|["n499"]
+(1 row)
+step s3m: MATCH (n:L) RETURN sum(CASE WHEN n.s = 'v' + toString(n.k / 2 + 1) THEN 1 ELSE 0 END) AS rewritten, count(n) AS total
+rewritten|total
+---------+-----
+1100     |1100 
+(1 row)
+final fo: MATCH (n:L {s:'v5'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, collect(m.name) AS scan
+seek  |scan  
+------+------
+["n4"]|["n4"]
+(1 row)
+final fn: MATCH (n:L {s:'v500'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v500' RETURN seek, collect(m.name) AS scan
+seek    |scan    
+--------+--------
+["n499"]|["n499"]
+(1 row)
+final fm: MATCH (n:L) RETURN sum(CASE WHEN n.s = 'v' + toString(n.k / 2 + 1) THEN 1 ELSE 0 END) AS rewritten, count(n) AS total
+rewritten|total
+---------+-----
+1100     |1100 
+(1 row)
+
+starting permutation: s1w s3o s1c s3n s3m s2o s2n s2m
+step s1w: MATCH (n:L) SET n.s = 'v' + toString(n.k / 2 + 1) RETURN count(n) AS rewritten
+rewritten
+---------
+1100     
+(1 row)
+step s3o: MATCH (n:L {s:'v5'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, collect(m.name) AS scan
+seek  |scan  
+------+------
+["n5"]|["n5"]
+(1 row)
+step s1c: COMMIT
+step s3n: MATCH (n:L {s:'v500'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v500' RETURN seek, collect(m.name) AS scan
+seek    |scan    
+--------+--------
+["n499"]|["n499"]
+(1 row)
+step s3m: MATCH (n:L) RETURN sum(CASE WHEN n.s = 'v' + toString(n.k / 2 + 1) THEN 1 ELSE 0 END) AS rewritten, count(n) AS total
+rewritten|total
+---------+-----
+1100     |1100 
+(1 row)
+step s2o: MATCH (n:L {s:'v5'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, collect(m.name) AS scan
+seek  |scan  
+------+------
+["n5"]|["n5"]
+(1 row)
+step s2n: MATCH (n:L {s:'v500'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v500' RETURN seek, collect(m.name) AS scan
+seek    |scan    
+--------+--------
+["n500"]|["n500"]
+(1 row)
+step s2m: MATCH (n:L) RETURN sum(CASE WHEN n.s = 'v' + toString(n.k / 2 + 1) THEN 1 ELSE 0 END) AS rewritten, count(n) AS total
+rewritten|total
+---------+-----
+0        |1100 
+(1 row)
+final fo: MATCH (n:L {s:'v5'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, collect(m.name) AS scan
+seek  |scan  
+------+------
+["n4"]|["n4"]
+(1 row)
+final fn: MATCH (n:L {s:'v500'}) WITH collect(n.name) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v500' RETURN seek, collect(m.name) AS scan
+seek    |scan    
+--------+--------
+["n499"]|["n499"]
+(1 row)
+final fm: MATCH (n:L) RETURN sum(CASE WHEN n.s = 'v' + toString(n.k / 2 + 1) THEN 1 ELSE 0 END) AS rewritten, count(n) AS total
+rewritten|total
+---------+-----
+1100     |1100 
+(1 row)

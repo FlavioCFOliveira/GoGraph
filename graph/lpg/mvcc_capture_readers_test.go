@@ -83,13 +83,19 @@ func TestForEachPairOverflowRelTypeByIDAsOf_IgnoresLaterCommits(t *testing.T) {
 	}
 	// Two types: the FIRST lives on the slot, the second and later in the overflow
 	// store, which is the structure under test.
-	g.SetEdgeLabel("a", "b", "R1")
-	g.SetEdgeLabel("a", "b", "R2")
+	if err := g.SetEdgeLabel("a", "b", "R1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("a", "b", "R2"); err != nil {
+		t.Fatal(err)
+	}
 
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
 
-	g.SetEdgeLabel("a", "b", "R3")
+	if err := g.SetEdgeLabel("a", "b", "R3"); err != nil {
+		t.Fatal(err)
+	}
 
 	src, dst := nodeIDOf(t, g, "a"), nodeIDOf(t, g, "b")
 	asOf := map[string]bool{}
@@ -124,12 +130,16 @@ func TestTombstonedIDsAsOf_ReportsTheSnapshotsDeadSet(t *testing.T) {
 			t.Fatalf("AddNode %s: %v", n, err)
 		}
 	}
-	g.RemoveNode("b")
+	if err := g.RemoveNode("b"); err != nil {
+		t.Fatalf("g.RemoveNode(\"b\"): %v", err)
+	}
 
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
 
-	g.RemoveNode("c") // after the snapshot
+	if err := g.RemoveNode("c"); err != nil {
+		t.Fatalf("g.RemoveNode(\"c\"): %v", err)
+	} // after the snapshot
 
 	dead := map[graph.NodeID]bool{}
 	got := g.TombstonedIDsAsOf(snap)

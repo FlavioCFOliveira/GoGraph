@@ -2,8 +2,9 @@ package cypher_test
 
 // durable_then_visible_test.go — regression tests for task #1281: the Cypher
 // autocommit write path ([Engine.RunInTx]) must fsync the WAL BEFORE its
-// mutations are allowed to remain visible to concurrent [lpg.Graph.View]
-// readers — durable-then-visible.
+// mutations become visible to concurrent readers — durable-then-visible. (This
+// named lpg.Graph.View readers; rmp #2344 removed that method, and a reader now
+// reads at an MVCC snapshot.)
 //
 // Before the fix the WAL fsync ([txn.Tx.CommitWALOnly]) ran later, in
 // [cypher.Result.Close], AFTER the visibility barrier (visMu) was released. A
@@ -132,10 +133,11 @@ func TestRunInTx_DurableThenVisible_RecoversWithoutClose(t *testing.T) {
 // TestRunInTx_DurableThenVisible_ConcurrentReader is the -race assertion the AC
 // asks for: a concurrent reader must never observe a write before it is durable.
 //
-// Post-fix the durability fsync and the visibility flip both happen inside the
-// single ApplyAtomically barrier, so a Graph.View reader observes either none of
-// a transaction's writes or all of them — and any write it observes is already
-// durable. The test runs many concurrent MATCH readers against the live engine
+// Post-fix the durability fsync runs inside the write bracket, before the
+// transaction's commit record is published when the bracket unwinds; every
+// write of the transaction resolves through that one record, so a snapshot
+// reader observes either none of a transaction's writes or all of them — and
+// any write it observes is already durable. The test runs many concurrent MATCH readers against the live engine
 // while a writer streams CREATEs; under -race it proves the in-barrier fsync
 // does not introduce a torn read, and afterwards it proves every committed write
 // is durable by recovering the WAL. A reader that observes a node must observe a

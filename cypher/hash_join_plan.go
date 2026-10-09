@@ -46,6 +46,7 @@ package cypher
 // identical to Selection(fullPredicate, Apply(...)).
 
 import (
+	"context"
 	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
@@ -198,6 +199,8 @@ func tryBuildHashJoin(
 	if err != nil {
 		return nil, false, err
 	}
+	// Resolve the arm's plans before the rebase below (see rowbind.go).
+	bopts.flushBindPlans()
 	for k, v := range innerSchema {
 		schema[k] = v + outerWidth
 	}
@@ -390,14 +393,16 @@ func collectPlanVars(plan ir.LogicalPlan) map[string]struct{} {
 	return out
 }
 
-// estimateLeadingScanRows returns the exact cardinality of the leading scan of
-// an arm, descending the leftmost child chain to the leaf scan. It returns the
-// label-bitmap cardinality for a NodeByLabelScan, the total node count for an
-// AllNodesScan, and (0, false) for any other leaf shape (index seek, expand-only
-// subtree, …). The leading scan is an UPPER bound on the rows the arm builds —
-// subsequent Expands and Selections only reduce the count — so it is a safe and
-// cheap floor input. labelSrc is the live label resolver; a nil bitmap (label
-// never interned) yields a zero count.
+// estimateLeadingScanRows returns the cardinality of the leading scan of an arm
+// for a decision that only CHOOSES a plan, descending the leftmost child chain
+// to the leaf scan. For a NodeByLabelScan it is [labelCardinalityEstimate]'s
+// figure — exact when the O(1) count answers, an O(1) upper bound under MVCC
+// churn (rmp #3010) — and it returns (0, false) for an AllNodesScan or any other
+// leaf shape (index seek, expand-only subtree, …). The leading scan is itself an
+// UPPER bound on the rows the arm builds — subsequent Expands and Selections only
+// reduce the count — so an upper bound on it is equally safe for the hash join's
+// size floor and the index nested-loop join's cost comparison. A decision whose
+// correctness rests on the number uses [exactLeadingScanRows].
 func estimateLeadingScanRows(arm ir.LogicalPlan, labelSrc labelResolverIface) (int, bool) {
 	p := arm
 	for p != nil {
@@ -406,11 +411,7 @@ func estimateLeadingScanRows(arm ir.LogicalPlan, labelSrc labelResolverIface) (i
 			if labelSrc == nil {
 				return 0, false
 			}
-			bm := labelSrc.ResolveLabelBitmap(n.Label)
-			if bm == nil {
-				return 0, true
-			}
-			return int(bm.GetCardinality()), true
+			return int(labelCardinalityEstimate(labelSrc, n.Label).rows), true
 		case *ir.AllNodesScan:
 			// An all-nodes scan's count is not available from the label
 			// resolver; treat as eligible (a bare disconnected MATCH (a),(b)
@@ -427,6 +428,37 @@ func estimateLeadingScanRows(arm ir.LogicalPlan, labelSrc labelResolverIface) (i
 		}
 	}
 	return 0, false
+}
+
+// exactLeadingScanRows is [estimateLeadingScanRows] with the EXACT label count,
+// for a decision whose correctness rests on it — the index nested-loop join's
+// coverage proof ([numericIndexCoversScan]). The count is resolved through
+// [labelExactRows] under ctx, so a statement cancelled while it is computed gets
+// ctx's error rather than waiting for the MVCC correction (rmp #3010).
+func exactLeadingScanRows(ctx context.Context, arm ir.LogicalPlan, labelSrc labelResolverIface) (int, bool, error) {
+	p := arm
+	for p != nil {
+		switch n := p.(type) {
+		case *ir.NodeByLabelScan:
+			if labelSrc == nil {
+				return 0, false, nil
+			}
+			c, err := labelExactRows(ctx, labelSrc, n.Label)
+			if err != nil {
+				return 0, false, err
+			}
+			return int(c), true, nil
+		case *ir.AllNodesScan:
+			return 0, false, nil
+		default:
+			children := p.Children()
+			if len(children) == 0 {
+				return 0, false, nil
+			}
+			p = children[0]
+		}
+	}
+	return 0, false, nil
 }
 
 // shiftApplyMetaColumns shifts the inner-relative column positions recorded in

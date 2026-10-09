@@ -172,7 +172,9 @@ func TestStatsRangeEstimate_EmptyLabelIsNotADeclinedCount(t *testing.T) {
 	// are NOT refreshed afterwards, on purpose: the point is a live statistic over a
 	// label that no longer has any rows.
 	for i := 0; i < 5000; i++ {
-		g.RemoveNode("a" + strconv.Itoa(i))
+		if err := g.RemoveNode("a" + strconv.Itoa(i)); err != nil {
+			t.Fatalf("g.RemoveNode(\"a\" + strconv.Itoa(i)): %v", err)
+		}
 	}
 	// The resolver is built AFTER the deletions: one built before would read a view
 	// of the instant before them.

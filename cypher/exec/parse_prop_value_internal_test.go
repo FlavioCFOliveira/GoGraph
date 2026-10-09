@@ -75,9 +75,17 @@ func TestParsePropValue_ListLiterals(t *testing.T) {
 			want:  lpg.ListValue([]lpg.PropertyValue{lpg.Int64Value(42)}),
 		},
 		{
-			name:  "null inside list is dropped",
-			input: "[1, null, 3]",
-			want:  lpg.ListValue([]lpg.PropertyValue{lpg.Int64Value(1), lpg.Int64Value(3)}),
+			// rmp #2941: a stored list cannot contain null. The element used
+			// to be dropped, storing [1, 3] for a statement that wrote
+			// [1, null, 3]; the whole list is now refused.
+			name:    "null inside list is refused",
+			input:   "[1, null, 3]",
+			wantErr: true,
+		},
+		{
+			name:    "null-only list is refused",
+			input:   "[null]",
+			wantErr: true,
 		},
 		{
 			name:  "string with comma inside",
@@ -89,8 +97,8 @@ func TestParsePropValue_ListLiterals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parsePropValue(tc.input)
 			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("parsePropValue(%q) = %v, want error", tc.input, got)
+				if !errors.Is(err, ErrNullListElement) {
+					t.Fatalf("parsePropValue(%q) = %v, %v; want ErrNullListElement", tc.input, got, err)
 				}
 				return
 			}

@@ -35,6 +35,12 @@ import (
 // test asserts that recovery either (a) succeeds with a consistent
 // prefix of the committed sequence, or (b) returns a documented error
 // — never panics, never deadlocks, never produces a garbled graph.
+//
+// path is a single-file log ([openSingleFileWAL]): the fixtures of these tests
+// damage the log by byte offset, which a segmented log's positions and
+// prev-links would refuse before the replay state machine under test is
+// reached. Torn and damaged segments have their own tests
+// (segmented_log_test.go).
 func frameBoundaries(t *testing.T, path string) []int64 {
 	t.Helper()
 	raw, err := os.ReadFile(path) //nolint:gosec // path under t.TempDir
@@ -42,18 +48,15 @@ func frameBoundaries(t *testing.T, path string) []int64 {
 		t.Fatalf("read WAL: %v", err)
 	}
 	offsets := []int64{0}
-	off := 0
-	for off < len(raw) {
-		if len(raw)-off < wal.HeaderSize {
+	r := bytes.NewReader(raw)
+	off := int64(0)
+	for {
+		f, derr := wal.Decode(r)
+		if derr != nil {
 			break
 		}
-		plen := binary.LittleEndian.Uint32(raw[off+6 : off+10])
-		frameEnd := off + wal.HeaderSize + int(plen)
-		if frameEnd > len(raw) {
-			break
-		}
-		offsets = append(offsets, int64(frameEnd))
-		off = frameEnd
+		off += int64(wal.FrameSize(f))
+		offsets = append(offsets, off)
 	}
 	return offsets
 }
@@ -302,10 +305,9 @@ type walCheckpoint struct {
 func writeMonotonicWorkload(t *testing.T, dir string) []walCheckpoint {
 	t.Helper()
 	walPath := filepath.Join(dir, "wal")
-	w, err := wal.Open(walPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A single-file log: these tests damage it by byte offset (see
+	// frameBoundaries).
+	w := openSingleFileWAL(t, walPath)
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
@@ -429,10 +431,9 @@ func committedAt(checkpoints []walCheckpoint, off int64) string {
 // final state.
 func writeFullWorkload(t *testing.T, dir string) string {
 	t.Helper()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A single-file log: these tests damage it by byte offset (see
+	// frameBoundaries).
+	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
@@ -714,7 +715,9 @@ func TestGraphFingerprint_LivenessGate(t *testing.T) {
 		t.Fatalf("live fingerprint must carry bob:\n%s", live)
 	}
 
-	g.RemoveNode("bob")
+	if err := g.RemoveNode("bob"); err != nil {
+		t.Fatalf("g.RemoveNode(\"bob\"): %v", err)
+	}
 	dead := graphFingerprint(t, g)
 	if dead == live {
 		t.Fatalf("fingerprint did not observe the tombstone: a resurrected node "+
@@ -766,8 +769,12 @@ func TestGraphFingerprint_ParallelSlotAssignment(t *testing.T) {
 		if h1 == h2 {
 			t.Fatalf("parallel edges must get distinct handles, both = %d", h1)
 		}
-		g.SetEdgeLabelByHandle("a", "b", h1, firstLabel)
-		g.SetEdgeLabelByHandle("a", "b", h2, secondLabel)
+		if err := g.SetEdgeLabelByHandle("a", "b", h1, firstLabel); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.SetEdgeLabelByHandle("a", "b", h2, secondLabel); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgePropertyByHandle("a", "b", h1, "role", lpg.StringValue(firstProp)); err != nil {
 			t.Fatalf("SetEdgePropertyByHandle: %v", err)
 		}
@@ -841,10 +848,8 @@ func TestCrashInjection_TombstonedNodeNotResurrected(t *testing.T) {
 func TestCrashInjection_ParallelEdgeSlotIdentitySurvivesRecovery(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A single-file log: this test damages or erases it as one file.
+	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
 	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
 	s := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
@@ -1169,10 +1174,8 @@ func TestCrashInjection_SnapshotThenCrashInWAL(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A single-file log: this test damages or erases it as one file.
+	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
@@ -1321,10 +1324,8 @@ func copyDir(src, dst string) error {
 func TestCrashInjection_PropertyReplay_AllKinds(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A single-file log: this test damages or erases it as one file.
+	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
@@ -1722,10 +1723,8 @@ func TestCrashInjection_ApplyOpCodec_DelPropertiesRoundTrip(t *testing.T) {
 func TestCrashInjection_MixedSnapshotV1V2(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A single-file log: this test damages or erases it as one file.
+	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),

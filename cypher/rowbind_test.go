@@ -20,7 +20,6 @@ package cypher
 //     (rmp #2864 established that: 3897/3897 held with its demotion rule removed).
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -31,6 +30,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testbin"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -81,16 +81,16 @@ func TestPopulateRowCtx_PerRowPathPerformsNoNameLookup(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go tool unavailable: cannot compile the package for its assembly listing")
 	}
-	cmd := exec.Command("go", "build", "-gcflags=-S", "github.com/FlavioCFOliveira/GoGraph/cypher")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		t.Skipf("go build -gcflags=-S failed (%v): %s", err, truncate(stderr.String(), 400))
+	// testbin keeps the build's work files on disk, outside TMPDIR and GOTMPDIR
+	// (rmp #3028).
+	_, listing, err := testbin.Go(context.Background(), ".", "build", "-gcflags=-S", "github.com/FlavioCFOliveira/GoGraph/cypher")
+	if err != nil {
+		t.Skipf("go build -gcflags=-S failed (%v): %s", err, truncate(string(listing), 400))
 	}
-	body, ok := funcAssembly(stderr.String(), "github.com/FlavioCFOliveira/GoGraph/cypher.populateRowCtx")
+	body, ok := funcAssembly(string(listing), "github.com/FlavioCFOliveira/GoGraph/cypher.populateRowCtx")
 	if !ok {
 		t.Fatalf("no STEXT block for populateRowCtx in the assembly listing (%d bytes): the "+
-			"extraction matched nothing, so this test proves nothing", stderr.Len())
+			"extraction matched nothing, so this test proves nothing", len(listing))
 	}
 	for _, call := range mapLookupRuntimeCalls {
 		if strings.Contains(body, call) {
@@ -476,19 +476,30 @@ func TestRowBindPlan_NameCollisionShapes(t *testing.T) {
 		},
 		{
 			// A name in edgeVarMeta AND in scalarCols: `r` is a relationship
-			// variable, and then an UNWIND element variable.
-			//
-			// THE EXPECTED VALUE IS A DEFECT, PINNED AS A DIFFERENTIAL, NOT AS A
-			// DESIRED ANSWER. The rows should be 1, 2, 3, 4 — the collected
-			// weights — and every one comes back NULL. It comes back NULL at
-			// f62a3c83 too, MEASURED, so it is not this change's doing and
-			// fixing it is not this change's scope; it is recorded separately.
-			// The case is here because it is the collision this change resolves,
-			// and pinning the behaviour is what makes a future change to it
-			// visible instead of silent.
-			"unwind_element_reuses_a_relationship_name_PREEXISTING_DEFECT",
+			// variable, and after the WITH an UNWIND element variable. The two
+			// are different variables (the WITH ends r's scope), so the element
+			// is the collected weight. Every row came back NULL while the
+			// relationship's facts outlived its scope; rmp #2906 scopes them.
+			"unwind_element_reuses_a_relationship_name",
 			`MATCH (:N)-[r:T]->() WITH collect(r.w) AS ws UNWIND ws AS r RETURN r ORDER BY r`,
-			[]string{"r=null", "r=null", "r=null", "r=null"},
+			[]string{"r=1", "r=2", "r=3", "r=4"},
+		},
+		{
+			// An aggregate output re-binds a relationship name. The relationship's
+			// facts outlived the aggregation because the output kept the name, so
+			// the projection above re-ran `count(*)` as a scalar function and
+			// failed with `count() takes exactly 1 argument(s), got 0` (rmp #2878).
+			"aggregate_alias_reuses_a_relationship_name",
+			`MATCH (:N)-[r:T]->() WITH count(*) AS r RETURN r`,
+			[]string{"r=4"},
+		},
+		{
+			// A projected value re-binds a relationship name, beside a carried
+			// node. The relationship's triplet coordinates outlived the WITH and
+			// decoded the new row, so every row came back NULL (rmp #2920).
+			"projection_alias_reuses_a_relationship_name",
+			`MATCH (:N {k:'a'})-[r:T]->(b) WITH b, 5 AS r RETURN r`,
+			[]string{"r=5", "r=5"},
 		},
 		{
 			// A named path and its relationship list bind under one plan, and the

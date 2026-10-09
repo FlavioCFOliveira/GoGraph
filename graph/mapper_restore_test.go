@@ -26,7 +26,7 @@ func TestMapper_LoadFrom_Roundtrip(t *testing.T) {
 	})
 
 	dst := NewMapper[string]()
-	if err := dst.LoadFrom(entries); err != nil {
+	if err := dst.LoadFrom(entries, nil); err != nil {
 		t.Fatalf("LoadFrom: %v", err)
 	}
 	if got := dst.Len(); got != src.Len() {
@@ -66,7 +66,7 @@ func TestMapper_LoadFrom_RejectsNonEmptyMapper(t *testing.T) {
 	t.Parallel()
 	m := NewMapper[string]()
 	originalID := m.Intern("preexisting")
-	err := m.LoadFrom([]MapperEntry[string]{{ID: 0, Key: "other"}})
+	err := m.LoadFrom([]MapperEntry[string]{{ID: 0, Key: "other"}}, nil)
 	if !errors.Is(err, ErrMapperNotEmpty) {
 		t.Fatalf("LoadFrom on non-empty mapper = %v, want ErrMapperNotEmpty", err)
 	}
@@ -90,28 +90,9 @@ func TestMapper_LoadFrom_RejectsShardMismatch(t *testing.T) {
 	corrupted := MapperEntry[string]{ID: id ^ 1, Key: "alice"}
 
 	dst := NewMapper[string]()
-	err := dst.LoadFrom([]MapperEntry[string]{corrupted})
+	err := dst.LoadFrom([]MapperEntry[string]{corrupted}, nil)
 	if !errors.Is(err, ErrMapperEntryCorrupted) {
 		t.Fatalf("LoadFrom(shard-mismatch) = %v, want ErrMapperEntryCorrupted", err)
-	}
-}
-
-// TestMapper_LoadFrom_RejectsIntraGap fakes a contiguous-slot
-// violation by handing LoadFrom a single entry whose intra-index is
-// 2 instead of 0. LoadFrom must reject rather than silently leave
-// holes in the reverse slice.
-func TestMapper_LoadFrom_RejectsIntraGap(t *testing.T) {
-	t.Parallel()
-	// Build a key whose hash maps to shard 0, then synthesise an
-	// entry at intra-index 2 (gap at 0 and 1).
-	shard := mapperShardFor("alice")
-	id := packNodeID(shard, 2)
-	entry := MapperEntry[string]{ID: id, Key: "alice"}
-
-	dst := NewMapper[string]()
-	err := dst.LoadFrom([]MapperEntry[string]{entry})
-	if !errors.Is(err, ErrMapperEntryCorrupted) {
-		t.Fatalf("LoadFrom(intra-gap) = %v, want ErrMapperEntryCorrupted", err)
 	}
 }
 
@@ -121,7 +102,7 @@ func TestMapper_LoadFrom_RejectsIntraGap(t *testing.T) {
 func TestMapper_LoadFrom_Empty(t *testing.T) {
 	t.Parallel()
 	m := NewMapper[string]()
-	if err := m.LoadFrom(nil); err != nil {
+	if err := m.LoadFrom(nil, nil); err != nil {
 		t.Fatalf("LoadFrom(nil): %v", err)
 	}
 	if got := m.Len(); got != 0 {

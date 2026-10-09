@@ -39,8 +39,8 @@ package exec
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -74,10 +74,13 @@ type Merge struct {
 	// It is consulted only by the propsEvalFn path; the literal-props path
 	// carries its own source inside searchFn.
 	labelSrc MergeLabelSource
+	// probe is the row-aware search's optional property-index access path
+	// (rmp #2812); nil walks. Like labelSrc it serves only the propsEvalFn path.
+	probe *mergeProbeSlot
 	// onCreateEvals / onMatchEvals map an action's target (via
 	// [MergeActionEvalKey]) to a per-row RHS evaluator for a non-literal
 	// ON CREATE / ON MATCH SET expression (e.g. `SET n.num = n.num + 1`).
-	// nil when every action's RHS is a literal. See [Merge.applyActions].
+	// nil when every action's RHS is a literal. See [Merge.applyAction].
 	onCreateEvals map[string]ValueEvalFn
 	onMatchEvals  map[string]ValueEvalFn
 
@@ -117,6 +120,10 @@ type Merge struct {
 	// whether rows arrived, because an exhausted child looks identical in both
 	// cases and guessing created data no statement asked for (rmp #2512).
 	leadingClause bool
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // mergeAction is a pre-parsed ON CREATE / ON MATCH SET item. Two shapes
@@ -132,6 +139,10 @@ type mergeAction struct {
 	key       string
 	value     string // opaque literal string; empty for label-set actions
 	setLabels []string
+	// ord is the item's position in its ON CREATE / ON MATCH list. It keys the
+	// item's evaluator ([MergeActionEvalKey]) and orders the item against the
+	// whole-entity items ([applyMergeItemsInOrder]) (rmp #2953).
+	ord int
 }
 
 // NewMerge creates a Merge operator.
@@ -292,35 +303,58 @@ func (op *Merge) resolveActionRel(targetVar string, row Row) (entityBinding, boo
 	return ent, true
 }
 
-// applySetAllActions applies each whole-entity SET action to the node it names,
-// resolved from row exactly as [Merge.applyActions] resolves a property action,
+// applyItems applies one ON CREATE / ON MATCH list to row in source order —
+// the per-property and label items and the whole-entity items interleaved by
+// position ([applyMergeItemsInOrder]) — so each item sees every earlier item's
+// write (rmp #2953). After each item the target's value in row is refreshed
+// ([refreshRowEntityValue]), so a later item that reads it through a projected
+// node or relationship value sees the write too.
+func (op *Merge) applyItems(actions []mergeAction, evals map[string]ValueEvalFn, setAll []MergeSetAllAction, row Row) error {
+	return applyMergeItemsInOrder(actions, setAll,
+		func(a *mergeAction) error {
+			if err := op.applyAction(a, evals, row); err != nil {
+				return err
+			}
+			refreshRowEntityValue(op.mutator, op.schema, a.nodeVar, row)
+			return nil
+		},
+		func(a MergeSetAllAction) error {
+			if err := op.applySetAllAction(a, row); err != nil {
+				return err
+			}
+			refreshRowEntityValue(op.mutator, op.schema, a.TargetVar, row)
+			return nil
+		},
+	)
+}
+
+// applySetAllAction applies one whole-entity SET action to the node it names,
+// resolved from row exactly as [Merge.applyAction] resolves a property action,
 // falling back to a relationship bound by a preceding clause (rmp #2511).
-func (op *Merge) applySetAllActions(actions []MergeSetAllAction, row Row) error {
-	for _, a := range actions {
-		nodeKey, ok := op.resolveActionNodeKey(a.TargetVar, row)
-		if !ok {
-			ent, isRel := op.resolveActionRel(a.TargetVar, row)
-			if !isRel {
-				continue
-			}
-			v, err := a.Eval(row)
-			if err != nil {
-				return err
-			}
-			if err := applyWholeEntityValueToEdge(
-				op.mutator, a.TargetVar, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.IsReplace, v,
-			); err != nil {
-				return err
-			}
-			continue
+func (op *Merge) applySetAllAction(a MergeSetAllAction, row Row) error {
+	nodeKey, ok := op.resolveActionNodeKey(a.TargetVar, row)
+	if !ok {
+		ent, isRel := op.resolveActionRel(a.TargetVar, row)
+		if !isRel {
+			return nil
 		}
 		v, err := a.Eval(row)
 		if err != nil {
 			return err
 		}
-		if err := applyWholeEntityValueToNode(op.mutator, a.TargetVar, nodeKey, a.IsReplace, v); err != nil {
+		if err := applyWholeEntityValueToEdge(
+			op.mutator, a.TargetVar, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.IsReplace, v,
+		); err != nil {
 			return err
 		}
+		return nil
+	}
+	v, err := a.Eval(row)
+	if err != nil {
+		return err
+	}
+	if err := applyWholeEntityValueToNode(op.mutator, a.TargetVar, nodeKey, a.IsReplace, v); err != nil {
+		return err
 	}
 	return nil
 }
@@ -376,24 +410,30 @@ func (op *Merge) WithLabelSource(src MergeLabelSource) *Merge {
 	return op
 }
 
+// WithIndexProber attaches the property-index access path of the row-aware
+// merge search (rmp #2812): when an index covers one of the pattern's
+// (label, property) pairs and the probe can prove its answer complete, the
+// candidates come from the index instead of the label posting list, and are
+// re-checked in full exactly as the walk's are. It is what makes the
+// UNWIND-MERGE bulk-ingest idiom cost one index lookup per row rather than one
+// label walk.
+//
+// prober may be nil, which keeps the walk. Returns op for chaining.
+func (op *Merge) WithIndexProber(prober MergeIndexProber) *Merge {
+	op.probe = newMergeProbeSlot(prober)
+	return op
+}
+
 // Init initialises the operator: executes the search plan, then dispatches
 // to the ON MATCH or ON CREATE branch depending on whether the search
 // returned any rows.
 //
-// The first Merge.Init (or [CreateNode.Init]) in the process also seeds
-// [globalNodeCounter] past the largest synthetic key already interned in
-// op.mutator, so that the keys minted by [Merge.freshNodeKey] in this
-// process cannot collide with __cx_merge_<hex> keys persisted by an earlier
-// process and replayed during WAL / snapshot recovery. Without this a
-// one-process-per-command consumer mints __cx_merge_1 on every command and
-// the second MERGE silently overwrites the first node. The seed is gated by
-// [globalNodeCounterSeededOnce] so the O(N) scan runs at most once per
-// process regardless of how many CreateNode / Merge operators are built.
+// It also seeds the target graph's key sequence once per graph
+// ([seedNodeKeySequence]); uniqueness against __cx_merge_<hex> keys the graph
+// already holds rests on [mintNodeKey]'s probe (rmp #3015).
 func (op *Merge) Init(ctx context.Context) error {
 	op.resetRunState(ctx)
-	globalNodeCounterSeededOnce.Do(func() {
-		seedGlobalNodeCounter(op.mutator)
-	})
+	seedNodeKeySequence(op.mutator)
 	return op.child.Init(ctx)
 }
 
@@ -429,7 +469,7 @@ func (op *Merge) runMergeForChild(childRow Row) error {
 	var rows []Row
 	var err error
 	if op.propsEvalFn != nil {
-		rows, err = searchMergeNodes(op.ctx, op.mutator, op.labelSrc, op.labels, propsForRow)
+		rows, err = searchMergeNodes(op.ctx, op.mutator, op.labelSrc, op.probe, op.labels, propsForRow)
 	} else {
 		rows, err = op.searchFn(op.ctx)
 	}
@@ -488,10 +528,7 @@ func (op *Merge) resetRunState(ctx context.Context) {
 // search sub-plan and buffers the rows for emission from Next.
 func (op *Merge) runOnMatchPath(rows []Row) error {
 	for i := range rows {
-		if applyErr := op.applyActions(op.onMatchActions, op.onMatchEvals, rows[i]); applyErr != nil {
-			return fmt.Errorf("exec: Merge: ON MATCH: %w", applyErr)
-		}
-		if applyErr := op.applySetAllActions(op.onMatchSetAll, rows[i]); applyErr != nil {
+		if applyErr := op.applyItems(op.onMatchActions, op.onMatchEvals, op.onMatchSetAll, rows[i]); applyErr != nil {
 			return fmt.Errorf("exec: Merge: ON MATCH: %w", applyErr)
 		}
 	}
@@ -525,15 +562,15 @@ func (op *Merge) runOnCreatePathWithProps(childRow Row, props []propLiteral) err
 	}
 	for _, p := range props {
 		if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
+			// A refusal of the pattern's own key by a holder this snapshot cannot
+			// see is the concurrent-MERGE creation race, not a violation (rmp #2987).
+			serr = classifyMergeUniqueViolation(op.ctx, op.mutator, op.labelSrc, op.probe, op.labels, p, serr)
 			return fmt.Errorf("exec: Merge: ON CREATE SetNodeProperty: %w", serr)
 		}
 	}
 
 	createdRow := op.combineRows(childRow, Row{expr.IntegerValue(int64(nodeID))})
-	if applyErr := op.applyActions(op.onCreateActions, op.onCreateEvals, createdRow); applyErr != nil {
-		return fmt.Errorf("exec: Merge: ON CREATE: %w", applyErr)
-	}
-	if applyErr := op.applySetAllActions(op.onCreateSetAll, createdRow); applyErr != nil {
+	if applyErr := op.applyItems(op.onCreateActions, op.onCreateEvals, op.onCreateSetAll, createdRow); applyErr != nil {
 		return fmt.Errorf("exec: Merge: ON CREATE: %w", applyErr)
 	}
 	op.created = true
@@ -563,8 +600,7 @@ func (op *Merge) Next(out *Row) (bool, error) {
 			return false, nil
 		}
 		// Drained — pull the next child row, run the merge cycle.
-		var childRow Row
-		ok, err := op.child.Next(&childRow)
+		childRow, ok, err := nextRow(op.child, &op.pull)
 		if err != nil {
 			return false, err
 		}
@@ -603,17 +639,16 @@ func (op *Merge) Close() error {
 	return op.child.Close()
 }
 
-// freshNodeKey returns a unique node key drawn from the process-global
-// counter. The key is never visible to Cypher callers; only the NodeID is
-// emitted into the row. The "__cx_merge_<hex>" form (synthKeyPrefix +
+// freshNodeKey returns a "__cx_merge_<hex>" key that op.mutator's graph does
+// not hold (see [mintNodeKey]). The key is never visible to Cypher callers;
+// only the NodeID is emitted into the row. The form (synthKeyPrefix +
 // mergeKeyInfix + hex) is parsed by [parseSynthKeySuffix] so [Merge.Init] /
 // [CreateNode.Init] seed the shared counter past it on recovery.
 func (op *Merge) freshNodeKey() string {
-	n := globalNodeCounter.Add(1)
-	return synthKeyPrefix + mergeKeyInfix + fmt.Sprintf("%x", n)
+	return mintNodeKey(op.mutator, mergeKeyInfix)
 }
 
-// applyActions applies a slice of mergeAction to a row. The row is expected to
+// applyAction applies one mergeAction to a row. The row is expected to
 // carry an IntegerValue NodeID at column 0 when op.nodeVar is involved.
 //
 // evals maps an action's target (via [MergeActionEvalKey]) to a per-row
@@ -622,94 +657,94 @@ func (op *Merge) freshNodeKey() string {
 // action's RHS is not a literal, the evaluator computes its value against row
 // so `ON MATCH SET n.num = n.num + 1` reads the node's current value instead
 // of being silently dropped (#1965).
-func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalFn, row Row) error {
-	for _, a := range actions {
-		var nodeKey string
-		var nodeID graph.NodeID
-		var resolved bool
+func (op *Merge) applyAction(a *mergeAction, evals map[string]ValueEvalFn, row Row) error {
+	var nodeKey string
+	var nodeID graph.NodeID
+	var resolved bool
 
-		// Try to resolve via schema first — unless the target is a relationship
-		// bound by a preceding clause, whose column carries a handle rather than a
-		// node id and must not be read as one ([Merge.isOuterRelVar], rmp #2515).
-		if !op.isOuterRelVar(a.nodeVar) {
-			id, schemaErr := resolveNodeIDFromRow(a.nodeVar, op.schema, row)
-			if schemaErr == nil {
-				if nodeKey, resolved = op.mutator.ResolveNodeLabel(id); resolved {
-					nodeID = id
-				}
+	// Try to resolve via schema first — unless the target is a relationship
+	// bound by a preceding clause, whose column carries a handle rather than a
+	// node id and must not be read as one ([Merge.isOuterRelVar], rmp #2515).
+	if !op.isOuterRelVar(a.nodeVar) {
+		id, schemaErr := resolveNodeIDFromRow(a.nodeVar, op.schema, row)
+		if schemaErr == nil {
+			if nodeKey, resolved = op.mutator.ResolveNodeLabel(id); resolved {
+				nodeID = id
 			}
 		}
+	}
 
-		// Fall back: if the action targets op.nodeVar and the created row has
-		// a NodeID at column 0.
-		if !resolved && a.nodeVar == op.nodeVar && len(row) > 0 {
-			if iv, ok := row[0].(expr.IntegerValue); ok {
-				if nodeKey, resolved = op.mutator.ResolveNodeLabel(graph.NodeID(iv)); resolved {
-					nodeID = graph.NodeID(iv)
-				}
+	// Fall back: if the action targets op.nodeVar and the created row has
+	// a NodeID at column 0.
+	if !resolved && a.nodeVar == op.nodeVar && len(row) > 0 {
+		if iv, ok := row[0].(expr.IntegerValue); ok {
+			if nodeKey, resolved = op.mutator.ResolveNodeLabel(graph.NodeID(iv)); resolved {
+				nodeID = graph.NodeID(iv)
 			}
 		}
+	}
 
-		if !resolved {
-			// Not a node in scope. A relationship bound by a preceding clause is
-			// still a legitimate target; resolveNodeIDFromRow only understands node
-			// values, so such an action used to be skipped and lost (rmp #2511).
-			if ent, isRel := op.resolveActionRel(a.nodeVar, row); isRel {
-				if err := op.applyRelAction(ent, a, evals, row); err != nil {
-					return err
-				}
+	if !resolved {
+		// Not a node in scope. A relationship bound by a preceding clause is
+		// still a legitimate target; resolveNodeIDFromRow only understands node
+		// values, so such an action used to be skipped and lost (rmp #2511).
+		if ent, isRel := op.resolveActionRel(a.nodeVar, row); isRel {
+			if err := op.applyRelAction(ent, a, evals, row); err != nil {
+				return err
 			}
-			continue
 		}
+		return nil
+	}
 
-		// Label-set action (`SET a:Foo:Bar`): add every label to the node.
-		if len(a.setLabels) > 0 {
-			// Attaching a label puts the node under every UNIQUE constraint declared
-			// on that label. SetNodeLabel reserves for it, at the mutator choke point
-			// (rmp #2358) — this was one of the three label-write sites that had to be
-			// found and fixed one by one when enforcement lived in the operators
-			// (rmp #2352), which is the reason it no longer lives here.
-			for _, lbl := range a.setLabels {
-				if serr := op.mutator.SetNodeLabel(nodeKey, lbl); serr != nil {
-					if isConstraintViolation(serr) {
-						return serr
-					}
-					return fmt.Errorf("exec: Merge: action SetNodeLabel %q: %w", lbl, serr)
+	// Label-set action (`SET a:Foo:Bar`): add every label to the node.
+	if len(a.setLabels) > 0 {
+		// Attaching a label puts the node under every UNIQUE constraint declared
+		// on that label. SetNodeLabel reserves for it, at the mutator choke point
+		// (rmp #2358) — this was one of the three label-write sites that had to be
+		// found and fixed one by one when enforcement lived in the operators
+		// (rmp #2352), which is the reason it no longer lives here.
+		for _, lbl := range a.setLabels {
+			if serr := op.mutator.SetNodeLabel(nodeKey, lbl); serr != nil {
+				if isConstraintViolation(serr) {
+					return serr
 				}
+				return fmt.Errorf("exec: Merge: action SetNodeLabel %q: %w", lbl, serr)
 			}
-			continue
 		}
+		return nil
+	}
 
-		// Property-set action. Resolve the value: literal fast path first,
-		// then the per-row expression evaluator for a non-literal RHS. The
-		// evaluator sees the row with the target's NodeID pinned at its schema
-		// column, so `a.nodeVar.<key>` reads the matched/created node.
-		pv, ok, remove, err := op.resolveActionValue(a, evals, op.actionEvalRow(row, a.nodeVar, nodeID))
-		if err != nil {
+	// Property-set action. Resolve the value: literal fast path first,
+	// then the per-row expression evaluator for a non-literal RHS. The
+	// evaluator sees the row with the target's NodeID pinned at its schema
+	// column, so `a.nodeVar.<key>` reads the matched/created node.
+	pv, ok, remove, err := op.resolveActionValue(a, evals, op.actionEvalRow(row, a.nodeVar, nodeID))
+	if err != nil {
+		return err
+	}
+	if remove {
+		// The RHS evaluated to null → openCypher removes the property.
+		// DelNodeProperty releases (rmp #2358).
+		if err := op.mutator.DelNodeProperty(nodeKey, a.key); err != nil {
 			return err
 		}
-		if remove {
-			// The RHS evaluated to null → openCypher removes the property.
-			// DelNodeProperty releases (rmp #2358).
-			op.mutator.DelNodeProperty(nodeKey, a.key)
-			continue
+		return nil
+	}
+	if !ok {
+		// Literal null (preserve prior skip behaviour), a non-literal RHS
+		// with no evaluator, or an evaluator no-op (eval error / unstorable
+		// type — matching regular SET). No write.
+		return nil
+	}
+	// Released-then-reserved inside SetNodeProperty (rmp #2358), which is what
+	// stops the replaced value leaking as a permanent phantom reservation
+	// (#1904) and an idempotent MERGE self-set being rejected as its own
+	// duplicate.
+	if serr := op.mutator.SetNodeProperty(nodeKey, a.key, pv); serr != nil {
+		if isConstraintViolation(serr) {
+			return serr
 		}
-		if !ok {
-			// Literal null (preserve prior skip behaviour), a non-literal RHS
-			// with no evaluator, or an evaluator no-op (eval error / unstorable
-			// type — matching regular SET). No write.
-			continue
-		}
-		// Released-then-reserved inside SetNodeProperty (rmp #2358), which is what
-		// stops the replaced value leaking as a permanent phantom reservation
-		// (#1904) and an idempotent MERGE self-set being rejected as its own
-		// duplicate.
-		if serr := op.mutator.SetNodeProperty(nodeKey, a.key, pv); serr != nil {
-			if isConstraintViolation(serr) {
-				return serr
-			}
-			return fmt.Errorf("exec: Merge: action SetNodeProperty: %w", serr)
-		}
+		return fmt.Errorf("exec: Merge: action SetNodeProperty: %w", serr)
 	}
 	return nil
 }
@@ -733,19 +768,20 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 // row with the target pinned at its schema column ([Merge.actionEvalRow]); the
 // relationship path passes the row unchanged, since it already carries the bound
 // relationship and pinning a NodeID over it would destroy the binding.
-func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn, evalRow Row) (pv lpg.PropertyValue, ok, remove bool, err error) {
+func (op *Merge) resolveActionValue(a *mergeAction, evals map[string]ValueEvalFn, evalRow Row) (pv lpg.PropertyValue, ok, remove bool, err error) {
 	lit, perr := parsePropValue(a.value)
 	switch {
 	case perr == nil:
 		return lit, true, false, nil
 	case isNullPropertyValueErr(perr):
 		return lpg.PropertyValue{}, false, false, nil
-	case errors.Is(perr, ErrNestedPropertyValue):
-		// A nested collection is a hard InvalidPropertyType error, not a
-		// deferrable non-literal RHS: fail-stop rather than drop the action (F3).
+	case isInvalidPropertyValueErr(perr):
+		// A nested collection, or a list with a null element, is a hard
+		// InvalidPropertyType error, not a deferrable non-literal RHS:
+		// fail-stop rather than drop the action (F3, rmp #2941).
 		return lpg.PropertyValue{}, false, false, perr
 	default:
-		fn, has := evals[MergeActionEvalKey(a.nodeVar, a.key)]
+		fn, has := evals[MergeActionEvalKey(a.ord, a.nodeVar, a.key)]
 		if !has {
 			return lpg.PropertyValue{}, false, false, nil
 		}
@@ -773,7 +809,7 @@ func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn,
 // so it is a defensive no-op. Value resolution reuses [Merge.resolveActionValue]
 // with the row unchanged, which is where a relationship RHS such as `rr.n + 1`
 // reads the bound relationship's current properties.
-func (op *Merge) applyRelAction(ent entityBinding, a mergeAction, evals map[string]ValueEvalFn, row Row) error {
+func (op *Merge) applyRelAction(ent entityBinding, a *mergeAction, evals map[string]ValueEvalFn, row Row) error {
 	if len(a.setLabels) > 0 {
 		return nil
 	}
@@ -782,7 +818,9 @@ func (op *Merge) applyRelAction(ent entityBinding, a mergeAction, evals map[stri
 		return err
 	}
 	if remove {
-		delEdgeProp(op.mutator, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.key)
+		if err := delEdgeProp(op.mutator, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.key); err != nil {
+			return err
+		}
 		return nil
 	}
 	if !ok {
@@ -814,14 +852,18 @@ func (op *Merge) actionEvalRow(row Row, targetVar string, nodeID graph.NodeID) R
 
 // MergeActionEvalKey composes the map key under which a MERGE ON CREATE /
 // ON MATCH property-set action's per-row RHS evaluator is registered and
-// looked up. targetVar is the entity variable the action writes (a node, a
-// bound endpoint, or a relationship variable) and key is the property key.
-// The NUL separator cannot appear in a Cypher identifier, so the composed key
-// is unambiguous across distinct (variable, property) pairs. The physical
+// looked up. ord is the item's position in its ON CREATE / ON MATCH list,
+// targetVar is the entity variable the action writes (a node, a bound
+// endpoint, or a relationship variable) and key is the property key. The
+// position is part of the key because two items may write the same property:
+// keyed on (variable, property) alone, `ON MATCH SET n.c = n.id + 1,
+// n.c = n.c * 10` registered one evaluator for both items, so the first item
+// ran the second's right-hand side (rmp #2953). The NUL separator cannot appear
+// in a Cypher identifier, so the composed key is unambiguous. The physical
 // builder ([cypher] package) and the operators here must agree on this
 // encoding, so it is defined once and exported.
-func MergeActionEvalKey(targetVar, key string) string {
-	return targetVar + "\x00" + key
+func MergeActionEvalKey(ord int, targetVar, key string) string {
+	return strconv.Itoa(ord) + "\x00" + targetVar + "\x00" + key
 }
 
 // parseMergeActions parses a slice of opaque SET-item strings into structured
@@ -833,7 +875,7 @@ func MergeActionEvalKey(targetVar, key string) string {
 // Items that do not match either pattern are silently skipped.
 func parseMergeActions(strs []string) ([]mergeAction, error) {
 	out := make([]mergeAction, 0, len(strs))
-	for _, s := range strs {
+	for ord, s := range strs {
 		s = strings.TrimSpace(s)
 		if eqIdx := strings.Index(s, "="); eqIdx >= 0 {
 			lhs := strings.TrimSpace(s[:eqIdx])
@@ -844,7 +886,7 @@ func parseMergeActions(strs []string) ([]mergeAction, error) {
 			}
 			varName := strings.TrimSpace(lhs[:dotIdx])
 			key := strings.TrimSpace(lhs[dotIdx+1:])
-			out = append(out, mergeAction{nodeVar: varName, key: key, value: rhs})
+			out = append(out, mergeAction{nodeVar: varName, key: key, value: rhs, ord: ord})
 			continue
 		}
 		// Label-set form: identifier followed by one or more `:Label` parts.
@@ -860,7 +902,7 @@ func parseMergeActions(strs []string) ([]mergeAction, error) {
 				}
 			}
 			if varName != "" && len(labels) > 0 {
-				out = append(out, mergeAction{nodeVar: varName, setLabels: labels})
+				out = append(out, mergeAction{nodeVar: varName, setLabels: labels, ord: ord})
 			}
 		}
 	}

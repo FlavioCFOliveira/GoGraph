@@ -60,7 +60,9 @@ func TestLPG_LabelOrder(t *testing.T) {
 				}
 				oracle[op.label] = true
 			} else {
-				g.RemoveNodeLabel(nodeKey, op.label)
+				if err := g.RemoveNodeLabel(nodeKey, op.label); err != nil {
+					t.Fatalf("g.RemoveNodeLabel(nodeKey, op.label): %v", err)
+				}
 				delete(oracle, op.label)
 			}
 		}

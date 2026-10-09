@@ -22,9 +22,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
-	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
-	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -71,21 +69,14 @@ func mgWriteCycle(t *testing.T, dir string, snap bool, queries ...string) {
 		}
 	}
 	if snap {
-		cs := csr.BuildFromAdjList(res.Graph.AdjList())
-		if err := snapshot.WriteSnapshotFullWithMapperCodec(filepath.Join(dir, "snapshot"), cs, res.Graph, txn.NewStringCodec()); err != nil {
+		if err := checkpointTestStore(dir, res.Graph, w, nil); err != nil {
 			w.Close()
-			t.Fatalf("WriteSnapshotFull: %v", err)
+			t.Fatalf("checkpoint: %v", err)
 		}
 	}
 	if err := w.Sync(); err != nil {
 		w.Close()
 		t.Fatalf("Sync: %v", err)
-	}
-	if snap {
-		if _, err := w.Truncate(); err != nil {
-			w.Close()
-			t.Fatalf("Truncate: %v", err)
-		}
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal.Close: %v", err)

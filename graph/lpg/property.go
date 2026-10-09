@@ -232,7 +232,21 @@ func NewPropertyKeyRegistry() *PropertyKeyRegistry {
 // already-interned id without taking the mutex; only the first interning
 // of a previously unseen name serialises under mu to publish the extended
 // tables. The steady-state property vocabulary is small and stable.
-func (r *PropertyKeyRegistry) Intern(name string) PropertyKeyID {
+//
+// It refuses a name longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], allocating nothing (rmp #2748). This is a breaking change:
+// Intern used to return the id alone and accept a name of any length.
+func (r *PropertyKeyRegistry) Intern(name string) (PropertyKeyID, error) {
+	if err := CheckToken("property key", name); err != nil {
+		return 0, err
+	}
+	return r.intern(name), nil
+}
+
+// intern is [PropertyKeyRegistry.Intern] without the length check, for the
+// callers in this package that have already run [CheckToken] on name at their
+// own entry, before changing any state.
+func (r *PropertyKeyRegistry) intern(name string) PropertyKeyID {
 	if id, ok := r.fwd.Load().m[name]; ok {
 		return id
 	}
@@ -280,17 +294,41 @@ func (r *PropertyKeyRegistry) Resolve(id PropertyKeyID) (string, bool) {
 
 // SetNodeProperty records the named property on n with the given
 // value, inserting n into the graph if necessary. Returns the error
-// from the underlying [adjlist.AdjList.AddNode] when present, or any
-// error returned by the installed [SchemaValidator].
+// from the underlying [adjlist.AdjList.AddNode] when present, any
+// error returned by the installed [SchemaValidator], or [ErrIndexedRawWrite].
+//
+// Index maintenance: SetNodeProperty writes the graph directly and delivers no
+// change to the secondary indexes, which only the engine's write path maintains
+// (see [ErrIndexedRawWrite]). While any index is registered on, or being built
+// for, [Graph.IndexManager] it is therefore refused with [ErrIndexedRawWrite]
+// and changes nothing — a value written here would be invisible to an index
+// seek. Write an indexed graph through the engine, or seed the graph through
+// this method BEFORE its first index is created: creating an index backfills it
+// from the graph.
+//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
+//
+// It runs as a single-operation transaction (rmp #2947): it refuses with an
+// error wrapping [ErrDirectWriteConflict], and changes nothing, while another
+// transaction holds an uncommitted write on the node's properties or existence. The refusal is retryable. See
+// [ErrDirectWriteConflict].
 func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) error {
-	err := g.setNodePropertyInfo(n, key, value, nil)
-	g.reclaimAfterDirectWrite(nil)
-	return err
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
+	if err := g.refuseIndexedRawWrite(); err != nil {
+		return err
+	}
+	return g.direct(func(tx *writeCtx) error { return g.setNodePropertyInfo(n, key, value, tx) })
 }
 
 // setNodePropertyInfo is [Graph.SetNodeProperty] with an explicit commit
 // record; info is nil for an autocommit write. See [Graph.setNodeLabelInfo].
 func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, tx *writeCtx) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
@@ -307,8 +345,15 @@ func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, 
 	// The reference engines do not pay this either: PostgreSQL and InnoDB resolve a
 	// tuple's identity once per write, and Memgraph's accessor carries the vertex
 	// pointer rather than re-looking it up per store.
-	id := g.adj.Mapper().Intern(n)
-	keyID := g.propKeys().Intern(key)
+	//
+	// Interned through [Graph.internEndpoint], so a node this write CREATES is
+	// born at the transaction's instant and withdrawn with it on abort (ACID
+	// audit round 6).
+	id := g.internEndpoint(n, tx)
+	if tx.doomed() {
+		return tx.err()
+	}
+	keyID := g.propKeys().intern(key)
 	s := g.nodePropShardFor(id)
 	s.mu.Lock()
 	// propBag is stored by value, so mutate a local copy and write it back.
@@ -350,9 +395,11 @@ func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, 
 		case !had:
 			ci, ts := g.deltaStamp(tx.record())
 			s.pushPropDelta(id, undoDelProp, keyID, PropertyValue{}, ci, ts, &g.propDeltaActive)
+			tx.noteSide(sideNodeProps, uint64(id), 0, 0)
 		case !propValuesDefinitelyEqual(prev, value):
 			ci, ts := g.deltaStamp(tx.record())
 			s.pushPropDelta(id, undoSetProp, keyID, prev, ci, ts, &g.propDeltaActive)
+			tx.noteSide(sideNodeProps, uint64(id), 0, 0)
 		}
 	}
 	bag.set(keyID, value)
@@ -367,29 +414,42 @@ func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, 
 
 // GetNodeProperty returns the property value attached to n under
 // key, and a bool reporting whether the property is set.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) GetNodeProperty(n N, key string) (PropertyValue, bool) {
-	id, ok := g.adj.Mapper().Lookup(n)
-	if !ok {
-		return PropertyValue{}, false
-	}
-	keyID, ok := g.propKeys().Lookup(key)
-	if !ok {
-		return PropertyValue{}, false
-	}
-	s := g.nodePropShardFor(id)
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	bag, ok := s.m[id]
-	if !ok {
-		return PropertyValue{}, false
-	}
-	return bag.get(keyID)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.GetNodePropertyAsOf(n, key, g.latestCommitted(&cs))
 }
 
 // DelNodeProperty removes the named property from n. No-op if absent.
-func (g *Graph[N, W]) DelNodeProperty(n N, key string) {
-	g.delNodePropertyInfo(n, key, nil)
-	g.reclaimAfterDirectWrite(nil)
+//
+// Index maintenance: DelNodeProperty delivers no change to the secondary
+// indexes, which only the engine's write path maintains, so a value it removed
+// stayed reachable through an index seek. While any index is registered on, or
+// being built for, [Graph.IndexManager] it is refused with [ErrIndexedRawWrite]
+// and changes nothing.
+//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong] and changes nothing (rmp #2748): no such token can exist,
+// and the WAL-backed store refuses the same call.
+//
+// It runs as a single-operation transaction (rmp #2947): it refuses with an
+// error wrapping [ErrDirectWriteConflict], and changes nothing, while another
+// transaction holds an uncommitted write on the node's properties or existence. The refusal is retryable. See
+// [ErrDirectWriteConflict].
+func (g *Graph[N, W]) DelNodeProperty(n N, key string) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
+	if err := g.refuseIndexedRawWrite(); err != nil {
+		return err
+	}
+	return g.direct(func(tx *writeCtx) error {
+		g.delNodePropertyInfo(n, key, tx)
+		return nil
+	})
 }
 
 // delNodePropertyInfo is [Graph.DelNodeProperty] with an explicit commit
@@ -456,22 +516,35 @@ func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, tx *writeCtx) {
 		return
 	}
 	s.mu.Lock()
+	// THE CONFLICT TEST RUNS BEFORE, AND OUTSIDE, BOTH PRESENCE GUARDS
+	// (rmp #2943), exactly as [Graph.removeNodeLabelInfo] does since rmp #2354.
+	// Both guards read the RAW stored bag, which already carries another
+	// in-flight transaction's eager removal, so a key a peer removed but has
+	// not committed looked absent here and this delete returned as a no-op:
+	// no version, no conflict, and the transaction committed as if the removal
+	// had happened. When the peer rolled back, its undo restored the value and
+	// the committed removal was lost. [nodePropShard.headStamp] reads the delta
+	// chain, not the bag, so it also answers for a node whose bag entry the
+	// peer's removal of its last property deleted outright. delNodePropertyInfo
+	// cannot return, so the conflict is recorded on the transaction and commit
+	// refuses it. See [writeCtx.conflictErr].
+	if g.propDeltasEnabled() {
+		if head := s.headStamp(id); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
+			s.mu.Unlock()
+			return
+		}
+	}
 	if bag, ok2 := s.m[id]; ok2 {
 		// MVCC P2 (rmp #2279), inert unless armed. Deleting a key that is not
 		// there changes nothing and records nothing; deleting one that is there
-		// records the pre-image so a reader can restore it.
+		// records the pre-image so a reader can restore it. Only the DELTA is
+		// guarded; the conflict test above is not (rmp #2943).
 		if g.propDeltasEnabled() {
 			if prev, had := bag.get(keyID); had {
-				// See setNodePropertyInfo; delNodePropertyInfo cannot return, so
-				// the conflict is recorded on the transaction and commit
-				// refuses it. See [writeCtx.conflictErr].
-				if head := s.headStamp(id); tx.conflicts(head) {
-					_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
-					s.mu.Unlock()
-					return
-				}
 				ci, ts := g.deltaStamp(tx.record())
 				s.pushPropDelta(id, undoSetProp, keyID, prev, ci, ts, &g.propDeltaActive)
+				tx.noteSide(sideNodeProps, uint64(id), 0, 0)
 			}
 		}
 		// propBag is stored by value; write the mutated copy back, dropping
@@ -530,6 +603,20 @@ const (
 // records the conflict on tx and touches no shard at all.
 func (g *Graph[N, W]) delNodePropertyShared(s *nodePropShard, id graph.NodeID, keyID PropertyKeyID, tx *writeCtx) delPropOutcome {
 	s.mu.RLock()
+	// The same unconditional head test the exclusive body runs, BEFORE either
+	// presence guard (rmp #2943): a key another in-flight transaction removed is
+	// absent from the raw bag, and settling that as "nothing to remove" without
+	// the test is the lost update described in [Graph.delNodePropertyInfo]. It
+	// runs over the same shard lock held in shared mode, so the head and the
+	// decision taken from it are ONE consistent observation. A refusal claims
+	// nothing, which is what lets it be settled without excluding writers.
+	if g.propDeltasEnabled() {
+		if head := s.headStamp(id); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
+			s.mu.RUnlock()
+			return delPropRefused
+		}
+	}
 	bag, ok := s.m[id]
 	if !ok {
 		s.mu.RUnlock()
@@ -554,43 +641,19 @@ func (g *Graph[N, W]) delNodePropertyShared(s *nodePropShard, id graph.NodeID, k
 		}
 		return delPropNothingToRemove
 	}
-	if g.propDeltasEnabled() {
-		// The same unconditional head test the exclusive body runs, over the
-		// same shard lock held in shared mode, so the head and the decision
-		// taken from it are ONE consistent observation. A refusal claims
-		// nothing, which is what lets it be settled without excluding writers.
-		if head := s.headStamp(id); tx.conflicts(head) {
-			_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
-			s.mu.RUnlock()
-			return delPropRefused
-		}
-	}
 	s.mu.RUnlock()
 	return delPropNeedsExclusive
 }
 
 // NodeProperties returns a snapshot of every property currently
 // attached to n.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) NodeProperties(n N) map[string]PropertyValue {
-	id, ok := g.adj.Mapper().Lookup(n)
-	if !ok {
-		return nil
-	}
-	s := g.nodePropShardFor(id)
-	s.mu.RLock()
-	bag, ok := s.m[id]
-	if !ok {
-		s.mu.RUnlock()
-		return nil
-	}
-	out := make(map[string]PropertyValue, bag.len())
-	bag.forEach(func(k PropertyKeyID, v PropertyValue) {
-		if name, ok := g.propKeys().Resolve(k); ok {
-			out[name] = v
-		}
-	})
-	s.mu.RUnlock()
-	return out
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.NodePropertiesAsOf(n, g.latestCommitted(&cs))
 }
 
 // NodePropertiesByID is the NodeID-keyed counterpart of [Graph.NodeProperties].
@@ -600,22 +663,13 @@ func (g *Graph[N, W]) NodeProperties(n N) map[string]PropertyValue {
 // labels — avoid a redundant Mapper round-trip per node. The returned map is a
 // fresh copy owned by the caller; it is nil when id has no recorded
 // properties. Concurrency-safe under the same contract as NodeProperties.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) NodePropertiesByID(id graph.NodeID) map[string]PropertyValue {
-	s := g.nodePropShardFor(id)
-	s.mu.RLock()
-	bag, ok := s.m[id]
-	if !ok {
-		s.mu.RUnlock()
-		return nil
-	}
-	out := make(map[string]PropertyValue, bag.len())
-	bag.forEach(func(k PropertyKeyID, v PropertyValue) {
-		if name, ok := g.propKeys().Resolve(k); ok {
-			out[name] = v
-		}
-	})
-	s.mu.RUnlock()
-	return out
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.NodePropertiesByIDAsOf(id, g.latestCommitted(&cs))
 }
 
 // NodePropertiesByIDFunc invokes visit once per property attached to the node
@@ -640,8 +694,13 @@ func (g *Graph[N, W]) NodePropertiesByID(id graph.NodeID) map[string]PropertyVal
 // graph-internal state; the PropertyValue passed in is a value copy, so copying
 // it out (or deriving an independent value from it) is safe and is the intended
 // use.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) NodePropertiesByIDFunc(id graph.NodeID, visit func(name string, pv PropertyValue)) {
-	g.NodePropertiesByIDFuncAsOf(id, nil, visit)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	g.NodePropertiesByIDFuncAsOf(id, g.latestCommitted(&cs), visit)
 }
 
 // NodePropertiesByIDFuncAsOf is [Graph.NodePropertiesByIDFunc] as the node
@@ -673,22 +732,11 @@ func (g *Graph[N, W]) NodePropertiesByIDFuncAsOf(id graph.NodeID, snap *Snapshot
 // read lock for the duration of the lookup, so it observes a consistent view of
 // the node's properties relative to any concurrent writer holding the shard
 // write lock.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) NodePropertyByID(id graph.NodeID, key string) (PropertyValue, bool) {
-	// Resolve the key name to its interned id without interning a new one: an
-	// unknown key cannot be present on any node, so a miss here is a definite
-	// "absent" answer and avoids polluting the registry with query-time names.
-	kid, ok := g.propKeys().Lookup(key)
-	if !ok {
-		return PropertyValue{}, false
-	}
-	s := g.nodePropShardFor(id)
-	s.mu.RLock()
-	bag, ok := s.m[id]
-	if !ok {
-		s.mu.RUnlock()
-		return PropertyValue{}, false
-	}
-	v, ok := bag.get(kid)
-	s.mu.RUnlock()
-	return v, ok
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.NodePropertyByIDAsOf(id, key, g.latestCommitted(&cs))
 }

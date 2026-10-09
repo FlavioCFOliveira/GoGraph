@@ -26,11 +26,15 @@ func createNodeTx(t *testing.T, c *boltTestClient, query string) {
 
 // TestBoltSmokeTest_CreateMatchReturn tests the full CREATE / MATCH / RETURN
 // cycle over the raw Bolt wire protocol:
-//  1. Connect to the shared test server.
+//  1. Connect to a server and graph of this test's own.
 //  2. CREATE two Person nodes (via explicit transactions).
 //  3. MATCH (n:Person) RETURN n — verify 2 rows returned.
+//
+// The server is per test, not the package-level shared one: the row count is
+// the assertion, and on a shared graph every repeated run (-count > 1) found the
+// previous runs' nodes too (rmp #2825).
 func TestBoltSmokeTest_CreateMatchReturn(t *testing.T) {
-	c := newBoltTestClient(t, sharedServerAddr)
+	c := newBoltTestClient(t, startTestServer(t, server.Options{}))
 	defer c.close(t)
 
 	c.negotiate(t)
@@ -69,8 +73,11 @@ func TestBoltSmokeTest_CreateMatchReturn(t *testing.T) {
 //  3. CREATE (:Product {name: "Widget"}).
 //  4. COMMIT.
 //  5. MATCH (p:Product) RETURN p — verify 1 row.
+//
+// Like [TestBoltSmokeTest_CreateMatchReturn] it runs on a server and graph of
+// its own, so a repeated run observes exactly the one node it created (rmp #2825).
 func TestBoltSmokeTest_ExplicitTx(t *testing.T) {
-	c := newBoltTestClient(t, sharedServerAddr)
+	c := newBoltTestClient(t, startTestServer(t, server.Options{}))
 	defer c.close(t)
 
 	c.negotiate(t)

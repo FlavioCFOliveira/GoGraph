@@ -99,6 +99,13 @@ type labelCounterAsOf interface {
 	ResolveLabelCountAsOf(name string) (int64, bool)
 }
 
+// labelCounterAsOfContext is the cancellable form of [labelCounterAsOf] (rmp
+// #3010): the same count, or ctx's error when the statement is cancelled while
+// the count's MVCC correction runs. On error the count is meaningless.
+type labelCounterAsOfContext interface {
+	ResolveLabelCountAsOfContext(ctx context.Context, name string) (int64, bool, error)
+}
+
 // LabelCountScan is a Volcano leaf operator that computes a group-by-less count
 // over a bare single-label node scan by reading the label's live-node count
 // directly. It emits exactly one row with a single [expr.IntegerValue] column
@@ -145,7 +152,17 @@ func (op *LabelCountScan) Init(ctx context.Context) error {
 	// The exact-or-nothing count declined. Before reaching for a bitmap, ask for
 	// the snapshot-aware count, which answers the same number and allocates
 	// nothing unless a correction is genuinely owed (rmp #2773).
-	if lc, ok := op.src.(labelCounterAsOf); ok {
+	switch lc := op.src.(type) {
+	case labelCounterAsOfContext:
+		n, ok, err := lc.ResolveLabelCountAsOfContext(ctx, op.label)
+		if err != nil {
+			return err
+		}
+		if ok {
+			op.count = n
+			return nil
+		}
+	case labelCounterAsOf:
 		if n, ok := lc.ResolveLabelCountAsOf(op.label); ok {
 			op.count = n
 			return nil

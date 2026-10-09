@@ -223,9 +223,6 @@ type CypherParserListener interface {
 	// EnterFilterWith is called when entering the filterWith production.
 	EnterFilterWith(c *FilterWithContext)
 
-	// EnterReduceExpression is called when entering the reduceExpression production.
-	EnterReduceExpression(c *ReduceExpressionContext)
-
 	// EnterPatternComprehension is called when entering the patternComprehension production.
 	EnterPatternComprehension(c *PatternComprehensionContext)
 
@@ -288,6 +285,9 @@ type CypherParserListener interface {
 
 	// EnterForeachSt is called when entering the foreachSt production.
 	EnterForeachSt(c *ForeachStContext)
+
+	// EnterReduceExpression is called when entering the reduceExpression production.
+	EnterReduceExpression(c *ReduceExpressionContext)
 
 	// ExitScript is called when exiting the script production.
 	ExitScript(c *ScriptContext)
@@ -505,9 +505,6 @@ type CypherParserListener interface {
 	// ExitFilterWith is called when exiting the filterWith production.
 	ExitFilterWith(c *FilterWithContext)
 
-	// ExitReduceExpression is called when exiting the reduceExpression production.
-	ExitReduceExpression(c *ReduceExpressionContext)
-
 	// ExitPatternComprehension is called when exiting the patternComprehension production.
 	ExitPatternComprehension(c *PatternComprehensionContext)
 
@@ -570,4 +567,7 @@ type CypherParserListener interface {
 
 	// ExitForeachSt is called when exiting the foreachSt production.
 	ExitForeachSt(c *ForeachStContext)
+
+	// ExitReduceExpression is called when exiting the reduceExpression production.
+	ExitReduceExpression(c *ReduceExpressionContext)
 }

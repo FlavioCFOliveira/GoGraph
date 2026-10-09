@@ -258,7 +258,6 @@ atomicExpression
 
 listExpression
     : IN propertyOrLabelExpression
-    | LBRACK (expression? RANGE expression? | expression) RBRACK
     ;
 
 stringExpression
@@ -275,8 +274,14 @@ nullExpression
     : IS NOT? NULL_W
     ;
 
+// Local modification (rmp #2918): list subscripts and slices are postfix
+// operators of the operand, interleaved freely with property lookups and
+// followed by an optional label test, as in openCypher's
+// oC_NonArithmeticOperatorExpression. The leading `(DOT name)*` run stays in
+// propertyExpression, which REMOVE also uses and which must not accept a
+// subscript there.
 propertyOrLabelExpression
-    : propertyExpression nodeLabels?
+    : propertyExpression (LBRACK (expression? RANGE expression? | expression) RBRACK (DOT name)*)* nodeLabels?
     ;
 
 propertyExpression
@@ -313,10 +318,6 @@ atom
     | listComprehension
     | patternComprehension
     | filterWith
-    // NB: reduce(...) is intentionally absent from this grammar; it is matched by
-    // a hand-written post-generation patch (gen-patches.patch, section E) that
-    // intercepts the "reduce"/"REDUCE" identifier (lexed as ID) followed by
-    // LPAREN, before the symbol/functionInvocation alternatives below run.
     | relationshipsChainPattern
     | parenthesizedExpression
     | functionInvocation
@@ -333,6 +334,13 @@ atom
     // full look-ahead, so declaration order does not affect which alternative
     // is selected.
     | mapProjection
+    // reduce(acc = init, x IN list | expr) (rmp #2923). Listed last for the
+    // reason mapProjection is: an alternative added anywhere else renumbers the
+    // later ones, and gen-patches.patch selects the Literal and Symbol
+    // alternatives by number. `reduce(` also begins a functionInvocation, since
+    // REDUCE is a `symbol`; the two are told apart by full look-ahead, because
+    // only reduceExpression admits the `|` before the closing parenthesis.
+    | reduceExpression
     ;
 
 // mapProjection is the map-projection expression (openCypher CIP2014-12-12).
@@ -503,6 +511,7 @@ symbol
     | SINGLE
     | EXPLAIN
     | PROFILE
+    | REDUCE
     ;
 
 reservedWord
@@ -562,4 +571,11 @@ reservedWord
     ;
 foreachSt
     : FOREACH LPAREN symbol IN expression STICK updatingStatement+ RPAREN
+    ;
+
+// reduceExpression (rmp #2923): reduce(acc = init, x IN list | expr). It is the
+// last rule so that it takes the last rule index, 93 — the index the hand-written
+// rule it replaces carried — and shifts no earlier rule's index.
+reduceExpression
+    : REDUCE LPAREN symbol ASSIGN expression COMMA filterExpression STICK expression RPAREN
     ;

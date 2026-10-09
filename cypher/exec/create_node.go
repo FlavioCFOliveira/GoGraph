@@ -39,8 +39,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -66,49 +64,106 @@ var ErrPropertyValueIsNull = errors.New("exec: property value is null (skip)")
 // security F3).
 var ErrNestedPropertyValue = errors.New("exec: InvalidPropertyType: a nested list or map is not a valid property value")
 
+// ErrNullListElement is returned when a property value is a list with a null
+// element. openCypher 9 restricts a property value to a primitive or a list of
+// primitives, and null is not a primitive value; TCK Set1 [10] classifies an
+// unstorable list as InvalidPropertyType, and Neo4j documents that a stored list
+// cannot contain null. Like [ErrNestedPropertyValue] it is a hard, fail-stop
+// error on every write path (rmp #2941): the statement fails and nothing is
+// written. Before it existed, SET treated such a list as a silent no-op that
+// kept the old value, and the CREATE/MERGE literal path stored the list with its
+// nulls removed.
+var ErrNullListElement = errors.New("exec: InvalidPropertyType: a list containing null is not a valid property value")
+
+// ErrEntityPropertyValue is returned when a property value is a node, a
+// relationship or a path, or a list holding one. openCypher 9 restricts a
+// property value to a primitive, a temporal value or a list of those, so an
+// entity is InvalidPropertyType; like [ErrNullListElement] it is a hard,
+// fail-stop error on every write path (rmp #2958).
+var ErrEntityPropertyValue = errors.New("exec: InvalidPropertyType: a node, relationship or path is not a valid property value")
+
+// ErrUnsupportedPropertyValue is returned for a value kind that has no
+// property encoding and is none of the kinds the other refusals name. No such
+// kind exists today; the sentinel keeps a future kind a refusal rather than a
+// silently dropped entry (rmp #2958).
+var ErrUnsupportedPropertyValue = errors.New("exec: InvalidPropertyType: the value kind is not a valid property value")
+
+// isInvalidPropertyValueErr reports whether err is one of the hard
+// InvalidPropertyType refusals a literal or parameter value can earn:
+// [ErrNestedPropertyValue], [ErrNullListElement], [ErrEntityPropertyValue] or
+// [ErrUnsupportedPropertyValue]. The literal builders use it to tell a refusal,
+// which fails the statement, from a non-literal expression, which is deferred
+// to a runtime evaluator.
+func isInvalidPropertyValueErr(err error) bool {
+	return errors.Is(err, ErrNestedPropertyValue) || errors.Is(err, ErrNullListElement) ||
+		errors.Is(err, ErrEntityPropertyValue) || errors.Is(err, ErrUnsupportedPropertyValue)
+}
+
+// exprValueToProperty converts a non-null runtime value to the property value
+// the write paths store, or refuses it with one of the InvalidPropertyType
+// sentinels. It accepts the kinds openCypher 9 allows as a property — a
+// primitive, a temporal value, or a list of those — and encodes a temporal
+// value exactly as the literal path does ([parseTemporalLiteral]) and as
+// cypher.exprValueToLPGProp does, so `SET n += {k: $date}` stores what
+// `SET n.k = $date` stores.
+//
+// Every other kind is refused, never skipped: a map or a nested list
+// ([ErrNestedPropertyValue]), an entity ([ErrEntityPropertyValue]), a list with
+// a null element ([ErrNullListElement]). Before rmp #2958 the map-ingestion
+// paths dropped a temporal or an unconvertible entry and reported success, and
+// on the REPLACE form still cleared every key the entity carried.
+func exprValueToProperty(v expr.Value) (lpg.PropertyValue, error) {
+	if lst, ok := v.(expr.ListValue); ok {
+		return exprListToLPGList(lst)
+	}
+	return exprScalarToProperty(v)
+}
+
+// exprScalarToProperty is [exprValueToProperty] for a value that is not a list.
+func exprScalarToProperty(v expr.Value) (lpg.PropertyValue, error) {
+	switch x := v.(type) {
+	case expr.StringValue:
+		return lpg.StringValue(string(x)), nil
+	case expr.IntegerValue:
+		return lpg.Int64Value(int64(x)), nil
+	case expr.FloatValue:
+		return lpg.Float64Value(float64(x)), nil
+	case expr.BoolValue:
+		return lpg.BoolValue(bool(x)), nil
+	case expr.DateValue:
+		return encodeTemporalProp(tempPrefixDate, x.String()), nil
+	case expr.LocalDateTimeValue:
+		return encodeTemporalProp(tempPrefixLocalDateTime, x.String()), nil
+	case expr.DateTimeValue:
+		return encodeTemporalProp(tempPrefixDateTime, x.String()), nil
+	case expr.LocalTimeValue:
+		return encodeTemporalProp(tempPrefixLocalTime, x.String()), nil
+	case expr.TimeValue:
+		return encodeTemporalProp(tempPrefixTime, x.String()), nil
+	case expr.DurationValue:
+		return encodeTemporalProp(tempPrefixDuration, x.String()), nil
+	case expr.ListValue, expr.MapValue:
+		return lpg.PropertyValue{}, ErrNestedPropertyValue
+	case expr.NodeValue, *expr.LazyNodeValue, expr.RelationshipValue, *expr.LazyRelationshipValue, expr.PathValue:
+		return lpg.PropertyValue{}, ErrEntityPropertyValue
+	default:
+		return lpg.PropertyValue{}, ErrUnsupportedPropertyValue
+	}
+}
+
 // synthKeyPrefix is the fixed prefix of every synthetic node key produced by
-// [CreateNode.freshNodeKey]. Kept as a constant so the counter-seeding scan in
-// [seedGlobalNodeCounter] and the formatter in [CreateNode.freshNodeKey] cannot
+// [CreateNode.freshNodeKey]. Kept as a constant so the sequence-seeding scan in
+// [maxSynthKeySuffix] and the formatter in [CreateNode.freshNodeKey] cannot
 // drift apart.
 const synthKeyPrefix = "__cx_"
 
 // mergeKeyInfix is the extra segment [Merge.freshNodeKey] inserts between
 // synthKeyPrefix and the hex counter, so merge-created keys take the form
 // "__cx_merge_<hex>" while CreateNode keys are "__cx_<hex>". Both operators
-// draw from the same [globalNodeCounter]; the infix only distinguishes the
-// originating operator. [parseSynthKeySuffix] strips it so the seeding scan
-// advances the shared counter past keys minted by EITHER operator on recovery.
+// draw from the target graph's [lpg.KeySequence]; the infix only distinguishes
+// the originating operator. [parseSynthKeySuffix] strips it so the seeding scan
+// advances the sequence past keys minted by EITHER operator on recovery.
 const mergeKeyInfix = "merge_"
-
-// globalNodeCounter provides a process-wide monotonic source for generated
-// node keys. Using an atomic counter avoids collisions if multiple Engine
-// instances operate on the same graph concurrently. Since rmp #2306 nothing
-// serialises writers — concurrency control is MVCC alone — so the atomic is no
-// longer a safety net but the actual mechanism keeping generated keys distinct.
-//
-// The counter is process-local and resets to zero in every new process. Across
-// process restarts this would produce keys that collide with previously
-// persisted ones from the same graph (Mapper.Intern of an existing key returns
-// the existing NodeID, silently overwriting the original node's properties on
-// the follow-up SetNodeProperty calls). To defend against that, every
-// [CreateNode] operator seeds the counter from the keys already interned in
-// its mutator on first [CreateNode.Init], advancing the counter past the
-// largest existing __cx_<hex> suffix via a CAS loop. The seed runs once per
-// process (gated by [globalNodeCounterSeededOnce]); subsequent CreateNode
-// operators observe the [sync.Once] as already-fired and skip the scan.
-//
-// Process-wide monotonic counter for unique key generation.
-var globalNodeCounter atomic.Uint64
-
-// globalNodeCounterSeededOnce guards the one-shot seed scan triggered by the
-// first [CreateNode.Init] in the process. The seed walks the mutator's
-// interned node keys (O(N) over distinct keys) and CASes
-// [globalNodeCounter] forward to one past the maximum __cx_<hex> suffix found.
-// All later CreateNode.Init calls observe the Once as already-fired and skip
-// the scan, so the cost is amortised across the lifetime of the process.
-//
-// Paired with globalNodeCounter.
-var globalNodeCounterSeededOnce sync.Once
 
 // CreateNode creates a new graph node per input row, sets its labels and
 // properties, and appends the new NodeID as a new column.
@@ -242,19 +297,11 @@ func (op *CreateNode) WithPropsEvalFn(fn PropsEvalFn) *CreateNode {
 	return op
 }
 
-// Init initialises the operator and its child.
-//
-// The first CreateNode.Init in the process also seeds [globalNodeCounter]
-// past the largest synthetic key currently interned in op.mutator, so that
-// node keys generated in this process cannot collide with keys persisted by
-// an earlier process and replayed during WAL / snapshot recovery. The seed
-// is gated by [globalNodeCounterSeededOnce] so the scan runs at most once
-// per process regardless of how many CreateNode operators are created.
+// Init initialises the operator and its child, and seeds the target graph's
+// key sequence once per graph ([seedNodeKeySequence]).
 func (op *CreateNode) Init(ctx context.Context) error {
 	op.ctx = ctx
-	globalNodeCounterSeededOnce.Do(func() {
-		seedGlobalNodeCounter(op.mutator)
-	})
+	seedNodeKeySequence(op.mutator)
 	return op.child.Init(ctx)
 }
 
@@ -351,30 +398,82 @@ func mergeProps(static []propLiteral, fn PropsEvalFn, row Row) ([]propLiteral, e
 	return merged, nil
 }
 
-// freshNodeKey returns a string key that is guaranteed to be unique within the
-// current process by drawing from a global monotonic counter. The key is never
-// visible to Cypher callers; only the NodeID is emitted into the row.
+// freshNodeKey returns a "__cx_<hex>" key that op.mutator's graph does not
+// hold (see [mintNodeKey]). The key is never visible to Cypher callers; only
+// the NodeID is emitted into the row.
 func (op *CreateNode) freshNodeKey() string {
-	n := globalNodeCounter.Add(1)
-	return synthKeyPrefix + strconv.FormatUint(n, 16)
+	return mintNodeKey(op.mutator, "")
 }
 
-// seedGlobalNodeCounter walks every node key already interned in m and
-// advances [globalNodeCounter] past the largest __cx_<hex> suffix found.
-// The advance uses a CAS loop so concurrent advances by other goroutines (or
-// by [CreateNode.freshNodeKey] in this goroutine) never roll the counter
-// backwards.
+// maxMintStep caps the stride [mintNodeKey] grows to while skipping keys the
+// graph already holds.
+const maxMintStep = 1 << 20
+
+// mintNodeKey returns synthKeyPrefix + infix + hex(n) for a value n drawn from
+// the target graph's [lpg.KeySequence] such that the key is not interned in m's
+// graph, live or tombstoned (rmp #3015).
 //
-// Cost is O(N) over the number of distinct keys in m at call time. The
-// caller guarantees seedGlobalNodeCounter runs at most once per process via
-// [globalNodeCounterSeededOnce], so the cost is amortised across the
-// lifetime of the engine. A nil mutator is tolerated (no-op) so the
-// operator stays usable in unit tests that build a CreateNode without a
-// backing mutator.
-func seedGlobalNodeCounter(m GraphMutator) {
+// The sequence belongs to the graph, not to the process, so two graphs in one
+// process mint the same keys for the same history: a simulator that replays one
+// seed twice in a process sees identical keys, hence identical mapper shards and
+// identical WAL id reservations (WAL v2 step 4). Every engine writing one graph
+// shares its sequence, so concurrent statements never draw the same value.
+//
+// The sequence alone keeps keys distinct only among the keys minted from it. A
+// graph may also hold synthetic keys it did not mint since it was loaded — keys
+// recovered from disk past the seed scan, or written through the lpg API — and
+// interning one of those returns the existing node, so a CREATE would silently
+// take over a committed node. mintNodeKey therefore asks the graph, through
+// [GraphMutator.ResolveNodeID] (one read-locked shard lookup, no allocation),
+// whether the candidate is taken. On a hit the stride doubles, so a run of k
+// occupied keys is crossed in O(log k) probes rather than k, and every candidate
+// is still a distinct sequence value: two concurrent statements can never be
+// handed the same key.
+//
+// The guarantee is against keys interned before the probe. A key from outside
+// the sequence interned between the probe and the caller's AddNode — a caller of
+// the lpg API writing a "__cx_" key concurrently — is not excluded; no generated
+// key can race another generated key.
+//
+// A nil m (unit tests that build an operator without a mutator) mints from a
+// fresh sequence with no probe.
+func mintNodeKey(m GraphMutator, infix string) string {
+	if m == nil {
+		var local lpg.KeySequence
+		return synthKeyPrefix + infix + strconv.FormatUint(local.Add(1), 16)
+	}
+	seq := m.KeySequence()
+	step := uint64(1)
+	for {
+		key := synthKeyPrefix + infix + strconv.FormatUint(seq.Add(step), 16)
+		if _, taken := m.ResolveNodeID(key); !taken {
+			return key
+		}
+		if step < maxMintStep {
+			step <<= 1
+		}
+	}
+}
+
+// seedNodeKeySequence starts m's graph's key sequence past the largest
+// __cx_<hex> suffix the graph holds, the first time any CreateNode, Merge or
+// MergePattern operator over that graph is initialised ([lpg.KeySequence.SeedOnce]).
+// Minting for a recovered graph then rarely probes an occupied key; uniqueness
+// does not rest on the seed but on [mintNodeKey]'s probe.
+//
+// Cost is O(N) over the distinct keys in the graph, once per graph. A nil
+// mutator is a no-op, so the operators stay usable in unit tests built without
+// a mutator.
+func seedNodeKeySequence(m GraphMutator) {
 	if m == nil {
 		return
 	}
+	m.KeySequence().SeedOnce(func() uint64 { return maxSynthKeySuffix(m) })
+}
+
+// maxSynthKeySuffix returns the largest synthetic-key suffix interned in m's
+// graph, 0 when there is none.
+func maxSynthKeySuffix(m GraphMutator) uint64 {
 	var maxSeen uint64
 	m.WalkNodeIDs(func(id graph.NodeID) bool {
 		key, ok := m.ResolveNodeLabel(id)
@@ -386,15 +485,7 @@ func seedGlobalNodeCounter(m GraphMutator) {
 		}
 		return true
 	})
-	for {
-		cur := globalNodeCounter.Load()
-		if cur >= maxSeen {
-			return
-		}
-		if globalNodeCounter.CompareAndSwap(cur, maxSeen) {
-			return
-		}
-	}
+	return maxSeen
 }
 
 // parseSynthKeySuffix returns the numeric hex suffix of a synthetic node key
@@ -403,8 +494,8 @@ func seedGlobalNodeCounter(m GraphMutator) {
 // key does not match either synthetic-key pattern, when the suffix is empty,
 // or when the suffix is not a valid hexadecimal uint64.
 //
-// Both operators draw from the same [globalNodeCounter], so the seeding scan
-// must advance the counter past the maximum value found across BOTH key
+// Both operators draw from the graph's [lpg.KeySequence], so the seeding scan
+// must advance the sequence past the maximum value found across BOTH key
 // forms. Recognising the "__cx_merge_<hex>" form is what stops a
 // one-process-per-command consumer from re-minting __cx_merge_1 on every
 // MERGE and silently collapsing distinct nodes across a store reopen.
@@ -502,9 +593,10 @@ func parsePropLiteralDeferred(s string) ([]propLiteral, error) {
 			if errors.Is(err, ErrPropertyValueIsNull) {
 				continue // null value: openCypher says do not set the property
 			}
-			if errors.Is(err, ErrNestedPropertyValue) {
-				// A nested collection is a hard InvalidPropertyType error, not a
-				// deferrable non-literal: fail-stop rather than store or drop it (F3).
+			if isInvalidPropertyValueErr(err) {
+				// A nested collection, or a list with a null element, is a hard
+				// InvalidPropertyType error, not a deferrable non-literal:
+				// fail-stop rather than store or drop it (F3, rmp #2941).
 				return nil, err
 			}
 			// Non-literal expression (variable ref, property access, arithmetic):
@@ -532,9 +624,13 @@ func quoteEscaped(s string, i int) bool {
 	return bs%2 == 1
 }
 
-// splitMapItems splits a comma-separated list of map items, respecting
-// string literal boundaries (no nesting of sub-maps is needed for the
-// current IR literal format).
+// splitMapItems splits a comma-separated list of map items (or list
+// elements) at its TOP-LEVEL commas: a comma inside a string literal, a nested
+// map or list, or a parenthesised group is part of the item. The parentheses
+// matter because any expression may be a map value, and a function call or a
+// reduce() carries its own commas — `{blob: reduce(s = 'z', i IN range(1, 16) |
+// s + s)}` and `{x: substring('abc', 0, 1)}` were split inside the call, and the
+// fragment after the comma failed with "missing ':' in map item" (rmp #2975).
 func splitMapItems(s string) []string {
 	var parts []string
 	depth := 0
@@ -553,9 +649,9 @@ func splitMapItems(s string) []string {
 		case '"', '\'':
 			inStr = true
 			strChar = c
-		case '{', '[':
+		case '{', '[', '(':
 			depth++
-		case '}', ']':
+		case '}', ']', ')':
 			depth--
 		case ',':
 			if depth == 0 {
@@ -732,10 +828,11 @@ func parsePropLiteralWithParamsCtx(s string, params map[string]expr.Value, merge
 				}
 				continue // null value: openCypher says do not set the property
 			}
-			if errors.Is(err, ErrNestedPropertyValue) {
-				// A nested collection (incl. a nested collection reached through a
-				// resolved parameter) is a hard InvalidPropertyType error, not a
-				// deferrable non-literal: fail-stop rather than drop it (F3).
+			if isInvalidPropertyValueErr(err) {
+				// A nested collection or a list with a null element (incl. one
+				// reached through a resolved parameter) is a hard
+				// InvalidPropertyType error, not a deferrable non-literal:
+				// fail-stop rather than drop it (F3, rmp #2941).
 				return nil, err
 			}
 			// Non-literal expression or unresolvable param: silently defer.
@@ -807,25 +904,10 @@ func parsePropValueWithParams(s string, params map[string]expr.Value) (lpg.Prope
 		if v == nil || expr.IsNull(v) {
 			return lpg.PropertyValue{}, ErrPropertyValueIsNull
 		}
-		switch val := v.(type) {
-		case expr.StringValue:
-			return lpg.StringValue(string(val)), nil
-		case expr.IntegerValue:
-			return lpg.Int64Value(int64(val)), nil
-		case expr.FloatValue:
-			return lpg.Float64Value(float64(val)), nil
-		case expr.BoolValue:
-			return lpg.BoolValue(bool(val)), nil
-		case expr.ListValue:
-			return exprListToLPGList(val)
-		case expr.MapValue:
-			// A map parameter is not a valid property value (openCypher
-			// InvalidPropertyType). Return the nested-value sentinel so the
-			// literal builders fail-stop rather than defer-and-drop it (F3).
-			return lpg.PropertyValue{}, ErrNestedPropertyValue
-		default:
-			return lpg.PropertyValue{}, fmt.Errorf("unsupported param type %T for $%s", v, name)
-		}
+		// The shared converter stores a temporal value and refuses every kind
+		// that is not a property, so the literal builders fail-stop instead of
+		// deferring the key to an evaluator that may drop it (rmp #2958).
+		return exprValueToProperty(v)
 	}
 	return parsePropValue(s)
 }
@@ -924,8 +1006,10 @@ func parsePropScalar(s string) (lpg.PropertyValue, error) {
 // string and nested-bracket boundaries) and recursively calls [parsePropValue]
 // on each element.
 //
-// An empty list literal "[]" produces a zero-element PropList.
-// Null elements are silently dropped (openCypher: [1, null, 3] → [1, 3]).
+// An empty list literal "[]" produces a zero-element PropList. A null element
+// refuses the whole list with [ErrNullListElement] (rmp #2941): a stored list
+// cannot contain null, and dropping the element stored a different value from
+// the one the statement wrote.
 func parsePropList(inner string) (lpg.PropertyValue, error) {
 	inner = strings.TrimSpace(inner)
 	if inner == "" {
@@ -944,7 +1028,7 @@ func parsePropList(inner string) (lpg.PropertyValue, error) {
 		pv, err := parsePropValue(part)
 		if err != nil {
 			if errors.Is(err, ErrPropertyValueIsNull) {
-				continue // null inside list: openCypher drops the element
+				return lpg.PropertyValue{}, ErrNullListElement
 			}
 			return lpg.PropertyValue{}, fmt.Errorf("list element %q: %w", part, err)
 		}
@@ -955,27 +1039,19 @@ func parsePropList(inner string) (lpg.PropertyValue, error) {
 
 // exprListToLPGList converts an [expr.ListValue] (a query parameter or
 // intermediate expression value) to an [lpg.PropList] property value. Each
-// element is converted individually; unsupported element types return an error.
+// element is converted by [exprScalarToProperty]; a null element, a nested
+// collection or any other unstorable element refuses the whole list with its
+// InvalidPropertyType sentinel.
 func exprListToLPGList(lv expr.ListValue) (lpg.PropertyValue, error) {
 	elems := make([]lpg.PropertyValue, 0, len(lv))
 	for _, v := range lv {
-		var pv lpg.PropertyValue
-		switch val := v.(type) {
-		case expr.StringValue:
-			pv = lpg.StringValue(string(val))
-		case expr.IntegerValue:
-			pv = lpg.Int64Value(int64(val))
-		case expr.FloatValue:
-			pv = lpg.Float64Value(float64(val))
-		case expr.BoolValue:
-			pv = lpg.BoolValue(bool(val))
-		case expr.ListValue, expr.MapValue:
-			// A nested list or map element makes the whole value an invalid
-			// property (openCypher InvalidPropertyType); fail-stop rather than
-			// build a nested PropList the storage layer cannot serialise (F3).
-			return lpg.PropertyValue{}, ErrNestedPropertyValue
-		default:
-			return lpg.PropertyValue{}, fmt.Errorf("unsupported list element type %T", v)
+		if v == nil || expr.IsNull(v) {
+			// A stored list cannot contain null (rmp #2941).
+			return lpg.PropertyValue{}, ErrNullListElement
+		}
+		pv, err := exprScalarToProperty(v)
+		if err != nil {
+			return lpg.PropertyValue{}, err
 		}
 		elems = append(elems, pv)
 	}

@@ -57,9 +57,9 @@ package cypher
 // cannot disagree about a node even in principle. See [uniqueValueSeed] and
 // [Engine.createConstraintLocked].
 //
-// The VALIDATION scan deliberately still reads live — see
-// TestCreateConstraint_UncommittedDuplicateStillRefusesTheConstraint for the
-// measurement that makes that load-bearing rather than an oversight.
+// The VALIDATION scan reads committed state as well since rmp #2946; an open
+// transaction's eager duplicate is refused at its own commit instead — see
+// TestCreateConstraint_UncommittedDuplicateIsRefusedAtItsCommit.
 //
 // # What the oracle is
 //
@@ -73,6 +73,7 @@ package cypher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -584,32 +585,43 @@ func TestCreateConstraint_CommittedDuplicateHiddenByOpenTxRefusesTheConstraint(t
 	}
 }
 
-// TestCreateConstraint_UncommittedDuplicateStillRefusesTheConstraint is the
-// counterweight, and it is why the VALIDATION scan was deliberately left reading
-// the live graph while the seed moved to a snapshot.
+// TestCreateConstraint_UncommittedDuplicateIsRefusedAtItsCommit is the
+// counterweight to the test above, rewritten by rmp #2946.
 //
 // An explicit transaction that has EAGERLY written a duplicate has not committed
-// it. A snapshot-reading validation would therefore accept the constraint — and
-// nothing would refuse that transaction's commit afterwards, because UNIQUE is
-// reserved at WRITE time and the statement ran before the constraint existed.
-// Measured while designing this fix: with the validation moved to the snapshot,
-// CREATE CONSTRAINT succeeded, the COMMIT returned nil, and two committed nodes
-// held "b" under an active UNIQUE constraint.
+// it, so the committed data satisfies UNIQUE and the DDL, which validates
+// committed state only, must SUCCEED. The transaction began before the
+// constraint existed, and it must then be refused at its own COMMIT by the
+// straddler validation (rmp #2936), so the committed graph never holds the
+// duplicate under the active constraint.
 //
-// So this test fails on the tempting one-line version of the fix — moving
-// scanLabelProperty to the snapshot as well — and that is exactly its purpose.
-func TestCreateConstraint_UncommittedDuplicateStillRefusesTheConstraint(t *testing.T) {
+// Before rmp #2946 the validation read the live graph and refused the DDL, which
+// refused a constraint the committed data satisfies. Before rmp #2936 that
+// refusal was the only protection, because nothing checked UNIQUE at the commit
+// of a statement that ran before the constraint existed; the commit assertion
+// below is what proves the check is there.
+func TestCreateConstraint_UncommittedDuplicateIsRefusedAtItsCommit(t *testing.T) {
 	t.Parallel()
 	e, tx := constraintDupEngine(t, map[string]string{"k1": "a", "k2": "b", "k3": "c"},
 		`MATCH (n:Person) WHERE n.tag = 'k1' SET n.name = 'b'`)
-	defer func() { _ = tx.Rollback() }()
-
-	if err := runConstraintWrite(t, e, constraintSnapshotDDL); err == nil {
-		t.Fatalf("CREATE CONSTRAINT succeeded while an open transaction held an eager, "+
-			"uncommitted duplicate of \"b\". Nothing checks UNIQUE at commit for a statement "+
-			"that ran before the constraint existed, so that transaction can now commit the "+
-			"duplicate: %d committed nodes would hold it under an active constraint. The "+
-			"validation scan must keep reading the live graph.", 2)
+	if err := runConstraintWrite(t, e, constraintSnapshotDDL); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("CREATE CONSTRAINT was REFUSED over committed data holding no duplicate, "+
+			"because an open transaction held an eager duplicate of \"b\": %v", err)
+	}
+	if !e.constraintReg.HasUnique("Person", "name") {
+		t.Error("CREATE CONSTRAINT registered no UNIQUE constraint on (Person).name")
+	}
+	cerr := tx.Commit()
+	if cerr == nil {
+		t.Fatal("the transaction that began before the constraint COMMITTED its duplicate of " +
+			"\"b\" under the active UNIQUE constraint")
+	}
+	if !errors.Is(cerr, exec.ErrConstraintViolation) {
+		t.Errorf("the commit was refused, but not as a constraint violation: %v", cerr)
+	}
+	if got := countCommittedName(t, e, "b"); got != 1 {
+		t.Errorf("the committed graph holds %d nodes named \"b\" under the active constraint, want 1", got)
 	}
 }
 

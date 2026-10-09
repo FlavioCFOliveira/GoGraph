@@ -13,8 +13,8 @@ import (
 
 // ErrMapperApply is returned by [ApplyMapperToGraph] when the supplied
 // readback violates an invariant the writer is responsible for
-// upholding (intra-shard gap, hash/shard mismatch, duplicate key, or a
-// non-empty target mapper). It wraps the underlying [graph.ErrMapper…]
+// upholding (an intra index at or above the shard's high-water mark,
+// hash/shard mismatch, duplicate key, or a non-empty target mapper). It wraps the underlying [graph.ErrMapper…]
 // sentinels so callers can branch on the typed cause via [errors.Is].
 var ErrMapperApply = errors.New("snapshot: cannot apply mapper")
 
@@ -37,6 +37,15 @@ var ErrMapperApply = errors.New("snapshot: cannot apply mapper")
 func ApplyMapperToGraph[N comparable, W any](g *lpg.Graph[N, W], rb MapperReadback) error {
 	defer metrics.Time("store.snapshot.ApplyMapperToGraph").Stop()
 	if len(rb.Pairs) == 0 {
+		if rb.Next == nil {
+			return nil
+		}
+		// No pairs, only the high-water marks of nodeids.bin (WAL v2 step 1): an
+		// image whose every assigned id is a hole. Any key type restores them.
+		if err := g.AdjList().Mapper().LoadFrom(nil, rb.Next); err != nil {
+			metrics.IncCounter("store.snapshot.ApplyMapperToGraph.errors", 1)
+			return fmt.Errorf("%w: %w", ErrMapperApply, err)
+		}
 		return nil
 	}
 	mapper := g.AdjList().Mapper()
@@ -55,7 +64,7 @@ func ApplyMapperToGraph[N comparable, W any](g *lpg.Graph[N, W], rb MapperReadba
 			Key: rb.Pairs[i].Key,
 		}
 	}
-	if err := stringMapper.LoadFrom(entries); err != nil {
+	if err := stringMapper.LoadFrom(entries, rb.Next); err != nil {
 		metrics.IncCounter("store.snapshot.ApplyMapperToGraph.errors", 1)
 		return fmt.Errorf("%w: %w", ErrMapperApply, err)
 	}
@@ -81,7 +90,7 @@ func ApplyMapperToGraph[N comparable, W any](g *lpg.Graph[N, W], rb MapperReadba
 // [ErrMapperApply] wrapping the relevant [graph.ErrMapper…] sentinel.
 func ApplyMapperToGraphWithCodec[N comparable, W any](g *lpg.Graph[N, W], rb MapperReadback, codec keyDecoder[N]) error {
 	defer metrics.Time("store.snapshot.ApplyMapperToGraphWithCodec").Stop()
-	if len(rb.RawPairs) == 0 {
+	if len(rb.RawPairs) == 0 && rb.Next == nil {
 		return nil
 	}
 	if codec == nil {
@@ -98,7 +107,7 @@ func ApplyMapperToGraphWithCodec[N comparable, W any](g *lpg.Graph[N, W], rb Map
 		}
 		entries[i] = graph.MapperEntry[N]{ID: rb.RawPairs[i].ID, Key: key}
 	}
-	if err := mapper.LoadFrom(entries); err != nil {
+	if err := mapper.LoadFrom(entries, rb.Next); err != nil {
 		metrics.IncCounter("store.snapshot.ApplyMapperToGraphWithCodec.errors", 1)
 		return fmt.Errorf("%w: %w", ErrMapperApply, err)
 	}

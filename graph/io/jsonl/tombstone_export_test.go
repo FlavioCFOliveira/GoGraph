@@ -40,7 +40,9 @@ func TestJSONL_TombstonedNodeNotExported(t *testing.T) {
 	if err := g.SetNodeProperty("a", "name", lpg.StringValue("alpha")); err != nil {
 		t.Fatalf("SetNodeProperty(a): %v", err)
 	}
-	g.RemoveNode("dead")
+	if err := g.RemoveNode("dead"); err != nil {
+		t.Fatalf("g.RemoveNode(\"dead\"): %v", err)
+	}
 
 	var buf bytes.Buffer
 	if _, err := jsonl.WriteWithProps(&buf, g); err != nil {
@@ -85,7 +87,9 @@ func TestJSONL_DeleteThenRecreateExportsOnce(t *testing.T) {
 	if err := g.AddNode("dead"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
-	g.RemoveNode("dead")
+	if err := g.RemoveNode("dead"); err != nil {
+		t.Fatalf("g.RemoveNode(\"dead\"): %v", err)
+	}
 	if err := g.AddNode("dead"); err != nil {
 		t.Fatalf("re-AddNode: %v", err)
 	}
@@ -126,8 +130,12 @@ func TestJSONL_OnlyTombstonedNodesExportsNothing(t *testing.T) {
 	if err := g.AddEdge("x", "y", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.RemoveNode("x")
-	g.RemoveNode("y")
+	if err := g.RemoveNode("x"); err != nil {
+		t.Fatalf("g.RemoveNode(\"x\"): %v", err)
+	}
+	if err := g.RemoveNode("y"); err != nil {
+		t.Fatalf("g.RemoveNode(\"y\"): %v", err)
+	}
 
 	var buf bytes.Buffer
 	written, err := jsonl.WriteWithProps(&buf, g)

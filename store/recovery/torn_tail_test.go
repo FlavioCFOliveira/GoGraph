@@ -11,7 +11,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
-	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // TestRecovery_TornTailDropsLastOp_WithSnapshot writes K=10 v2 WAL
@@ -39,10 +38,8 @@ func TestRecovery_TornTailDropsLastOp_WithSnapshot(t *testing.T) {
 
 	// Phase 1: build a base graph and snapshot it. The snapshot node
 	// "base" must survive regardless of WAL truncation.
-	w, err := wal.Open(walPath)
-	if err != nil {
-		t.Fatalf("wal.Open: %v", err)
-	}
+	// A single-file log: this test damages or erases it as one file.
+	w := openSingleFileWAL(t, walPath)
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),

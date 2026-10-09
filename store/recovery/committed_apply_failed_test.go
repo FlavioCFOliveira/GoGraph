@@ -11,23 +11,24 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
-// TestCommit_DurableButApplyFails_ReconciledByRecovery is the F5
-// regression test (docs/acid-audit.md). A typed store whose graph was
-// built with a shard-capacity cap can fail the in-memory apply AFTER the
-// transaction is already durable (op frames + OpCommit marker fsynced). The
-// commit must then:
+// TestCommit_ApplyRefusalLeavesNothingDurable descends from the F5 regression
+// test (docs/acid-audit.md). A typed store whose graph was built with a
+// shard-capacity cap fails the in-memory apply with adjlist.ErrShardFull. Until
+// the ACID audit of rmp #2965 that failure came AFTER the fsync, so Commit
+// reported ErrCommittedNotApplied and recovery replayed the transaction. Commit
+// now applies before it writes the WAL record, so the commit must:
 //
-//   - report ErrCommittedNotApplied (wrapping adjlist.ErrShardFull), so the
-//     durable commit is never a silent, ambiguous failure; and
-//   - remain fully recoverable: recovery rebuilds the graph WITHOUT a cap,
-//     so it replays the whole transaction atomically and all nodes appear.
+//   - return adjlist.ErrShardFull, and NOT ErrCommittedNotApplied;
+//   - leave nothing durable: recovery replays no op; and
+//   - leave nothing visible: the apply is aborted as a whole, so none of the
+//     transaction's edges is in the live graph.
 //
 // AddNode alone never overflows a shard (it only interns in the mapper);
 // AddEdge allocates the source node's outgoing slot, so with
 // MaxShardCapacity == 1 and edges from > 256 distinct sources the
 // pigeonhole principle guarantees at least one shard overflows during the
 // apply phase.
-func TestCommit_DurableButApplyFails_ReconciledByRecovery(t *testing.T) {
+func TestCommit_ApplyRefusalLeavesNothingDurable(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal")
@@ -54,27 +55,32 @@ func TestCommit_DurableButApplyFails_ReconciledByRecovery(t *testing.T) {
 			t.Fatalf("AddEdge(%s): %v", srcs[i], err)
 		}
 	}
-	// The commit is durable (WAL synced) but the in-memory apply overflows a
-	// capped shard, so Commit reports ErrCommittedNotApplied wrapping
-	// ErrShardFull — never a plain error, and never a silent success.
+	// The in-memory apply overflows a capped shard BEFORE anything is written to
+	// the WAL, so Commit returns ErrShardFull and nothing is durable.
 	err = tx.Commit()
 	if err == nil {
-		t.Fatal("Commit returned nil; expected ErrCommittedNotApplied (capped shard must overflow on apply)")
+		t.Fatal("Commit returned nil; expected adjlist.ErrShardFull (capped shard must overflow on apply)")
 	}
-	if !errors.Is(err, txn.ErrCommittedNotApplied) {
-		t.Fatalf("Commit error = %v; want errors.Is(..., ErrCommittedNotApplied)", err)
+	if errors.Is(err, txn.ErrCommittedNotApplied) { //nolint:staticcheck // SA1019: asserts the deprecated sentinel is never returned
+		t.Fatalf("Commit error = %v; a refused apply must not be reported as durable", err)
 	}
 	if !errors.Is(err, adjlist.ErrShardFull) {
 		t.Fatalf("Commit error = %v; want it to wrap adjlist.ErrShardFull", err)
+	}
+	visible := 0
+	for i, s := range srcs {
+		if g.AdjList().HasEdge(s, "d"+itoa(i)) {
+			visible++
+		}
+	}
+	if visible != 0 {
+		t.Fatalf("ATOMICITY: %d/%d edges of the refused transaction are in the live graph", visible, n)
 	}
 
 	// The checkpointer is not involved; just close the WAL and recover.
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal.Close: %v", err)
 	}
-
-	// Recovery rebuilds the graph WITHOUT a shard cap, so the durable
-	// transaction replays in full and atomically: all n nodes are present.
 	res, err := Open[string, int64](dir, Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -82,16 +88,12 @@ func TestCommit_DurableButApplyFails_ReconciledByRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recovery.Open: %v", err)
 	}
-	if res.WALOps != n {
-		t.Fatalf("WALOps = %d, want %d (whole durable transaction replays)", res.WALOps, n)
+	if res.WALOps != 0 {
+		t.Fatalf("WALOps = %d, want 0 (the refused transaction must not be durable)", res.WALOps)
 	}
-	missing := 0
 	for i, s := range srcs {
-		if !res.Graph.AdjList().HasEdge(s, "d"+itoa(i)) {
-			missing++
+		if res.Graph.AdjList().HasEdge(s, "d"+itoa(i)) {
+			t.Fatalf("recovered graph holds edge %s->d%d of the refused transaction", s, i)
 		}
-	}
-	if missing != 0 {
-		t.Fatalf("%d/%d edges missing after recovery — durable transaction not fully reconciled", missing, n)
 	}
 }

@@ -13,9 +13,11 @@ package cypher_test
 // That made the Bolt tx_timeout inert at BEGIN, and it contradicted BeginTx's
 // own godoc, which promises a prompt error on an elapsed deadline.
 //
-// The barrier wait is real rather than theoretical: Engine.Run executes an entire
-// query inside Graph.View, which holds the barrier's read side, so a writer
-// arriving during a slow read queues behind it.
+// The barrier wait was real rather than theoretical: Engine.Run then executed an
+// entire query inside Graph.View, which held the barrier's read side, so a writer
+// arriving during a slow read queued behind it. Neither half remains: rmp #2305
+// retired BeginTx's barrier hold, and rmp #2344 removed Graph.View — a read now
+// takes an MVCC snapshot and no lock.
 //
 // Layer: short.
 

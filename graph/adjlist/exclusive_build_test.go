@@ -219,11 +219,12 @@ func TestBuilderOwner_TransactionKeepsCloneOnceWithNoBulkWindow(t *testing.T) {
 			"stable identity and the reordering in builderOwner is unsound")
 	}
 
-	info, _ := ws.End()
-	if info == nil {
-		t.Fatal("the transaction versioned nothing, so this test exercised no version chain")
+	// The two writes carry no transaction, so they took the slot transaction's id
+	// as their builder IDENTITY only: each is its own transaction, committed at
+	// once, and none joined the slot transaction's record (rmp #2967).
+	if info, _ := ws.End(); info != nil {
+		t.Fatal("an untransacted write joined the transaction the slot names")
 	}
-	info.Commit(ws.Clock().NextCommitTS())
 
 	n := 0
 	for range a.Neighbours("a") {

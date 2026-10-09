@@ -255,8 +255,31 @@ func TestProfile_ReportsRowsAndRefusesWrites(t *testing.T) {
 		t.Errorf("a profiled plan must report per-operator time:\n%s", out)
 	}
 
-	if _, werr := eng.Profile(context.Background(), "CREATE (:P {age: 9})", nil); werr == nil {
-		t.Error("Profile must refuse a writing statement rather than execute its writes")
+	// A writing statement is executed transactionally and measured (rmp #2790):
+	// its write applies exactly once and the tree names the write operator.
+	countP := func() string {
+		r, err := eng.Run(context.Background(), "MATCH (n:P) RETURN count(n) AS c", nil)
+		if err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		defer func() { _ = r.Close() }()
+		if !r.Next() {
+			t.Fatal("count returned no row")
+		}
+		return r.ValueAt(0).String()
+	}
+	if before := countP(); before != "120" {
+		t.Fatalf("seed holds %s :P nodes, want 120", before)
+	}
+	wout, werr := eng.Profile(context.Background(), "CREATE (:P {age: 9})", nil)
+	if werr != nil {
+		t.Fatalf("Profile of a writing statement: %v", werr)
+	}
+	if !strings.Contains(wout, "CreateNode") {
+		t.Errorf("the profiled write's tree does not name its write operator:\n%s", wout)
+	}
+	if after := countP(); after != "121" {
+		t.Errorf("Profile applied the CREATE to give %s :P nodes, want exactly 121", after)
 	}
 }
 

@@ -1683,15 +1683,20 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, st *evalCallState, 
 		return nil, &EvalError{Msg: fmt.Sprintf("no function registry; cannot call %s()", n.Name)}
 	}
 
-	// Resolve function name. Namespaced functions join with ".".
-	name := strings.ToLower(n.Name)
-	if len(n.Namespace) > 0 {
-		parts := make([]string, 0, len(n.Namespace)+1)
-		for _, ns := range n.Namespace {
-			parts = append(parts, strings.ToLower(ns))
-		}
-		parts = append(parts, name)
-		name = strings.Join(parts, ".")
+	// Resolve the function name (namespaced functions join with "."). A
+	// per-statement registry memoises the name, the resolved function and — for
+	// a statement-constant call — its value, once per call site (rmp #2891; see
+	// callsite.go). site is nil on every other registry, and when the
+	// statement's table is full.
+	var site *callSite
+	var name string
+	if host, ok := reg.(callSiteHost); ok {
+		site = resolveCallSite(host, n, reg)
+	}
+	if site != nil {
+		name = site.name
+	} else {
+		name = callName(n)
 	}
 
 	// ── Quantifier functions (all, any, none, single) ──────────────────────────
@@ -1740,20 +1745,40 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, st *evalCallState, 
 		}
 	}
 
-	fn, ok := reg.Resolve(name)
+	var fn BuiltinFn
+	var ok bool
+	if site != nil {
+		fn, ok = site.fn, site.found
+	} else {
+		fn, ok = reg.Resolve(name)
+	}
 	if !ok {
 		return nil, &EvalError{Msg: fmt.Sprintf("unknown function %q", name)}
 	}
 
-	args := make([]Value, len(n.Args))
-	for i, arg := range n.Args {
-		v, err := evalExpr(arg, row, st, params, reg)
-		if err != nil {
-			return nil, err
+	fold := site != nil && site.fold && !site.noFold.Load()
+	var result Value
+	var err error
+	if memo := foldedValue(site, fold); memo != nil {
+		result, err = memo.v, memo.err
+	} else {
+		args := make([]Value, len(n.Args))
+		for i, arg := range n.Args {
+			v, aerr := evalExpr(arg, row, st, params, reg)
+			if aerr != nil {
+				return nil, aerr
+			}
+			args[i] = v
 		}
-		args[i] = v
+		result, err = fn(args)
+		if fold {
+			if foldableArgs(args) {
+				site.value.CompareAndSwap(nil, &foldedCall{v: result, err: err})
+			} else {
+				site.noFold.Store(true)
+			}
+		}
 	}
-	result, err := fn(args)
 	if err != nil {
 		return nil, err
 	}

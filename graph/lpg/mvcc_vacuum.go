@@ -143,8 +143,10 @@ const (
 	vacuumIdlePasses = 2
 
 	// vacuumMinBackoff and vacuumMaxBackoff bound the wait between passes that
-	// free nothing. A pass that frees something does not wait at all — draining
-	// is the one thing worth doing at full speed.
+	// free nothing. A pass that frees a backlog — it stopped at the cap, or freed
+	// at least [reclaimThreshold] records — does not wait at all: draining is
+	// the one thing worth doing at full speed. A pass that frees less waits at
+	// most vacuumMinBackoff, cut short by the next churn wake (rmp #3060).
 	//
 	// The floor keeps a graph whose versions are pinned by a long-lived reader
 	// from re-sweeping in a tight loop; the ceiling keeps the vacuum responsive
@@ -596,8 +598,9 @@ func (g *Graph[N, W]) startVacuum() {
 
 // vacuumLoop is the background sweeper.
 //
-// It sweeps at full speed while it is making progress and backs off when it is
-// not, exactly as PostgreSQL's launcher does, and it exits once
+// It sweeps at full speed while it is draining a backlog, paces itself on the
+// churn signal while it is keeping up, and backs off when it frees nothing,
+// as PostgreSQL's launcher does, and it exits once
 // [vacuumIdlePasses] consecutive passes free nothing rather than waiting on a
 // ticker that would wake to do nothing.
 func (g *Graph[N, W]) vacuumLoop() {
@@ -688,12 +691,35 @@ func (g *Graph[N, W]) vacuumLoop() {
 		if freed > 0 {
 			idle = 0
 			backoff = vacuumMinBackoff
-			// Draining is the one thing worth doing at full speed, so do not
-			// wait — but do honour a shutdown between passes.
+			// A BACKLOG is drained at full speed: a pass that stopped at the cap,
+			// or freed a threshold's worth, leaves work it has already proved is
+			// there. Honour a shutdown between passes.
+			if capped || freed >= reclaimThreshold {
+				select {
+				case <-v.stop:
+					return
+				default:
+				}
+				continue
+			}
+			// A SMALL pass waits for the next churn signal or the floor (rmp
+			// #3060). With no reader registered the watermark is the clock, so
+			// every pass frees what the writers committed during the one before
+			// it, and a loop that never waits after such a pass runs beside the
+			// writers for as long as they write: measured at one pass per 16
+			// direct AddEdge calls (16 to 63 records each), and its per-unit
+			// yields' thread wakeups doubled the process CPU time of a
+			// single-writer build. Waiting restores what the debt counter is
+			// for — one pass per [reclaimThreshold] versions — and the bound is
+			// unchanged: a charge that takes the debt past the threshold sends
+			// the wake this wait returns on.
+			timer.Reset(vacuumMinBackoff)
 			select {
 			case <-v.stop:
 				return
-			default:
+			case <-v.wake:
+				timer.Stop()
+			case <-timer.C:
 			}
 			continue
 		}
@@ -839,11 +865,10 @@ func (g *Graph[N, W]) sweepUnit(u vacuumUnit, watermark uint64) int {
 		hist.Reset()
 		return g.adj.Reclaim(watermark, hist)
 	case unitNodeLife:
-		// ABORTED life records first (rmp #2318): a birth or death stamped
-		// [mvcc.AbortedTS] can never satisfy the watermark test, and dropping it
-		// also has to reconcile the tombstone bitmap the aborted transaction
-		// left behind. See [Graph.reclaimAbortedLife].
-		return g.reclaimAbortedLife() + g.reclaimNodeLife(watermark)
+		// An ABORTED life record (rmp #2318) never satisfies the watermark test;
+		// the abort that wrote it withdraws it, through its own write set
+		// ([Graph.withdrawAbortedNow]), before the abort returns.
+		return g.reclaimNodeLife(watermark)
 	case unitAdjStamps:
 		// The adjacency conflict stamps are bounded here and nowhere else. They
 		// are pure write-side bookkeeping — one pair of timestamps per node a
@@ -860,7 +885,7 @@ func (g *Graph[N, W]) sweepUnit(u vacuumUnit, watermark uint64) int {
 		// They ride this unit rather than getting their own because they are written
 		// only for nodes under an existence constraint, so on the schemas that have
 		// none the extra call walks 64 nil maps and returns zero.
-		return g.adjVer.clearAborted() + g.adjVer.truncate(watermark) +
+		return g.adjVer.truncate(watermark) +
 			g.conVer.clearAborted() + g.conVer.truncate(watermark)
 	case unitIndexRemovals:
 		return g.applyDeferredIndexRemovals(watermark)

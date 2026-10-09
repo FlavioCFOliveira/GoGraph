@@ -79,7 +79,9 @@ func liGraph(t *testing.T, n int) *lpg.Graph[string, float64] {
 	if err := g.SetNodeLabel("b00000", "Empty"); err != nil {
 		t.Fatalf("SetNodeLabel Empty: %v", err)
 	}
-	g.RemoveNodeLabel("b00000", "Empty")
+	if err := g.RemoveNodeLabel("b00000", "Empty"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"b00000\", \"Empty\"): %v", err)
+	}
 	// A disjoint population.
 	for i := 0; i < 20; i++ {
 		key := fmt.Sprintf("o%05d", i)
@@ -90,6 +92,17 @@ func liGraph(t *testing.T, n int) *lpg.Graph[string, float64] {
 			t.Fatalf("SetNodeLabel Other: %v", err)
 		}
 	}
+	// Settle the MVCC history before any plan is asserted. The planner's label
+	// counts are exact only while the graph's history backlog is at most
+	// planExactBacklog; above it they are the O(1) upper bound (rmp #3010), under
+	// which an empty label is no longer provably empty and the gate declines. This
+	// build leaves ~10 000 history records, and the background vacuum that reclaims
+	// them runs asynchronously, so without this the asserted plans depended on
+	// whether that goroutine had been scheduled — measured: backlog 10 183 and the
+	// zero-population short-circuit declined under -cpu 1, backlog 879-1 875 and it
+	// fired under -cpu 8. ReclaimNow makes the fixture's state a function of what
+	// it wrote, not of when the vacuum woke.
+	g.ReclaimNow()
 	return g
 }
 

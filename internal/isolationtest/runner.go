@@ -244,6 +244,13 @@ func (sr *sessionRunner) exec(st *Step) (stepResult, error) {
 	if st.Hook != nil {
 		return stepResult{step: *st}, st.Hook(sr.ctx)
 	}
+	if st.Probe != nil {
+		cols, rows, err := st.Probe(sr.ctx)
+		if err != nil {
+			return stepResult{step: *st}, err
+		}
+		return stepResult{step: *st, render: renderRows(cols, rows), cols: cols, rows: rows}, nil
+	}
 	params, err := toParams(st.Params)
 	if err != nil {
 		return stepResult{step: *st}, err
@@ -285,10 +292,23 @@ func (sr *sessionRunner) control(c Control) error {
 		}
 		tx := sr.tx
 		sr.tx = nil
-		if c == Commit {
-			return tx.Commit()
+		if c == Rollback {
+			return tx.Rollback()
 		}
-		return tx.Rollback()
+		err := tx.Commit()
+		// A poisoned transaction is the one COMMIT leaves OPEN: the engine refuses
+		// it without finishing the handle, and expects the caller to roll it back
+		// (cypher.ErrTxPoisoned). The session's handle is cleared above, so without
+		// this the transaction would keep its writes and its horizon slot until the
+		// engine closes, and a later step of the permutation would see them. The
+		// rollback is the client's obligation the harness performs; the COMMIT's own
+		// error is what the step reports.
+		if errors.Is(err, cypher.ErrTxPoisoned) {
+			if rerr := tx.Rollback(); rerr != nil {
+				return errors.Join(err, fmt.Errorf("rolling back the poisoned transaction: %w", rerr))
+			}
+		}
+		return err
 	default:
 		return fmt.Errorf("unknown control verb %q", c)
 	}
@@ -429,6 +449,13 @@ func (r *Runner) runPermutation(ctx context.Context, s *Spec, p Permutation, w *
 			}
 		}
 	}
+	for _, st := range s.Final {
+		got, ferr := control.exec(&st)
+		got.step, got.err = st, ferr
+		w.printf("final %s: %s\n", st.Name, st.display())
+		writeOutcome(w, &got)
+		r.observe(p, &got)
+	}
 	for _, st := range s.Teardown {
 		if _, terr := control.exec(&st); terr != nil {
 			w.printf("teardown %s: %v\n", st.Name, terr)
@@ -478,6 +505,11 @@ func writeStep(w *transcript, got *stepResult, suffix string) {
 	} else {
 		w.printf("step %s: %s\n", got.step.Name, got.step.display())
 	}
+	writeOutcome(w, got)
+}
+
+// writeOutcome renders a completed step's error or rows, below its header line.
+func writeOutcome(w *transcript, got *stepResult) {
 	if got.err != nil {
 		w.printf("ERROR: %s\n", classifyError(got.err))
 		return

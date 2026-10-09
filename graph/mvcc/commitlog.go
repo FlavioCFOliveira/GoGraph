@@ -45,8 +45,9 @@ package mvcc
 // numeric_limits<uint64_t>::max() is deallocated and head_start_ advances by
 // kIdsInBlock. OldestActive() is then a single field read under a spin lock.
 //
-// GoGraph takes MEMGRAPH'S SHAPE, for three reasons that are about this engine
-// and not about taste:
+// GoGraph takes MEMGRAPH'S CONTIGUOUS FRONTIER rather than PostgreSQL's
+// per-snapshot list, for three reasons that are about this engine and not about
+// taste:
 //
 //  1. THE READ PATH DOES NOT MOVE. With a contiguous frontier, [Clock.ReadTS]
 //     stays one atomic load and [Visible] stays one comparison — the read-side
@@ -65,12 +66,60 @@ package mvcc
 //     running xid would make every snapshot uselessly stale. That reasoning
 //     does not transfer.
 //
-//  3. THE MEMORY BOUND IS STRUCTURAL RATHER THAN CONFIGURED. A block is
-//     released as soon as every id in it has finished, so what is retained is
-//     the window between the oldest unfinished timestamp and the newest
-//     allocated one — bounded by how many writers are committing at once.
-//     PostgreSQL bounds xip by max_connections and pays that allocation per
-//     snapshot; GoGraph would pay it per read.
+//  3. THE MEMORY IS PER CLOCK, NOT PER READ. What must be retained is the
+//     window between the oldest unfinished timestamp and the newest allocated
+//     one — bounded by how many writers are committing at once — and it is held
+//     once, on the publish side. PostgreSQL bounds xip by max_connections and
+//     pays that allocation per snapshot; GoGraph would pay it per read.
+//
+// # How the shape changed: a lock-free registry of commits (rmp #2932)
+//
+// The first implementation held Memgraph's shape literally: a bitmap of blocks
+// behind a publish lock, with a lock-free fast path in front for the in-order
+// case. Memgraph can afford the lock because it never contends on it — its commit
+// allocates the timestamp and marks it finished under one engine_lock_
+// (memgraph/memgraph, master ebf1bc0d, src/storage/v2/inmemory/storage.cpp,
+// Commit), and CommitLog::MarkFinished takes a spin lock per call
+// (src/storage/v2/commit_log.cpp). GoGraph commits in parallel, and that lock
+// became the bottleneck: measured on bench/mvccwrite's mixed arm at 32 writers,
+// a straggling publication pushed every later one onto the lock, and a writer
+// descheduled while holding it held the frontier for milliseconds — long enough
+// for writers to exhaust 64 serialization-conflict retries on their own earlier
+// commits.
+//
+// Removing the lock was not enough on its own. The frontier is contiguous, so a
+// commit whose OWNER is descheduled between allocating its timestamp and
+// publishing it holds the frontier just the same, and on 10 cores running 32
+// writers such windows reached 2.2-4.4 ms. So the registry does two things:
+//
+//   - OUT-OF-ORDER COMPLETION WITHOUT A LOCK. Every allocated timestamp owns a
+//     record in a fixed ring of slots, and a publication that finishes out of
+//     order marks its record finished with one atomic store; whoever closes the
+//     gap below it carries the frontier over it with a compare-and-swap. This is
+//     the structural idea of InnoDB's Link_buf (mysql/mysql-server, trunk
+//     3b99be40, storage/innobase/include/ut0link_buf.h: slots filled out of
+//     order, a tail any thread advances over the contiguous run), and its log
+//     writer's reliance on concurrent threads reporting completion into it
+//     (storage/innobase/log/log0buf.cc, log_buffer_write_completed).
+//   - HELPING. A publication stuck behind a commit that is READY — every
+//     precondition of its publication holds — stamps that commit's record and
+//     advances the frontier over it on its owner's behalf. This is the helping
+//     discipline of lock-free algorithms (Herlihy and Shavit, The Art of
+//     Multiprocessor Programming, ch. 10-11; Harris, "A Pragmatic
+//     Implementation of Non-Blocking Linked-Lists", DISC 2001): an operation
+//     that would otherwise wait on a stalled peer completes the peer's
+//     operation instead, each step decided by a compare-and-swap so that exactly
+//     one party wins it. PostgreSQL's group commit is the lock-based cousin:
+//     ProcArrayGroupClearXid has the lock holder clear every queued backend's
+//     xid on its behalf (postgres/postgres, REL_17_STABLE 6dba8019,
+//     src/backend/storage/ipc/procarray.c) — the same idea of completing others'
+//     work, but its followers sleep until the leader is done, and the registry
+//     has no leader and no sleep.
+//
+// A timestamp is allocated by REGISTERING its record in the slot for that
+// timestamp, so the record exists — and a helper can find it — from the instant
+// the timestamp does. See [Clock.AllocateFor] for the protocol, the invariants
+// and who may publish what.
 //
 // THE COST, STATED PLAINLY. A reader cannot observe a commit above the oldest
 // unfinished one even when it has already published. The staleness is the
@@ -78,359 +127,156 @@ package mvcc
 // in docs/benchmarks/mvcc-write-scaling-2026-08-02.md. Memgraph accepts exactly
 // this trade, and it buys a hot path that does not grow.
 
-import (
-	"math/bits"
-	"sync/atomic"
-)
+import "sync/atomic"
 
+// registrySlots is the number of slots in the commit registry. A slot holds the
+// records of the timestamps congruent to it modulo registrySlots, newest first; a
+// timestamp's record stays findable until the frontier passes it, however many
+// laps of the ring are in flight at once (see [commitRegistry.claim]), so the
+// number bounds nothing but the length of those chains, which is one while fewer
+// than registrySlots commits are in flight. 4096 slots are 32 KiB, allocated by
+// the first allocation.
+const registrySlots = 1 << 12
+
+const registryMask = registrySlots - 1
+
+// commitRegistry maps every allocated commit timestamp that the frontier has not
+// yet passed to the record that owns it. See the file comment and
+// [Clock.AllocateFor].
+//
+// Safe for concurrent use.
+type commitRegistry struct {
+	slots atomic.Pointer[[registrySlots]atomic.Pointer[CommitInfo]]
+	// outOfOrder counts publications that finished while an earlier timestamp
+	// was still in flight; helped counts publications performed on an owner's
+	// behalf; chained counts claims that found the previous lap's record still
+	// pending and linked behind it. See the [Clock] accessors.
+	outOfOrder atomic.Uint64
+	helped     atomic.Uint64
+	chained    atomic.Uint64
+	// pending is how many records are marked finished and not yet passed by the
+	// frontier. While it is zero an in-order publication has nothing above it to
+	// carry the frontier over, and skips the walk (see [Clock.finishCommitTS]).
+	// It can read -1 for an instant: a record is marked before it is counted in,
+	// so a party that passes it in between counts it out first.
+	pending atomic.Int64
+	// linked is how many records hold a non-nil [CommitInfo.older]. While it is
+	// zero an in-order publication has no link to clear on the record it passes,
+	// and skips looking the record up (see [commitRegistry.unlink]).
+	linked atomic.Int64
+}
+
+// The states of [CommitInfo.finished].
 const (
-	// clWordBits is how many timestamps one bitmap word carries.
-	clWordBits = 64
-	// clWordsPerBlock sizes one block at 512 bytes of bitmap, which is 4096
-	// timestamps. Memgraph uses 8192 words (524 288 ids) per block because its
-	// ids are transaction ids, allocated at BEGIN and therefore live for the
-	// whole transaction. GoGraph's are commit timestamps allocated at commit,
-	// so the live window is the number of writers inside their commit section —
-	// tens, not hundreds of thousands. A block two orders of magnitude smaller
-	// keeps the resident bitmap at half a kilobyte in the normal case while
-	// still absorbing 4096 commits before a single allocation.
-	clWordsPerBlock = 64
-	// clIDsPerBlock is how many timestamps one block addresses.
-	clIDsPerBlock = clWordsPerBlock * clWordBits
-	// clAllFinished is a word in which every timestamp has finished.
-	clAllFinished = ^uint64(0)
+	finishedNone    = 0
+	finishedMarked  = 1
+	finishedCounted = 2
 )
 
-// clBlock is one run of [clIDsPerBlock] consecutive timestamps.
-type clBlock struct {
-	next  *clBlock
-	words [clWordsPerBlock]uint64
-}
-
-// commitLog records which allocated commit timestamps have FINISHED — whether
-// they committed or were abandoned — and reports the newest instant below which
-// none is still in flight.
-//
-// It is NOT safe for concurrent use; [Clock] guards it with a mutex taken only
-// on the publish path, once per commit, never on a read.
-type commitLog struct {
-	// head addresses timestamps [headStart, headStart+clIDsPerBlock).
-	head *clBlock
-	// headStart is the timestamp of bit 0 of head. It only ever increases, by
-	// whole blocks, as fully-finished blocks are retired.
-	headStart uint64
-	// blocked counts the reasons the publish fast path in [Clock.finishCommitTS]
-	// must not run. It is ZERO in the state that path exists for, so its guard is
-	// one atomic load (rmp #2362).
-	//
-	// TWO things block it, and both are load-bearing:
-	//
-	//  1. A SET BIT ABOVE THE FRONTIER. [commitLog.advance] walks over every
-	//     contiguous set bit and can move the frontier by many; the fast path moves
-	//     it by exactly one. With a bit already set above, advancing by one strands
-	//     the rest — durable, acknowledged, and invisible for ever, because no
-	//     later publication revisits them. docs/mvcc-publish-fast-path.md records
-	//     that stall and the reasoning that found it.
-	//
-	//  2. A PUBLISHER INSIDE THE LOCKED PATH ([commitLog.blockFastPath]). The
-	//     locked path reads `visible` to catch the log up to it; a fast path that
-	//     advanced `visible` AFTER that read would leave the bit the publisher is
-	//     about to set stranded in exactly the same way. Holding this up across the
-	//     whole critical section is what forces such a fast path to see a non-zero
-	//     count on its post-CAS re-check and fall through to the lock, where the
-	//     catch-up is exact.
-	//
-	// Together they close the race that neither closes alone: a stall needs a fast
-	// path whose re-check sees zero AND a publisher that missed its advance, and
-	// the publisher's own count cannot be released before the bit it stranded is
-	// counted, so the re-check cannot see zero.
-	//
-	// It is a FLAG, not a count, and it is written only on the transition. The fast
-	// path compares it with zero and nothing else, so the exact number of reasons is
-	// of no interest to any reader — and publishing it on every reason is what made
-	// an out-of-order publication cost twice as much when this was an
-	// atomic read-modify-write. The real count lives in `bits` below, in plain
-	// arithmetic under pubMu, and a run of out-of-order publications now stores here
-	// twice in total rather than twice per commit.
-	//
-	// Written only under pubMu; read without it by the fast path, hence atomic.
-	blocked atomic.Int64
-	// flagged mirrors `blocked` for the writer's own use, so the store above can be
-	// skipped when the flag is already in the state it needs. Plain: every write to
-	// both is under pubMu.
-	flagged bool
-	// bits is how many set bits sit ABOVE the frontier — reason 1 above. Plain,
-	// because pubMu serialises every mutation; it reaches the fast path only
-	// through `blocked`.
-	bits int64
-	// oldest is the smallest allocated timestamp that has NOT finished. Every
-	// timestamp below it has, so oldest-1 is the frontier a reader may start
-	// at. Timestamps are allocated from 1, so it starts at 1 and the initial
-	// frontier is 0 — nothing committed.
-	oldest uint64
-}
-
-// frontier is the newest timestamp below which nothing is in flight.
-func (l *commitLog) frontier() uint64 {
-	if l.oldest == 0 {
-		return 0 // zero value: nothing allocated yet
-	}
-	return l.oldest - 1
-}
-
-// finish records that ts will never be published again — it either committed or
-// was abandoned — and returns the resulting frontier.
-//
-// A timestamp already swept past is ignored rather than treated as an error:
-// the frontier has moved beyond it, so re-marking it could only corrupt a block
-// that no longer describes it.
-func (l *commitLog) finish(ts uint64) uint64 {
-	if l.oldest == 0 {
-		// Zero value. Timestamps are allocated from 1.
-		l.oldest, l.headStart = 1, 1
-	}
-	if ts < l.oldest {
-		return l.frontier()
-	}
-	block, start := l.blockFor(ts)
-	off := ts - start
-	block.words[off/clWordBits] |= 1 << (off % clWordBits)
-	if ts != l.oldest {
-		l.bits++ // a bit above the frontier; see [commitLog.blocked]
-		return l.frontier()
-	}
-	before := l.oldest
-	l.advance()
-	// advance() consumed this timestamp plus every already-finished one above it.
-	// This one was never counted — it was never above the frontier — and the rest
-	// were counted when their bits were set.
-	if n := l.oldest - before; n > 1 {
-		l.bits -= int64(n - 1)
-	}
-	return l.frontier()
-}
-
-// syncTo declares that every timestamp at or below floor has finished — whoever
-// recorded it, and whether or not this log holds a bit for it — and resumes the
-// contiguous walk from there. It returns the resulting frontier.
-//
-// # Why the locked path cannot skip it (rmp #2362)
-//
-// The publish fast path raises [Clock.visible] WITHOUT taking pubMu, and therefore
-// without touching the log, so `oldest` can lag the published frontier by an
-// unbounded amount — a single writer committing in order never enters the locked
-// path at all. Two things then go wrong if the locked path walks from its own
-// stale position:
-//
-//   - [commitLog.blockFor] extends the chain from headStart, so it would allocate
-//     one block for every [clIDsPerBlock] timestamps the fast path published;
-//   - the frontier it computes is BELOW `visible`, so a bit set above the true
-//     frontier is never consumed and the commit carrying it stays invisible.
-//
-// # Why the jump needs no adjustment to `blocked`
-//
-// Nothing in (oldest, floor] can carry a set bit. A bit above `oldest` blocks the
-// fast path, so `visible` cannot have passed it; and the locked path calls this
-// BEFORE [commitLog.finish], so a timestamp at or below the published frontier
-// takes finish's `ts < l.oldest` early return and records nothing. The jump
-// therefore crosses clear bits only, and only the advance below retires any.
-//
-// Not safe for concurrent use; the caller holds pubMu.
-func (l *commitLog) syncTo(floor uint64) uint64 {
-	if l.oldest == 0 {
-		// Zero value. Timestamps are allocated from 1.
-		l.oldest, l.headStart = 1, 1
-	}
-	if floor < l.oldest {
-		return l.frontier() // already at or ahead of the published frontier
-	}
-	l.oldest = floor + 1
-	l.retireBehind()
-	// Whatever is already finished above the new position must be consumed HERE.
-	// This runs on the fall-through case, where the fast path has already put ts
-	// into `visible`, so the finish(ts) that follows takes its early return and
-	// never advances — leaving this the only chance to close the gap.
-	before := l.oldest
-	l.advance()
-	if n := l.oldest - before; n > 0 {
-		l.bits -= int64(n)
-	}
-	return l.frontier()
-}
-
-// enterPublish and exitPublish bracket a publisher's critical section, so a fast
-// path whose CAS lands inside it falls through to the lock rather than advancing
-// the frontier the publisher is about to compute. See [commitLog.blocked] for why
-// this is necessary and not merely conservative.
-//
-// enterPublish MUST be called before the publisher reads the frontier it will
-// compute from — that ordering is the whole point, and reversing it reopens the
-// stall.
-//
-// The flag being up does NOT mean the log is in step with the published frontier,
-// and an earlier draft that skipped [commitLog.syncTo] on that reasoning was
-// wrong: a fast path can raise `visible` and only THEN see the flag on its
-// re-check, so a raise can land while the flag is up. syncTo is unconditional for
-// that reason.
-func (l *commitLog) enterPublish() {
-	if l.flagged {
-		return
-	}
-	l.flagged = true
-	l.blocked.Store(1)
-}
-
-// exitPublish lowers the flag, unless a set bit above the frontier keeps it up on
-// its own.
-func (l *commitLog) exitPublish() {
-	if l.bits != 0 {
-		return
-	}
-	l.flagged = false
-	l.blocked.Store(0)
-}
-
-// fastPathUsable reports whether the frontier may be advanced without pubMu.
-func (l *commitLog) fastPathUsable() bool { return l.blocked.Load() == 0 }
-
-// rebase declares that every timestamp at or below floor has finished, discards
-// the tracking state below it, and leaves the log addressing floor+1 onwards.
-//
-// # Why recovery needs it, and the defect that proves it (rmp #2309)
-//
-// [Clock.RatchetTo] restores a derived clock by raising the allocation counter and
-// the visible frontier. Those two are atomics, but the CONTIGUITY is not: it lives
-// here, in `oldest`, and a log that still believes timestamp 1 is unfinished
-// computes a frontier of 0 forever.
-//
-// The consequence is total and silent. After a ratchet to F the next commit
-// allocates F+1 and calls [commitLog.finish], which sets its bit but does not
-// advance — F+1 is not `oldest`, which is still 1. `frontier()` returns 0,
-// [Clock.finishCommitTS] only ever raises `visible`, so the frontier never moves
-// past F again and EVERY POST-RECOVERY COMMIT IS INVISIBLE FOR THE LIFE OF THE
-// PROCESS. Writes keep succeeding; readers simply never see them.
-//
-// That is not hypothetical: the first version of RatchetTo moved only the two
-// counters, and internal/sim's full-stack crash-recovery scenario caught it as node
-// LOSS against the oracle (21 nodes expected, 15 present) — a shape that looks
-// nothing like a clock defect, which is why it is pinned by a test here as well.
-//
-// Not safe for concurrent use; the caller holds pubMu, and recovery has no commits
-// in flight by construction.
-func (l *commitLog) rebase(floor uint64) {
-	// A fresh head addressing floor+1 onwards: everything below is finished by
-	// declaration, so the old blocks describe nothing anyone can ask about.
-	l.head = &clBlock{}
-	l.headStart = floor + 1
-	l.oldest = floor + 1
-	// Every bit the log held described a timestamp below the new floor, so nothing
-	// above the frontier is recorded any more; recovery has no commit in flight by
-	// construction, so the publisher half is zero too. Leaving a stale count here
-	// would disable the publish fast path for the life of the process.
-	l.bits = 0
-	l.flagged = false
-	l.blocked.Store(0)
-}
-
-// retireBehind drops every block the log has left entirely behind, so that head
-// addresses `oldest` again.
-//
-// [commitLog.advance] does this one block at a time as it walks, which is right
-// when the frontier moves by a handful of timestamps. A jump from
-// [commitLog.syncTo] can skip arbitrarily many at once — a long run of fast-path
-// publications leaves `oldest` as far behind as it likes — so the case where
-// nothing follows head is rebased directly rather than one block per iteration.
-func (l *commitLog) retireBehind() {
-	if l.head == nil {
-		l.headStart = l.oldest // nothing allocated: rebase the empty log
-		return
-	}
-	for l.oldest >= l.headStart+clIDsPerBlock {
-		if l.head.next == nil {
-			// Nothing follows, so nothing at or above `oldest` is recorded: reuse
-			// the block the log already owns rather than churning an allocation.
-			*l.head = clBlock{}
-			l.headStart = l.oldest
-			return
-		}
-		l.retireHead()
+// settle takes a record the frontier has passed back out of pending, exactly
+// once whoever calls it.
+func (r *commitRegistry) settle(rec *CommitInfo) {
+	if rec.finished.CompareAndSwap(finishedMarked, finishedCounted) {
+		r.pending.Add(-1)
 	}
 }
 
-// blockFor returns the block addressing ts, and the timestamp of its bit 0,
-// extending the chain as far as necessary.
-//
-// It walks from head, which is O(live blocks) — one in the normal case, since a
-// block covers 4096 commits and is retired as soon as it is fully finished.
-func (l *commitLog) blockFor(ts uint64) (*clBlock, uint64) {
-	if l.head == nil {
-		l.head = &clBlock{}
-	}
-	b, start := l.head, l.headStart
-	for ts >= start+clIDsPerBlock {
-		if b.next == nil {
-			b.next = &clBlock{}
-		}
-		b, start = b.next, start+clIDsPerBlock
-	}
-	return b, start
+// passed is what every party that carries the frontier over rec owes it: take it
+// out of pending, and drop its link to the previous lap's record.
+func (r *commitRegistry) passed(rec *CommitInfo) {
+	r.settle(rec)
+	r.unlink(rec)
 }
 
-// advance moves oldest past every contiguously finished timestamp, retiring any
-// block it leaves entirely behind.
+// unlink clears rec's link to the previous lap's record of its slot, exactly
+// once whoever calls it. The caller has just carried the frontier over rec, so
+// the frontier is past the linked record too and nothing needs to find it any
+// more. Clearing the link is what lets a chained record be reclaimed: rec is
+// referenced by every version its transaction wrote, so a link kept for rec's
+// lifetime would keep the chain behind it alive as long (rmp #2932 audit).
 //
-// It is called only when the timestamp just finished WAS the oldest unfinished
-// one, so the common case walks a handful of bits: the frontier is at most as
-// far behind as the number of writers committing at once.
-func (l *commitLog) advance() {
-	for l.head != nil {
-		off := l.oldest - l.headStart
-		if off >= clIDsPerBlock {
-			l.retireHead()
+// No unpassed record becomes unreachable: a link is cleared only on a record the
+// frontier has passed, and a chain is ordered newest first, so every record
+// behind a passed one has been passed as well.
+func (r *commitRegistry) unlink(rec *CommitInfo) {
+	if o := rec.older.Load(); o != nil && rec.older.CompareAndSwap(o, nil) {
+		r.linked.Add(-1)
+	}
+}
+
+// table returns the registry's slots, allocating them the first time.
+func (r *commitRegistry) table() *[registrySlots]atomic.Pointer[CommitInfo] {
+	if t := r.slots.Load(); t != nil {
+		return t
+	}
+	fresh := new([registrySlots]atomic.Pointer[CommitInfo])
+	if r.slots.CompareAndSwap(nil, fresh) {
+		return fresh
+	}
+	return r.slots.Load()
+}
+
+// claim allocates the next commit timestamp by installing info as the head of
+// that timestamp's slot, and returns it. The compare-and-swap on the slot is the
+// arbiter: exactly one record wins each timestamp. The allocation counter
+// follows the slot, and an allocator that finds a slot claimed ahead of the
+// counter advances the counter for the claimant, so a claimant descheduled
+// between the two steps delays nobody.
+//
+// When the slot's current head belongs to a timestamp the frontier has not yet
+// passed — more than registrySlots commits in flight — info is linked in front
+// of it rather than replacing it, so every pending record stays findable. Nothing
+// ever waits for room.
+func (r *commitRegistry) claim(commit, visible *atomic.Uint64, info *CommitInfo) uint64 {
+	t := r.table()
+	for {
+		ts := commit.Load() + 1
+		slot := &t[ts&registryMask]
+		head := slot.Load()
+		if head != nil && head.claim.Load() >= ts {
+			commit.CompareAndSwap(ts-1, ts)
 			continue
 		}
-		word, bit := off/clWordBits, off%clWordBits
-		w := l.head.words[word]
-		if bit == 0 && w == clAllFinished {
-			// Whole word finished: skip it without touching 64 bits one by one.
-			l.oldest += clWordBits
-			continue
+		info.claim.Store(ts)
+		var older *CommitInfo
+		if head != nil && head.claim.Load() > visible.Load() {
+			older = head
+			// Counted in BEFORE the record is installed: the timestamp does not
+			// exist until then, so whoever later passes it — and reads linked to
+			// decide whether to look for a link — reads it after this.
+			r.linked.Add(1)
 		}
-		// The first clear bit at or above `bit` is where the frontier stops.
-		// Inverting and masking off the bits below `bit` turns that into one
-		// trailing-zeros instruction.
-		unfinished := ^w &^ ((1 << bit) - 1)
-		if unfinished == 0 {
-			l.oldest += clWordBits - bit // rest of the word is finished
-			continue
+		info.older.Store(older)
+		if slot.CompareAndSwap(head, info) {
+			if older != nil {
+				r.chained.Add(1)
+			}
+			commit.CompareAndSwap(ts-1, ts)
+			return ts
 		}
-		l.oldest += uint64(bits.TrailingZeros64(unfinished)) - bit
-		return
+		// Not installed, so nobody else can see the link: take it back.
+		if older != nil {
+			info.older.Store(nil)
+			r.linked.Add(-1)
+		}
 	}
 }
 
-// retireHead drops the head block, whose every timestamp has finished, and
-// rebases the log on the next one. This is what bounds the memory: what is
-// retained is the window between the oldest unfinished timestamp and the newest
-// allocated one, not the history of every commit.
-func (l *commitLog) retireHead() {
-	if l.head.next == nil {
-		// Nothing follows: reuse the block rather than churn an allocation, and
-		// rebase it on the next run of timestamps.
-		*l.head = clBlock{}
-		l.headStart += clIDsPerBlock
-		return
+// find returns the record that owns ts, or nil when ts has no record the
+// frontier has not passed. A slot's chain is ordered newest first, so the walk
+// stops at the first older claim.
+func (r *commitRegistry) find(ts uint64) *CommitInfo {
+	t := r.slots.Load()
+	if t == nil {
+		return nil
 	}
-	l.head = l.head.next
-	l.headStart += clIDsPerBlock
-}
-
-// liveBlocks reports how many blocks the log is holding. Exposed for the
-// memory-bound test; a growing value means a timestamp finished late or never.
-func (l *commitLog) liveBlocks() int {
-	n := 0
-	for b := l.head; b != nil; b = b.next {
-		n++
+	for rec := t[ts&registryMask].Load(); rec != nil; rec = rec.older.Load() {
+		switch c := rec.claim.Load(); {
+		case c == ts:
+			return rec
+		case c < ts:
+			return nil
+		}
 	}
-	return n
+	return nil
 }

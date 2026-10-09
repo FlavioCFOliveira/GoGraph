@@ -140,7 +140,9 @@ func TestProcDbPropertyKeys_DroppedAfterDelete(t *testing.T) {
 	}
 
 	// Delete the only element bearing "rare".
-	g.RemoveNode("bob")
+	if err := g.RemoveNode("bob"); err != nil {
+		t.Fatalf("g.RemoveNode(\"bob\"): %v", err)
+	}
 
 	after := propertyKeysInUse(t, eng)
 	if _, ok := after["rare"]; ok {

@@ -107,10 +107,10 @@ func TestAux_GrowAcrossAppends(t *testing.T) {
 	srcID, _ := a.Mapper().Lookup("s")
 
 	// Attach an aux column and set the value on slot 0.
-	a.UpdateEntryAux(srcID, func(cur AuxColumn, nbs []graph.NodeID) (AuxColumn, bool) {
+	must(t).B(a.UpdateEntryAux(srcID, func(cur AuxColumn, nbs []graph.NodeID) (AuxColumn, bool) {
 		base := &fakeAux{vals: make([]int, len(nbs)), present: make([]bool, len(nbs))}
 		return base.setOn(0, 100), true
-	})
+	}))
 
 	// Append three more parallel/distinct edges. Each append must grow the aux
 	// column by one absent slot via GrowSlot.
@@ -281,16 +281,16 @@ func TestAux_CompactAcrossRemoval(t *testing.T) {
 	}
 	srcID, _ := a.Mapper().Lookup("s")
 	// Set a distinct value on each slot.
-	a.UpdateEntryAux(srcID, func(cur AuxColumn, nbs []graph.NodeID) (AuxColumn, bool) {
+	must(t).B(a.UpdateEntryAux(srcID, func(cur AuxColumn, nbs []graph.NodeID) (AuxColumn, bool) {
 		f := &fakeAux{vals: make([]int, len(nbs)), present: make([]bool, len(nbs))}
 		for i := range nbs {
 			f = f.setOn(i, 10+i)
 		}
 		return f, true
-	})
+	}))
 
 	// Remove the middle edge s->d1 (slot 1).
-	a.RemoveEdge("s", "d1")
+	must(t).E(a.RemoveEdge("s", "d1"))
 
 	nbs, _ := a.LoadEntry(srcID)
 	aux := auxOf(a, srcID)
@@ -335,7 +335,7 @@ func TestAux_NilUntilSet(t *testing.T) {
 	if aux := a.LoadEntryAux(srcID); aux != nil {
 		t.Fatalf("aux is non-nil on a graph that never set one: %v", aux)
 	}
-	a.RemoveEdge("s", "d0")
+	must(t).E(a.RemoveEdge("s", "d0"))
 	if aux := a.LoadEntryAux(srcID); aux != nil {
 		t.Fatalf("aux became non-nil after a removal on a property-free graph")
 	}
@@ -353,13 +353,13 @@ func TestAux_CarriedByTrim(t *testing.T) {
 		}
 	}
 	srcID, _ := a.Mapper().Lookup("s")
-	a.UpdateEntryAux(srcID, func(cur AuxColumn, nbs []graph.NodeID) (AuxColumn, bool) {
+	must(t).B(a.UpdateEntryAux(srcID, func(cur AuxColumn, nbs []graph.NodeID) (AuxColumn, bool) {
 		f := &fakeAux{vals: make([]int, len(nbs)), present: make([]bool, len(nbs))}
 		for i := range nbs {
 			f = f.setOn(i, 50+i)
 		}
 		return f, true
-	})
+	}))
 	before := auxOf(a, srcID)
 
 	a.Compact(context.Background())
@@ -386,10 +386,13 @@ func TestAux_UpdateNoEntry(t *testing.T) {
 	a.Mapper().Intern("lonely") // interned but no edge → no entry
 	srcID, _ := a.Mapper().Lookup("lonely")
 	called := false
-	ok := a.UpdateEntryAux(srcID, func(cur AuxColumn, nbs []graph.NodeID) (AuxColumn, bool) {
+	ok, err := a.UpdateEntryAux(srcID, func(cur AuxColumn, nbs []graph.NodeID) (AuxColumn, bool) {
 		called = true
 		return cur, true
 	})
+	if err != nil {
+		t.Fatalf("UpdateEntryAux: %v", err)
+	}
 	if ok {
 		t.Fatalf("UpdateEntryAux returned true for a source with no entry")
 	}

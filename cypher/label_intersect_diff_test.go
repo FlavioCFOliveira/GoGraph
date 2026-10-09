@@ -95,7 +95,9 @@ func liDiffGraph(t *testing.T) (*lpg.Graph[string, float64], []liDiffNode) {
 	}
 	// A registered-but-EMPTY label.
 	add("empty_donor", "L1", "Vanished")
-	g.RemoveNodeLabel("empty_donor", "Vanished")
+	if err := g.RemoveNodeLabel("empty_donor", "Vanished"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"empty_donor\", \"Vanished\"): %v", err)
+	}
 	for i := range truth {
 		if truth[i].key == "empty_donor" {
 			delete(truth[i].labels, "Vanished")
@@ -104,11 +106,15 @@ func liDiffGraph(t *testing.T) (*lpg.Graph[string, float64], []liDiffNode) {
 	// A node carrying BOTH labels that is then DELETED, so a stale bitmap would
 	// surface it.
 	add("deleted_both", "L1", "L2")
-	g.RemoveNode("deleted_both")
+	if err := g.RemoveNode("deleted_both"); err != nil {
+		t.Fatalf("g.RemoveNode(\"deleted_both\"): %v", err)
+	}
 	truth = truth[:len(truth)-1]
 	// A node RELABELLED away from the conjunction after the fact.
 	add("relabelled_away", "L1", "L2")
-	g.RemoveNodeLabel("relabelled_away", "L2")
+	if err := g.RemoveNodeLabel("relabelled_away", "L2"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"relabelled_away\", \"L2\"): %v", err)
+	}
 	for i := range truth {
 		if truth[i].key == "relabelled_away" {
 			delete(truth[i].labels, "L2")
@@ -266,6 +272,40 @@ func TestLabelIntersect_Differential(t *testing.T) {
 		wantFire: true,
 	}}
 
+	// checkAnswers is the plan-independent half of the gate: both arms agree with
+	// each other and with the absolute oracle.
+	checkAnswers := func(t *testing.T, query string, want []string) {
+		t.Helper()
+		gotOn := liRunKeys(t, on, query)
+		gotOff := liRunKeys(t, off, query)
+
+		// (1) The two arms must agree, whatever the answer is.
+		assertSameStrings(t, "enabled vs disabled", gotOn, gotOff)
+		// (2) And both must equal the absolute oracle.
+		if want != nil {
+			// (2) MEMBERSHIP against the absolute oracle, not merely cardinality.
+			assertSameStrings(t, "enabled vs Go oracle", gotOn, want)
+			assertSameStrings(t, "disabled vs Go oracle", gotOff, want)
+		} else if len(gotOn) != 0 {
+			t.Fatalf("expected an empty result, got %d rows: %v", len(gotOn), gotOn)
+		}
+	}
+
+	// The answers are checked first against the fixture as written, while its MVCC
+	// history may still be live, because the right answer must not depend on the
+	// vacuum. The PLAN does: above planExactBacklog the planner's label counts are
+	// upper bounds (rmp #3010), under which a registered-but-empty label is not
+	// provably empty and the gate declines. The background vacuum reclaims this
+	// fixture's history asynchronously, so the plan assertions below run only once
+	// ReclaimNow has settled it — otherwise they depended on whether that goroutine
+	// had been scheduled.
+	for _, tc := range cases {
+		t.Run("live_history/"+tc.name, func(t *testing.T) {
+			checkAnswers(t, tc.query, tc.want)
+		})
+	}
+	g.ReclaimNow()
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			planOn, err := on.Explain(tc.query, nil)
@@ -286,19 +326,7 @@ func TestLabelIntersect_Differential(t *testing.T) {
 				}
 			}
 
-			gotOn := liRunKeys(t, on, tc.query)
-			gotOff := liRunKeys(t, off, tc.query)
-
-			// (1) The two arms must agree, whatever the answer is.
-			assertSameStrings(t, "enabled vs disabled", gotOn, gotOff)
-			// (2) And both must equal the absolute oracle.
-			if tc.want != nil {
-				// (2) MEMBERSHIP against the absolute oracle, not merely cardinality.
-				assertSameStrings(t, "enabled vs Go oracle", gotOn, tc.want)
-				assertSameStrings(t, "disabled vs Go oracle", gotOff, tc.want)
-			} else if len(gotOn) != 0 {
-				t.Fatalf("expected an empty result, got %d rows: %v", len(gotOn), gotOn)
-			}
+			checkAnswers(t, tc.query, tc.want)
 		})
 	}
 }
@@ -483,7 +511,9 @@ func TestLabelIntersect_ConcurrentRelabelling(t *testing.T) {
 				if err := g.SetNodeLabel(k, "CB"); err != nil {
 					return
 				}
-				g.RemoveNodeLabel(k, "CB")
+				if err := g.RemoveNodeLabel(k, "CB"); err != nil {
+					t.Errorf("g.RemoveNodeLabel(k, \"CB\"): %v", err)
+				}
 			}
 		}
 	}()

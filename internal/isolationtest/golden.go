@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -37,7 +38,7 @@ func Check(t *testing.T, s *Spec, r *Runner) {
 	if err := r.Run(context.Background(), s, &buf); err != nil {
 		t.Fatalf("run spec %s: %v", s.Name, err)
 	}
-	path := filepath.Join("testdata", s.Name+".golden")
+	path := goldenPath(s.Name)
 	if !goldens.UpdateRequested() {
 		if want, err := readGolden(path); err == nil && !bytes.Equal(want, buf.Bytes()) {
 			t.Errorf("spec %s: transcript differs from %s\n%s",
@@ -91,8 +92,26 @@ func diffLines(want, got string) string {
 	return b.String()
 }
 
-// readGolden reads a golden transcript, relative to the calling test's package
-// directory exactly as [goldens.Assert] resolves it.
+// goldenPath returns the ABSOLUTE path of spec name's golden transcript:
+// testdata/<name>.golden in this package's own directory.
+//
+// It is absolute so that the pre-diff in [Check] and [goldens.Assert] read the
+// same file whatever the test's working directory. goldens.Assert resolves a
+// relative path against the source file of ITS caller, which is this package
+// (golden.go), never the test that called Check; reading the same relative path
+// with os.ReadFile resolved it against the working directory instead, which is
+// the CALLING test's package. For a caller outside this package the pre-diff
+// therefore found no file and stayed silent while goldens.Assert still failed
+// with its plain line diff.
+func goldenPath(name string) string {
+	dir := "."
+	if _, self, _, ok := runtime.Caller(0); ok {
+		dir = filepath.Dir(self)
+	}
+	return filepath.Join(dir, "testdata", name+".golden")
+}
+
+// readGolden reads a golden transcript at path, as [goldenPath] names it.
 func readGolden(path string) ([]byte, error) {
 	return os.ReadFile(filepath.Clean(path))
 }

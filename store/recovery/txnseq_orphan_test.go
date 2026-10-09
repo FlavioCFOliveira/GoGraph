@@ -1,8 +1,6 @@
 package recovery
 
 import (
-	"bytes"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -26,7 +24,7 @@ import (
 //
 //  1. On ONE store (so txnSeq is monotonic: tx1 = seq 1, tx2 = seq 2),
 //     commit tx1 (AddNode "a") then tx2 (AddNode "b") and close the WAL.
-//  2. Splice tx1's OpCommit frame out of the WAL file, simulating a
+//  2. Splice tx1's OpCommit frame out of the WAL (as a legacy fixture), simulating a
 //     commit that failed between its data frames and its marker while
 //     the WAL kept growing. Frames are independently CRC'd, so the
 //     remaining sequence is well-formed: AddNode("a") seq 1 (orphaned),
@@ -72,40 +70,27 @@ func TestRecovery_OrphanedPendingOpsDiscardedOnTxnSeqMismatch(t *testing.T) {
 		t.Fatalf("wal Close: %v", err)
 	}
 
-	// Step 2: locate tx1's OpCommit frame (Kind == OpCommit, TxnSeq == 1)
-	// by walking the frames with the production decoder, then rewrite the
-	// file without it.
-	raw, err := os.ReadFile(walPath) //nolint:gosec // path under t.TempDir
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	r := bytes.NewReader(raw)
-	total := len(raw)
-	spliceStart, spliceEnd := -1, -1
-	for {
-		frameStart := total - r.Len()
-		f, derr := wal.Decode(r)
-		if derr != nil {
-			break // clean EOF surfaces as ErrTornFrame; the walk is done
-		}
-		frameEnd := total - r.Len()
-		op, oerr := Decode(f.Payload)
+	// Step 2: drop tx1's OpCommit frame (Kind == OpCommit, TxnSeq == 1) and
+	// rewrite the log as a legacy single-file fixture: removing a frame from a
+	// segmented log breaks its positions, which recovery refuses before the
+	// replay state machine under test is ever reached.
+	var kept [][]byte
+	found := false
+	for _, p := range logPayloads(t, walPath) {
+		op, oerr := Decode(p)
 		if oerr != nil {
-			t.Fatalf("Decode frame at offset %d: %v", frameStart, oerr)
+			t.Fatalf("Decode: %v", oerr)
 		}
 		if op.Kind == txn.OpCommit && op.TxnSeq == 1 {
-			spliceStart, spliceEnd = frameStart, frameEnd
+			found = true
+			continue
 		}
+		kept = append(kept, p)
 	}
-	if spliceStart < 0 {
+	if !found {
 		t.Fatal("tx1 OpCommit frame not found in WAL")
 	}
-	spliced := make([]byte, 0, len(raw)-(spliceEnd-spliceStart))
-	spliced = append(spliced, raw[:spliceStart]...)
-	spliced = append(spliced, raw[spliceEnd:]...)
-	if err := os.WriteFile(walPath, spliced, 0o600); err != nil { //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
-		t.Fatalf("WriteFile (spliced WAL): %v", err)
-	}
+	spliced := writeLegacyLog(t, walPath, kept)
 
 	// Step 3: recovery must apply ONLY tx2. The orphaned tx1 ops precede
 	// tx2's in the buffer and carry TxnSeq 1 != 2; the suffix filter must
@@ -126,7 +111,7 @@ func TestRecovery_OrphanedPendingOpsDiscardedOnTxnSeqMismatch(t *testing.T) {
 	if _, ok := res.Graph.AdjList().Mapper().Lookup("a"); ok {
 		t.Fatal("node 'a' present after recovery: aborted tx1 was resurrected by tx2's OpCommit (Atomicity violation)")
 	}
-	if res.WALTailOffset != int64(len(spliced)) {
-		t.Fatalf("WALTailOffset = %d, want %d", res.WALTailOffset, int64(len(spliced)))
+	if res.WALEnd != int64(len(spliced)) {
+		t.Fatalf("WALEnd = %d, want %d", res.WALEnd, int64(len(spliced)))
 	}
 }

@@ -106,14 +106,18 @@ func TestCSRPairCache_ConsultationsPartitionExactly(t *testing.T) {
 	}
 
 	// 2. A WRITE transaction that also expands must not be served, and must not
-	//    serve. Which bypass bucket it lands in is deliberately NOT asserted: the
+	//    serve. The hop is INCOMING on purpose: since rmp #2883 a write
+	//    statement's forward hop reads the transaction's own adjacency per source
+	//    and never consults the cache at all (asserted at the end of this step),
+	//    so only a traversal that still builds a whole-graph pair reaches the
+	//    route this step watches. Which bypass bucket it lands in is deliberately NOT asserted: the
 	//    engine's write build threads no cache at all today, so it books
 	//    `no_cache` rather than the rmp #2446 `own_writes` — measured, and recorded
 	//    as a finding on rmp #2866 rather than pinned here, since either bucket
 	//    satisfies the rule this test is about.
 	hitsBefore := probe.get("cypher.csr_pair_cache.hits")
 	bypassBefore := probe.bypasses()
-	res, err := eng.RunAny(ctx, `MATCH (n:N {k:'a'})-[r:T]->(m) SET m.seen = true`, nil)
+	res, err := eng.RunAny(ctx, `MATCH (n:N {k:'a'})<-[r:T]-(m) SET m.seen = true`, nil)
 	if err != nil {
 		t.Fatalf("write query: %v", err)
 	}
@@ -128,6 +132,23 @@ func TestCSRPairCache_ConsultationsPartitionExactly(t *testing.T) {
 	if got := probe.get("cypher.csr_pair_cache.hits"); got != hitsBefore {
 		t.Errorf("a write transaction's expand was served %d cached pair(s): rmp #2446 "+
 			"forbids sharing a view that sees its own uncommitted writes", got-hitsBefore)
+	}
+	// The forward form of the same write consults nothing and builds nothing
+	// (rmp #2883), which satisfies rmp #2446 by construction.
+	hitsBefore, bypassBefore = probe.get("cypher.csr_pair_cache.hits"), probe.bypasses()
+	fwdBuilds := csrPairUncachedBuildCount.Load()
+	res, err = eng.RunAny(ctx, `MATCH (n:N {k:'a'})-[r:T]->(m) SET m.seen = true`, nil)
+	if err != nil {
+		t.Fatalf("forward write query: %v", err)
+	}
+	for res.Next() {
+	}
+	res.Close()
+	if d := csrPairUncachedBuildCount.Load() - fwdBuilds; d != 0 {
+		t.Errorf("a write transaction's FORWARD expand built %d CSR pair(s); want 0 (rmp #2883)", d)
+	}
+	if probe.get("cypher.csr_pair_cache.hits") != hitsBefore || probe.bypasses() != bypassBefore {
+		t.Error("a write transaction's FORWARD expand consulted the shared pair cache")
 	}
 
 	// 3. The cross-instrument identity. Every route into an O(V+E) build funnels
@@ -166,11 +187,13 @@ func TestCSRPairCache_BypassBucketsAreDistinguishable(t *testing.T) {
 	}
 
 	// A cache present, consulted through a WRITE transaction's own view — the
-	// rmp #2446 case. [lpg.Graph.WriterView] is bound to the open transaction's
+	// rmp #2446 case. [lpg.Graph.WriterViewOf] is bound to the open transaction's
 	// snapshot, which carries its id, so viewCarriesOwnWrites must refuse it.
 	cache := newCSRPairCache()
-	if err := g.ApplyVersioned(func(lpg.WriteTx) error {
-		view := g.WriterView()
+	if err := g.ApplyVersioned(func(tx lpg.WriteTx) error {
+		// The transaction's own view, carried rather than looked up: a shared
+		// bracket does not claim the ambient slot (rmp #2947).
+		view := g.WriterViewOf(tx)
 		if view.Snapshot() == nil || view.Snapshot().TxID() == 0 {
 			t.Fatal("WriterView carries no transaction id: this test is not exercising " +
 				"the own-writes case it claims to")

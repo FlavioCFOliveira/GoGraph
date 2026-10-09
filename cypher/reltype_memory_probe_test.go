@@ -70,7 +70,9 @@ func buildTypedFixture(tb testing.TB, n int) *lpg.Graph[string, float64] {
 			if err := g.AddEdge(src, dst, 1); err != nil {
 				tb.Fatalf("AddEdge: %v", err)
 			}
-			g.SetEdgeLabel(src, dst, typ)
+			if err := g.SetEdgeLabel(src, dst, typ); err != nil {
+				tb.Fatal(err)
+			}
 		}
 	}
 	return g

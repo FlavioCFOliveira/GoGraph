@@ -163,17 +163,17 @@ var parseErrorGoldens = []parseErrorGolden{
 		query: "MATCH (n) RETURN",
 		want: ParseError{
 			OffendingToken: "",
-			Message:        "mismatched input '<EOF>' expecting {'(', '{', '[', '-', '+', '*', '$', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'EXISTS', 'DISTINCT', 'NOT', 'FALSE', 'TRUE', 'NULL', 'CASE', 'EXPLAIN', 'PROFILE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT}",
+			Message:        "mismatched input '<EOF>' expecting {'(', '{', '[', '-', '+', '*', '$', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'EXISTS', 'DISTINCT', 'NOT', 'FALSE', 'TRUE', 'NULL', 'CASE', 'EXPLAIN', 'PROFILE', 'REDUCE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT}",
 			Expected: []string{"'('", "')'", "'{'", "'}'", "'['", "']'", "'-'", "'+'", "'/'", "'*'",
 				"'`'", "'$'", "'CALL'", "'FILTER'", "'EXTRACT'", "'COUNT'", "'ANY'", "'NONE'",
 				"'SINGLE'", "'ALL'", "'ASC'", "'EXISTS'", "'LIMIT'", "'DISTINCT'", "'ENDS'",
 				"'NOT'", "'OR'", "'FALSE'", "'TRUE'", "'NULL'", "'CONSTRAINT'", "'CASE'",
-				"'WHEN'", "'EXPLAIN'", "'PROFILE'", "ID", "ESC_LITERAL", "CHAR_LITERAL",
+				"'WHEN'", "'EXPLAIN'", "'PROFILE'", "'REDUCE'", "ID", "ESC_LITERAL", "CHAR_LITERAL",
 				"STRING_LITERAL", "DIGIT", "FLOAT"},
 			Line:   1,
 			Column: 16,
 		},
-		text: "parse error at 1:16, expected one of {'(', ')', '{', '}', '[', ']', '-', '+', '/', '*', '`', '$', 'CALL', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'ASC', 'EXISTS', 'LIMIT', 'DISTINCT', 'ENDS', 'NOT', 'OR', 'FALSE', 'TRUE', 'NULL', 'CONSTRAINT', 'CASE', 'WHEN', 'EXPLAIN', 'PROFILE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT, FLOAT}",
+		text: "parse error at 1:16, expected one of {'(', ')', '{', '}', '[', ']', '-', '+', '/', '*', '`', '$', 'CALL', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'ASC', 'EXISTS', 'LIMIT', 'DISTINCT', 'ENDS', 'NOT', 'OR', 'FALSE', 'TRUE', 'NULL', 'CONSTRAINT', 'CASE', 'WHEN', 'EXPLAIN', 'PROFILE', 'REDUCE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT, FLOAT}",
 	},
 	{
 		name:  "parse_unclosed_paren",
@@ -195,16 +195,16 @@ var parseErrorGoldens = []parseErrorGolden{
 		query: "RETURN 1 +",
 		want: ParseError{
 			OffendingToken: "",
-			Message:        "mismatched input '<EOF>' expecting {'(', '{', '[', '-', '+', '$', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'EXISTS', 'FALSE', 'TRUE', 'NULL', 'CASE', 'EXPLAIN', 'PROFILE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT}",
+			Message:        "mismatched input '<EOF>' expecting {'(', '{', '[', '-', '+', '$', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'EXISTS', 'FALSE', 'TRUE', 'NULL', 'CASE', 'EXPLAIN', 'PROFILE', 'REDUCE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT}",
 			Expected: []string{"'('", "')'", "'{'", "'}'", "'['", "']'", "'-'", "'+'", "'/'", "'$'",
 				"'CALL'", "'FILTER'", "'EXTRACT'", "'COUNT'", "'ANY'", "'NONE'", "'SINGLE'",
 				"'ALL'", "'ASC'", "'EXISTS'", "'LIMIT'", "'FALSE'", "'TRUE'", "'NULL'",
-				"'CONSTRAINT'", "'CASE'", "'WHEN'", "'EXPLAIN'", "'PROFILE'", "ID",
+				"'CONSTRAINT'", "'CASE'", "'WHEN'", "'EXPLAIN'", "'PROFILE'", "'REDUCE'", "ID",
 				"ESC_LITERAL", "CHAR_LITERAL", "STRING_LITERAL", "DIGIT", "FLOAT"},
 			Line:   1,
 			Column: 10,
 		},
-		text: "parse error at 1:10, expected one of {'(', ')', '{', '}', '[', ']', '-', '+', '/', '$', 'CALL', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'ASC', 'EXISTS', 'LIMIT', 'FALSE', 'TRUE', 'NULL', 'CONSTRAINT', 'CASE', 'WHEN', 'EXPLAIN', 'PROFILE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT, FLOAT}",
+		text: "parse error at 1:10, expected one of {'(', ')', '{', '}', '[', ']', '-', '+', '/', '$', 'CALL', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'ASC', 'EXISTS', 'LIMIT', 'FALSE', 'TRUE', 'NULL', 'CONSTRAINT', 'CASE', 'WHEN', 'EXPLAIN', 'PROFILE', 'REDUCE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT, FLOAT}",
 	},
 	{
 		name:  "parse_set_no_target",
@@ -230,11 +230,11 @@ var parseErrorGoldens = []parseErrorGolden{
 			Expected: []string{"'CALL'", "'YIELD'", "'CREATE'", "'DELETE'", "'DESC'", "'DETACH'",
 				"'EXISTS'", "'MATCH'", "'MERGE'", "'ON'", "'OPTIONAL'", "'ORDER'", "'REMOVE'",
 				"'RETURN'", "'SET'", "'SKIP'", "'WITH'", "'UNION'", "'UNWIND'", "'AND'",
-				"'FOREACH'", "'EXPLAIN'", "'PROFILE'", "ID"},
+				"'FOREACH'", "'EXPLAIN'", "'PROFILE'", "'REDUCE'"},
 			Line:   1,
 			Column: 0,
 		},
-		text: "unexpected \"FOO\" at 1:0, expected one of {'CALL', 'YIELD', 'CREATE', 'DELETE', 'DESC', 'DETACH', 'EXISTS', 'MATCH', 'MERGE', 'ON', 'OPTIONAL', 'ORDER', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'WITH', 'UNION', 'UNWIND', 'AND', 'FOREACH', 'EXPLAIN', 'PROFILE', ID}",
+		text: "unexpected \"FOO\" at 1:0, expected one of {'CALL', 'YIELD', 'CREATE', 'DELETE', 'DESC', 'DETACH', 'EXISTS', 'MATCH', 'MERGE', 'ON', 'OPTIONAL', 'ORDER', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'WITH', 'UNION', 'UNWIND', 'AND', 'FOREACH', 'EXPLAIN', 'PROFILE', 'REDUCE'}",
 	},
 	{
 		name:  "parse_extra_paren",
@@ -268,34 +268,41 @@ var parseErrorGoldens = []parseErrorGolden{
 		query: "RETURN ,",
 		want: ParseError{
 			OffendingToken: ",",
-			Message:        "mismatched input ',' expecting {'(', '{', '[', '-', '+', '*', '$', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'EXISTS', 'DISTINCT', 'NOT', 'FALSE', 'TRUE', 'NULL', 'CASE', 'EXPLAIN', 'PROFILE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT}",
+			Message:        "mismatched input ',' expecting {'(', '{', '[', '-', '+', '*', '$', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'EXISTS', 'DISTINCT', 'NOT', 'FALSE', 'TRUE', 'NULL', 'CASE', 'EXPLAIN', 'PROFILE', 'REDUCE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT}",
 			Expected: []string{"'('", "')'", "'{'", "'}'", "'['", "']'", "'-'", "'+'", "'/'", "'*'",
 				"'`'", "'$'", "'CALL'", "'FILTER'", "'EXTRACT'", "'COUNT'", "'ANY'", "'NONE'",
 				"'SINGLE'", "'ALL'", "'ASC'", "'EXISTS'", "'LIMIT'", "'DISTINCT'", "'ENDS'",
 				"'NOT'", "'OR'", "'FALSE'", "'TRUE'", "'NULL'", "'CONSTRAINT'", "'CASE'",
-				"'WHEN'", "'EXPLAIN'", "'PROFILE'", "ID", "ESC_LITERAL", "CHAR_LITERAL",
+				"'WHEN'", "'EXPLAIN'", "'PROFILE'", "'REDUCE'", "ID", "ESC_LITERAL", "CHAR_LITERAL",
 				"STRING_LITERAL", "DIGIT", "FLOAT"},
 			Line:   1,
 			Column: 7,
 		},
-		text: "unexpected \",\" at 1:7, expected one of {'(', ')', '{', '}', '[', ']', '-', '+', '/', '*', '`', '$', 'CALL', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'ASC', 'EXISTS', 'LIMIT', 'DISTINCT', 'ENDS', 'NOT', 'OR', 'FALSE', 'TRUE', 'NULL', 'CONSTRAINT', 'CASE', 'WHEN', 'EXPLAIN', 'PROFILE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT, FLOAT}",
+		text: "unexpected \",\" at 1:7, expected one of {'(', ')', '{', '}', '[', ']', '-', '+', '/', '*', '`', '$', 'CALL', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'ASC', 'EXISTS', 'LIMIT', 'DISTINCT', 'ENDS', 'NOT', 'OR', 'FALSE', 'TRUE', 'NULL', 'CONSTRAINT', 'CASE', 'WHEN', 'EXPLAIN', 'PROFILE', 'REDUCE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT, FLOAT}",
 	},
 	{
-		// The input that drives antlr4-go v4.13.1's DefaultErrorStrategy into
-		// an unchecked type assertion. The first stage does NOT panic on it,
-		// the second stage does, and [recoverParseScript] converts it — so this
-		// case also proves the retry reproduces a GENUINE runtime panic rather
-		// than swallowing it.
-		name:  "parse_panic_with_return",
+		// Until rmp #2899 this input drove antlr4-go v4.13.1's
+		// DefaultErrorStrategy into an unchecked type assertion: the
+		// hand-written MultiPartQ called withSt without first setting the
+		// invoking ATN state, so error recovery found an epsilon transition
+		// where it asserted a RuleTransition, and the caller saw
+		// "parser panic: interface conversion …" at 0:0. With the invoking
+		// states set, the second stage reports the syntax error itself.
+		name:  "parse_with_no_projection",
 		query: "MATCH (n) WITH RETURN n",
 		want: ParseError{
-			OffendingToken: "",
-			Message:        "parser panic: interface conversion: antlr.Transition is *antlr.EpsilonTransition, not *antlr.RuleTransition",
-			Expected:       nil,
-			Line:           0,
-			Column:         0,
+			OffendingToken: "RETURN",
+			Message:        "extraneous input 'RETURN' expecting {'(', '{', '[', '-', '+', '*', '$', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'EXISTS', 'DISTINCT', 'NOT', 'FALSE', 'TRUE', 'NULL', 'CASE', 'EXPLAIN', 'PROFILE', 'REDUCE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT}",
+			Expected: []string{"'('", "')'", "'{'", "'}'", "'['", "']'", "'-'", "'+'", "'/'", "'*'",
+				"'`'", "'$'", "'CALL'", "'FILTER'", "'EXTRACT'", "'COUNT'", "'ANY'", "'NONE'",
+				"'SINGLE'", "'ALL'", "'ASC'", "'EXISTS'", "'LIMIT'", "'DISTINCT'", "'ENDS'",
+				"'NOT'", "'OR'", "'FALSE'", "'TRUE'", "'NULL'", "'CONSTRAINT'", "'CASE'",
+				"'WHEN'", "'EXPLAIN'", "'PROFILE'", "'REDUCE'", "ID", "ESC_LITERAL", "CHAR_LITERAL",
+				"STRING_LITERAL", "DIGIT", "FLOAT"},
+			Line:   1,
+			Column: 15,
 		},
-		text: "parse error at 0:0: parser panic: interface conversion: antlr.Transition is *antlr.EpsilonTransition, not *antlr.RuleTransition",
+		text: "unexpected \"RETURN\" at 1:15, expected one of {'(', ')', '{', '}', '[', ']', '-', '+', '/', '*', '`', '$', 'CALL', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'ASC', 'EXISTS', 'LIMIT', 'DISTINCT', 'ENDS', 'NOT', 'OR', 'FALSE', 'TRUE', 'NULL', 'CONSTRAINT', 'CASE', 'WHEN', 'EXPLAIN', 'PROFILE', 'REDUCE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT, FLOAT}",
 	},
 	{
 		name:  "empty_input",
@@ -306,11 +313,11 @@ var parseErrorGoldens = []parseErrorGolden{
 			Expected: []string{"'CALL'", "'YIELD'", "'CREATE'", "'DELETE'", "'DESC'", "'DETACH'",
 				"'EXISTS'", "'MATCH'", "'MERGE'", "'ON'", "'OPTIONAL'", "'ORDER'", "'REMOVE'",
 				"'RETURN'", "'SET'", "'SKIP'", "'WITH'", "'UNION'", "'UNWIND'", "'AND'",
-				"'FOREACH'", "'EXPLAIN'", "'PROFILE'", "ID"},
+				"'FOREACH'", "'EXPLAIN'", "'PROFILE'", "'REDUCE'"},
 			Line:   1,
 			Column: 0,
 		},
-		text: "parse error at 1:0, expected one of {'CALL', 'YIELD', 'CREATE', 'DELETE', 'DESC', 'DETACH', 'EXISTS', 'MATCH', 'MERGE', 'ON', 'OPTIONAL', 'ORDER', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'WITH', 'UNION', 'UNWIND', 'AND', 'FOREACH', 'EXPLAIN', 'PROFILE', ID}",
+		text: "parse error at 1:0, expected one of {'CALL', 'YIELD', 'CREATE', 'DELETE', 'DESC', 'DETACH', 'EXISTS', 'MATCH', 'MERGE', 'ON', 'OPTIONAL', 'ORDER', 'REMOVE', 'RETURN', 'SET', 'SKIP', 'WITH', 'UNION', 'UNWIND', 'AND', 'FOREACH', 'EXPLAIN', 'PROFILE', 'REDUCE'}",
 	},
 	{
 		name:  "parse_unclosed_list",
@@ -329,16 +336,16 @@ var parseErrorGoldens = []parseErrorGolden{
 		query: "RETURN CASE WHEN THEN 1 END",
 		want: ParseError{
 			OffendingToken: "THEN",
-			Message:        "extraneous input 'THEN' expecting {'(', '{', '[', '-', '+', '$', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'EXISTS', 'NOT', 'FALSE', 'TRUE', 'NULL', 'CASE', 'EXPLAIN', 'PROFILE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT}",
+			Message:        "extraneous input 'THEN' expecting {'(', '{', '[', '-', '+', '$', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'EXISTS', 'NOT', 'FALSE', 'TRUE', 'NULL', 'CASE', 'EXPLAIN', 'PROFILE', 'REDUCE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT}",
 			Expected: []string{"'('", "')'", "'{'", "'}'", "'['", "']'", "'-'", "'+'", "'/'", "'$'",
 				"'CALL'", "'FILTER'", "'EXTRACT'", "'COUNT'", "'ANY'", "'NONE'", "'SINGLE'",
 				"'ALL'", "'ASC'", "'EXISTS'", "'LIMIT'", "'NOT'", "'OR'", "'FALSE'", "'TRUE'",
-				"'NULL'", "'CONSTRAINT'", "'CASE'", "'WHEN'", "'EXPLAIN'", "'PROFILE'", "ID",
+				"'NULL'", "'CONSTRAINT'", "'CASE'", "'WHEN'", "'EXPLAIN'", "'PROFILE'", "'REDUCE'", "ID",
 				"ESC_LITERAL", "CHAR_LITERAL", "STRING_LITERAL", "DIGIT", "FLOAT"},
 			Line:   1,
 			Column: 17,
 		},
-		text: "unexpected \"THEN\" at 1:17, expected one of {'(', ')', '{', '}', '[', ']', '-', '+', '/', '$', 'CALL', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'ASC', 'EXISTS', 'LIMIT', 'NOT', 'OR', 'FALSE', 'TRUE', 'NULL', 'CONSTRAINT', 'CASE', 'WHEN', 'EXPLAIN', 'PROFILE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT, FLOAT}",
+		text: "unexpected \"THEN\" at 1:17, expected one of {'(', ')', '{', '}', '[', ']', '-', '+', '/', '$', 'CALL', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'ASC', 'EXISTS', 'LIMIT', 'NOT', 'OR', 'FALSE', 'TRUE', 'NULL', 'CONSTRAINT', 'CASE', 'WHEN', 'EXPLAIN', 'PROFILE', 'REDUCE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT, FLOAT}",
 	},
 	{
 		name:  "parse_nul_bytes",

@@ -79,6 +79,9 @@
 //   - [snapshot.WriteSnapshotFull] writes a full CSR-plus-labels snapshot
 //     to a directory.
 //   - [recovery.Open] reconstructs a graph from a snapshot and its WAL.
+//   - [store.Open] reopens a store directory for writing in one call:
+//     recovery, the clean gate, the WAL open, and the transactional store
+//     built from the recovery result.
 //
 // Serve the Bolt protocol:
 //

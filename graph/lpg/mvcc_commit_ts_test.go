@@ -176,3 +176,40 @@ func TestAllocateCommitTS_ZeroWhenThereIsNothingToStamp(t *testing.T) {
 		t.Fatalf("AllocateCommitTS with no transaction = %d, want 0", got)
 	}
 }
+
+// TestAllocateCommitTS_KeepsTheRecordItRegisters pins that a durable
+// transaction's early allocation keeps the record it registers — an anonymous
+// one when the transaction has versioned nothing yet — so the discharge can pass
+// it to the clock (rmp #2932 re-audit, N3), and that the discharge clears it.
+func TestAllocateCommitTS_KeepsTheRecordItRegisters(t *testing.T) {
+	g := commitTSGraph(t)
+	for _, versioned := range []bool{false, true} {
+		if err := g.ApplyVersioned(func(tx WriteTx) error {
+			if versioned {
+				if err := g.Writer(tx).AddNode("n"); err != nil {
+					return err
+				}
+			}
+			if ts := g.AllocateCommitTS(tx); ts == 0 {
+				t.Fatal("fixture: no instant allocated")
+			}
+			if tx.w.allocRec == nil {
+				t.Fatalf("versioned=%v: the allocation kept no record", versioned)
+			}
+			if versioned && tx.w.allocRec != tx.w.tx.OpenRecord() {
+				t.Fatal("the allocation registered a record other than the transaction's own")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if n := g.MVCCStats().InFlightCommits; n != 0 {
+			t.Fatalf("versioned=%v: InFlightCommits = %d after the discharge", versioned, n)
+		}
+	}
+	w := g.acquireWriteCtx(0, 0)
+	if w.allocRec != nil {
+		t.Fatal("recycled write state carries a registered record")
+	}
+	g.releaseWriteCtx(w)
+}

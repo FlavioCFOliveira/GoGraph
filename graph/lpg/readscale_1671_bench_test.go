@@ -2,13 +2,14 @@ package lpg
 
 // readscale_1671_bench_test.go — empirical read-scaling baseline for #1671.
 //
-// Measures how a transactional reader (Graph.View bracketing a realistic
-// per-row read of labels + a property) scales with goroutine count while a
-// background writer commits multi-op transactions via Graph.ApplyAtomically.
-// Under the current visMu RWMutex barrier, View takes the read side of visMu;
-// a writer holding the write side excludes every reader for its whole apply.
-// The benchmark quantifies that reader/writer exclusion so the lock-free
-// snapshot end-state (#1671) can be compared against it with benchstat.
+// Measures how a reader doing a realistic per-row read of labels + a property
+// scales with goroutine count while a background writer commits multi-op
+// transactions via Graph.ApplyAtomically. When this was written the reader
+// bracketed the read in Graph.View, the read side of the visMu RWMutex, and the
+// writer excluded every reader for its whole apply. rmp #2344 removed
+// Graph.View: the reader now calls the direct accessors, each of which reads
+// the latest committed version through a snapshot on its own stack and takes
+// no lock, so this measures the lock-free end-state (#1671) directly.
 //
 // Run: go test -run x -bench BenchmarkReadScale1671 -benchmem -cpu=1,8,64,256 ./graph/lpg/
 //
@@ -45,10 +46,9 @@ func buildScaleGraph(tb testing.TB, nNodes int) (*Graph[string, float64], []grap
 	return g, ids
 }
 
-// BenchmarkReadScale1671_ViewBarrier measures the transactional read path under
-// the visMu barrier with NO concurrent writer (pure reader/reader scaling: many
-// View readers, which should not block one another since visMu allows shared
-// readers). This isolates the read-side lock overhead.
+// BenchmarkReadScale1671_ViewBarrier measures the read path with NO concurrent
+// writer (pure reader/reader scaling). The reads take no lock; the name records
+// the Graph.View barrier it originally measured, removed by rmp #2344.
 func BenchmarkReadScale1671_ViewBarrier(b *testing.B) {
 	g, ids := buildScaleGraph(b, 4096)
 	b.ReportAllocs()
@@ -74,10 +74,10 @@ func BenchmarkReadScale1671_ViewBarrier(b *testing.B) {
 	_ = ctr
 }
 
-// BenchmarkReadScale1671_ViewUnderWriter measures the transactional read path
-// while a single background writer commits 8-op transactions via
-// ApplyAtomically. Under the barrier, the writer's write-lock excludes all
-// readers for the apply duration — the reader/writer exclusion #1671 removes.
+// BenchmarkReadScale1671_ViewUnderWriter measures the read path while a single
+// background writer commits 8-op transactions via ApplyAtomically. The writer
+// holds the schema barrier exclusively, but the reads take no lock, so the
+// writer no longer excludes them — the reader/writer exclusion #1671 removed.
 func BenchmarkReadScale1671_ViewUnderWriter(b *testing.B) {
 	g, ids := buildScaleGraph(b, 4096)
 	stop := make(chan struct{})
@@ -91,10 +91,10 @@ func BenchmarkReadScale1671_ViewUnderWriter(b *testing.B) {
 				return
 			default:
 			}
-			_ = g.ApplyAtomically(func() error {
+			_ = g.ApplyAtomicallyTx(func(tx WriteTx) error {
 				for k := 0; k < 8; k++ {
 					key := "n" + strconv.Itoa((w+k)&(len(ids)-1))
-					_ = g.SetNodeProperty(key, "v", Int64Value(int64(w+k)))
+					_ = g.Writer(tx).SetNodeProperty(key, "v", Int64Value(int64(w+k)))
 				}
 				return nil
 			})

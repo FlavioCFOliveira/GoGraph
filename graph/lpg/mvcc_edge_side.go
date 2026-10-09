@@ -24,6 +24,9 @@ import "github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 // version can conflict, it is also what keeps an idempotent re-assertion from
 // aborting a transaction that changed nothing.
 func (g *Graph[N, W]) addOverflowVersioned(sh *edgeLabelShard, k edgeKey, lid LabelID, tx *writeCtx) bool {
+	if !g.overflowHeadAdmits(sh, k, tx) {
+		return false
+	}
 	if sh.hasOverflow(k, lid) {
 		return false
 	}
@@ -37,6 +40,9 @@ func (g *Graph[N, W]) addOverflowVersioned(sh *edgeLabelShard, k edgeKey, lid La
 // overflow list, reporting whether lid was present. The caller must hold the
 // shard's write lock.
 func (g *Graph[N, W]) removeOverflowVersioned(sh *edgeLabelShard, k edgeKey, lid LabelID, tx *writeCtx) bool {
+	if !g.overflowHeadAdmits(sh, k, tx) {
+		return false
+	}
 	if !sh.hasOverflow(k, lid) {
 		return false
 	}
@@ -50,6 +56,9 @@ func (g *Graph[N, W]) removeOverflowVersioned(sh *edgeLabelShard, k edgeKey, lid
 // label on k, returning how many were dropped. The caller must hold the shard's
 // write lock.
 func (g *Graph[N, W]) clearOverflowVersioned(sh *edgeLabelShard, k edgeKey, tx *writeCtx) int {
+	if !g.overflowHeadAdmits(sh, k, tx) {
+		return 0
+	}
 	if len(sh.overflow[k]) == 0 {
 		return 0
 	}
@@ -57,6 +66,26 @@ func (g *Graph[N, W]) clearOverflowVersioned(sh *edgeLabelShard, k edgeKey, tx *
 		return 0
 	}
 	return sh.clearOverflow(k)
+}
+
+// overflowHeadAdmits tests the newest version of k's overflow list BEFORE the
+// presence check of its caller, recording the conflict on tx and reporting false
+// when tx may not displace it (rmp #2947). A presence check reads the present
+// list, which may be showing another transaction's uncommitted change, and a
+// write that returned "nothing to change" from it would lose itself to that
+// transaction's rollback — the shape of rmp #2943. It tests EVERY transaction's
+// write, not only a direct one's (ACID audit round 6, finding C1): a durable
+// store commit's no-op is left out of the WAL, so it is lost the same way. The
+// test records no version, so an idempotent re-assertion over a visible head
+// still records none and refuses nothing, which is what
+// [Graph.addOverflowVersioned] keeps the presence check first for. The caller
+// holds the shard's lock.
+func (g *Graph[N, W]) overflowHeadAdmits(sh *edgeLabelShard, k edgeKey, tx *writeCtx) bool {
+	if head := sh.v.headStamp(k); tx.conflicts(head) {
+		_ = tx.conflictErr(mvcc.StoreEdgeTypes, head)
+		return false
+	}
+	return true
 }
 
 // pushOverflowVersion records the overflow list of k before a change, and
@@ -90,6 +119,7 @@ func (g *Graph[N, W]) pushOverflowVersion(sh *edgeLabelShard, k edgeKey, tx *wri
 	}
 	info, ts := g.deltaStamp(tx.record())
 	sh.v.push(k, pre, had, info, ts, &g.edgeLabelVersionActive)
+	tx.noteSide(sideEdgeOverflow, uint64(k.src), uint64(k.dst), 0)
 	return true
 }
 
@@ -143,6 +173,7 @@ func (g *Graph[N, W]) pushHandleLabelVersion(sh *edgeHandleLabelShard, k edgeKey
 	}
 	info, ts := g.deltaStamp(tx.record())
 	sh.v.push(key, pre, had, info, ts, &g.edgeHandleLabelVersionActive)
+	tx.noteSide(sideHandleLabels, uint64(key.pair.src), uint64(key.pair.dst), key.handle)
 	return true
 }
 
@@ -192,7 +223,31 @@ func (g *Graph[N, W]) pushHandlePropVersion(sh *edgeHandlePropShard, k edgeKey, 
 	}
 	info, ts := g.deltaStamp(tx.record())
 	sh.v.push(key, pre, had, info, ts, &g.edgeHandlePropVersionActive)
+	tx.noteSide(sideHandleProps, uint64(key.pair.src), uint64(key.pair.dst), key.handle)
 	return true
+}
+
+// checkHandlePropConflict runs the write-write conflict test of
+// [Graph.pushHandlePropVersion] for a property delete that finds no bag to
+// change, recording a conflict on tx, and pushes no version. The caller must
+// hold the shard's lock.
+//
+// A delete that finds the handle's bag absent is NOT a write nobody can collide
+// with (rmp #2943): the raw map already carries another in-flight transaction's
+// eager removal, and when that removal took the instance's last property the bag
+// entry is gone. Returning without the test let the delete commit as a no-op; the
+// peer's rollback then restored the value and the committed removal was lost. The
+// head is read from the version chain, which the peer's removal pushed to, so the
+// test answers correctly with no bag at all. An untouched chain yields zero and
+// never conflicts. This is the rule [Graph.removeNodeLabelInfo] applies to labels
+// (rmp #2354).
+func (g *Graph[N, W]) checkHandlePropConflict(sh *edgeHandlePropShard, k edgeKey, handle uint64, tx *writeCtx) {
+	if !g.mvccArmed {
+		return
+	}
+	if head := sh.v.headStamp(edgeHandleKey{pair: k, handle: handle}); tx.conflicts(head) {
+		_ = tx.conflictErr(mvcc.StoreEdgePropsHandle, head)
+	}
 }
 
 // ── per-instance relationship types and properties (keyed by ordinal) ────────
@@ -221,6 +276,7 @@ func (g *Graph[N, W]) pushInstanceLabelVersion(sh *edgeInstanceLabelShard, k edg
 	}
 	info, ts := g.deltaStamp(tx.record())
 	sh.v.push(key, pre, had, info, ts, &g.edgeInstanceLabelVersionActive)
+	tx.noteSide(sideInstanceLabels, uint64(key.pair.src), uint64(key.pair.dst), uint64(key.idx))
 	return true
 }
 
@@ -248,12 +304,13 @@ func (g *Graph[N, W]) pushInstancePropVersion(sh *edgeInstancePropShard, k edgeK
 	}
 	info, ts := g.deltaStamp(tx.record())
 	sh.v.push(key, pre, had, info, ts, &g.edgeInstancePropVersionActive)
+	tx.noteSide(sideInstanceProps, uint64(key.pair.src), uint64(key.pair.dst), uint64(key.idx))
 	return true
 }
 
 // ── whole-pair drops ─────────────────────────────────────────────────────────
 //
-// clearEdgePairState drops a whole pair's per-instance metadata in one map
+// clearPairSides drops a whole pair's per-instance metadata in one map
 // delete once the last edge between the endpoints is gone. A reader from before
 // that must still see all of it, so every instance the pair held needs its own
 // pre-image recorded. The walks are over the pair's own [instMap], so their
@@ -271,6 +328,19 @@ func (g *Graph[N, W]) pushHandleLabelVersionsForPair(sh *edgeHandleLabelShard, k
 		return true
 	}
 	im := sh.m[k]
+	if !sh.v.empty() {
+		// An instance a pending removal has already taken out of the map has no
+		// key to walk, but its version is still another transaction's: dropping
+		// the pair over it lets that transaction's rollback restore it onto a
+		// pair with no edge left (rmp #2947, audit F3).
+		if head := sh.v.conflictWhere(func(x edgeHandleKey) bool {
+			_, present := im.get(x.handle)
+			return x.pair == k && !present
+		}, tx); head != 0 {
+			_ = tx.conflictErr(mvcc.StoreEdgeTypesHandle, head)
+			return false
+		}
+	}
 	ok := true
 	im.forEachKey(func(handle uint64) bool {
 		ok = g.pushHandleLabelVersion(sh, k, handle, tx)
@@ -284,6 +354,16 @@ func (g *Graph[N, W]) pushHandlePropVersionsForPair(sh *edgeHandlePropShard, k e
 		return true
 	}
 	im := sh.m[k]
+	if !sh.v.empty() {
+		// See [Graph.pushHandleLabelVersionsForPair] (rmp #2947, audit F3).
+		if head := sh.v.conflictWhere(func(x edgeHandleKey) bool {
+			_, present := im.get(x.handle)
+			return x.pair == k && !present
+		}, tx); head != 0 {
+			_ = tx.conflictErr(mvcc.StoreEdgePropsHandle, head)
+			return false
+		}
+	}
 	ok := true
 	im.forEachKey(func(handle uint64) bool {
 		ok = g.pushHandlePropVersion(sh, k, handle, tx)
@@ -297,6 +377,16 @@ func (g *Graph[N, W]) pushInstanceLabelVersionsForPair(sh *edgeInstanceLabelShar
 		return true
 	}
 	im := sh.m[k]
+	if !sh.v.empty() {
+		// See [Graph.pushHandleLabelVersionsForPair] (rmp #2947, audit F3).
+		if head := sh.v.conflictWhere(func(x edgeInstanceKey) bool {
+			_, present := im.get(x.idx)
+			return x.pair == k && !present
+		}, tx); head != 0 {
+			_ = tx.conflictErr(mvcc.StoreEdgeTypesOrd, head)
+			return false
+		}
+	}
 	ok := true
 	im.forEachKey(func(idx int64) bool {
 		ok = g.pushInstanceLabelVersion(sh, k, idx, tx)
@@ -310,6 +400,16 @@ func (g *Graph[N, W]) pushInstancePropVersionsForPair(sh *edgeInstancePropShard,
 		return true
 	}
 	im := sh.m[k]
+	if !sh.v.empty() {
+		// See [Graph.pushHandleLabelVersionsForPair] (rmp #2947, audit F3).
+		if head := sh.v.conflictWhere(func(x edgeInstanceKey) bool {
+			_, present := im.get(x.idx)
+			return x.pair == k && !present
+		}, tx); head != 0 {
+			_ = tx.conflictErr(mvcc.StoreEdgePropsOrd, head)
+			return false
+		}
+	}
 	ok := true
 	im.forEachKey(func(idx int64) bool {
 		ok = g.pushInstancePropVersion(sh, k, idx, tx)

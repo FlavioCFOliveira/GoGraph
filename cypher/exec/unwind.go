@@ -42,6 +42,10 @@ type Unwind struct {
 	curList expr.ListValue  // list being expanded
 	listIdx int             // index into curList
 	closed  bool            // guards Close against duplicate child.Close calls
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewUnwind creates an Unwind operator.
@@ -99,8 +103,7 @@ func (op *Unwind) Next(out *Row) (bool, error) {
 		}
 
 		// Fetch the next input row.
-		var childRow Row
-		ok, err := op.child.Next(&childRow)
+		childRow, ok, err := nextRow(op.child, &op.pull)
 		if err != nil {
 			return false, err
 		}

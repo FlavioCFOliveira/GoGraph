@@ -1,8 +1,8 @@
 package cypher
 
-// constraint_notnull_committed_test.go — rmp #2798 gate: CREATE CONSTRAINT ...
-// IS NOT NULL is validated against COMMITTED state as well as live state, and
-// registers only when NEITHER violates.
+// constraint_notnull_committed_test.go — rmp #2798 gate, revised by rmp #2946:
+// CREATE CONSTRAINT ... IS NOT NULL is validated against COMMITTED state, and an
+// open transaction's eager null is refused at that transaction's commit.
 //
 // # The defect these tests pin
 //
@@ -44,12 +44,13 @@ package cypher
 // transaction that began before the constraint existed has none and its
 // commit-time [touchedNodes.checkNotNullConstraints] is a no-op.
 //
-// So the answer is not "snapshot instead of live", it is BOTH: the DDL is
-// refused when the COMMITTED state violates (which the live scan cannot see) OR
-// when the LIVE state violates (which a snapshot cannot see). The refusal is
-// conservative in the direction where a conservative answer is merely unhelpful
-// — a DDL refused because an open transaction happens to be holding an eager
-// null — and never in the direction where it would be a breach.
+// rmp #2798 answered with BOTH views: the DDL was refused when the committed
+// state violated OR when the live state did. rmp #2936 then gave such a
+// transaction a commit-time check — a transaction open across a new constraint
+// is validated at COMMIT against the latest committed state merged with its own
+// writes — which closes the hole above at its source. rmp #2946 therefore
+// dropped the live view: the DDL validates committed state only, and the eager
+// null is refused at its own commit ([TestCreateConstraint_NotNull_EagerNullIsRefusedAtItsCommit]).
 //
 // # What the oracle is
 //
@@ -60,9 +61,11 @@ package cypher
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -259,28 +262,22 @@ func TestCreateConstraint_NotNull_SucceedsOverCompliantCommittedData(t *testing.
 	}
 }
 
-// TestCreateConstraint_NotNull_EagerNullStillRefusesTheConstraint is the
-// counterweight, and it is why the LIVE scan is KEPT alongside the committed one
-// rather than replaced by it.
+// TestCreateConstraint_NotNull_EagerNullIsRefusedAtItsCommit is the counterweight
+// to the tests above, rewritten by rmp #2946.
 //
 // Every arm's COMMITTED graph is compliant; each eager, uncommitted statement
-// makes the LIVE view look violating. A snapshot-reading validation cannot see
-// any of them, so it would ACCEPT the constraint — and nothing then refuses the
-// transaction's commit, because [Engine.BeginTx] allocated no touched-node set
-// for a transaction that began before the constraint existed. Measured with
-// validation moved to the snapshot alone: CREATE CONSTRAINT succeeded, the
-// COMMIT returned nil, and a committed node carried no email under an active
-// NOT NULL constraint.
+// makes only the LIVE view violate. The DDL validates committed state, so it must
+// SUCCEED — the data it is asked about satisfies the constraint — and the open
+// transaction, which began before the constraint existed, must then be refused at
+// its own COMMIT by the straddler validation (rmp #2936), leaving the committed
+// graph compliant.
 //
-// So this test fails on the tempting one-line version of the fix — moving the
-// scan to the snapshot — and that is exactly its purpose. It is the direct
-// counterpart of
-// TestCreateConstraint_UncommittedDuplicateStillRefusesTheConstraint on the
-// UNIQUE side.
-//
-// It also pins that these four arms are NOT what the fix changed: all four were
-// already refused pre-fix, by the live scan, and must stay refused.
-func TestCreateConstraint_NotNull_EagerNullStillRefusesTheConstraint(t *testing.T) {
+// Before rmp #2946 the DDL read the live graph as well and refused all four arms,
+// which refused a constraint the committed data satisfies. Before rmp #2936 that
+// refusal was the only thing standing between these arms and a committed null
+// under an active constraint; the commit-time check is what makes it unnecessary,
+// and the commit assertion below is what proves the check is there.
+func TestCreateConstraint_NotNull_EagerNullIsRefusedAtItsCommit(t *testing.T) {
 	t.Parallel()
 	for _, arm := range []struct{ name, eager string }{
 		{"removeProperty", `MATCH (n:Person) WHERE n.tag = 'k2' REMOVE n.email`},
@@ -291,20 +288,29 @@ func TestCreateConstraint_NotNull_EagerNullStillRefusesTheConstraint(t *testing.
 		t.Run(arm.name, func(t *testing.T) {
 			t.Parallel()
 			e := notNullEngine(t, notNullCompliantFixture())
-			registered, err := notNullDDLUnderOpenTx(t, e, arm.eager)
-			if err == nil {
-				t.Errorf("CREATE CONSTRAINT ... IS NOT NULL SUCCEEDED while an open transaction "+
-					"held an eager, uncommitted null from %q. Nothing checks NOT NULL at commit "+
-					"for a transaction that began before the constraint existed, so that "+
-					"transaction can now commit the null and leave a committed node violating an "+
-					"active constraint. The validation scan must keep reading the live graph "+
-					"as well as committed state.", arm.eager)
-			} else if !strings.Contains(err.Error(), notNullViolationMsg) {
-				t.Errorf("CREATE CONSTRAINT was refused, but not for the null: %v", err)
+			tx, berr := e.BeginTx(context.Background())
+			if berr != nil {
+				t.Fatalf("BeginTx: %v", berr)
 			}
-			if registered {
-				t.Error("the refused CREATE CONSTRAINT left a NOT NULL constraint registered on " +
-					"(Person).email")
+			sres, serr := tx.Exec(arm.eager, nil)
+			drainConstraintStmt(t, sres, serr)
+			if err := runConstraintWrite(t, e, notNullDDL); err != nil {
+				t.Errorf("CREATE CONSTRAINT ... IS NOT NULL was REFUSED over compliant committed "+
+					"data because an open transaction held an eager null from %q: %v", arm.eager, err)
+			}
+			if !e.constraintReg.HasNotNull("Person", "email") {
+				t.Error("CREATE CONSTRAINT registered no NOT NULL constraint on (Person).email")
+			}
+			cerr := tx.Commit()
+			if cerr == nil {
+				t.Fatalf("the transaction that began before the constraint COMMITTED its null "+
+					"from %q under the active NOT NULL constraint", arm.eager)
+			}
+			if !errors.Is(cerr, exec.ErrConstraintViolation) {
+				t.Errorf("the commit was refused, but not as a constraint violation: %v", cerr)
+			}
+			if n := commitStateCount(t, e, `MATCH (n:Person) WHERE n.email IS NULL RETURN count(n) AS c`); n != 0 {
+				t.Errorf("%d committed :Person nodes carry no email under the active constraint", n)
 			}
 		})
 	}

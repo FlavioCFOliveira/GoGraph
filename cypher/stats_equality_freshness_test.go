@@ -371,7 +371,7 @@ func TestReorderStatsFreshness_EqualityScreenIsRedundant(t *testing.T) {
 			drain := labelCardinalityEstimate(src, "Person")
 			bare := statsEqualityEstimateWith(src, "Person", "grp",
 				expr.StringValue("hot"), populationFromDrain(drain))
-			screened := reorderStatsFreshness(src, "Person", "grp", drain, bare)
+			screened := reorderStatsFreshness(src, "Person", "grp", populationFromDrain(drain), bare)
 			if screened != bare {
 				t.Errorf("the planner screen changed the provider's verdict from %+v to "+
 					"%+v; it is not the no-op its removal from the equality path assumes",
@@ -403,7 +403,7 @@ func TestStatsEqualityFreshness_NaNLiteralSurvivesStaleness(t *testing.T) {
 		Left:     &ast.Property{Receiver: &ast.Variable{Name: "p"}, Key: "grp"},
 		Right:    &ast.FloatLiteral{Value: math.NaN()},
 	}}
-	got, _ := reorderFilteredRows(sel, scan, src, nil, labelCardinalityEstimate(src, "Person"))
+	got, _, _ := reorderFilteredRows(context.Background(), sel, scan, src, nil, labelCardinalityEstimate(src, "Person"))
 	if got.source != estExact || got.rows != 0 {
 		t.Errorf("the reorder gate's estimate for `= NaN` over a stale statistic is "+
 			"%+v, want {rows:0 source:exact}. No row can equal NaN, so the count is a "+

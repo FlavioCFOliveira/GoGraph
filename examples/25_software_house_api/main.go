@@ -149,7 +149,7 @@ func seedAtStartup(ctx context.Context, ds *dataStore, scale synthScale) int {
 	fmt.Fprintf(os.Stderr, "seed.applied=%t\n", seeded)
 	// Telemetry: varies per run and per machine, never pinned.
 	mem := readMem()
-	liveNodes := ds.graph.LiveOrder()
+	liveNodes := ds.graph.LiveOrderStored()
 	fmt.Fprintf(os.Stderr, "# seed.elapsed=%s\n", elapsed.Round(time.Millisecond))
 	fmt.Fprintf(os.Stderr, "# seed.node_rate=%.0f nodes/s\n", rate(liveNodes, elapsed))
 	fmt.Fprintf(os.Stderr, "# mem.heap_alloc=%s\n", humanBytes(mem.HeapAlloc))

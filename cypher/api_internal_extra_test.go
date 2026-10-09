@@ -270,11 +270,15 @@ func TestWALMutatorAdapter_SetAndDelEdgeProperty(t *testing.T) {
 		t.Fatalf("AddEdge: %v", err)
 	}
 
-	a.SetEdgeLabel("S", "D", "KNOWS")
+	if err := a.SetEdgeLabel("S", "D", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.SetEdgeProperty("S", "D", "since", lpg.Int64Value(2020)); err != nil {
 		t.Fatalf("SetEdgeProperty: %v", err)
 	}
-	a.DelEdgeProperty("S", "D", "since")
+	if err := a.DelEdgeProperty("S", "D", "since"); err != nil {
+		t.Fatal(err)
+	}
 
 	// IndexBuffer should now hold one Set + one Del + one AddEdgeLabel change.
 	if got := a.buf.Len(); got < 3 {
@@ -316,8 +320,12 @@ func TestWALMutatorAdapter_NodePropertyAndLabelRoundTrip(t *testing.T) {
 		t.Errorf("NodeLabels missing Person: got %v", labels)
 	}
 
-	a.DelNodeProperty("N", "name")
-	a.RemoveNodeLabel("N", "Person")
+	if err := a.DelNodeProperty("N", "name"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RemoveNodeLabel("N", "Person"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestWALMutatorAdapter_ResolveNodeID_WalkNodeIDs(t *testing.T) {

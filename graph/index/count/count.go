@@ -36,8 +36,8 @@
 // that all READS ran under a read barrier (visMu.RLock in Graph.View). BOTH HALVES
 // ARE FALSE, and have been since sprint 334 made MVCC the module's concurrency
 // control: commitUnderBarrier now runs inside a SHARED hold, so two writers mutate
-// this store concurrently, and an ordinary query read takes no barrier at all —
-// Graph.View survives only for DDL-adjacent scans.
+// this store concurrently, and an ordinary query read takes no barrier at all.
+// rmp #2344 then removed Graph.View outright.
 //
 // What makes it safe is therefore the structure itself, not exclusion:
 //

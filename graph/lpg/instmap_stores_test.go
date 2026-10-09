@@ -34,7 +34,9 @@ func newParallelGraph(t *testing.T) *Graph[string, float64] {
 func TestInstanceStores_ManyParallelEdgesByOrdinal(t *testing.T) {
 	g := newParallelGraph(t)
 	for i := 1; i <= parallelEdges; i++ {
-		g.SetEdgeLabelAt("a", "b", int64(i), fmt.Sprintf("T%d", i))
+		if err := g.SetEdgeLabelAt("a", "b", int64(i), fmt.Sprintf("T%d", i)); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgePropertyAt("a", "b", int64(i), "seq", Int64Value(int64(i))); err != nil {
 			t.Fatalf("SetEdgePropertyAt %d: %v", i, err)
 		}
@@ -59,7 +61,7 @@ func TestInstanceStores_ManyParallelEdgesByOrdinal(t *testing.T) {
 	// Remove one instance from the middle: every sibling must survive. A
 	// swap-based removal in the small tier makes this the case most likely to
 	// go wrong, and the promoted map tier must behave identically.
-	g.RemoveEdgeInstance("a", "b", 5)
+	must(t).E(g.RemoveEdgeInstance("a", "b", 5))
 	if labels := g.EdgeLabelsAt("a", "b", 5); len(labels) != 0 {
 		t.Fatalf("EdgeLabelsAt(5) after removal = %v, want none", labels)
 	}
@@ -85,7 +87,9 @@ func TestInstanceStores_ManyParallelEdgesByHandle(t *testing.T) {
 			t.Fatalf("AddEdgeH %d: %v", i, err)
 		}
 		handles = append(handles, h)
-		g.SetEdgeLabelByHandle("a", "b", h, fmt.Sprintf("H%d", i))
+		if err := g.SetEdgeLabelByHandle("a", "b", h, fmt.Sprintf("H%d", i)); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgePropertyByHandle("a", "b", h, "seq", Int64Value(int64(i))); err != nil {
 			t.Fatalf("SetEdgePropertyByHandle %d: %v", i, err)
 		}
@@ -107,7 +111,7 @@ func TestInstanceStores_ManyParallelEdgesByHandle(t *testing.T) {
 		}
 	}
 
-	g.RemoveEdgeInstanceByHandle("a", "b", handles[5])
+	must(t).E(g.RemoveEdgeInstanceByHandle("a", "b", handles[5]))
 	if labels := g.EdgeLabelsByHandle("a", "b", handles[5]); len(labels) != 0 {
 		t.Fatalf("EdgeLabelsByHandle after removal = %v, want none", labels)
 	}
@@ -129,7 +133,9 @@ func TestInstanceStores_ManyParallelEdgesByHandle(t *testing.T) {
 func TestInstanceStores_RemoveEdgeDropsEveryInstance(t *testing.T) {
 	g := newParallelGraph(t)
 	for i := 1; i <= parallelEdges; i++ {
-		g.SetEdgeLabelAt("a", "b", int64(i), fmt.Sprintf("T%d", i))
+		if err := g.SetEdgeLabelAt("a", "b", int64(i), fmt.Sprintf("T%d", i)); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgePropertyAt("a", "b", int64(i), "seq", Int64Value(int64(i))); err != nil {
 			t.Fatalf("SetEdgePropertyAt %d: %v", i, err)
 		}
@@ -137,7 +143,7 @@ func TestInstanceStores_RemoveEdgeDropsEveryInstance(t *testing.T) {
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.RemoveEdge("a", "b")
+	must(t).E(g.RemoveEdge("a", "b"))
 	if g.AdjList().HasEdge("a", "b") {
 		t.Fatal("RemoveEdge left the edge in place")
 	}
@@ -151,8 +157,10 @@ func TestInstanceStores_RemoveEdgeDropsEveryInstance(t *testing.T) {
 		}
 	}
 	// Re-creating the pair must start clean rather than resurrect the old
-	// instance state — the invariant clearEdgePairState exists to hold.
-	g.SetEdgeLabelAt("a", "b", 1, "Fresh")
+	// instance state — the invariant clearPairSides exists to hold.
+	if err := g.SetEdgeLabelAt("a", "b", 1, "Fresh"); err != nil {
+		t.Fatal(err)
+	}
 	labels := g.EdgeLabelsAt("a", "b", 1)
 	if len(labels) != 1 || labels[0] != "Fresh" {
 		t.Fatalf("re-created instance 1 = %v, want [Fresh]", labels)
@@ -184,7 +192,9 @@ func TestHandleStores_PopulatedInBothStorageModes(t *testing.T) {
 			if h == 0 {
 				t.Fatal("AddEdgeH returned handle 0; both modes mint a handle")
 			}
-			g.SetEdgeLabelByHandle("a", "b", h, "KNOWS")
+			if err := g.SetEdgeLabelByHandle("a", "b", h, "KNOWS"); err != nil {
+				t.Fatal(err)
+			}
 			if err := g.SetEdgePropertyByHandle("a", "b", h, "since", Int64Value(2026)); err != nil {
 				t.Fatalf("SetEdgePropertyByHandle: %v", err)
 			}

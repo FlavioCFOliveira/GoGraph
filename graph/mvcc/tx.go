@@ -90,6 +90,24 @@ func (tx Tx) ID() uint64 {
 	return tx.st.TxID()
 }
 
+// Implicit reports whether tx names an implicit transaction: the
+// single-operation transaction a direct write runs as ([ImplicitTxBit]). It is
+// false for the zero value.
+func (tx Tx) Implicit() bool { return IsImplicitTx(tx.ID()) }
+
+// NoteAdjacency records that this transaction created a version on the
+// adjacency entry of node id; see [TxState.NoteAdjacency]. It is a no-op for
+// the zero value.
+//
+// Safe for concurrent use.
+//
+// For use by graph/lpg and graph/adjlist; not part of the stable API.
+func (tx Tx) NoteAdjacency(id uint64) {
+	if tx.st != nil {
+		tx.st.NoteAdjacency(id)
+	}
+}
+
 // Record returns the shared commit record the version being created right now
 // must point at, allocating the transaction's record if this is its first
 // version and counting that version.

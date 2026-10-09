@@ -49,7 +49,9 @@ func TestGraph_EdgeIndex_TracksSetEdgeLabel(t *testing.T) {
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "KNOWS")
+	if err := g.SetEdgeLabel("a", "b", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
 	lid, ok := g.Registry().Lookup("KNOWS")
 	if !ok {
 		t.Fatal("Registry has no KNOWS label after SetEdgeLabel")
@@ -66,7 +68,9 @@ func TestGraph_RemoveNodeLabel_UnknownNode(t *testing.T) {
 	t.Parallel()
 	g := New[string, int64](adjlist.Config{Directed: true})
 	// Must not panic and must be a no-op.
-	g.RemoveNodeLabel("ghost", "AnyLabel")
+	if err := g.RemoveNodeLabel("ghost", "AnyLabel"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"ghost\", \"AnyLabel\"): %v", err)
+	}
 }
 
 // TestGraph_RemoveNodeLabel_UnknownLabel covers the early-return path
@@ -77,7 +81,9 @@ func TestGraph_RemoveNodeLabel_UnknownLabel(t *testing.T) {
 	if err := g.AddNode("alice"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
-	g.RemoveNodeLabel("alice", "NeverRegistered")
+	if err := g.RemoveNodeLabel("alice", "NeverRegistered"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"alice\", \"NeverRegistered\"): %v", err)
+	}
 }
 
 // TestGraph_HasNodeLabel_NegativePaths covers every false-returning
@@ -149,7 +155,9 @@ func TestGraph_HasEdgeLabel_NegativePaths(t *testing.T) {
 	if err := g.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("alice", "bob", "KNOWS")
+	if err := g.SetEdgeLabel("alice", "bob", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
 	if g.HasEdgeLabel("alice", "bob", "FOLLOWS") {
 		t.Fatal("HasEdgeLabel: bag does not contain FOLLOWS, must return false")
 	}
@@ -169,7 +177,7 @@ func TestLabelRegistry_Concurrent_DoubleCheck(t *testing.T) {
 	done := make(chan struct{})
 	for i := range ids {
 		go func(i int) {
-			ids[i] = r.Intern("hot")
+			ids[i] = r.intern("hot")
 			done <- struct{}{}
 		}(i)
 	}

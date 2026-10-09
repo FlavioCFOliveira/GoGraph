@@ -409,27 +409,113 @@ in the pre-existing bug the audit found.
   become immutable per-label roaring snapshots (roaring clones only the touched
   containers) and be published as part of the same `Snapshot` flip, so a reader
   can never see "edge in adjacency but not yet in the label bitmap".
-- **`index.Manager` (hash exact-match, B-tree range).** Verified gap:
-  `index.Manager.Apply`/`ApplyBatch` exist but are **never called from any LPG
-  live write path** — these indexes are not maintained by live transactions at
-  all today. F3.4 wires live maintenance AND makes each registered index fold
-  its new version into the same atomic `Snapshot` flip. Subscribers without
-  `Serializer` keep the rebuild-on-restart contract.
+- **`index.Manager` (hash exact-match, B-tree range).** Live transactions
+  maintain these indexes. (Corrected 2026-10-07 at `cd97fdf5`, rmp #2610. This
+  bullet used to state that `index.Manager.Apply`/`ApplyBatch` were never called
+  from any live write path, which was false; a 2026-09-08 note at `efd32fb9`
+  corrected the claim but named `ApplyBatch` as the commit-time call, which it no
+  longer is.) The path, at `cd97fdf5`:
+  - Every write operator enqueues an `index.Change` into the transaction's
+    `exec.IndexBuffer` (`IndexBuffer.Enqueue`, `cypher/exec/index_writeback.go:30`).
+    A rollback takes `IndexBuffer.Rollback` (`:68`) and applies nothing.
+  - At commit, `armIndexCommit` (`cypher/index_commit_apply.go:313`), called from
+    `ExplicitTx.Commit` (`cypher/exectx.go:944`) and `Result.commitUnderBarrier`
+    (`cypher/api.go:7010`), drops a batch no index concerns
+    (`index.Manager.Concerns`, `graph/index/manager.go:606`) and otherwise installs
+    the transaction as its `lpg.CommitApplier`.
+  - At publication, lpg calls `ApplyCommitted` (`graph/lpg/mvcc_write.go:1092`),
+    which delivers the batch through `applyCommitted`
+    (`cypher/index_commit_apply.go:172`), `IndexBuffer.CommitInState`
+    (`cypher/exec/index_writeback.go:60`) and `index.Manager.ApplyBatchInState`
+    (`graph/index/manager.go:651`), before the commit record is published.
+  - `index.Manager.ApplyBatch` (`graph/index/manager.go:575`) is reached only
+    through `IndexBuffer.Commit` (`cypher/exec/index_writeback.go:48`), from two
+    fallbacks: `armIndexCommit` for a transaction without a versioned write
+    (`cypher/index_commit_apply.go:324`), and `Result.closeLocked` for a result not
+    finalised inside the write bracket (`cypher/api.go:7209`). Measured: with
+    `ApplyBatch` replaced by a panic, autocommit and explicit commits on a
+    persisted store maintained every bound index listed below and nothing
+    panicked; the same mutant panics in the `graph/index` tests.
+  - The index kinds that receive live maintenance are the BOUND ones: the hash
+    index of `CREATE INDEX` (`newBoundNodeHashIndex`, `cypher/index_binding.go:195`),
+    the string B-tree (`newBoundNodeBTreeIndex`, `:817`), the numeric companion of
+    either (`newBoundNodeBTreeIndexNumeric`, `:721`), and the hash index backing a
+    UNIQUE constraint (`cypher/api.go:4423`). Recovery re-registers bound
+    instances of the same kinds (`cypher/index_binding.go:1126`, `:1147`, `:1205`;
+    `cypher/api.go:2044`). Measured on a persisted store: each held the values
+    committed through autocommit and through an explicit transaction, and after a
+    reopen each held a value committed after recovery.
+  - An UNBOUND `hash.New`/`btree.New` receives no maintenance: its `Concerns` is
+    false and its `Apply`/`ApplyInState` are no-ops (`graph/index/hash/index.go:2058`,
+    `:2116`; `graph/index/btree/index.go:595`, `graph/index/btree/bound.go:211`).
+    Besides a caller's own Go-API registration, the module registers one only
+    when binding fails: in recovery (`cypher/index_binding.go:1129`, `:1150`), and
+    as the UNIQUE backing fallback (`cypher/api.go:2042`;
+    `cypher/exec/create_constraint.go:121-125`). Measured: 0 entries after the
+    commits above.
+  - A subscriber that does not implement `index.Serializer` is omitted from a
+    snapshot and rebuilt on restart (`store/snapshot/capture.go:567-596`).
 
-  > **SUPERSEDED (F3.4 delivered; verified 2026-09-08 at `efd32fb9`).** The gap above
-  > describes the state F3.4 was written against, and the paragraph contradicted the
-  > F3.4 entry in the staging list further down this document. Live maintenance IS
-  > wired. Every write operator enqueues an `index.Change` into a per-transaction
-  > `exec.IndexBuffer` (`cypher/exec/index_writeback.go`), and the buffer is drained
-  > through `index.Manager.ApplyBatch` inside the write bracket at three production
-  > sites: `cypher/exectx.go:808` (`ExplicitTx.Commit`) and `cypher/api.go:6732` and
-  > `:6911` (`Result.commitUnderBarrier` and `Result.closeLocked`, the autocommit and
-  > `RunInTx` paths). A rollback takes `IndexBuffer.Rollback` and applies nothing.
+  **F3.4 is DONE** (2026-10-07 at `1dd13429`, rmp #3023): live maintenance is
+  the path above, and "Index reads describe the reader's snapshot" below covers
+  the read side. See the F3.4 entry in the staging list for the file:line of
+  each mechanism.
 
 **Invariant:** every read-servable structure is reachable *only* through the
 `Snapshot` root. Any structure left directly mutable-and-read is a hole through
 which a partial transaction leaks; the single-root rule is what makes
 "no partial reads" provable rather than hoped-for.
+
+### Who maintains a secondary index (rmp #2062, #2848, #2938)
+
+A property index registered on `index.Manager` is written by one path only: the
+change fan-out the Cypher engine drives when a transaction commits
+(`index.Manager.ApplyBatchInState`, from `cypher/index_commit_apply.go`). The
+raw `lpg.Graph` mutators deliver no change, so:
+
+- The raw node mutators — label, property, removal, revival — refuse with
+  `lpg.ErrIndexedRawWrite` while any index is registered or being built, and
+  change nothing. A graph is populated through them before its first index is
+  created; creating an index backfills it.
+- The raw edge mutators are admitted. They change no node's labels, properties
+  or existence, and no index the module builds consumes an edge change: the
+  bound hash and btree indexes decline every edge change through
+  `index.ChangeFilter`, and `index.Manager.Concerns` keeps a batch for an edge
+  change only when a filter claims it. A Go-API subscriber that consumes edge
+  changes is outside this contract.
+- An index registered through the Go API without a binding (`hash.New`,
+  `btree.New`) claims no change, so no path maintains it. The planner never
+  serves a read from one: `indexCoversNode` (`cypher/api.go`) accepts only a
+  bound index, and the range, prefix and join paths already required one.
+
+### Index reads describe the reader's snapshot (rmp #2937)
+
+An index is written at commit and read at the present, while a reader runs at a
+snapshot. Every MATCH access path that reads a property index — the equality
+seek, the key-set seek, the range, prefix and intersection scans, and the index
+nested-loop join — asks `index.Manager.DescribesSnapshot(startTS)` after its
+lookup. When the proof holds, the lookup is the answer. When it does not, the
+access path answers from the snapshot instead: the equality and key-set seeks,
+which subsume their Selection, walk the replaced label scan at the snapshot and
+keep the nodes whose property equals a key under openCypher `=`; the range
+family emits the label scan and leaves its retained residual Filter to decide;
+the join takes its per-row fallback over the inner label scan. The operator
+contract is in `cypher/exec/index_snapshot.go`, the build side in
+`cypher/index_snapshot_read.go`. The proof is process-wide, so under concurrent
+commits to any index a reader that began earlier declines and pays for the
+label scan. The node MERGE probe (`cypher/merge_index_probe.go`) applies the
+same proof.
+
+### Constraint builds validate committed state (rmp #2946)
+
+`CREATE CONSTRAINT … IS UNIQUE` and `… IS NOT NULL` validate the existing data
+against a snapshot taken under the commit-decision hold
+(`index.Manager.HoldCommitDecisions`) after `lpg.Graph.AwaitAllocatedCommits`,
+so the snapshot is the committed state and no commit can land before the
+constraint is registered. An open transaction's uncommitted writes are not
+validated by the DDL; that transaction began before the constraint existed and
+is validated at its own commit against the latest committed state merged with
+its writes (`exec.ConstraintRegistry.ValidateStraddler`, rmp #2936).
 
 ## Checkpoint and recovery
 
@@ -462,10 +548,19 @@ writer stays registered through its MVCC publish:
   durable below `W` but not yet published would be missing from the image and
   truncated away — an acknowledged commit lost. Asserted by
   `checkpoint.TestCheckpoint_WatermarkAndInstantDescribeTheSameBoundary`.
-- No id is interned by a still-open transaction when `at` is taken, which is what
-  keeps the instant-filtered mapper's per-shard intra indexes contiguous and therefore
-  loadable. Stated as `snapshot.ErrCaptureNotQuiesced`; the capture refuses rather than
-  publishing an image recovery would reject.
+- The image's mapper must load. The checkpointer opens `at` with
+  `lpg.Graph.BeginCaptureRead`, which records the mapper's per-shard high-water marks
+  just after the instant (rmp #2991). The capture carries exactly the ids ever born as
+  of `at` (`lpg.Graph.NodeBornAsOf`); every other assigned id is a hole, absent from
+  `mapper.bin` and not a tombstone, and `graph.Mapper.LoadFrom` accepts holes below the
+  marks the image records in `nodeids.bin` (WAL v2 step 1, `docs/design-wal-v2.md` §3).
+  The drain does not stop every interning: an lpg write transaction or an eager engine
+  write that is not a registered store writer can hold an interned, uncommitted key at
+  `at`; that key is a hole, and its transaction, which can only commit after `at`,
+  creates it anew in recovery's replay. Asserted by
+  `checkpoint.TestCheckpoint_CaptureIgnoresAbortedInternAfterInstant`,
+  `checkpoint.TestCheckpoint_CaptureTombstonesKeyOfTxnOpenAtInstant` and
+  `checkpoint.TestCheckpoint_KeyInternedAtInstantRevivedByAddEdgeOnly`.
 
 The reclamation horizon is pinned only for step 2 — an in-memory, O(V+E) window with
 no disk I/O — never across the snapshot write. Pinned by
@@ -506,7 +601,7 @@ This closes audit findings E6, E7, E8 and E9 of
 |-------|-------------|-----------------------|
 | F3.2 | `Snapshot` root + `atomic.Pointer` + pin API; adjacency reads via pinned snapshot | adjacency reads are transaction-atomic; no regression |
 | F3.3 | labels, properties, tombstones move into the snapshot (drop RWMutex reads) | those reads lock-free + consistent with adjacency |
-| F3.4 | label bitmaps immutable; live hash/B-tree index maintenance wired into the flip | indexes correct and isolation-consistent |
+| F3.4 | **DONE, by a different mechanism (see the F3.4 entry below).** Planned: label bitmaps immutable; live hash/B-tree index maintenance wired into the flip | indexes correct and isolation-consistent |
 | F3.5 | commit builds one next-Snapshot for the whole batch and swaps once; checkpoint/recovery read a pinned snapshot | **full SI: no reader ever observes a partial transaction** |
 | F3.6 | invariant + property + soak tests; benchmark/TCK regression gate | proven and non-regressing |
 
@@ -891,23 +986,29 @@ Delivered:
   lock-free CSR path); the lock-free per-shard snapshot below restores
   streaming and is the tracked optimisation.
 
-- **F3.4 (done).** The `index.Manager` hash/B-tree buffer is now committed by
-  `commitIndexUnderBarrier` inside the write's `ApplyAtomically` window (right
-  after materialize), so the graph and its secondary indexes flip atomically —
-  an IndexSeek read can no longer observe a transaction whose graph change is
-  visible but whose index change is not. The live roaring label bitmaps already
-  update inside the same window (`SetNodeLabel`/`SetEdgeLabel` run there). Lock
-  order `visMu → index` matches the read side (`View → index`), so no deadlock.
-
-  > **Correction (2026-09-08 at `efd32fb9`): the mechanism is right, the name is
-  > gone.** There is no `commitIndexUnderBarrier` anywhere in the module. The buffer
-  > is drained by `exec.IndexBuffer.Commit` → `index.Manager.ApplyBatch`, called from
-  > `cypher/exectx.go:808`, `cypher/api.go:6732` and `cypher/api.go:6911`, in each case
-  > inside the write bracket and AFTER the WAL fsync, so the ordering is
-  > durable-then-visible. `Graph.View` no longer exists either (rmp #2344; see the
-  > reading note at the top of this document), so the read side of the stated lock
-  > order is now "a read takes no barrier at all" and the surviving order is
-  > `schemaGate → writer admission → visMu`.
+- **F3.4 (DONE; mechanisms verified 2026-10-07 at `1dd13429`, rmp #3023).** An
+  IndexSeek cannot observe a transaction whose graph change is visible but whose
+  index change is not, and it never answers from an index that does not describe
+  its snapshot. Two mechanisms deliver this; the design planned at F3.4 (a
+  `commitIndexUnderBarrier` call inside an exclusive `ApplyAtomically` window,
+  with `Graph.View` as the read side) was replaced and none of it exists.
+  - **Write side — live maintenance at publication.** A commit installs its index
+    batch as the transaction's `lpg.CommitApplier` (`armIndexCommit`,
+    `cypher/index_commit_apply.go:313`); lpg runs it inside the publishing
+    bracket (`graph/lpg/mvcc_write.go:1092`) and it reaches the indexes through
+    `index.Manager.ApplyBatchInState` (`graph/index/manager.go:651`), after the
+    WAL fsync and before the commit record is published, so the ordering is
+    durable-then-visible.
+  - **Read side — the snapshot proof or the snapshot.** An index access path
+    asks `index.Manager.DescribesSnapshot` (`graph/index/manager.go:412`) for the
+    reader's start instant through `snapshotGuard.declines`
+    (`cypher/exec/index_snapshot.go:89-90`); when the proof fails it answers from
+    the reader's snapshot instead. The access paths covered are listed in "Index
+    reads describe the reader's snapshot" (rmp #2937).
+  - **Label bitmaps.** They did not become immutable per-label snapshots. A
+    label read at a reader's instant goes through the versioned accessor
+    (`ReadView.HasNodeLabel` → `Graph.HasNodeLabelAsOf`,
+    `graph/lpg/readview.go:89-91`), not the bitmap.
 
 - **F3.5 (fixed by routing the checkpoint through the commit mutex).** The
   checkpointer now runs its whole snapshot+truncate window under

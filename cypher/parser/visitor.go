@@ -1621,51 +1621,18 @@ func (v *visitor) VisitAtomicExpression(ctx *gen.AtomicExpressionContext) interf
 		}
 	}
 
-	// Apply IN / subscript / slice. Subscripts and slices that
-	// immediately follow an IN clause apply to the IN's right operand,
-	// not to the (lhs IN rhs) result — `3 IN list[0]` parses as
-	// `3 IN (list[0])`, matching the openCypher precedence rule that
-	// list/subscript operators bind tighter than the IN comparison.
-	listExprs := ctx.AllListExpression()
-	i := 0
-	for i < len(listExprs) {
-		r := v.visit(listExprs[i])
+	// Apply IN. Subscripts and slices are postfix operators of the operand
+	// (propertyOrLabelExpression, rmp #2918), so `3 IN list[0]` already
+	// reaches here as `3 IN (list[0])`: list operators bind tighter than
+	// the IN comparison, as openCypher requires.
+	for _, le := range ctx.AllListExpression() {
+		r := v.visit(le)
 		if err := firstError(r); err != nil {
 			return err
 		}
-		switch e := r.(type) {
-		case *listInExpr:
-			// Consume any trailing subscripts/slices that operate on
-			// the IN's right operand before wrapping the whole thing.
-			rhs := e.list
-			j := i + 1
-			for j < len(listExprs) {
-				inner := v.visit(listExprs[j])
-				if err := firstError(inner); err != nil {
-					return err
-				}
-				sub, isSub := inner.(*subscriptOrSlice)
-				if !isSub {
-					break
-				}
-				if sub.isSlice {
-					rhs = &ast.SliceExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: rhs, From: sub.from, To: sub.to}
-				} else {
-					rhs = &ast.SubscriptExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: rhs, Index: sub.index}
-				}
-				j++
-			}
-			base = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: base, Operator: "IN", Right: rhs}
-			i = j
-			continue
-		case *subscriptOrSlice:
-			if e.isSlice {
-				base = &ast.SliceExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: base, From: e.from, To: e.to}
-			} else {
-				base = &ast.SubscriptExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: base, Index: e.index}
-			}
+		if in, ok := r.(*listInExpr); ok {
+			base = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: base, Operator: "IN", Right: in.list}
 		}
-		i++
 	}
 
 	// Apply IS NULL / IS NOT NULL.
@@ -1682,72 +1649,17 @@ func (v *visitor) VisitAtomicExpression(ctx *gen.AtomicExpressionContext) interf
 	return base
 }
 
-// VisitListExpression handles IN expr | [expr?..expr?] | [expr].
+// VisitListExpression handles IN propertyOrLabelExpression.
 func (v *visitor) VisitListExpression(ctx *gen.ListExpressionContext) interface{} {
-	if ctx.IN() != nil {
-		// IN propertyOrLabelExpression
-		right, err := asExpr(v.visit(ctx.PropertyOrLabelExpression()))
-		if err != nil {
-			return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
-		}
-		return &listInExpr{list: right}
+	right, err := asExpr(v.visit(ctx.PropertyOrLabelExpression()))
+	if err != nil {
+		return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
 	}
-	// [ … ] form: slice or subscript
-	exprs := ctx.AllExpression()
-	if ctx.RANGE() != nil {
-		// Slice: [from?..to?]
-		var from, to ast.Expression
-		// Determine from / to by position: text before ".." is from, after is to.
-		text := ctx.GetText()
-		// Strip surrounding brackets
-		inner := strings.TrimPrefix(strings.TrimSuffix(text, "]"), "[")
-		idx := strings.Index(inner, "..")
-		hasBefore := idx > 0
-		hasAfter := idx >= 0 && idx < len(inner)-2
-
-		if hasBefore && len(exprs) > 0 {
-			var err error
-			from, err = asExpr(v.visit(exprs[0]))
-			if err != nil {
-				return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
-			}
-		}
-		if hasAfter {
-			exprIdx := 0
-			if hasBefore {
-				exprIdx = 1
-			}
-			if exprIdx < len(exprs) {
-				var err error
-				to, err = asExpr(v.visit(exprs[exprIdx]))
-				if err != nil {
-					return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
-				}
-			}
-		}
-		return &subscriptOrSlice{isSlice: true, from: from, to: to}
-	}
-	// Subscript: [expr]
-	if len(exprs) == 1 {
-		idx, err := asExpr(v.visit(exprs[0]))
-		if err != nil {
-			return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
-		}
-		return &subscriptOrSlice{isSlice: false, index: idx}
-	}
-	return unsupported(ctx, "listExpression", "unexpected form")
+	return &listInExpr{list: right}
 }
 
 // listInExpr is an internal transfer type for the IN rhs.
 type listInExpr struct{ list ast.Expression }
-
-// subscriptOrSlice is an internal transfer type.
-type subscriptOrSlice struct {
-	from    ast.Expression
-	to      ast.Expression
-	index   ast.Expression
-	isSlice bool
-}
 
 // VisitStringExpression returns a partial *BinaryOp with nil Left (filled by parent).
 func (v *visitor) VisitStringExpression(ctx *gen.StringExpressionContext) interface{} {
@@ -1776,17 +1688,21 @@ func (v *visitor) VisitNullExpression(ctx *gen.NullExpressionContext) interface{
 	return "IS NULL"
 }
 
-// VisitPropertyOrLabelExpression handles atom (labelFilter | propertyAccess)*.
+// VisitPropertyOrLabelExpression handles
+// propertyExpression ('[' index-or-slice ']' ('.' name)*)* nodeLabels?.
 //
-// The grammar rule produces either or both of:
+// The grammar rule produces, in source order:
 //
 //   - PropertyExpression: atom + dot-access chain (e.g. `n.name`, `a.b.c`).
+//   - Postfix list operators, each optionally followed by further property
+//     lookups: `q[0]`, `q[1..2]`, `q[0].w`, `q[0][1].a.b` (rmp #2918). They
+//     apply left to right, so every operator's receiver is the expression
+//     built so far — openCypher's oC_NonArithmeticOperatorExpression.
 //   - NodeLabels: trailing label filter (`:Foo:Bar`).
 //
-// When NodeLabels are present they wrap the (possibly empty) property
-// chain in an ast.LabelPredicate so the predicate `n:Foo` evaluates to
-// the right TRUE / FALSE / NULL at run-time. A bare property chain is
-// returned verbatim.
+// When NodeLabels are present they wrap the (possibly empty) postfix chain in
+// an ast.LabelPredicate so the predicate `n:Foo` evaluates to the right
+// TRUE / FALSE / NULL at run-time. A bare chain is returned verbatim.
 func (v *visitor) VisitPropertyOrLabelExpression(ctx *gen.PropertyOrLabelExpressionContext) interface{} {
 	pe := ctx.PropertyExpression()
 	if pe == nil {
@@ -1795,6 +1711,12 @@ func (v *visitor) VisitPropertyOrLabelExpression(ctx *gen.PropertyOrLabelExpress
 	base, err := v.visitPropertyExpression(pe)
 	if err != nil {
 		return &SemaError{Rule: "propertyOrLabelExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	if len(ctx.AllLBRACK()) > 0 {
+		base, err = v.applyPostfixOperators(ctx, base)
+		if err != nil {
+			return &SemaError{Rule: "propertyOrLabelExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
 	}
 	if nl := ctx.NodeLabels(); nl != nil {
 		labels := nodeLabels(nl)
@@ -1808,6 +1730,64 @@ func (v *visitor) VisitPropertyOrLabelExpression(ctx *gen.PropertyOrLabelExpress
 		}
 	}
 	return base
+}
+
+// applyPostfixOperators folds the subscripts, slices and property lookups that
+// follow ctx's propertyExpression onto base, in source order. The children are
+// read in order because the grammar interleaves them: an expression before
+// '..' is a slice's lower bound, one after it the upper bound, and one in a
+// bracket without '..' a subscript index.
+func (v *visitor) applyPostfixOperators(ctx *gen.PropertyOrLabelExpressionContext, base ast.Expression) (ast.Expression, error) {
+	var (
+		inBracket, isSlice bool
+		first, second      ast.Expression
+	)
+	pos := positionOf(ctx)
+	for _, child := range ctx.GetChildren() {
+		switch c := child.(type) {
+		case antlr.TerminalNode:
+			switch c.GetSymbol().GetTokenType() {
+			case gen.CypherParserLBRACK:
+				inBracket, isSlice, first, second = true, false, nil, nil
+			case gen.CypherParserRANGE:
+				isSlice = true
+			case gen.CypherParserRBRACK:
+				end := endPositionOfToken(c.GetSymbol())
+				if isSlice {
+					base = &ast.SliceExpr{Pos: pos, EndPos: end, Expr: base, From: first, To: second}
+				} else {
+					base = &ast.SubscriptExpr{Pos: pos, EndPos: end, Expr: base, Index: first}
+				}
+				inBracket = false
+			}
+		case gen.IExpressionContext:
+			if !inBracket {
+				continue
+			}
+			e, err := asExpr(v.visit(c))
+			if err != nil {
+				return nil, err
+			}
+			if isSlice {
+				second = e
+			} else {
+				first = e
+			}
+		case gen.INameContext:
+			base = &ast.Property{Pos: pos, EndPos: endPositionOf(c), Receiver: base, Key: nameText(c)}
+		}
+	}
+	return base, nil
+}
+
+// endPositionOfToken is endPositionOf for a single token: the first byte past
+// its text.
+func endPositionOfToken(tok antlr.Token) ast.Position {
+	return ast.Position{
+		Line:   uint32(tok.GetLine()),
+		Column: uint32(tok.GetColumn()) + uint32(len(tok.GetText())),
+		Offset: uint32(tok.GetStop()) + 1,
+	}
 }
 
 func (v *visitor) visitPropertyExpression(ctx gen.IPropertyExpressionContext) (ast.Expression, error) {
@@ -2119,42 +2099,52 @@ func (v *visitor) VisitInvocationName(ctx *gen.InvocationNameContext) interface{
 // Subquery forms
 // -------------------------------------------------------------------------
 
-// subqueryUnionUnsupported is the refusal a UNION inside an EXISTS or COUNT
-// subquery body earns, shared by both so the two cannot drift (rmp #2615).
+// subqueryBody returns the AST a block-form EXISTS or COUNT body is held as:
+// the *ast.SingleQuery itself for a one-branch body, and the *ast.MultiQuery
+// for a UNION body (rmp #2627). A one-part MultiQuery is unwrapped so a body
+// without UNION keeps the shape every single-branch consumer expects.
 //
-// # Why this is a refusal and not an answer
+// # A UNION body is answered, from every branch
 //
-// The grammar admits `regularQuery` in both positions, so a UNION parses; but
-// [ast.ExistsSubquery.Query] and [ast.CountSubquery.Query] are typed
-// *ast.SingleQuery, which cannot hold one. Both visitors used to keep
-// q.Parts[0] and discard the rest — "multi-union inside EXISTS is unusual" —
-// which made the query answer from ONE BRANCH with no error and no
-// notification. MEASURED on a node with a :W edge and no :Z edge,
-// `EXISTS { MATCH (x)-[:Z]->() RETURN 1 UNION MATCH (x)-[:W]->() RETURN 1 }`
-// returned false where the second branch matches: a silent wrong answer.
+// Until rmp #2627 a UNION body was refused (rmp #2615), and before that it was
+// answered from Parts[0] alone — a silent wrong answer. Both reference engines
+// answer it, read from their grammar source: Neo4j's existsExpression and
+// countExpression admit `regularQuery`, which is
+// `singleQuery (UNION (ALL | DISTINCT)? singleQuery)*` (github.com/neo4j/neo4j
+// 2026.07.1, community/cypher/front-end/parser/v5/parser/src/main/antlr4/org/neo4j/cypher/internal/parser/v5/Cypher5Parser.g4:33-35,
+// 671-677), and Memgraph's `EXISTS '{' subqueryBody '}'` and
+// `COUNT '{' subqueryBody '}'` admit `cypherQuery`, which carries `cypherUnion`
+// (github.com/memgraph/memgraph commit 01cc6b67c6d0d1161c15b99cd76ed13959d8f3da,
+// src/query/frontend/opencypher/grammar/Cypher.g4:73, 79-81, 272-273, 318-319).
 //
-// BOTH REFERENCE ENGINES ANSWER THIS QUERY, read from their grammar source:
-// Neo4j's existsExpression and countExpression admit `regularQuery`, which is
-// `singleQuery (UNION (ALL | DISTINCT)? singleQuery)*` (Cypher5Parser.g4:33-35,
-// 671-677), and Memgraph's existsSubquery and countSubquery admit `cypherQuery`,
-// which carries `cypherUnion` (Cypher.g4:73-81, 317-323). So refusing DIVERGES
-// from both, and says so rather than pretending the shape is illegal.
+// # Column compatibility applies inside the body
 //
-// It is refused rather than supported because a silent wrong answer is a DEFECT
-// and reference parity is a FEATURE: supporting it means widening the two AST
-// node types and teaching the subquery driver to translate a multi-branch body,
-// including UNION-versus-UNION-ALL de-duplication inside a subquery. That is
-// filed separately. The openCypher 9 TCK does not cover subquery expressions at
-// all — zero occurrences of `EXISTS {` or `COUNT {` in any feature file — so
-// neither refusing nor supporting moves the conformance count.
-func subqueryUnionUnsupported(rule string, pos ast.Position) *SemaError {
-	return &SemaError{
-		Rule: rule,
-		Pos:  pos,
-		Message: "UNION is not supported inside an " + rule +
-			" subquery body: the query would be answered from its first branch alone. " +
-			"Rewrite the subquery without UNION, or combine the branches outside it",
+// The body is visited by [visitor.VisitRegularQuery], the same visitor a
+// top-level UNION goes through, so its two rules hold here unchanged: UNION and
+// UNION ALL may not be mixed (InvalidClauseComposition), and every branch must
+// project the same columns (DifferentColumnsInUnion, [checkUnionColumns]) —
+// both compile-time errors. That is Neo4j's behaviour too. Its column check is
+// not confined to the top level: VariableChecker.incompatibleReturnColumns
+// fires on EVERY Union statement scope, a subquery body's included, and raises
+// "All sub queries in an UNION must have the same return column names"
+// (github.com/neo4j/neo4j 2026.07.1,
+// community/cypher/front-end/frontend/src/main/scala/org/neo4j/cypher/internal/frontend/phases/parserTransformers/scoping/VariableChecker.scala:143-148,
+// VariableCheckerUtil.scala:450-463, and the message at
+// community/cypher/front-end/ast/src/main/scala/org/neo4j/cypher/internal/ast/semantics/SemanticError.scala:735-738);
+// its EXISTS and COUNT checks run the body through
+// Union.semanticCheckInSubqueryExpressionContext, which applies the same
+// per-branch checks as a top-level UNION (ast/Query.scala:1200-1208 and
+// ast/semantics/SemanticExpressionCheck.scala:899-943). The openCypher TCK pins
+// the rule for a top-level UNION (clauses/union/Union1.feature [5] and
+// Union2.feature [5], "Failing when UNION has different columns" /
+// "Failing when UNION ALL has different columns"); it has no scenario for a
+// UNION inside a subquery expression, so the rule is applied here by the same
+// code rather than by a second policy.
+func subqueryBody(q *ast.MultiQuery) ast.Query {
+	if len(q.Parts) == 1 {
+		return q.Parts[0]
 	}
+	return q
 }
 
 // VisitSubqueryExist handles EXISTS { … }.
@@ -2172,17 +2162,16 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 			}
 			return &ast.ExistsSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q}
 		case *ast.MultiQuery:
-			// A UNION body. Refused rather than answered from Parts[0], which is
-			// what this did until rmp #2615 — silently, and wrongly. See
-			// [subqueryUnionUnsupported].
-			if len(q.Parts) > 1 {
-				return subqueryUnionUnsupported("EXISTS", positionOf(ctx))
-			}
+			// A UNION body: every branch is held and every branch is checked, so
+			// an update clause in any branch is refused (rmp #2627). See
+			// [subqueryBody].
 			if len(q.Parts) > 0 {
-				if err := existsSubqueryHasUpdateClause(q.Parts[0]); err != nil {
-					return &SemaError{Rule: "subqueryExist", Pos: positionOf(ctx), Message: err.Error()}
+				for _, part := range q.Parts {
+					if err := existsSubqueryHasUpdateClause(part); err != nil {
+						return &SemaError{Rule: "subqueryExist", Pos: positionOf(ctx), Message: err.Error()}
+					}
 				}
-				return &ast.ExistsSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q.Parts[0]}
+				return &ast.ExistsSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: subqueryBody(q)}
 			}
 		}
 	}
@@ -2225,8 +2214,8 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 // reading clauses is well formed.
 //
 // The clauses are assembled exactly as [visitor.VisitSinglePartQ] does. The
-// resulting RETURN-less SingleQuery is the same shape that existsToSingleQuery
-// and countToSingleQuery already synthesise for the bare-pattern form, so the
+// resulting RETURN-less SingleQuery is the same shape that existsToQuery
+// and countToQuery already synthesise for the bare-pattern form, so the
 // downstream evaluator needs no change.
 func (v *visitor) visitSubqueryReadingBlock(ctx antlr.ParserRuleContext, rss []gen.IReadingStatementContext) (*ast.SingleQuery, *SemaError) {
 	q := &ast.SingleQuery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
@@ -2274,13 +2263,10 @@ func (v *visitor) VisitSubqueryCount(ctx *gen.SubqueryCountContext) interface{} 
 		case *ast.SingleQuery:
 			return &ast.CountSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q}
 		case *ast.MultiQuery:
-			// Same refusal as the EXISTS sibling, through the same helper so the
-			// two cannot drift (rmp #2615).
-			if len(q.Parts) > 1 {
-				return subqueryUnionUnsupported("COUNT", positionOf(ctx))
-			}
+			// A UNION body, held whole through the same helper as the EXISTS
+			// sibling so the two cannot drift (rmp #2627). See [subqueryBody].
 			if len(q.Parts) > 0 {
-				return &ast.CountSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q.Parts[0]}
+				return &ast.CountSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: subqueryBody(q)}
 			}
 		}
 	}

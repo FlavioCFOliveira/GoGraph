@@ -1,0 +1,516 @@
+spec gg01-traversal-at-pinned-snapshot: 2 sessions, 10 permutations
+# GG01. s0 pins a read snapshot and counts the paths of length 1..4 from a, twice; s1
+# adds b->e and deletes c->d in two autocommit statements. Both of s0's counts equal
+# the snapshot's: a traversal never mixes instants.
+# The final dangling probe must count 0 in every permutation: an edge to a dead node
+# is never committed (catalogue §9 point 3).
+
+starting permutation: s0r1 s0r2 s0c s1a s1d
+step s0r1: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s0r2: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s0c: COMMIT
+step s1a: MATCH (x:N {name:'b'}), (y:N {name:'e'}) CREATE (x)-[:R {id:6}]->(y) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (:N {name:'c'})-[r:R]->(:N {name:'d'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+final paths: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+4    
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+"c" 
+"d" 
+"e" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|5 |"c"
+"b"|2 |"c"
+"b"|6 |"e"
+"d"|4 |"e"
+(5 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+5        |0       
+(1 row)
+
+starting permutation: s0r1 s0r2 s1a s0c s1d
+step s0r1: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s0r2: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s1a: MATCH (x:N {name:'b'}), (y:N {name:'e'}) CREATE (x)-[:R {id:6}]->(y) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0c: COMMIT
+step s1d: MATCH (:N {name:'c'})-[r:R]->(:N {name:'d'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+final paths: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+4    
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+"c" 
+"d" 
+"e" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|5 |"c"
+"b"|2 |"c"
+"b"|6 |"e"
+"d"|4 |"e"
+(5 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+5        |0       
+(1 row)
+
+starting permutation: s0r1 s0r2 s1a s1d s0c
+step s0r1: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s0r2: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s1a: MATCH (x:N {name:'b'}), (y:N {name:'e'}) CREATE (x)-[:R {id:6}]->(y) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (:N {name:'c'})-[r:R]->(:N {name:'d'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0c: COMMIT
+final paths: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+4    
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+"c" 
+"d" 
+"e" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|5 |"c"
+"b"|2 |"c"
+"b"|6 |"e"
+"d"|4 |"e"
+(5 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+5        |0       
+(1 row)
+
+starting permutation: s0r1 s1a s0r2 s0c s1d
+step s0r1: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s1a: MATCH (x:N {name:'b'}), (y:N {name:'e'}) CREATE (x)-[:R {id:6}]->(y) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0r2: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s0c: COMMIT
+step s1d: MATCH (:N {name:'c'})-[r:R]->(:N {name:'d'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+final paths: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+4    
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+"c" 
+"d" 
+"e" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|5 |"c"
+"b"|2 |"c"
+"b"|6 |"e"
+"d"|4 |"e"
+(5 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+5        |0       
+(1 row)
+
+starting permutation: s0r1 s1a s0r2 s1d s0c
+step s0r1: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s1a: MATCH (x:N {name:'b'}), (y:N {name:'e'}) CREATE (x)-[:R {id:6}]->(y) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0r2: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s1d: MATCH (:N {name:'c'})-[r:R]->(:N {name:'d'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0c: COMMIT
+final paths: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+4    
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+"c" 
+"d" 
+"e" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|5 |"c"
+"b"|2 |"c"
+"b"|6 |"e"
+"d"|4 |"e"
+(5 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+5        |0       
+(1 row)
+
+starting permutation: s0r1 s1a s1d s0r2 s0c
+step s0r1: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s1a: MATCH (x:N {name:'b'}), (y:N {name:'e'}) CREATE (x)-[:R {id:6}]->(y) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (:N {name:'c'})-[r:R]->(:N {name:'d'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0r2: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s0c: COMMIT
+final paths: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+4    
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+"c" 
+"d" 
+"e" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|5 |"c"
+"b"|2 |"c"
+"b"|6 |"e"
+"d"|4 |"e"
+(5 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+5        |0       
+(1 row)
+
+starting permutation: s1a s0r1 s0r2 s0c s1d
+step s1a: MATCH (x:N {name:'b'}), (y:N {name:'e'}) CREATE (x)-[:R {id:6}]->(y) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0r1: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s0r2: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s0c: COMMIT
+step s1d: MATCH (:N {name:'c'})-[r:R]->(:N {name:'d'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+final paths: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+4    
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+"c" 
+"d" 
+"e" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|5 |"c"
+"b"|2 |"c"
+"b"|6 |"e"
+"d"|4 |"e"
+(5 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+5        |0       
+(1 row)
+
+starting permutation: s1a s0r1 s0r2 s1d s0c
+step s1a: MATCH (x:N {name:'b'}), (y:N {name:'e'}) CREATE (x)-[:R {id:6}]->(y) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0r1: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s0r2: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s1d: MATCH (:N {name:'c'})-[r:R]->(:N {name:'d'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0c: COMMIT
+final paths: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+4    
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+"c" 
+"d" 
+"e" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|5 |"c"
+"b"|2 |"c"
+"b"|6 |"e"
+"d"|4 |"e"
+(5 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+5        |0       
+(1 row)
+
+starting permutation: s1a s0r1 s1d s0r2 s0c
+step s1a: MATCH (x:N {name:'b'}), (y:N {name:'e'}) CREATE (x)-[:R {id:6}]->(y) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s0r1: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s1d: MATCH (:N {name:'c'})-[r:R]->(:N {name:'d'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0r2: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s0c: COMMIT
+final paths: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+4    
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+"c" 
+"d" 
+"e" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|5 |"c"
+"b"|2 |"c"
+"b"|6 |"e"
+"d"|4 |"e"
+(5 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+5        |0       
+(1 row)
+
+starting permutation: s1a s1d s0r1 s0r2 s0c
+step s1a: MATCH (x:N {name:'b'}), (y:N {name:'e'}) CREATE (x)-[:R {id:6}]->(y) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (:N {name:'c'})-[r:R]->(:N {name:'d'}) DELETE r RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s0r1: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s0r2: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+7    
+(1 row)
+step s0c: COMMIT
+final paths: MATCH p = (:N {name:'a'})-[*1..4]->(z) RETURN count(p) AS paths
+paths
+-----
+4    
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+"c" 
+"d" 
+"e" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|5 |"c"
+"b"|2 |"c"
+"b"|6 |"e"
+"d"|4 |"e"
+(5 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+5        |0       
+(1 row)

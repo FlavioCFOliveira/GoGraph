@@ -1,0 +1,615 @@
+spec mg07-on-match-changes-unique-key: 3 sessions, 30 permutations
+# MG07. UNIQUE on (:K).k, one node k='a'. s1 runs MERGE (n {k:'a'}) ON MATCH SET
+# n.k = 'b', which releases 'a' and reserves 'b'; s2 MERGEs k='b'; s3 creates k='a'
+# in an autocommit statement. Exactly one node per key in every interleaving, and
+# each loser gets a typed error. The release of 'a' is deferred to s1's commit
+# (rmp #2366), so s3 is refused while s1 is open.
+
+starting permutation: s1m s1c s2m s2c s3c
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s1c: COMMIT
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+v   
+----
+"s3"
+(1 row)
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"s3"  
+"b"|"seed"
+(2 rows)
+
+starting permutation: s1m s1c s2m s3c s2c
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s1c: COMMIT
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+v   
+----
+"s3"
+(1 row)
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"s3"  
+"b"|"seed"
+(2 rows)
+
+starting permutation: s1m s1c s3c s2m s2c
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s1c: COMMIT
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+v   
+----
+"s3"
+(1 row)
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"s3"  
+"b"|"seed"
+(2 rows)
+
+starting permutation: s1m s2m s1c s2c s3c
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+v   
+----
+"s3"
+(1 row)
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"s3"  
+"b"|"seed"
+(2 rows)
+
+starting permutation: s1m s2m s1c s3c s2c
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s1c: COMMIT
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+v   
+----
+"s3"
+(1 row)
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"s3"  
+"b"|"seed"
+(2 rows)
+
+starting permutation: s1m s2m s2c s1c s3c
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+v   
+----
+"s3"
+(1 row)
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"s3"  
+"b"|"seed"
+(2 rows)
+
+starting permutation: s1m s2m s2c s3c s1c
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"b"|"seed"
+(1 row)
+
+starting permutation: s1m s2m s3c s1c s2c
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"b"|"seed"
+(1 row)
+
+starting permutation: s1m s2m s3c s2c s1c
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"b"|"seed"
+(1 row)
+
+starting permutation: s1m s3c s1c s2m s2c
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1c: COMMIT
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"b"|"seed"
+(1 row)
+
+starting permutation: s1m s3c s2m s1c s2c
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"b"|"seed"
+(1 row)
+
+starting permutation: s1m s3c s2m s2c s1c
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"b"|"seed"
+(1 row)
+
+starting permutation: s2m s1m s1c s2c s3c
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s2m s1m s1c s3c s2c
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s2m s1m s2c s1c s3c
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s2m s1m s2c s3c s1c
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s2c: COMMIT
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s2m s1m s3c s1c s2c
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s2m s1m s3c s2c s1c
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s2m s2c s1m s1c s3c
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s2c: COMMIT
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s2m s2c s1m s3c s1c
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s2c: COMMIT
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s2m s2c s3c s1m s1c
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s2c: COMMIT
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s2m s3c s1m s1c s2c
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s2m s3c s1m s2c s1c
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s2m s3c s2c s1m s1c
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s2c: COMMIT
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s3c s1m s1c s2m s2c
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s1c: COMMIT
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"b"|"seed"
+(1 row)
+
+starting permutation: s3c s1m s2m s1c s2c
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"b"|"seed"
+(1 row)
+
+starting permutation: s3c s1m s2m s2c s1c
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+k  
+---
+"b"
+(1 row)
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"b"|"seed"
+(1 row)
+
+starting permutation: s3c s2m s1m s1c s2c
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s3c s2m s1m s2c s1c
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)
+
+starting permutation: s3c s2m s2c s1m s1c
+step s3c: CREATE (n:K {k:'a', v:'s3'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "a" already exists
+step s2m: MERGE (n:K {k:'b'}) ON CREATE SET n.v = 's2' RETURN n.k AS k, n.v AS v
+k  |v   
+---+----
+"b"|"s2"
+(1 row)
+step s2c: COMMIT
+step s1m: MERGE (n:K {k:'a'}) ON MATCH SET n.k = 'b' RETURN n.k AS k
+ERROR: exec: Merge: ON MATCH: exec: constraint violation: UNIQUE constraint on (K).k: value "b" already exists
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v     
+---+------
+"a"|"seed"
+"b"|"s2"  
+(2 rows)

@@ -43,6 +43,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -226,6 +227,9 @@ func TestCheckpoint_UnreadableSnapshot_DoesNotTruncateWAL(t *testing.T) {
 		t.Errorf("WALTruncBytes = %d, want 0: the checkpointer discarded the WAL prefix "+
 			"behind a snapshot nothing can read — committed data is unrecoverable", got)
 	}
+	if _, ok, _ := waltest.CheckpointRecorded(dir); ok {
+		t.Error("the control file records the unreadable snapshot as the start of recovery")
+	}
 	if got := fileSize(t, walPath); got != walBefore {
 		t.Errorf("WAL size = %d, want %d (unchanged): the WAL was truncated behind an "+
 			"unreadable snapshot", got, walBefore)
@@ -320,9 +324,9 @@ func TestCheckpoint_PermittedTruncation_LeavesARecoverableStore(t *testing.T) {
 
 	// The gate must have PERMITTED the truncation — otherwise the guarantee
 	// below would be about an artefact the gate never approved.
-	if got := cp.Stats().WALTruncBytes; got == 0 {
-		t.Fatal("WALTruncBytes = 0: the gate refused a perfectly good snapshot, so the " +
-			"readback rejects images it must accept")
+	if _, ok, err := waltest.CheckpointRecorded(dir); err != nil || !ok {
+		t.Fatalf("the checkpoint did not record its snapshot (err %v): the gate refused a perfectly good snapshot, so the "+
+			"readback rejects images it must accept", err)
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal.Close: %v", err)
@@ -375,9 +379,9 @@ func TestCheckpoint_PermittedTruncation_LeavesARecoverableStore(t *testing.T) {
 // fileSize returns the size of path, failing the test if it cannot be stat-ed.
 func fileSize(t *testing.T, path string) int64 {
 	t.Helper()
-	fi, err := os.Stat(path)
+	b, err := waltest.FrameBytes(path)
 	if err != nil {
-		t.Fatalf("stat %s: %v", path, err)
+		t.Fatalf("read WAL frames of %s: %v", path, err)
 	}
-	return fi.Size()
+	return int64(len(b))
 }

@@ -55,10 +55,18 @@ func TestProcDbRelationshipTypes_AfterCreatingEdges(t *testing.T) {
 		}
 	}
 	// KNOWS is borne by two distinct edges to confirm de-duplication.
-	g.SetEdgeLabel("alice", "bob", "KNOWS")
-	g.SetEdgeLabel("alice", "bob", "LIKES")
-	g.SetEdgeLabel("alice", "acme", "KNOWS")
-	g.SetEdgeLabel("alice", "acme", "WORKS_WITH")
+	if err := g.SetEdgeLabel("alice", "bob", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("alice", "bob", "LIKES"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("alice", "acme", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("alice", "acme", "WORKS_WITH"); err != nil {
+		t.Fatal(err)
+	}
 
 	res, err := eng.Run(context.Background(),
 		`CALL db.relationshipTypes() YIELD relationshipType`, nil)

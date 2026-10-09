@@ -308,10 +308,10 @@ func (e *Engine[N, W]) seedAllLive() *roaring64.Bitmap {
 // The lock-free TombstoneCount gate keeps the common never-deleted
 // case free of the tombstone lock and the TombstonedIDs allocation.
 func (e *Engine[N, W]) pruneTombstones(bm *roaring64.Bitmap) {
-	if e.g.TombstoneCount() == 0 {
+	if e.g.TombstoneCountStored() == 0 {
 		return
 	}
-	for _, id := range e.g.TombstonedIDs() {
+	for _, id := range e.g.TombstonedIDsStored() {
 		bm.Remove(uint64(id))
 	}
 }

@@ -52,7 +52,7 @@ func drainExec(t *testing.T, res *cypher.Result) error {
 func liveNodeCount(g *lpg.Graph[string, float64]) int {
 	live := 0
 	g.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
-		if realID, ok := g.AdjList().Mapper().Lookup(key); ok && !g.IsTombstoned(realID) {
+		if realID, ok := g.AdjList().Mapper().Lookup(key); ok && !g.IsTombstonedStored(realID) {
 			_ = id
 			live++
 		}

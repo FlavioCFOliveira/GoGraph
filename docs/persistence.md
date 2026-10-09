@@ -97,6 +97,12 @@ one that would block every subsequent checkpoint while the WAL grew unbounded.
 The transaction consumes a sequence, applies nothing, and leaves the store
 usable.
 
+The 65535-byte token limit is not a WAL-only rule. It is `lpg.MaxTokenLen`, and
+the in-memory engine, every `Tx` mutator, bulk import and the Cypher engines all
+refuse an over-long label, relationship type or property key with
+`lpg.ErrTokenTooLong` before any write, so a graph cannot hold a token its own
+WAL could not log (rmp #2748). Call `lpg.CheckToken` to validate a name first.
+
 ## Transaction isolation
 
 **Writes do not serialise.** Since rmp #2306 the transactional layer's
@@ -128,7 +134,13 @@ architectural correction rather than an optimisation. See
 
 ```
 <dir>/
-  wal                — single un-segmented, appended file of framed records
+  wal.control        — 64-byte WAL control file: store id, oldest retained
+                       position, checkpoint redo position (store/wal/FORMAT.md)
+  wal.d/             — the WAL segments, <016x segNo>.wal, numbered from 1
+  wal                — the legacy single-file log of a store written before
+                       WAL v2, ending with its seal, or a one-frame seal stub
+  wal.prefix-truncated — durable marker: the WAL prefix has been truncated,
+                       so the history requires the snapshot
   wal.lock           — 0-byte sentinel carrying an exclusive flock(2). Held for
                        the writer's lifetime; a second process opening the same
                        WAL gets wal.ErrWALLocked instead of blocking.
@@ -165,15 +177,22 @@ it is written only when the graph has something to put in it, its absence loads
 as an empty component, and none of them bumps the manifest version — see
 "Snapshot file format" below.
 
-The WAL is one file. It is **not** segmented: `wal.Writer` reclaims space by
-rewriting the surviving suffix under an atomic rename
-(`wal.Writer.TruncatePrefix`), not by unlinking whole segments.
+The WAL is **segmented** (WAL v2, [design-wal-v2.md](design-wal-v2.md)):
+`wal.Writer` reclaims space by unlinking whole segments below the oldest
+retained position (`wal.Writer.MarkCheckpoint`, then
+`wal.Writer.ReclaimSegments`), never by rewriting a file. A store written by an
+earlier release keeps its single-file `wal`; the first writable, clean open
+seals it and continues in segments, and a build older than WAL v2 then refuses
+the directory. The snapshot also carries `nodeids.bin`, the per-shard node-id
+high-water marks, in manifest version 4.
 
 ## WAL payload schema
 
-A WAL frame is `magic("GGWA") | uint16 version | uint32 length | uint32 crc32c`
-followed by the payload — a 14-byte header (`wal.HeaderSize`), with
-`wal.CurrentVersion` currently `1`. The frame layer is documented in
+A WAL frame written by this release is a 36-byte header (`wal.HeaderSizeV2`,
+`wal.CurrentVersion` = `2`) carrying the magic, version, length, the frame's
+logical position, the distance back to its predecessor, the store id and a
+CRC32C, followed by the payload. The 14-byte version-1 header
+(`wal.HeaderSize`, `wal.LegacyVersion`) is still read, never written. The frame layer is documented in
 [`store/wal/FORMAT.md`](../store/wal/FORMAT.md); this section covers the
 payload the transaction layer puts inside it. A single frame payload is capped
 at 1 GiB, so a corrupt or crafted length field cannot force an unbounded
@@ -1374,9 +1393,10 @@ and is evaluated by the caller, because only the engine knows which
    union is a deliberate over-approximation: it can refuse a hydration that would
    have been sound, never permit one that is not.
 
-`cypher.NewEngineWithStoreAndRecovery(store, res)` is the recommended
-constructor: it threads the whole `Result` so the payloads travel with it and
-cannot be dropped by accident. `NewEngineWithStoreAndSchema` remains available
+`cypher.NewEngineWithOpened(opened)`, over a directory opened by `store.Open`, is
+the recommended constructor; it is `cypher.NewEngineWithStoreAndRecovery(store,
+res)` applied to the opened store and its recovery. Both thread the whole
+`Result` so the payloads travel with it and cannot be dropped by accident. `NewEngineWithStoreAndSchema` remains available
 and unchanged — it carries no payloads and therefore always rebuilds.
 
 **A damaged payload is a per-index rebuild, never a fail-stop.** An index is
@@ -1493,11 +1513,14 @@ transactions commit and append frames *past W*. Then:
    snapshot lacks. That is a supported degraded mode (unbounded WAL growth,
    Durability intact), surfaced via
    `store.checkpoint.truncate_skipped_not_self_sufficient`.
-7. Otherwise call `wal.Writer.TruncatePrefix(W)`, which discards **only**
-   *[0, W)* and preserves every frame committed during phase 2. It is itself
-   crash-safe: it writes the surviving suffix to a temporary file and renames it
-   over the WAL. The reclaimed byte count is recorded on `Stats.WALTruncBytes`
-   and emitted via `store.checkpoint.wal_truncated_bytes`.
+7. Otherwise call `wal.Writer.MarkCheckpoint(W)`, which records the redo
+   position in the control file (temp file, fsync, rename, directory fsync),
+   then `wal.Writer.ReclaimSegments`, which unlinks only the segments whose
+   frames all lie below the oldest retained position — never the active
+   segment — and preserves every frame committed during phase 2. Reclamation
+   takes neither the commit lock nor the append lock. The reclaimed byte count
+   is recorded on `Stats.WALTruncBytes` and emitted via
+   `store.checkpoint.wal_truncated_bytes`.
 
 Measured end to end on a 40 000-commit `int64`-keyed store with four writer
 goroutines committing throughout: the checkpoint completed in 103.8 ms, 45
@@ -1507,17 +1530,18 @@ the concurrent suffix. Reopening the directory recovered `WALOps=45` and the
 identical graph (40 091 live nodes, 40 045 edges), `IsClean()` true.
 
 Crash safety at any interleaving follows from the ordering: the snapshot is
-self-sufficient, and recovery replays the **whole** surviving WAL idempotently
-on top of it, so the folded prefix is re-applied harmlessly and the suffix lands
-on top. Four crashpoints exercise the window, all no-ops in production
-(`GOGRAPH_CRASH_AT` unset) and driven by
-`store/recovery/checkpoint_crashinject_test.go`:
-`checkpoint.p2-snapshot-published-pre-truncate` (snapshot durable, full WAL
-intact, nothing truncated) in `store/checkpoint.writeAndTruncate`, and
-`checkpoint.truncprefix.tmp-written-pre-rename`,
-`checkpoint.truncprefix.post-rename-pre-dirfsync` and
-`checkpoint.truncprefix.post-rename-pre-bookkeeping` inside
-`wal.Writer.TruncatePrefix`.
+self-sufficient and records the WAL position it covers, the control file records
+the snapshot before any segment is unlinked, and recovery replays only the
+frames at or above the snapshot's redo position, refusing a snapshot that does
+not reach the retained log (`docs/design-wal-v2.md` §4). The crashpoints of the
+window, all no-ops in production (`GOGRAPH_CRASH_AT` unset), are driven by
+`store/recovery/checkpoint_crashinject_test.go` and
+`store/recovery/walv2_crashinject_test.go`:
+`checkpoint.p2-snapshot-published-pre-truncate` (snapshot durable and recorded,
+nothing unlinked) in `store/checkpoint.writeAndTruncate`, and
+`checkpoint.control-tmp-pre-rename`, `checkpoint.control-renamed-pre-dirfsync`,
+`checkpoint.unlink-partial` and `checkpoint.unlink-done-pre-dirfsync` inside
+`wal.Writer.MarkCheckpoint` and `wal.Writer.ReclaimSegments`.
 
 Why this matters (audit gaps F2/F3, see `docs/acid-audit.md`): an
 earlier checkpoint wrote a *CSR-only* snapshot and then truncated the
@@ -1674,6 +1698,83 @@ post-drain close when the abandoned connections eventually finish (idle
 timeout, transaction reap, client exit). Only if a full drain never
 completes is the closer left for process exit.
 
+## Composed open
+
+`store.Open[N, W](dir, opts)` and its context-aware twin
+`store.OpenCtx[N, W](ctx, dir, opts)` are the composed counterpart of
+`store.DB.Close`: the one correct reopen sequence, so an embedder does not
+hand-write it and cannot drop recovered state by omission:
+
+```go
+opened, err := store.Open(dir, store.Options[string, float64]{
+    Codec:       txn.NewStringCodec(),
+    WeightCodec: txn.NewFloat64WeightCodec(),
+})
+if err != nil {
+    return err // recovery error, or *store.UncleanRecoveryError
+}
+defer opened.Close()                     // store.DB teardown, quiesce wired
+eng := cypher.NewEngineWithOpened(opened) // re-registers the recovered schema
+```
+
+It runs, in order:
+
+1. Recovery (`recovery.OpenCtx`) over `dir`: the snapshot, then the WAL tail at
+   `dir/wal`.
+2. The clean gate. When `Result.IsClean()` is false the open is refused with a
+   `*store.UncleanRecoveryError`, which wraps `store.ErrUncleanRecovery` and the
+   recovery's `TailErr`, and carries the refused `Result` for diagnostics. No
+   WAL writer is opened and the directory is left as recovery left it. The gate
+   is on `IsClean`, not on the recovery error alone, so the nil-error
+   `recovery.ErrCommittedTxnCorruptOp` outcome is refused too: every commit
+   appended after that damage would be discarded by the next recovery. With
+   `Options.AllowUnclean` the directory is opened **read-only** instead (see
+   below) and steps 3 to 5 do not run.
+3. `wal.Open(dir/wal)`, which takes the WAL lock and truncates a benign torn
+   tail.
+4. `Result.NewStoreCapped`, which carries the recovered graph (with its graph
+   configuration and restored MVCC clock), the transaction-sequence floor
+   `MaxTxnSeq` (ratcheted with `Options.ResumeTxnSeq`), the producer op cap
+   clamped to the replay bound `MaxTxnOps`, and the codecs recovery used.
+5. A `store.DB` over the WAL with `WithQuiesce(st.RunUnderCommitLock)` wired,
+   followed by `Options.CloseOptions`.
+
+The returned `*store.Opened[N, W]` embeds `*store.DB` and exposes `Store()`,
+`Graph()`, `Recovery()` (the schema, index payloads, and derived counters), and
+`WAL()` (for wiring a checkpointer; never close it directly). A failed open
+closes anything it opened. `store.Open` must not run concurrently with another
+open of, or writer on, the same directory; a second process that reaches step 3
+while the first holds the WAL lock fails with `wal.ErrWALLocked`.
+
+### Read-only open of an unclean directory
+
+`Options.AllowUnclean` turns the refusal into a read-only open, for both
+not-clean outcomes (the fail-stop corruption recovery returns as its error, and
+the nil-error `ErrCommittedTxnCorruptOp`). A recovery error that is not a
+corruption (an I/O error, a cancelled context) is still returned, and a clean
+recovery opens for writing whatever the option says.
+
+A read-only `Opened`:
+
+- holds the recovered committed prefix in `Graph()` and the full `Recovery()`
+  result; reads, including Cypher reads through `cypher.NewEngineWithOpened`,
+  work;
+- opens no WAL writer: no lock is taken, no byte is written, and `WAL()` is nil;
+- reports `ReadOnly() == true`, and its store is a `txn.NewReadOnlyStore`
+  (`Store().ReadOnly() == true`);
+- refuses every commit that would write with `store.ErrReadOnlyStore` (the same
+  value as `txn.ErrReadOnlyStore`): `Tx.Commit`, `Tx.CommitCtx`,
+  `Tx.CommitWALOnly`, and therefore every Cypher write and DDL statement. A
+  transaction that buffered nothing commits as a no-op;
+- closes with `Close` as usual; the embedded `DB` owns no WAL.
+
+Nothing is acknowledged, so nothing can be lost: a later open sees exactly the
+same committed prefix. Mutating `Graph()` directly bypasses the store and is
+never durable; do not.
+
+The low-level pieces stay public; the sections below describe them, and
+`store.Open` is exactly their composition.
+
 ## Recovery procedure
 
 `recovery.Open[N, W](dir, opts)` and its context-aware twin
@@ -1718,8 +1819,9 @@ two over an injected filesystem — return a `Result` containing the rebuilt
   `OpCreateConstraint` / `OpCreateIndex` frames, with later DROPs applied.
   Both slices are deterministically ordered so a reopen is reproducible.
   Recovery does not enforce or build them; the engine does, via
-  `cypher.NewEngineWithStoreAndSchema` or
-  `cypher.NewEngineWithStoreAndRecovery`.
+  `cypher.NewEngineWithOpened` (over `store.Open`),
+  `cypher.NewEngineWithStoreAndRecovery`, or
+  `cypher.NewEngineWithStoreAndSchema`.
 - `WALOps int` — how many WAL ops were applied.
 - `WALTailOffset int64` — the byte offset at which replay stopped.
 - `MaxTxnSeq uint64` — the highest transaction sequence any durable `OpCommit`
@@ -1783,9 +1885,10 @@ st := res.NewStore(w, txn.Options[int64, float64]{
 
 Appending to a corrupt WAL would permanently embed the corruption and
 silently drop every committed op that followed the bad frame, so the
-safe behaviour — refusing to append — is the default. Every shipped
-example under `examples/` that recovers then reopens the WAL for
-append checks `IsClean()` before doing so.
+safe behaviour — refusing to append — is the default. The snippet above is
+what `store.Open` composes (see *Composed open*); the shipped examples that
+recover and then append reopen through `store.Open`, which applies the
+`IsClean()` gate itself.
 
 **Reopen through `Result.NewStore`, not through a hand-built `txn.Store`.**
 `NewStore` is `txn.NewStoreWithOptions` with `Options.ResumeTxnSeq` already set
@@ -1936,4 +2039,4 @@ change that intentionally bumps the on-disk shape, and add a fresh
 
 ---
 
-*Last reviewed: 2026-09-08 against commit `efd32fb991f415c3a2871dab1ea1bfb83434d189`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-10-09 against commit `60c90d730ebdd6fb3168614de4b92d78bf4d6ca4`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

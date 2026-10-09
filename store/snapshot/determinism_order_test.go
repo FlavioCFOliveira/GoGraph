@@ -57,7 +57,9 @@ func buildMultiPropGraph(t *testing.T) *lpg.Graph[string, int64] {
 					t.Fatal(err)
 				}
 			}
-			g.SetEdgeLabel(s, d, "E")
+			if err := g.SetEdgeLabel(s, d, "E"); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	return g
@@ -152,7 +154,9 @@ func TestCollectors_IndependentOfInsertionOrder(t *testing.T) {
 			if err := g.SetEdgeProperty("s1", d, "k2", lpg.Int64Value(2)); err != nil {
 				t.Fatal(err)
 			}
-			g.SetEdgeLabel("s1", d, "E")
+			if err := g.SetEdgeLabel("s1", d, "E"); err != nil {
+				t.Fatal(err)
+			}
 		}
 		return g
 	}

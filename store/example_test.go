@@ -68,3 +68,46 @@ func ExampleDB() {
 	// Output:
 	// append after Close is ErrWriterClosed: true
 }
+
+// ExampleOpen opens a store directory, commits a transaction, closes it, and
+// reopens it with store.Open: recovery, the clean gate, the WAL open, and the
+// transactional store built from the recovery result happen in one call, so
+// the reopened store resumes the transaction sequence the WAL already spent.
+func ExampleOpen() {
+	dir, err := os.MkdirTemp("", "store-open-example")
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	opts := store.Options[string, float64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewFloat64WeightCodec(),
+	}
+	for _, key := range []string{"alice", "bob"} {
+		o, err := store.Open(dir, opts)
+		if err != nil {
+			panic(err)
+		}
+		tx := o.Store().Begin()
+		if err := tx.AddNode(key); err != nil {
+			panic(err)
+		}
+		if err := tx.Commit(); err != nil {
+			panic(err)
+		}
+		if err := o.Close(); err != nil {
+			panic(err)
+		}
+	}
+
+	o, err := store.Open(dir, opts)
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = o.Close() }()
+	_, hasAlice := o.Graph().AdjList().Mapper().Lookup("alice")
+	_, hasBob := o.Graph().AdjList().Mapper().Lookup("bob")
+	fmt.Println(hasAlice, hasBob, o.Recovery().MaxTxnSeq)
+	// Output: true true 2
+}

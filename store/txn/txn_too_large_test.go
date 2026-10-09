@@ -9,6 +9,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -70,14 +71,14 @@ func TestTx_Commit_RejectsOverCapTransaction(t *testing.T) {
 	}
 
 	// Nothing was made durable: the WAL holds no frames from the rejected
-	// transaction. Assert via the raw on-disk size (no frames written) and via
-	// a fresh recovery observing none of the nodes.
-	raw, rerr := os.ReadFile(filepath.Join(dir, "wal")) //nolint:gosec // path under t.TempDir
+	// transaction. Assert via the segments' frame bytes (no frames written) and
+	// via a fresh recovery observing none of the nodes.
+	raw, rerr := waltest.FrameBytes(filepath.Join(dir, "wal"))
 	if rerr != nil {
-		t.Fatalf("ReadFile(wal): %v", rerr)
+		t.Fatalf("read WAL frames: %v", rerr)
 	}
 	if len(raw) != 0 {
-		t.Fatalf("WAL is %d bytes after a rejected commit, want 0 (nothing durable)", len(raw))
+		t.Fatalf("WAL holds %d frame bytes after a rejected commit, want 0 (nothing durable)", len(raw))
 	}
 
 	res, oerr := recovery.Open[string, int64](dir, recovery.Options[string, int64]{

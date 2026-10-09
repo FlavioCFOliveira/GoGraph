@@ -1,0 +1,430 @@
+spec ix10-parameter-seek-own-write: 2 sessions, 8 permutations
+# IX10 (#2814 through a second access path, 3fd78c5e). Hash indexes on (:L).s and
+# (:L).k. Inside one transaction s1 moves n7 to s = 'zzz' and k = 16 (n8's key), then
+# reads both through a PARAMETER seek ($v string, $k integer). Each equals the
+# literal answer and the scan. s2 reads the same parameters in an autocommit
+# statement.
+
+starting permutation: s1w s1ps s1pk s1po s1ls s1lk s1c s2ps
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s1ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1pk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1po: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1ls: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1lk: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1c: COMMIT
+step s2ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fpk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fpo: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s1ps s1pk s1po s1ls s1lk s2ps s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s1ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1pk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1po: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1ls: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1lk: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s2ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1c: COMMIT
+final fps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fpk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fpo: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s1ps s1pk s1po s1ls s2ps s1lk s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s1ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1pk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1po: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1ls: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1lk: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1c: COMMIT
+final fps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fpk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fpo: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s1ps s1pk s1po s2ps s1ls s1lk s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s1ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1pk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1po: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1ls: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1lk: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1c: COMMIT
+final fps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fpk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fpo: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s1ps s1pk s2ps s1po s1ls s1lk s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s1ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1pk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s2ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1po: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1ls: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1lk: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1c: COMMIT
+final fps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fpk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fpo: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s1ps s2ps s1pk s1po s1ls s1lk s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s1ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1pk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1po: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1ls: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1lk: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1c: COMMIT
+final fps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fpk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fpo: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s2ps s1ps s1pk s1po s1ls s1lk s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s2ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1pk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1po: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1ls: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1lk: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1c: COMMIT
+final fps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fpk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fpo: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ps s1w s1ps s1pk s1po s1ls s1lk s1c
+step s2ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s1ps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1pk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1po: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1ls: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1lk: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1c: COMMIT
+final fps: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=zzz
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fpk: MATCH (n:L {k:$k}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = $k RETURN seek, count(m) AS scan  -- $k=16
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fpo: MATCH (n:L {s:$v}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = $v RETURN seek, count(m) AS scan  -- $v=v7
+seek|scan
+----+----
+0   |0   
+(1 row)

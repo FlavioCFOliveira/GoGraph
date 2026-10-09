@@ -1,0 +1,115 @@
+spec sk17-observed-transaction-vanishes-otv: 4 sessions, 2 permutations
+# SK17, OTV (Turso hermitage_tests.rs:295; MIT, adapted from Hermitage). T1 sets
+# a = 11 and b = 19; T2 sets a = 12 and is refused at its statement (F2, F3), then
+# ROLLS BACK (GoGraph poisons it; Turso rolls it back itself, F8); T1 commits; T2'
+# BEGINs after that commit, sets a = 12 and b = 18, and commits. T3, open since the
+# start, reads (10, 20) at every step: a committed or refused peer's effects never
+# appear in, then vanish from, its snapshot. Final state (12, 18).
+
+starting permutation: s1a s1bw s2a s2rb s1c s3r1 s4b s4a s4bw s3r2 s4c s3r3 s3r4 s3c
+step s1a: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s1bw: MATCH (n:H {name:'b'}) SET n.v = 19 RETURN n.v AS b
+b 
+--
+19
+(1 row)
+step s2a: MATCH (n:H {name:'a'}) SET n.v = 12 RETURN n.v AS a
+ERROR: serialization conflict
+step s2rb: ROLLBACK
+step s1c: COMMIT
+step s3r1: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s4b: BEGIN
+step s4a: MATCH (n:H {name:'a'}) SET n.v = 12 RETURN n.v AS a
+a 
+--
+12
+(1 row)
+step s4bw: MATCH (n:H {name:'b'}) SET n.v = 18 RETURN n.v AS b
+b 
+--
+18
+(1 row)
+step s3r2: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s4c: COMMIT
+step s3r3: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s3r4: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s3c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+12|18
+(1 row)
+
+starting permutation: s1a s1bw s3r1 s2a s3r2 s2rb s1c s3r3 s4b s4a s4bw s4c s3r4 s3c
+step s1a: MATCH (n:H {name:'a'}) SET n.v = 11 RETURN n.v AS a
+a 
+--
+11
+(1 row)
+step s1bw: MATCH (n:H {name:'b'}) SET n.v = 19 RETURN n.v AS b
+b 
+--
+19
+(1 row)
+step s3r1: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s2a: MATCH (n:H {name:'a'}) SET n.v = 12 RETURN n.v AS a
+ERROR: serialization conflict
+step s3r2: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s2rb: ROLLBACK
+step s1c: COMMIT
+step s3r3: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s4b: BEGIN
+step s4a: MATCH (n:H {name:'a'}) SET n.v = 12 RETURN n.v AS a
+a 
+--
+12
+(1 row)
+step s4bw: MATCH (n:H {name:'b'}) SET n.v = 18 RETURN n.v AS b
+b 
+--
+18
+(1 row)
+step s4c: COMMIT
+step s3r4: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+10|20
+(1 row)
+step s3c: COMMIT
+final final: MATCH (x:H {name:'a'}), (y:H {name:'b'}) RETURN x.v AS a, y.v AS b
+a |b 
+--+--
+12|18
+(1 row)

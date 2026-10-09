@@ -1,0 +1,585 @@
+spec sk04-cross-label-write-skew: 2 sessions, 20 permutations
+# SK04. Rule: a project's manager must be a manager. s1 checks that person p is a
+# manager and creates a project managed by p; s2 checks that no project names p and
+# demotes p. They read and write different labels, so both commit where their reads
+# precede each other's commits: SI permits the broken rule.
+
+starting permutation: s1r s1w s1c s2r s2w s2c
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s2c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s1r s1w s2r s1c s2w s2c
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s2c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s1r s1w s2r s2w s1c s2c
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s1r s1w s2r s2w s2c s1c
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s1r s2r s1w s1c s2w s2c
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s2c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s1r s2r s1w s2w s1c s2c
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s1r s2r s1w s2w s2c s1c
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s1r s2r s2w s1w s1c s2c
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s1r s2r s2w s1w s2c s1c
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s1r s2r s2w s2c s1w s1c
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s2c: COMMIT
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s1c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s2r s1r s1w s1c s2w s2c
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s2c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s2r s1r s1w s2w s1c s2c
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s2r s1r s1w s2w s2c s1c
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s2r s1r s2w s1w s1c s2c
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s2r s1r s2w s1w s2c s1c
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s2r s1r s2w s2c s1w s1c
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s2c: COMMIT
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s1c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s2r s2w s1r s1w s1c s2c
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s2r s2w s1r s1w s2c s1c
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s2r s2w s1r s2c s1w s1c
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s2c: COMMIT
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s1c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)
+
+starting permutation: s2r s2w s2c s1r s1w s1c
+step s2r: MATCH (j:Project {manager:'p'}) RETURN count(j) AS projects
+projects
+--------
+0       
+(1 row)
+step s2w: MATCH (p:Person {name:'p'}) SET p.manager = false RETURN p.manager AS manager
+manager
+-------
+false  
+(1 row)
+step s2c: COMMIT
+step s1r: MATCH (p:Person {name:'p'}) RETURN p.manager AS manager
+manager
+-------
+true   
+(1 row)
+step s1w: CREATE (j:Project {name:'proj', manager:'p'}) RETURN j.name AS project
+project
+-------
+"proj" 
+(1 row)
+step s1c: COMMIT
+final final: MATCH (p:Person {name:'p'}) OPTIONAL MATCH (j:Project {manager:'p'}) RETURN p.manager AS manager, count(j) AS projects
+manager|projects
+-------+--------
+false  |1       
+(1 row)

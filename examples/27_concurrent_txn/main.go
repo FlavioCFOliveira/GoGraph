@@ -38,9 +38,10 @@
 //     the fact line total_balance_invariant_holds flips to 0.
 //
 //   - ATOMICITY. Half the transfers run as MULTI-STATEMENT explicit transactions
-//     ([cypher.Engine.BeginTx]: a debit statement, then a credit statement, then
+//     ([cypher.Session.BeginTx]: a debit statement, then a credit statement, then
 //     one Commit); the other half run as SINGLE-STATEMENT autocommit writes
-//     ([cypher.Engine.RunInTx]) that debit and credit in one statement. In both
+//     ([cypher.Session.RunAny], routing to RunInTx) that debit and credit in one
+//     statement. Each writer goroutine owns one [cypher.Session]. In both
 //     shapes a concurrent reader can never slip between the debit and the credit —
 //     it sees the whole transaction or none of it. Atomicity also has to survive
 //     a REFUSED transfer: a transaction that loses a write-write conflict must
@@ -690,6 +691,16 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 		transfers := plan.byWriter[wkr]
 		go func() {
 			defer writersWG.Done()
+			// One cypher.Session per writer: a writer's next transfer reads the
+			// balances its own previous transfers wrote, and the bare Engine does not
+			// promise that a statement observes the caller's own earlier commit while
+			// another writer's older commit is still in flight (rmp #2626,
+			// docs/mvcc-frontier-visibility.md). Without the session such a read can
+			// take its snapshot below the writer's own commit and be refused with a
+			// serialization conflict nothing else contended for. The session waits
+			// for its own latest commit before each statement, so the conflicts
+			// counted below are contention between writers.
+			sess := eng.NewSession()
 			for i, t := range transfers {
 				if i%ctxCheckEvery == 0 && ctx.Err() != nil {
 					setErr(ctx.Err())
@@ -699,7 +710,7 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 					var wait time.Duration
 					err := retryOnConflict(ctx, conflictRetryBudget, &conflictCounts, func() error {
 						var e error
-						wait, e = commitMultiStatement(ctx, eng, t, plan.splitMulti)
+						wait, e = commitMultiStatement(ctx, sess, t, plan.splitMulti)
 						return e
 					})
 					if err != nil {
@@ -709,7 +720,7 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 					acquireWaitTotal.Add(int64(wait))
 					acquireWaitCount.Add(1)
 				} else if err := retryOnConflict(ctx, conflictRetryBudget, &conflictCounts, func() error {
-					return commitSingleStatement(ctx, eng, t)
+					return commitSingleStatement(ctx, sess, t)
 				}); err != nil {
 					setErr(fmt.Errorf("writer single-statement: %w", err))
 					return
@@ -1052,7 +1063,7 @@ func (p *plan) readerCount() int { return p.readers }
 // reader can never observe the debit without the credit. It returns the time
 // spent blocked acquiring the transaction (a contention proxy). Any failure
 // rolls the transaction back.
-func commitMultiStatement(ctx context.Context, eng *cypher.Engine, t transfer, split bool) (time.Duration, error) {
+func commitMultiStatement(ctx context.Context, sess *cypher.Session, t transfer, split bool) (time.Duration, error) {
 	if split {
 		// NEGATIVE CONTROL (config.faultSplitMultiStatement): commit the debit and
 		// the credit as two independent autocommit transactions. Between them the
@@ -1060,16 +1071,16 @@ func commitMultiStatement(ctx context.Context, eng *cypher.Engine, t transfer, s
 		// sees a genuinely torn total. This is the deliberately broken behaviour
 		// the gate is validated against; it is unreachable from a flag.
 		start := time.Now()
-		if err := runWriteAny(ctx, eng, qDebit, map[string]any{"id": acctKey(t.from), "amt": t.amount}); err != nil {
+		if err := runWriteAnySession(ctx, sess, qDebit, map[string]any{"id": acctKey(t.from), "amt": t.amount}); err != nil {
 			return time.Since(start), fmt.Errorf("debit: %w", err)
 		}
-		if err := runWriteAny(ctx, eng, qCredit, map[string]any{"id": acctKey(t.to), "amt": t.amount}); err != nil {
+		if err := runWriteAnySession(ctx, sess, qCredit, map[string]any{"id": acctKey(t.to), "amt": t.amount}); err != nil {
 			return time.Since(start), fmt.Errorf("credit: %w", err)
 		}
 		return time.Since(start), nil
 	}
 	acquireStart := time.Now()
-	tx, err := eng.BeginTx(ctx)
+	tx, err := sess.BeginTx(ctx)
 	wait := time.Since(acquireStart)
 	if err != nil {
 		return wait, fmt.Errorf("begin: %w", err)
@@ -1109,8 +1120,8 @@ func execInTx(tx *cypher.ExplicitTx, query string, params map[string]any) error 
 // commitSingleStatement executes one transfer as a single-statement autocommit
 // write (RunInTx): the debit and credit happen in one statement, made durable on
 // Result.Close.
-func commitSingleStatement(ctx context.Context, eng *cypher.Engine, t transfer) error {
-	return runWriteAny(ctx, eng, qTransfer, map[string]any{"from": acctKey(t.from), "to": acctKey(t.to), "amt": t.amount})
+func commitSingleStatement(ctx context.Context, sess *cypher.Session, t transfer) error {
+	return runWriteAnySession(ctx, sess, qTransfer, map[string]any{"from": acctKey(t.from), "to": acctKey(t.to), "amt": t.amount})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1491,6 +1502,16 @@ func runWrite(ctx context.Context, eng *cypher.Engine, query string, params map[
 // RunAny so a writing clause is executed under RunInTx automatically.
 func runWriteAny(ctx context.Context, eng *cypher.Engine, query string, params map[string]any) error {
 	res, err := eng.RunAny(ctx, query, params)
+	if err != nil {
+		return err
+	}
+	return drainClose(res)
+}
+
+// runWriteAnySession is [runWriteAny] through a [cypher.Session], so the
+// statement observes every commit that session has made.
+func runWriteAnySession(ctx context.Context, sess *cypher.Session, query string, params map[string]any) error {
+	res, err := sess.RunAny(ctx, query, params)
 	if err != nil {
 		return err
 	}

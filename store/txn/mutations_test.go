@@ -59,8 +59,9 @@ func openTypedWeightedStore(t *testing.T) (store *Store[string, int64], walPath 
 }
 
 // TestTx_AddNode_Idempotence confirms that two AddNode("alice") calls
-// produce a single interned node and two WAL frames (the WAL records
-// both ops; the mapper deduplicates).
+// produce a single interned node and ONE op frame: the WAL records effects,
+// and the second AddNode, of a node the first already created, changes nothing
+// (rmp #2965, round 5).
 func TestTx_AddNode_Idempotence(t *testing.T) {
 	t.Parallel()
 	s, walPath, cleanup := openTypedStringStore(t)
@@ -79,10 +80,10 @@ func TestTx_AddNode_Idempotence(t *testing.T) {
 	if got := s.Graph().AdjList().Mapper().Len(); got != 1 {
 		t.Fatalf("mapper Len = %d, want 1 (AddNode must be idempotent)", got)
 	}
-	// Three WAL frames must be present: one per op (the WAL is the durable
-	// log; dedup is the in-memory mapper's job) plus the v3 OpCommit marker
-	// that closes the transaction atomically.
-	if err := walFrameCountEquals(walPath, 3); err != nil {
+	// Two WAL frames must be present: the one AddNode that took effect plus
+	// the v3 OpCommit marker that closes the transaction atomically. The no-op
+	// second AddNode is not logged.
+	if err := walFrameCountEquals(walPath, 2); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -821,7 +822,10 @@ func walFrameCountEquals(path string, want int) error {
 	}
 	defer func() { _ = r.Close() }()
 	frames := 0
-	if err := r.Replay(func(_ wal.Frame) error {
+	if err := r.Replay(func(f wal.Frame) error {
+		if len(f.Payload) > 0 && f.Payload[0] == wal.ControlRecordTag {
+			return nil // a node id reservation (WAL v2 step 4), not a transaction frame
+		}
 		frames++
 		return nil
 	}); err != nil {
@@ -845,6 +849,9 @@ func assertFirstFrameKind(path string, wantVersion, wantKind byte) error {
 	var first wal.Frame
 	var seen bool
 	if err := r.Replay(func(f wal.Frame) error {
+		if len(f.Payload) > 0 && f.Payload[0] == wal.ControlRecordTag {
+			return nil // a node id reservation (WAL v2 step 4), not a transaction frame
+		}
 		if !seen {
 			first = f
 			seen = true

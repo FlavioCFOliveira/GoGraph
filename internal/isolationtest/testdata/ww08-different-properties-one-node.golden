@@ -1,0 +1,107 @@
+spec ww08-different-properties-one-node: 2 sessions, 6 permutations
+# WW08. s1 writes n.a, s2 writes n.b — different properties of ONE node. The node is
+# the unit of conflict (F4), so the second writer is refused, the same verdict as
+# PostgreSQL's and InnoDB's row granularity. A narrowing of the conflict unit to
+# per-property would show here as a diff.
+
+starting permutation: s1w s1c s2w s2c
+step s1w: MATCH (n:Item {name:'n'}) SET n.a = 1 RETURN n.a AS a
+a
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (n:Item {name:'n'}) SET n.b = 2 RETURN n.b AS b
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item {name:'n'}) RETURN n.a AS a, n.b AS b
+a|b
+-+-
+1|0
+(1 row)
+
+starting permutation: s1w s2w s1c s2c
+step s1w: MATCH (n:Item {name:'n'}) SET n.a = 1 RETURN n.a AS a
+a
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {name:'n'}) SET n.b = 2 RETURN n.b AS b
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item {name:'n'}) RETURN n.a AS a, n.b AS b
+a|b
+-+-
+1|0
+(1 row)
+
+starting permutation: s1w s2w s2c s1c
+step s1w: MATCH (n:Item {name:'n'}) SET n.a = 1 RETURN n.a AS a
+a
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {name:'n'}) SET n.b = 2 RETURN n.b AS b
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:Item {name:'n'}) RETURN n.a AS a, n.b AS b
+a|b
+-+-
+1|0
+(1 row)
+
+starting permutation: s2w s1w s1c s2c
+step s2w: MATCH (n:Item {name:'n'}) SET n.b = 2 RETURN n.b AS b
+b
+-
+2
+(1 row)
+step s1w: MATCH (n:Item {name:'n'}) SET n.a = 1 RETURN n.a AS a
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (n:Item {name:'n'}) RETURN n.a AS a, n.b AS b
+a|b
+-+-
+0|2
+(1 row)
+
+starting permutation: s2w s1w s2c s1c
+step s2w: MATCH (n:Item {name:'n'}) SET n.b = 2 RETURN n.b AS b
+b
+-
+2
+(1 row)
+step s1w: MATCH (n:Item {name:'n'}) SET n.a = 1 RETURN n.a AS a
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item {name:'n'}) RETURN n.a AS a, n.b AS b
+a|b
+-+-
+0|2
+(1 row)
+
+starting permutation: s2w s2c s1w s1c
+step s2w: MATCH (n:Item {name:'n'}) SET n.b = 2 RETURN n.b AS b
+b
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (n:Item {name:'n'}) SET n.a = 1 RETURN n.a AS a
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item {name:'n'}) RETURN n.a AS a, n.b AS b
+a|b
+-+-
+0|2
+(1 row)

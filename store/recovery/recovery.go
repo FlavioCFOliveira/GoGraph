@@ -32,6 +32,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
@@ -88,9 +89,13 @@ type Result[N comparable, W any] struct {
 	// graph topology, so they are surfaced here rather than applied to Graph.
 	// The slice is deterministically ordered (kind, label, property, name).
 	Constraints []ConstraintRecord
-	// Indexes reports the durable index definitions recovered from the WAL
-	// ([txn.OpCreateIndex] / [txn.OpDropIndex] ops). The engine re-registers
-	// and re-backfills these on open so a user-created index survives a crash
+	// Indexes reports the durable index definitions recovered for the graph:
+	// the set declared in the snapshot's indexdefs.bin component (the
+	// checkpoint-survival path) reconciled with the [txn.OpCreateIndex] /
+	// [txn.OpDropIndex] ops replayed from the WAL tail (last writer wins by
+	// name), so the result is the index set as of the last durable commit.
+	// The engine re-registers and re-backfills these on open so a
+	// user-created index survives a crash
 	// and a restart (Durability). Index definitions are engine schema, not
 	// graph topology, so they are surfaced here rather than applied to Graph.
 	// The slice is deterministically ordered (by name).
@@ -222,18 +227,20 @@ type Result[N comparable, W any] struct {
 	// [txn.Store] with [txn.NewStoreWithOptionsCapped] rather than through this
 	// handoff — are outside the clamp and own the invariant themselves.
 	MaxTxnOps int
-	// WALTailOffset is the byte offset of the last durable frame boundary
-	// in the WAL. It equals the WAL file size when every frame was
-	// consumed cleanly, and the boundary of the last fully-consumed frame
-	// when replay stopped early — for a benign torn tail
-	// ([wal.ErrTornFrame]) that is the start of the torn frame. It is 0
-	// when the directory has no WAL file. Callers that reopen the WAL for
-	// append must truncate the file to this offset first so new frames are
-	// not written after torn-tail junk that every subsequent reader would
-	// stop at ([wal.Open] performs that truncation itself for benign torn
-	// tails).
-	WALTailOffset int64
-	SnapshotHit   bool
+	// WALEnd is the end of the valid log: for a segmented log the logical
+	// position just past the last valid frame (E), for a legacy single-file
+	// log the byte offset of the last durable frame boundary. It is 0 when the
+	// directory has no WAL. WALTailSegment and WALTailSegmentOffset name the
+	// segment holding that end and the file offset just past its last valid
+	// frame (both 0 for a legacy log or a log with no retained frame), and
+	// WALLastFramePos is the position of the last valid frame (-1 when none,
+	// or for a legacy log). [wal.Open] discards a benign torn tail itself, so
+	// a reopen needs none of these; they are diagnostics.
+	WALEnd               int64
+	WALTailSegment       uint64
+	WALTailSegmentOffset int64
+	WALLastFramePos      int64
+	SnapshotHit          bool
 	// SnapshotSelfSufficient reports that the loaded snapshot could reconstruct
 	// the graph on its own: it carried a mapper.bin, so every node id was
 	// RESTORED from the image rather than re-derived by WAL-replay interning, and
@@ -259,7 +266,9 @@ type Result[N comparable, W any] struct {
 // genuine-corruption sentinel ([wal.ErrCRCMismatch], [wal.ErrBadMagic],
 // [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge],
 // [wal.ErrTornFrameMasksData], [ErrUnsupportedRecordVersion],
-// [ErrTransactionTooLarge], or [ErrCommittedTxnCorruptOp]).
+// [ErrTransactionTooLarge], [ErrCommittedTxnCorruptOp], or a WAL v2 container
+// or snapshot-reaches-WAL sentinel such as [wal.ErrFramePosition] or
+// [ErrSnapshotTooOld]).
 //
 // # IsClean is the STRONGER signal; the function error is not equivalent
 //
@@ -443,8 +452,8 @@ func clampProducerCapToReplay(producer, replay int) int {
 // on-disk corruption (true) versus a benign / absent stop condition
 // (false). It mirrors [wal.Reader.Replay], which surfaces every WAL-reader
 // error except [wal.ErrTornFrame] as a hard error, and additionally treats
-// recovery's own [ErrUnsupportedRecordVersion], [ErrTransactionTooLarge] and
-// [ErrCommittedTxnCorruptOp] as corruption.
+// recovery's own [ErrUnsupportedRecordVersion], [ErrTransactionTooLarge],
+// [ErrMissingSnapshot] and [ErrCommittedTxnCorruptOp] as corruption.
 //
 // A nil error, a torn tail, and the CRC-valid-but-unparseable trailing-frame
 // markers raised by the codec apply path (a truncated v2 body, a missing
@@ -498,9 +507,17 @@ func tailErrIsCorruption(err error) bool {
 		errors.Is(err, wal.ErrFrameTooLarge),
 		errors.Is(err, ErrUnsupportedRecordVersion),
 		errors.Is(err, ErrTransactionTooLarge),
-		errors.Is(err, ErrCommittedTxnCorruptOp):
+		errors.Is(err, ErrMissingSnapshot),
+		errors.Is(err, ErrUnboundNodeKey),
+		errors.Is(err, ErrCommitAnnexCorrupt),
+		errors.Is(err, graph.ErrNodeIDMismatch),
+		errors.Is(err, ErrIDBeyondReservation),
+		errors.Is(err, ErrIDRecordCorrupt),
+		errors.Is(err, ErrCommittedTxnCorruptOp),
+		isWALV2Corruption(err):
 		// ErrCommittedTxnCorruptOp is not-clean but not fail-stop; see the
-		// recorded-departure section above and [tailErrIsOpenFatal].
+		// recorded-departure section above and [tailErrIsOpenFatal]. The WAL v2
+		// container and snapshot-reaches-WAL sentinels are fail-stop.
 		return true
 	default:
 		// CRC-valid-but-unparseable trailing frame (truncated v2 body,
@@ -719,6 +736,29 @@ var ErrTransactionTooLarge = errors.New("recovery: v3 transaction exceeds the pe
 // acknowledged transactions were gone (rmp #2794).
 var ErrCommittedTxnCorruptOp = errors.New("recovery: corrupt op inside a committed v3 transaction")
 
+// ErrMissingSnapshot is returned by [Open], [OpenCtx] and [OpenFS] (and is
+// [Result.TailErr]) when the directory's WAL is a suffix whose prefix a
+// checkpoint truncated, and no snapshot covers that prefix (rmp #2990).
+//
+// For a segmented log the store's durable record that its history requires a
+// snapshot is the WAL control file: its prefix-truncated flag, set by every
+// checkpoint whose snapshot stands alone before any segment is unlinked, and an
+// oldest retained position above 0. For a legacy single-file log it is the
+// marker [wal.PrefixTruncatedMarkerPath], which recovery writes the first time
+// it loads a self-sufficient snapshot of a legacy store that lacks it
+// (rmp #3002), and which a segmented store also honours. A directory with such
+// a record but no snapshot manifest has lost the only copy of every commit a
+// checkpoint may have folded, and is refused even when its WAL happens to be
+// complete.
+// Recovery refuses it rather than replaying the suffix onto an empty graph and
+// reporting a shorter history as clean. [Result.IsClean] is false and no WAL
+// frame is replayed, so the returned graph is empty.
+//
+// It is a fail-stop condition with no automatic repair: restore the snapshot
+// directory from a backup. Removing the record opens the WAL suffix alone, which
+// discards the folded commits.
+var ErrMissingSnapshot = errors.New("recovery: WAL prefix was truncated by a checkpoint but no snapshot covers it")
+
 // Decode parses one payload back into an [Op]. The parser peeks the
 // first byte to select the decoder:
 //
@@ -743,6 +783,31 @@ func Decode(payload []byte) (Op, error) {
 		return decodeV3(payload)
 	case txn.OpRecordV2:
 		return decodeV2(payload)
+	case wal.ControlRecordTag:
+		// A WAL control record (docs/design-wal-v2.md §1.2). This build knows
+		// only the legacy seal, which ends the legacy single-file log and is
+		// not an op; any other kind is refused like an unknown record.
+		if _, ok := wal.DecodeLegacySeal(payload); ok {
+			return Op{Version: wal.ControlRecordTag, Kind: txn.OpKind(wal.CtlLegacySeal)}, nil
+		}
+		// The id records of WAL v2 step 4. Body is the payload, so the replay
+		// decodes it with the wal decoders.
+		if _, _, ok, err := wal.DecodeReserveIDs(payload); ok {
+			if err != nil {
+				metrics.IncCounter("store.recovery.Decode.errors", 1)
+				return Op{}, fmt.Errorf("%w: %w", ErrIDRecordCorrupt, err)
+			}
+			return Op{Version: wal.ControlRecordTag, Kind: txn.OpKind(wal.CtlReserveIDs), Body: payload}, nil
+		}
+		if _, ok, err := wal.DecodeNextIDsExact(payload); ok {
+			if err != nil {
+				metrics.IncCounter("store.recovery.Decode.errors", 1)
+				return Op{}, fmt.Errorf("%w: %w", ErrIDRecordCorrupt, err)
+			}
+			return Op{Version: wal.ControlRecordTag, Kind: txn.OpKind(wal.CtlNextIDsExact), Body: payload}, nil
+		}
+		metrics.IncCounter("store.recovery.Decode.errors", 1)
+		return Op{}, fmt.Errorf("%w: unknown WAL control record", ErrUnsupportedRecordVersion)
 	default:
 		// A v1 (txn.OpRecordV1) untagged frame, or any unknown version
 		// tag. v1 frames are no longer written and are not invertible
@@ -1069,7 +1134,15 @@ func accumulateIndexOp(is *indexSet, op *Op) (isIndex, ok bool) {
 //
 // Open loads any snapshot under dir/snapshot (v1 or v2; CSR-only or
 // CSR + labels + properties + indexes), then replays the WAL at
-// dir/wal applying each op into the live graph. Labels, properties,
+// dir/wal applying each op into the live graph. For a segmented WAL (a control
+// file at dir/wal.control, segments under dir/wal.d) it first checks that the
+// snapshot reaches the log — same store id ([ErrForeignSnapshot]), redo
+// position not below the oldest retained position ([ErrSnapshotTooOld]) and
+// not beyond the end of the log ([ErrSnapshotAheadOfWAL]) — validates every
+// frame's position, prev-link and store id ([wal.ErrFramePosition],
+// [wal.ErrPrevLink], [wal.ErrForeignStore]), and applies only the frames at or
+// above the snapshot's redo position. The legacy single-file log is replayed
+// when no snapshot records a redo position. Labels, properties,
 // and registered indexes carried by a v2 snapshot are reconstructed
 // into the returned [Result.Graph] when the LPG has a Manager wired
 // before the call returns (see [TestRecovery_IndexesSurviveRestart_WiredEarly]
@@ -1088,6 +1161,17 @@ func accumulateIndexOp(is *indexSet, op *Op) (isIndex, ok bool) {
 // Open is safe to call on a dir that contains only a snapshot, only
 // a WAL, both, or neither: missing components are tolerated and the
 // returned [Result.Graph] is a fresh empty graph when neither exists.
+// The one exception is a WAL whose prefix a checkpoint truncated (recorded in
+// the control file, or by [wal.PrefixTruncatedMarkerPath] for a legacy log)
+// with no snapshot: Open returns [ErrMissingSnapshot] and replays nothing,
+// because the WAL alone is not the store's history.
+//
+// The first CLEAN recovery that loads a self-sufficient snapshot of a legacy
+// store without that marker (a store created before the marker existed) writes it
+// durably, so a later loss of the snapshot is refused (rmp #3002). That
+// recovery therefore needs write access to dir: on a read-only directory it
+// fails with the write error. An unclean recovery writes nothing. [OpenCtx]
+// and [OpenFS] behave identically.
 //
 // A torn or truncated WAL tail — the normal state after a crash between
 // two fsyncs — is benign: Open recovers the committed prefix, returns a
@@ -1124,6 +1208,9 @@ func Open[N comparable, W any](dir string, opts Options[N, W]) (Result[N, W], er
 // checked at the snapshot-load boundary and at every 4096 WAL frames
 // replayed; on cancellation the function returns the partially-
 // recovered Result paired with the wrapped ctx.Err.
+//
+// Like [Open], its first clean recovery of a store without the WAL prefix
+// marker writes the marker, and so needs write access to dir (rmp #3002).
 func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[N, W]) (Result[N, W], error) {
 	defer metrics.Time("store.recovery.OpenCtx").Stop()
 	if opts.Codec == nil {
@@ -1149,7 +1236,9 @@ func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 // parameter type is unexported (mirroring
 // [github.com/FlavioCFOliveira/GoGraph/store/wal.OpenWith]); production code
 // calls [Open], which supplies the OS backend. Passing the OS backend here is
-// behaviourally equivalent to [Open].
+// behaviourally equivalent to [Open], including the WAL prefix marker write
+// on the first clean recovery of a store without it, made through fsys
+// (rmp #3002).
 func OpenFS[N comparable, W any](fsys recoveryFS, dir string, opts Options[N, W]) (Result[N, W], error) {
 	return OpenCtxFS[N, W](context.Background(), fsys, dir, opts)
 }
@@ -1385,6 +1474,33 @@ func openCodec[N comparable, W any](
 		haveManifest = true
 	}
 
+	// A WAL whose prefix a checkpoint truncated is a SUFFIX of the history, and
+	// only the snapshot that folded the prefix makes it whole (rmp #2990). The
+	// WAL cannot say so itself — frames carry no position — so the writer makes
+	// a marker durable before its first truncation, and recovery refuses a
+	// directory that holds the marker but no snapshot. Replaying the suffix onto
+	// an empty graph would open a shorter history and report it clean: every
+	// commit the snapshot folded lost in silence. The refusal happens before any
+	// replay, so the diagnostic graph is empty.
+	//
+	// A segmented log (WAL v2) carries that record in its control file, and its
+	// frames carry positions, so recovery also checks that the snapshot reaches
+	// the log (docs/design-wal-v2.md §4.3 and §4.6, rmp #3014): same store, and a
+	// redo position R inside the retained log, F <= R. These refusals happen before
+	// any replay too.
+	walPath := filepath.Join(dir, "wal")
+	wlog, refused, lerr := openWALChecked(fsys, walPath, snapDir, haveManifest, &loaded.Manifest)
+	if lerr != nil {
+		metrics.IncCounter("store.recovery.openCodec.errors", 1)
+		res := Result[N, W]{Graph: lpg.New[N, W](defaultRecoveryConfig())}
+		if refused {
+			res.TailErr = lerr
+		}
+		return res, lerr
+	}
+	defer func() { _ = wlog.Close() }()
+	_, segmented := wlog.Control()
+
 	// Reconstruct the graph with the persisted shape (or the default when no
 	// manifest / no persisted config). The config is fixed for the lifetime
 	// of the recovered graph.
@@ -1447,7 +1563,7 @@ func openCodec[N comparable, W any](
 		// in RawPairs and is decoded through the supplied codec. v2
 		// snapshots without a mapper produce an empty readback here and
 		// the original WAL-replay-only reconstruction path applies.
-		haveMapper := len(loaded.Mapper.Pairs) > 0 || len(loaded.Mapper.RawPairs) > 0
+		haveMapper := mapperPresent(loaded.Mapper)
 		if haveMapper {
 			if len(loaded.Mapper.RawPairs) > 0 {
 				if err := snapshot.ApplyMapperToGraphWithCodec(g, loaded.Mapper, codec); err != nil {
@@ -1514,7 +1630,9 @@ func openCodec[N comparable, W any](
 			// by replaying OpRemoveNode, so applying a possibly-stale
 			// snapshot set there could wrongly re-tombstone a re-created
 			// node.
-			snapshot.ApplyTombstonesToGraph(g, loaded.Tombstones)
+			if err := snapshot.ApplyTombstonesToGraph(g, loaded.Tombstones); err != nil {
+				return res, fmt.Errorf("recovery: apply snapshot tombstones: %w", err)
+			}
 			res.SnapshotTombstones = len(loaded.Tombstones.IDs)
 
 			// Self-sufficient path: the mapper is fully restored, so every
@@ -1551,41 +1669,38 @@ func openCodec[N comparable, W any](
 			// handle high-water counter so post-recovery edge creation never
 			// re-mints a live handle (invariant I5).
 			if haveSnapEdgeHandles {
-				snapshot.ApplyEdgeHandlesToGraph(g, loaded.EdgeHandles)
+				if err := snapshot.ApplyEdgeHandlesToGraph(g, loaded.EdgeHandles); err != nil {
+					metrics.IncCounter("store.recovery.openCodec.errors", 1)
+					return res, fmt.Errorf("recovery: apply snapshot edge handles: %w", err)
+				}
 			}
 			snapshotSideAppliedEarly = true
 		}
 	}
 
-	walPath := filepath.Join(dir, "wal")
-	walMissing := false
-	if _, err := fsys.Stat(walPath); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			metrics.IncCounter("store.recovery.openCodec.errors", 1)
-			return res, err
-		}
-		walMissing = true
+	plan, perr := planWALReplay(wlog, haveManifest, &loaded.Manifest)
+	if perr != nil {
+		metrics.IncCounter("store.recovery.openCodec.errors", 1)
+		return res, perr
 	}
-	if !walMissing {
-		r, err := fsys.OpenWALReader(walPath)
-		if err != nil {
-			metrics.IncCounter("store.recovery.openCodec.errors", 1)
-			return res, err
-		}
-		// best-effort: read-only WAL reader, close err is non-actionable for callers.
-		defer func() { _ = r.Close() }()
-		walRes, walErr := replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched)
+	defer plan.close()
+	if plan.src != nil {
+		walRes, walErr := replayWALInto(ctx, plan.src, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, plan.redo, plan.schemaBelowRedo, loaded.Mapper.Next)
 		// The node facets the SUFFIX touched. In a checkpointed directory the WAL
-		// on disk IS the suffix (its prefix was truncated), so this is exactly
-		// what a caller needs to decide whether a snapshot index payload still
-		// describes the graph. In a directory whose truncate was skipped the WAL
-		// still holds the pre-snapshot prefix, which only WIDENS the sets and so
-		// makes the hydration test more conservative, never wrong.
+		// replayed IS the suffix above the redo position, so this is exactly what
+		// a caller needs to decide whether a snapshot index payload still
+		// describes the graph. Where the whole log is replayed it only WIDENS the
+		// sets and so makes the hydration test more conservative, never wrong.
 		res.WALTouchedNodeLabels = touched.sortedLabels()
 		res.WALTouchedNodePropertyKeys = touched.sortedKeys()
 		res.WALOps = walRes.WALOps
 		res.TailErr = walRes.TailErr
-		res.WALTailOffset = walRes.WALTailOffset
+		res.WALEnd, res.WALLastFramePos = walRes.WALTailOffset, -1
+		if segmented {
+			res.WALTailSegment, res.WALTailSegmentOffset = wlog.TailSegment()
+			res.WALLastFramePos = wlog.LastFramePos()
+			res.TailErr = plan.checkReachesEnd(res.TailErr, res.WALEnd)
+		}
 		res.MaxTxnSeq = walRes.MaxTxnSeq
 		// MAXIMUM, not assignment: the snapshot's captured instant was already
 		// seeded above, and the derived floor is the maximum over EVERYTHING
@@ -1697,7 +1812,10 @@ func openCodec[N comparable, W any](
 	// column. The self-sufficient path applied these before WAL replay
 	// (snapshotSideAppliedEarly), so it is skipped here.
 	if haveSnapEdgeHandles && !snapshotSideAppliedEarly {
-		snapshot.ApplyEdgeHandlesToGraph(g, snapEdgeHandles)
+		if err := snapshot.ApplyEdgeHandlesToGraph(g, snapEdgeHandles); err != nil {
+			metrics.IncCounter("store.recovery.openCodec.errors", 1)
+			return res, fmt.Errorf("recovery: apply snapshot edge handles: %w", err)
+		}
 	}
 	// SECONDARY INDEXES ARE REPORTED, NEVER LOADED (rmp #2490).
 	//
@@ -1744,7 +1862,49 @@ func openCodec[N comparable, W any](
 		metrics.IncCounter("store.recovery.openCodec.corruptTail", 1)
 		return res, res.TailErr
 	}
+	// GIVE A PRE-MARKER STORE ITS CONTROL RECORD (rmp #3002). A store whose WAL
+	// prefix was truncated before the marker existed has no marker, so losing
+	// its snapshot later would be indistinguishable from a store that never
+	// checkpointed. A self-sufficient snapshot is what a truncation requires and
+	// what a checkpoint publishes before truncating, so the first recovery that
+	// loads one writes the marker if it is absent; from then on the store's
+	// history requires a snapshot, as PostgreSQL's pg_control names the
+	// checkpoint recovery must find. The accepted consequence is that such a
+	// store whose WAL happens to be complete is also refused if the snapshot is
+	// lost. Written only on a CLEAN recovery, so a refused directory, and one
+	// opened read-only after an unclean recovery (store.Options.AllowUnclean),
+	// is left byte-for-byte as recovery found it; a failure to write it fails the
+	// open, because the record is what makes a later snapshot loss detectable.
+	//
+	// A segmented store records the same fact in its control file, so it never
+	// needs the marker.
+	if err := ensurePrefixMarker(fsys, walPath, !segmented && res.SnapshotSelfSufficient && res.IsClean()); err != nil {
+		metrics.IncCounter("store.recovery.openCodec.errors", 1)
+		return res, err
+	}
 	return res, nil
+}
+
+// ensurePrefixMarker makes the WAL prefix marker for walPath durable when due
+// (a clean recovery that loaded a self-sufficient snapshot) and absent, and
+// does nothing otherwise (rmp #3002). See the call site in [openCodec] for why
+// recovery writes it.
+func ensurePrefixMarker(fsys recoveryFS, walPath string, due bool) error {
+	if !due {
+		return nil
+	}
+	_, err := fsys.Stat(wal.PrefixTruncatedMarkerPath(walPath))
+	switch {
+	case err == nil:
+		return nil
+	case !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("recovery: probe WAL prefix marker: %w", err)
+	}
+	if err := fsys.WritePrefixMarker(walPath); err != nil {
+		return fmt.Errorf("recovery: write WAL prefix marker: %w", err)
+	}
+	metrics.IncCounter("store.recovery.openCodec.prefixMarkerWritten", 1)
+	return nil
 }
 
 // ReplayResult reports what a single WAL-replay pass consumed and recovered. It
@@ -1752,8 +1912,8 @@ func openCodec[N comparable, W any](
 // the ops applied to the graph, TailErr records why replay stopped (nil at a
 // clean EOF, a benign torn tail, or a genuine-corruption sentinel — classified
 // by [tailErrIsCorruption] / the [Result.IsClean] contract), and WALTailOffset
-// is the byte offset of the last durable frame boundary (the truncation point a
-// reopen-for-append must cut back to, per [Result.WALTailOffset]).
+// is the end of the last valid frame: a byte offset for a single-file log, a
+// log position for a segmented one (see [Result.WALEnd]).
 //
 // Constraints and Indexes hold the durable schema definitions accumulated from
 // the CREATE/DROP CONSTRAINT and CREATE/DROP INDEX ops seen during this pass,
@@ -1841,7 +2001,7 @@ func (r *ReplayResult) IsClean() bool { return !tailErrIsCorruption(r.TailErr) }
 // [ReplayResult.Indexes] as it sees fit.
 func ReplayWAL[N comparable, W any](
 	ctx context.Context,
-	r *wal.Reader,
+	r wal.FrameSource,
 	g *lpg.Graph[N, W],
 	codec txn.Codec[N],
 	wcodec txn.WeightCodec[W],
@@ -1850,7 +2010,13 @@ func ReplayWAL[N comparable, W any](
 	cAcc := newConstraintSet()
 	iAcc := newIndexSet()
 	touched := newTouchSet()
-	res, err := replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched)
+	var res ReplayResult
+	var err error
+	if log, ok := r.(*wal.Log); ok {
+		res, err = replayLogWithoutSnapshot(ctx, log, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched)
+	} else {
+		res, err = replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false, nil)
+	}
 	res.Constraints = cAcc.snapshot()
 	res.Indexes = iAcc.snapshot()
 	res.WALTouchedNodeLabels = touched.sortedLabels()
@@ -1891,9 +2057,19 @@ func ReplayWAL[N comparable, W any](
 // nil here because openCodec reads them off its own accumulators after the
 // snapshot reconciliation and ReplayWAL snapshots the fresh ones it owns. The
 // returned error is non-nil only for a ctx cancellation observed mid-replay.
+//
+// redo is the snapshot's redo position R, or -1 for none. A [wal.CurrentVersion]
+// frame below R is validated but not applied: its sequence and commit timestamp
+// still count, but no graph op below R is applied, because the snapshot already
+// holds its effect. When schemaBelowRedo is set the schema DDL of a transaction
+// committed below R is still accumulated, for a snapshot that may lack
+// constraints.bin or indexdefs.bin and so still relies on those frames.
+// No frame starting at R while the log goes past it is
+// [ErrRedoPointNotFrameBoundary]; a transaction with ops below R and its marker
+// at or above R is [ErrRedoPointMidTransaction].
 func replayWALInto[N comparable, W any](
 	ctx context.Context,
-	r *wal.Reader,
+	r wal.FrameSource,
 	g *lpg.Graph[N, W],
 	codec txn.Codec[N],
 	wcodec txn.WeightCodec[W],
@@ -1901,8 +2077,18 @@ func replayWALInto[N comparable, W any](
 	cAcc *constraintSet,
 	iAcc *indexSet,
 	touched *touchSet,
+	redo int64,
+	schemaBelowRedo bool,
+	idBase *[graph.MapperShards]uint64,
 ) (ReplayResult, error) {
 	var res ReplayResult
+	// WAL v2 step 4: the node id marks the log's reservations and clean-close
+	// records name, applied to the mapper once the replay ends, whatever ends it.
+	ids := newIDReplay(g.AdjList().Mapper(), idBase)
+	defer ids.apply(g.AdjList().Mapper())
+	// crossed reports that a frame at or above redo has been read; belowPending
+	// counts the buffered ops read below redo at that moment.
+	crossed, belowPending := redo < 0, 0
 	// Bracket the whole replay in ONE adjacency commit window (task #1526): WAL
 	// recovery is single-threaded with no concurrent reader and no concurrent
 	// PinSnapshot, so it is the sanctioned exclusive-build mode. Within the
@@ -1936,10 +2122,32 @@ func replayWALInto[N comparable, W any](
 				return res, err
 			}
 		}
+		if !crossed && f.Version == wal.CurrentVersion && int64(f.Pos) >= redo { //nolint:gosec // G115: positions are bounded by int64 file arithmetic
+			if int64(f.Pos) > redo { //nolint:gosec // G115: as above
+				res.TailErr = fmt.Errorf("%w: redo position %d, next frame at %d", ErrRedoPointNotFrameBoundary, redo, f.Pos)
+				break
+			}
+			crossed, belowPending = true, len(pending)
+		}
 		op, derr := Decode(f.Payload)
 		if derr != nil {
 			res.TailErr = derr
 			break
+		}
+		if op.Version == wal.ControlRecordTag {
+			switch byte(op.Kind) {
+			case wal.CtlReserveIDs:
+				shard, limit, _, _ := wal.DecodeReserveIDs(op.Body)
+				ids.reserve(int(shard), limit)
+			case wal.CtlNextIDsExact:
+				next, _, _ := wal.DecodeNextIDsExact(op.Body)
+				ids.exact(&next, crossed)
+			default:
+				// The legacy seal: no op follows it in the legacy file, so ops
+				// still buffered are orphans of a transaction that never committed.
+				pending, belowPending = pending[:0], 0
+			}
+			continue
 		}
 		if op.Version == txn.OpRecordV3 {
 			// Track the highest sequence any v3 frame carries, INCLUDING frames
@@ -1996,6 +2204,33 @@ func replayWALInto[N comparable, W any](
 				metrics.IncCounter("store.recovery.openCodec.orphanedOps", uint64(start))
 			}
 			committed := pending[start:]
+			if !crossed {
+				// Below the redo position: the snapshot holds this transaction's
+				// graph effect; only its schema DDL is accumulated.
+				if schemaBelowRedo && !accumulateSchemaOnly(committed, cAcc, iAcc) {
+					res.TailErr = fmt.Errorf("%w: txn seq %d below the snapshot redo position at WAL frame %d",
+						ErrCommittedTxnCorruptOp, commitSeq, frameIdx)
+					pending = pending[:0]
+					break
+				}
+				pending = pending[:0]
+				continue
+			}
+			if start < belowPending {
+				res.TailErr = fmt.Errorf("%w: txn seq %d at WAL frame %d", ErrRedoPointMidTransaction, commitSeq, frameIdx)
+				pending = pending[:0]
+				break
+			}
+			belowPending = 0
+			// WAL v2 step 3: a marker that carries an id annex binds every created
+			// key to its exact id before the ops replay, under the strict rule.
+			annexed, annexErr := replayCommitAnnex(g, committed, op.Body, codec, ids.check)
+			if annexErr != nil {
+				metrics.IncCounter("store.recovery.openCodec.commitAnnex", 1)
+				res.TailErr = fmt.Errorf("%w (txn seq %d, WAL frame %d)", annexErr, commitSeq, frameIdx)
+				pending = pending[:0]
+				break
+			}
 			failedIdx := -1
 			for i := range committed {
 				if !applyOrAccumulate(g, &committed[i], codec, wcodec, cAcc, iAcc, touched) {
@@ -2012,6 +2247,11 @@ func replayWALInto[N comparable, W any](
 			var failedKind txn.OpKind
 			if failedIdx >= 0 {
 				failedKind = committed[failedIdx].Kind
+			}
+			if failedIdx < 0 {
+				annexed.settle(g)
+			} else {
+				withdrawAnnex(g, annexed, committed[:failedIdx], codec)
 			}
 			pending = pending[:0]
 			if failedIdx >= 0 {
@@ -2052,6 +2292,13 @@ func replayWALInto[N comparable, W any](
 		// v2 frame: self-committing (one frame is one transaction). v1
 		// frames never reach here — Decode rejects them upstream with
 		// ErrUnsupportedRecordVersion.
+		if !crossed {
+			if schemaBelowRedo && !accumulateSchemaOnly([]Op{op}, cAcc, iAcc) {
+				res.TailErr = errors.New("recovery: v2 frame is not decodable through the supplied codec")
+				break
+			}
+			continue
+		}
 		if !applyOrAccumulate(g, &op, codec, wcodec, cAcc, iAcc, touched) {
 			// A malformed v2 body (truncated endpoints, missing or
 			// overflowing trailing label/key length) failed to decode
@@ -2067,6 +2314,24 @@ func replayWALInto[N comparable, W any](
 	}
 	res.WALTailOffset = r.TailOffset()
 	return res, nil
+}
+
+// accumulateSchemaOnly feeds the schema-DDL ops of a committed unit below the
+// snapshot redo position to the accumulators and ignores every graph op. It
+// returns false when a DDL op's body is undecodable.
+func accumulateSchemaOnly(ops []Op, cs *constraintSet, is *indexSet) bool {
+	for i := range ops {
+		if isC, ok := accumulateConstraintOp(cs, &ops[i]); isC {
+			if !ok {
+				return false
+			}
+			continue
+		}
+		if isI, ok := accumulateIndexOp(is, &ops[i]); isI && !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // applyOrAccumulate routes a decoded op either to the constraint accumulator
@@ -2108,9 +2373,14 @@ func applyOrAccumulate[N comparable, W any](
 // When wcodec is non-nil and the op is [txn.OpAddEdgeWeighted], the
 // typed weight payload between codec.dst and the trailing label is
 // decoded and applied to the graph. When wcodec is nil and the op is
-// [txn.OpAddEdgeWeighted], the apply falls back to a zero weight and
-// the `store.recovery.applyOp.fallbackZeroWeight` counter is
-// incremented.
+// [txn.OpAddEdgeWeighted], the weight payload cannot be decoded: the
+// op is NOT applied, the `store.recovery.applyOp.fallbackZeroWeight`
+// counter is incremented (the name predates this behaviour; no zero
+// weight is applied), and false is returned. Inside a committed v3
+// transaction the replay loop then raises [ErrCommittedTxnCorruptOp]
+// and stops, so that transaction and every transaction after it in the
+// WAL are discarded; [Open] still returns a nil error and
+// [Result.IsClean] reports false.
 //
 // It also returns false when the graph REFUSES a decoded op — every mutation
 // whose lpg.Graph primitive can fail (node add, node label, node property, edge
@@ -2223,11 +2493,17 @@ func applyOpCodec[N comparable, W any](
 			// itself.
 			for _, lbl := range g.NodeLabels(src) {
 				touched.addLabel(lbl)
-				g.RemoveNodeLabel(src, lbl)
+				if err := g.RemoveNodeLabel(src, lbl); err != nil {
+					metrics.IncCounter("store.recovery.applyOp.removeNodeLabelErrors", 1)
+					return false
+				}
 			}
 			for k := range g.NodeProperties(src) {
 				touched.addKey(k)
-				g.DelNodeProperty(src, k)
+				if err := g.DelNodeProperty(src, k); err != nil {
+					metrics.IncCounter("store.recovery.applyOp.delNodePropertyErrors", 1)
+					return false
+				}
 			}
 			// Reconstruct the tombstone so the node is logically deleted
 			// after replay, not merely a label-stripped live node. Without
@@ -2235,10 +2511,16 @@ func applyOpCodec[N comparable, W any](
 			// resurrect the node as an undeletable ghost. A later OpAddNode
 			// for the same key revives it (g.AddNode clears the tombstone),
 			// so replay order is honoured.
-			g.RemoveNode(src)
+			if err := g.RemoveNode(src); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.removeNodeErrors", 1)
+				return false
+			}
 		case txn.OpRemoveNodeLabel:
 			touched.addLabel(label)
-			g.RemoveNodeLabel(src, label)
+			if err := g.RemoveNodeLabel(src, label); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.removeNodeLabelErrors", 1)
+				return false
+			}
 		case txn.OpSetNodeLabel:
 			touched.addLabel(label)
 			if err := g.SetNodeLabel(src, label); err != nil {
@@ -2246,12 +2528,17 @@ func applyOpCodec[N comparable, W any](
 				return false
 			}
 		case txn.OpSetEdgeLabel:
-			g.SetEdgeLabel(src, dst, label)
+			// A refusal here can only be the token bound, which no op the
+			// uint16-prefixed WAL decoded can exceed: an undecodable op.
+			if err := g.SetEdgeLabel(src, dst, label); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.setEdgeLabelErrors", 1)
+				return false
+			}
 		case txn.OpRemoveEdge:
 			// LPG edge removal: a fully-disconnected pair also sheds its
 			// per-pair edge labels/properties, so a later OpAddEdge for the
 			// same endpoints does not resurrect the removed edge's labels.
-			g.RemoveEdge(src, dst)
+			return replayRemoveEdge(g, src, dst)
 		}
 
 	case txn.OpAddEdgeH:
@@ -2298,7 +2585,10 @@ func applyOpCodec[N comparable, W any](
 			}
 		case txn.OpDelNodeProperty:
 			touched.addKey(key)
-			g.DelNodeProperty(src, key)
+			if err := g.DelNodeProperty(src, key); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.delNodePropertyErrors", 1)
+				return false
+			}
 		case txn.OpSetEdgeProperty:
 			val, _, verr := decodeRecoveryPropertyValue(rest)
 			if verr != nil {
@@ -2309,7 +2599,10 @@ func applyOpCodec[N comparable, W any](
 				return false
 			}
 		case txn.OpDelEdgeProperty:
-			g.DelEdgeProperty(src, dst, key)
+			if err := g.DelEdgeProperty(src, dst, key); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.delEdgePropertyErrors", 1)
+				return false
+			}
 		}
 	}
 	return true
@@ -2410,7 +2703,10 @@ func applySetEdgeLabelByHandle[N comparable, W any](g *lpg.Graph[N, W], src, dst
 	if !ok {
 		return false
 	}
-	g.SetEdgeLabelByHandle(src, dst, handle, label)
+	if err := g.SetEdgeLabelByHandle(src, dst, handle, label); err != nil {
+		metrics.IncCounter("store.recovery.applyOp.setEdgeLabelErrors", 1)
+		return false
+	}
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }
@@ -2475,7 +2771,10 @@ func applyDelEdgePropertyByHandle[N comparable, W any](g *lpg.Graph[N, W], src, 
 	if !ok {
 		return false
 	}
-	g.DelEdgePropertyByHandle(src, dst, handle, key)
+	if err := g.DelEdgePropertyByHandle(src, dst, handle, key); err != nil {
+		metrics.IncCounter("store.recovery.applyOp.delEdgePropertyErrors", 1)
+		return false
+	}
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }
@@ -2498,7 +2797,11 @@ func applyRemoveEdgeInstanceByHandle[N comparable, W any](g *lpg.Graph[N, W], sr
 	if !ok {
 		return false
 	}
-	g.RemoveEdgeInstanceByHandle(src, dst, handle)
+	if err := g.RemoveEdgeInstanceByHandle(src, dst, handle); err != nil {
+		// Nothing can be pending during replay; a refusal is reported, never dropped.
+		metrics.IncCounter("store.recovery.applyOp.removeEdgeErrors", 1)
+		return false
+	}
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }
@@ -2529,7 +2832,11 @@ func applyRemoveEdgeByHandle[N comparable, W any](g *lpg.Graph[N, W], src, dst N
 	if !ok {
 		return false
 	}
-	g.RemoveEdgeByHandle(src, dst, handle)
+	if _, err := g.RemoveEdgeByHandle(src, dst, handle); err != nil {
+		// See OpRemoveEdge: nothing can be pending during replay.
+		metrics.IncCounter("store.recovery.applyOp.removeEdgeErrors", 1)
+		return false
+	}
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }
@@ -2743,4 +3050,25 @@ func decodeRecoveryTimeProp(buf []byte) (lpg.PropertyValue, []byte, error) {
 		return lpg.PropertyValue{}, buf, errors.New("recovery: short time property")
 	}
 	return lpg.TimeValue(time.Unix(0, nanos).UTC()), buf[n:], nil
+}
+
+// replayRemoveEdge applies a logged OpRemoveEdge. Replay runs before the store
+// accepts any transaction, so no write can be pending and the direct-write
+// refusal of rmp #2947 cannot occur; if it does, it is counted and reported as
+// a failed op, never dropped.
+func replayRemoveEdge[N comparable, W any](g *lpg.Graph[N, W], src, dst N) bool {
+	if err := g.RemoveEdge(src, dst); err != nil {
+		metrics.IncCounter("store.recovery.applyOp.removeEdgeErrors", 1)
+		return false
+	}
+	return true
+}
+
+// mapperPresent reports whether a snapshot readback restores the interning table:
+// it carries mapper pairs. An image with no pair (an empty graph, or one whose every
+// assigned id is a hole) takes the WAL-replay path exactly as before WAL v2 step 1,
+// without restoring its nodeids.bin marks; nothing on disk names a hole's id until
+// the id annex of step 3, which revisits it.
+func mapperPresent(rb snapshot.MapperReadback) bool {
+	return len(rb.Pairs) > 0 || len(rb.RawPairs) > 0
 }

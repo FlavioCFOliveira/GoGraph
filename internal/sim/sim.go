@@ -40,6 +40,10 @@ const (
 
 // Config parameterises a simulation run.
 type Config struct {
+	// beforeFixture, when non-nil, runs on the fresh simulator before a scenario
+	// constructs its fixtures. Tests use it to place the graph's synthetic
+	// node-key sequence; it is unexported, so only this package can set it.
+	beforeFixture func(*Simulator)
 	// Workload is the actor mix. When nil, [DefaultWorkload] is used.
 	Workload *Workload
 	// OnOp, when non-nil, is called synchronously with each tick and the
@@ -174,8 +178,12 @@ type Simulator struct {
 	seed     *Seed
 	cfg      Config
 	// crashCount and replayedOps accumulate run statistics for reports and tests.
-	crashCount  int
-	replayedOps int
+	crashCount int
+	// nodeIDsCompared counts the nodes the NodeID stability oracle compared
+	// across every recovery of the run (nodeid_stability.go); its non-vacuity
+	// witness.
+	nodeIDsCompared int
+	replayedOps     int
 	// rejectedWrites counts write-shaped operations the engine did NOT commit
 	// (committed == false). Under the disk-full scenario this is the non-vacuity
 	// guard that ENOSPC actually fired: an honest write fails only when the
@@ -467,8 +475,24 @@ type schemaChurnStep struct {
 // FOR ... REQUIRE grammar (the legacy ON ... ASSERT spelling runs in the
 // constraint scenarios and the wire SchemaChanger), and the index create is
 // OPTIONS-free, so it exercises the default (hash) kind.
+//
+// Every applied step is followed by the same IF [NOT] EXISTS statement a second
+// time, which the engine ABSORBS as a no-op because the object is by then in the
+// state the statement asks for (rmp #2829): CREATE ... IF NOT EXISTS on a name
+// known to be present, and DROP ... IF EXISTS on a name known to be absent. The
+// cycle is positional and the run creates sim_person_name before the first step
+// and no sim_contact_email_uq, so "known" is a property of the step order, not
+// an assumption. Without these steps the tick loop never issued an absorbed
+// statement, and the DDL counters oracle could not see a counter that reports an
+// effect an absorbed no-op never applied (the rmp #2818 class). runSchemaChaos
+// issues MaxTicks/schemaChurnEvery = 10 steps, so all eight are reached.
 var schemaChurnSteps = []schemaChurnStep{
 	{
+		ddl:   "CREATE CONSTRAINT sim_contact_email_uq IF NOT EXISTS FOR (n:Contact) REQUIRE n.email IS UNIQUE",
+		apply: func(m *SchemaModel) { m.AddUniqueConstraint("sim_contact_email_uq", "Contact", "email") },
+	},
+	{
+		// Absorbed: the constraint was created by the previous step.
 		ddl:   "CREATE CONSTRAINT sim_contact_email_uq IF NOT EXISTS FOR (n:Contact) REQUIRE n.email IS UNIQUE",
 		apply: func(m *SchemaModel) { m.AddUniqueConstraint("sim_contact_email_uq", "Contact", "email") },
 	},
@@ -477,11 +501,26 @@ var schemaChurnSteps = []schemaChurnStep{
 		apply: func(m *SchemaModel) { m.DropConstraint("sim_contact_email_uq") },
 	},
 	{
+		// Absorbed: the constraint was dropped by the previous step.
+		ddl:   "DROP CONSTRAINT sim_contact_email_uq IF EXISTS",
+		apply: func(m *SchemaModel) { m.DropConstraint("sim_contact_email_uq") },
+	},
+	{
+		ddl:   "DROP INDEX sim_person_name IF EXISTS",
+		apply: func(m *SchemaModel) { m.DropIndex("sim_person_name") },
+	},
+	{
+		// Absorbed: the index was dropped by the previous step (the rmp #2818 shape).
 		ddl:   "DROP INDEX sim_person_name IF EXISTS",
 		apply: func(m *SchemaModel) { m.DropIndex("sim_person_name") },
 	},
 	{
 		ddl:   "CREATE INDEX sim_person_name FOR (n:Person) ON (n.name)",
+		apply: func(m *SchemaModel) { m.AddIndex("sim_person_name", SchemaIndexHash, "Person", "name") },
+	},
+	{
+		// Absorbed: the index was created by the previous step.
+		ddl:   "CREATE INDEX IF NOT EXISTS sim_person_name FOR (n:Person) ON (n.name)",
 		apply: func(m *SchemaModel) { m.AddIndex("sim_person_name", SchemaIndexHash, "Person", "name") },
 	},
 }
@@ -572,6 +611,7 @@ func (s *Simulator) maybeCrash(_ context.Context, tick int64) (*SimReport, error
 	// INTEGRATED crash-storm / full-stack loop, so a future async-checkpoint or
 	// mid-publish window cannot silently promote a snapshot a real crash would
 	// have lost. Harmless under the current synchronous-checkpoint ordering.
+	idsBefore := liveNodeIDs(s.store.Graph())
 	s.disk.Crash()
 	// Reopen with the SAME store configuration the crashed store used — crucially
 	// the same durable layout. In full-stack mode (cfg.dir set) this reopens the
@@ -598,6 +638,11 @@ func (s *Simulator) maybeCrash(_ context.Context, tick int64) (*SimReport, error
 	// uncommitted may have leaked in (see [InvariantChecker.CheckDurability]).
 	if violations := s.checker.CheckDurability(tick, s.oracle, s.engine); len(violations) > 0 {
 		return s.report(tick, Op{Kind: OpMatch, Cypher: "<crash recovery>"}, violations), nil
+	}
+	n, idViolations := checkNodeIDStability(tick, idsBefore, store.Graph())
+	s.nodeIDsCompared += n
+	if len(idViolations) > 0 {
+		return s.report(tick, Op{Kind: OpMatch, Cypher: "<crash recovery: NodeID stability>"}, idViolations), nil
 	}
 
 	// When the search battery is enabled, run it on the recovered graph too: this
@@ -667,6 +712,7 @@ func (s *Simulator) forceCrash(tick int64, opLabel string) (*SimReport, error) {
 		return nil, nil
 	}
 	storeCfg := s.store.Config()
+	idsBefore := liveNodeIDs(s.store.Graph())
 	s.store.Crash()
 	store, err := OpenSimStore(s.disk, storeCfg)
 	if err != nil {
@@ -678,6 +724,11 @@ func (s *Simulator) forceCrash(tick int64, opLabel string) (*SimReport, error) {
 	s.replayedOps += store.WALOps()
 	if v := s.checker.CheckDurability(tick, s.oracle, s.engine); len(v) > 0 {
 		return s.report(tick, Op{Kind: OpMatch, Cypher: opLabel}, v), nil
+	}
+	n, idViolations := checkNodeIDStability(tick, idsBefore, store.Graph())
+	s.nodeIDsCompared += n
+	if len(idViolations) > 0 {
+		return s.report(tick, Op{Kind: OpMatch, Cypher: opLabel}, idViolations), nil
 	}
 	return nil, nil
 }
@@ -816,6 +867,10 @@ func (s *Simulator) Oracle() *GraphOracle { return s.oracle }
 // CrashCount returns how many crash+recovery cycles the run performed (always 0
 // when crashes are disabled).
 func (s *Simulator) CrashCount() int { return s.crashCount }
+
+// NodeIDsCompared returns how many surviving nodes the NodeID stability oracle
+// compared across the run's recoveries (WAL v2 step 3).
+func (s *Simulator) NodeIDsCompared() int { return s.nodeIDsCompared }
 
 // ReplayedOps returns the cumulative number of WAL ops recovery replayed across
 // every crash cycle in the run.

@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
+	"runtime/pprof"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
@@ -25,12 +28,10 @@ var ErrWriterClosed = errors.New("wal: writer is closed")
 // log.
 var ErrWALLocked = errors.New("wal: WAL directory is locked by another process")
 
-// ErrPrefixTruncateUnsupported is returned by [Writer.TruncatePrefix] on a
-// Writer created via [OpenWith] (a synthetic, path-less file handle). The
-// crash-safe prefix truncation works by writing the surviving suffix to a
-// sibling temp file and atomically renaming it over the WAL path, so it
-// requires a real filesystem path — which only [Open] records.
-var ErrPrefixTruncateUnsupported = errors.New("wal: TruncatePrefix requires a path-backed writer (use Open, not OpenWith)")
+// ErrSegmentsUnsupported is returned by [Writer.MarkCheckpoint] and
+// [Writer.ReclaimSegments] on a Writer created by [OpenWith]: a single-file
+// test writer has no control file and no segments to reclaim.
+var ErrSegmentsUnsupported = errors.New("wal: operation requires a segmented writer (use Open or OpenFS, not OpenWith)")
 
 // ErrDurabilityFailed marks every error a POISONED writer returns: the write-ahead
 // log could not be made durable, the un-synced suffix has been discarded, and this
@@ -44,25 +45,53 @@ var ErrPrefixTruncateUnsupported = errors.New("wal: TruncatePrefix requires a pa
 // It is NOT retriable, and that is the whole point of naming it. A group commit is
 // FAIL-ALL: when the leader's fsync fails, every member's frames and OpCommit
 // markers are discarded together, so a transaction that did nothing wrong fails
-// because another transaction's I/O failed. While commits were serialised that was
-// unremarkable — the batch was one unit. Once writers are independent (rmp #2306) a
-// caller needs to tell "MY transaction lost a conflict, retry it" from "the storage
-// substrate failed, everything in flight is gone, and retrying will not help",
-// because the two demand opposite responses and both used to arrive as an
-// undistinguished error.
+// because another transaction's I/O failed. A caller needs to tell "MY
+// transaction lost a conflict, retry it" from "the storage substrate failed,
+// everything in flight is gone, and retrying will not help" (rmp #2306).
 //
 // Fail-all is kept rather than softened, because the alternative is to acknowledge a
 // commit whose durability is unknown, which the module's ACID mandate forbids
 // outright. It is also the LENIENT end of the prior art: PostgreSQL does not fail the
-// transaction, it fails the PROCESS —
-// `issue_xlog_fsync` carries the comment "PANIC if failed to fsync" and calls
-// `ereport(PANIC, …)` (postgres/postgres, branch master, read 2026-08-04 at commit
-// 69ed7fd7e9da1cff2f04af04f630287971fe99fe;
-// src/backend/access/transam/xlog.c). GoGraph cannot take that route: it is a library
-// embedded in the caller's process, killing the host is not its decision to make, and
-// the reliability mandate forbids the library from crashing. So the handle dies and
+// transaction, it fails the PROCESS — `issue_xlog_fsync` carries the comment "PANIC
+// if failed to fsync" (postgres/postgres, master, read 2026-08-04 at commit
+// 69ed7fd7e9da1cff2f04af04f630287971fe99fe; src/backend/access/transam/xlog.c).
+// GoGraph is a library embedded in the caller's process, so the handle dies and
 // says so, which is PostgreSQL's conclusion scoped to what a library owns.
 var ErrDurabilityFailed = errors.New("wal: durability failed; the un-synced suffix was discarded and this writer is poisoned")
+
+// Segment sizes (docs/design-wal-v2.md §2.3).
+const (
+	// DefaultSegmentSize is the segment size target when [Options.SegmentSize]
+	// is 0: 16 MiB, PostgreSQL's default wal_segment_size.
+	DefaultSegmentSize int64 = 16 << 20
+	// MinSegmentSize is the smallest segment size target [Options] accepts.
+	MinSegmentSize int64 = 1 << 20
+)
+
+// Options configures [OpenWithOptions] and [OpenFSWithOptions]. It is a plain
+// configuration value: populate it before the call and do not mutate it
+// while the call is in flight; read-only, it is safe for concurrent use.
+type Options struct {
+	// SegmentSize is the target size of a segment in bytes: a segment at or
+	// above it is rolled over at the next run boundary, so one run larger
+	// than the target still lands in one segment. 0 selects
+	// [DefaultSegmentSize]; a value below [MinSegmentSize] is refused.
+	SegmentSize int64
+	// SyncLatency, when non-nil, delays every data fsync and directory fsync
+	// of the writer; a testing instrument, see [SyncLatency].
+	SyncLatency *SyncLatency
+}
+
+func (o Options) segmentSize() (int64, error) {
+	switch {
+	case o.SegmentSize == 0:
+		return DefaultSegmentSize, nil
+	case o.SegmentSize < MinSegmentSize:
+		return 0, fmt.Errorf("wal: segment size %d is below the minimum %d", o.SegmentSize, MinSegmentSize)
+	default:
+		return o.SegmentSize, nil
+	}
+}
 
 // Stats is a snapshot of a [Writer]'s lifetime counters. Counters
 // are monotonic; subtract two snapshots to compute deltas. Values
@@ -76,313 +105,706 @@ var ErrDurabilityFailed = errors.New("wal: durability failed; the un-synced suff
 // concurrently with [Writer.Append] and [Writer.Sync].
 type Stats struct {
 	Frames uint64 // total frames appended
-	Bytes  uint64 // total bytes appended (header + payload)
-	Syncs  uint64 // total Sync calls
-	// SyncFailed counts Sync calls that failed at the flush/fsync
+	Bytes  uint64 // total frame bytes appended (header + payload)
+	Syncs  uint64 // total successful data syncs (commit path and rollover)
+	// SyncFailed counts sync rounds that failed at the flush/fsync
 	// I/O layer. Calls rejected because the writer was already
 	// poisoned by an earlier failure are not counted (mirroring how
 	// context-cancelled calls are not counted).
 	SyncFailed uint64
+	// ControlFrames and ControlBytes count the subset of Frames and Bytes whose
+	// payload is a control record ([ControlRecordTag]): node id reservations and
+	// the clean-close id marks (WAL v2 step 4). Frames − ControlFrames is the
+	// number of transaction frames.
+	ControlFrames uint64
+	ControlBytes  uint64
 }
 
-// Writer is a single-writer append-only log file. Callers append
-// frames with [Writer.Append] and durably commit them with
-// [Writer.Sync]; group-commit is achieved by appending several
-// frames before a single Sync.
+// segMeta is one retained segment as the writer tracks it.
+type segMeta struct {
+	no uint64
+	// start is the logical position of the segment's first frame (for the
+	// active segment before its first frame: the position it will start at).
+	start int64
+	// prevFramePos is the position of the frame preceding start, -1 for none.
+	prevFramePos int64
+}
+
+// Writer appends frames to a store's write-ahead log. Callers append frames
+// with [Writer.Append] / [Writer.AppendRun] and durably commit them with
+// [Writer.Sync] / [Writer.SyncGroup]; group-commit is achieved by appending
+// several frames before a single sync.
 //
-// Writer is safe for concurrent calls to [Writer.Append] / Sync /
-// Stats; all mutations serialise on an internal mutex.
+// A Writer created by [Open] or [OpenFS] writes a segmented log
+// (docs/design-wal-v2.md): a control file, numbered segments under
+// walPath+".d", and every frame stamped with its logical position, a link to its
+// predecessor and the store id. Positions never reset; [Writer.DurableOffset]
+// and the watermark [Writer.AppendRun] returns are positions. A segment at or
+// above the target size is rolled over at the next run boundary, after it has
+// been made durable, so no transaction spans two segments and every non-tail
+// segment is fully durable before its successor receives a byte. A checkpoint
+// reclaims space by unlinking whole segments ([Writer.MarkCheckpoint],
+// [Writer.ReclaimSegments]) without taking the append lock.
 //
-// A Writer fail-stops on commit failure: the first flush or fsync
-// error in [Writer.Sync] permanently poisons the writer. The
-// un-synced suffix of the file — which may hold the flushed frames
-// (including the commit marker) of the very transaction whose Sync
-// just failed — is physically discarded, and every subsequent
-// Append/Sync returns the original error. Without the poison, a
-// later transaction's successful fsync would make the failed
-// transaction's frames durable even though its commit was never
-// acknowledged, and recovery would replay it: a phantom commit
-// violating Atomicity and Durability. A poisoned Writer accepts only
-// [Writer.Close]; the owner must discard it and re-open the WAL,
-// which re-validates the tail.
+// A Writer created by [OpenWith] writes the same frames into one file with no
+// control file and no rollover; it is a test writer.
+//
+// # Concurrency
+//
+// Writer is safe for concurrent use by any number of goroutines. Appends,
+// syncs and rollover serialise on one internal mutex; a group-commit leader
+// releases it across its fsync. [Writer.MarkCheckpoint] and
+// [Writer.ReclaimSegments] never take that mutex: they touch only the control
+// file and segments the writer no longer appends to, under their own locks.
+// The writer of an [Open]ed log may run one short-lived background goroutine
+// that prepares the next segment; [Writer.Close] waits for it.
+//
+// # Fail-stop
+//
+// A Writer fail-stops on commit failure: the first flush or fsync error
+// permanently poisons it. The un-synced suffix of the active segment — which
+// may hold the flushed frames (including the commit marker) of the very
+// transaction whose sync just failed — is physically discarded, and every
+// subsequent Append/Sync returns the original error. Without the poison, a
+// later transaction's successful fsync would make the failed transaction's
+// frames durable even though its commit was never acknowledged: a phantom
+// commit violating Atomicity and Durability. A poisoned Writer accepts only
+// [Writer.Close]; the owner must discard it and re-open the WAL.
 //
 // # Which method answers "is this Writer healthy" — rmp #2525
 //
-// [Writer.Poisoned] does, and it is the only member that does. Every exported
-// method was called on a poisoned Writer and the result read off the run
-// (rmp #2525; the gate is TestWriter_PoisonedStateSurface). The set splits
-// three ways, and the split is NOT uniform, which is why it is written down:
+// [Writer.Poisoned] does, and it is the only member that does. The set splits
+// this way:
 //
-//   - They return the sticky poison error — the IDENTICAL error value, not
-//     merely one of the same class, that [Writer.Poisoned] reports:
-//     [Writer.Append], [Writer.AppendCtx], [Writer.AppendRun], [Writer.Sync],
-//     [Writer.SyncCtx], [Writer.TruncatePrefix] and [Writer.Close]. For these,
-//     and only these, a nil return does imply the Writer was not poisoned at
-//     the moment of the call.
+//   - They return the sticky poison error — the IDENTICAL error value that
+//     [Writer.Poisoned] reports: [Writer.Append], [Writer.AppendCtx],
+//     [Writer.AppendRun], [Writer.Sync], [Writer.SyncCtx], [Writer.Truncate]
+//     and [Writer.Close].
 //   - They can return nil WHILE the Writer is poisoned: [Writer.SyncBuffered]
-//     always does, because the poison rewinds the accepted offset to the
+//     always does, because the poison rewinds the accepted position to the
 //     durable one and the already-durable fast path fires; [Writer.SyncGroup]
 //     does for a watermark that was already durable before the failing round,
-//     which is the deliberate durability-first rule of rmp #2322 — a committer
-//     whose marker is on the platter must not be told its commit failed.
-//     SyncGroup still returns the sticky error for a watermark the poison
-//     discarded. A nil from either of these says nothing about the Writer's
-//     health.
-//   - It does not consult the poison at all: [Writer.Truncate] empties the file
-//     and leaves the Writer poisoned, returning nil if its own fsync succeeds
-//     and the raw fsync error — neither the sticky error nor an
-//     [ErrDurabilityFailed] — if it does not. Its return therefore says nothing
-//     about the fail-stop state in either direction. [Writer.Stats] and
-//     [Writer.DurableOffset] have no error channel; [Stats.SyncFailed] counts
-//     the failed sync rounds and is 1 after one poison.
+//     the deliberate durability-first rule of rmp #2322.
+//   - They do not consult the poison: [Writer.MarkCheckpoint] and
+//     [Writer.ReclaimSegments] act on durable state only, [Writer.Stats] and
+//     [Writer.DurableOffset] have no error channel.
 //
-// So a caller that needs to know whether this handle can still accept work
-// calls [Writer.Poisoned]. A flush that returned nil is not evidence.
-//
-// After [Writer.Close] every method in the three groups above returns
-// [ErrWriterClosed] instead of the sticky error — the closed check precedes the
-// poison check — while [Writer.Poisoned] still reports the sticky error, so the
-// owner can still learn why the handle died.
+// After [Writer.Close] every method in the first two groups returns
+// [ErrWriterClosed] instead of the sticky error, while [Writer.Poisoned] still
+// reports the sticky error.
 type Writer struct {
 	f WALFile
 
 	// syncErr is the sticky poison error: set under mu by the first
-	// flush/fsync failure in SyncCtx and never cleared. While non-nil
-	// every AppendCtx/SyncCtx call returns it without touching the
-	// file.
+	// flush/fsync failure and never cleared.
 	syncErr error
 
-	// fsys is the path-based filesystem backend [Writer.TruncatePrefix] uses
-	// for its temp-write / rename / remove during crash-safe prefix truncation.
-	// [Open] installs [osWALFS] (the os.* calls, byte-identical to the pre-seam
-	// path); [OpenFS] installs the caller's backend (the simulator's in-memory
-	// disk in DST). It is nil for a path-less [OpenWith] Writer, which rejects
-	// TruncatePrefix before ever touching fsys.
+	// fsys is the path-based filesystem backend: [Open] installs [osWALFS],
+	// [OpenFS] the caller's backend (the simulator's in-memory disk in DST).
 	fsys walFS
 
-	// lockFile is the open handle of the WAL directory LOCK file whose
-	// flock(2) / O_EXCL lifetime is tied to this Writer. It is non-nil
-	// only for Writers created via [Open] (not [OpenWith], which is used
-	// exclusively by tests that supply synthetic WALFile implementations).
-	// Released by Close via releaseLock.
+	// lockFile is the open handle of the LOCK file whose flock(2) lifetime is
+	// tied to this Writer; non-nil only for [Open]. Released by Close.
 	lockFile *os.File
 
 	bw *bufio.Writer
+	// hdr is the frame-header scratch buffer appendLocked encodes into; guarded
+	// by mu.
+	hdr [HeaderSizeV2]byte
 
-	// --- group-commit coordination (Writer-owned, all under mu) ---
-	//
-	// SyncGroup implements PostgreSQL-XLogFlush-style commit coalescing: a
-	// committer records the watermark (appendedSize) covering its last
-	// appended frame, then either fsyncs the whole buffered suffix once as
-	// the group LEADER or, if a leader is already flushing, waits on
-	// groupCond until a fsync covers its watermark. One fsync therefore
-	// makes many committers' frames durable, amortising the ~per-commit fsync
-	// cost across the group. The watermark is the Writer's own appendedSize /
-	// durableSize, taken under mu, so the coordinator never tracks byte
-	// offsets independently of the file (the load-bearing audit invariant).
-
-	// groupCond signals waiters when a sync round completes (durableSize
+	// groupCond signals waiters when a sync round completes (durablePos
 	// advanced) or the writer is poisoned. Its locker is &mu.
 	groupCond *sync.Cond
 
-	// dirFsync is the parent-directory fsync used by [Writer.TruncatePrefix]
-	// after the atomic rename. It defaults to parentDirFsync; tests override it
-	// to inject a post-rename failure and assert the Writer fail-stops. Never
-	// nil after a constructor runs.
+	// dirFsync fsyncs the parent directory of its argument. Never nil after a
+	// constructor runs; [OpenWithOptions] wraps it with the SyncLatency delay.
 	dirFsync func(string) error
 
-	// path is the filesystem path of the WAL file, recorded by [Open] so
-	// [Writer.TruncatePrefix] can perform its crash-safe atomic-rename
-	// (write the surviving suffix to a sibling temp file, then rename it
-	// over path). It is empty for Writers built via [OpenWith] (synthetic
-	// test files have no real path); TruncatePrefix returns
-	// [ErrPrefixTruncateUnsupported] for a path-less Writer.
+	// syncLatency, when non-nil, delays every data fsync. Set once at
+	// construction and never mutated, so it is read without a lock.
+	syncLatency *SyncLatency
+
+	// path is the WAL base path (dir/wal); empty for [OpenWith].
 	path string
 
-	// durableSize is the file size, in bytes, covered by the last
-	// successful fsync (or the size observed at open). Guarded by mu.
-	// It is the truncation target when a sync failure must discard
-	// the un-synced suffix.
-	durableSize int64
-	// appendedSize is durableSize plus every frame byte accepted by
-	// AppendCtx since the last successful fsync — the logical file
-	// size once the buffer is flushed. Guarded by mu. Tracking it
-	// incrementally keeps the commit hot path free of size-probing
-	// seek syscalls.
-	appendedSize int64
+	// segmented is false only for [OpenWith].
+	segmented bool
+	// asyncPrepare selects the background segment preparer ([Open]); [OpenFS]
+	// prepares the next segment synchronously at rollover, which keeps the
+	// simulator's disk operations deterministic.
+	asyncPrepare bool
+	storeID      uint64
+	segSize      int64
+
+	// Active-segment geometry, guarded by mu. A position p of the active
+	// segment lives at file offset fileBase + (p - segStart).
+	segNo    uint64
+	segStart int64
+	fileBase int64
+
+	// durablePos is the position covered by the last successful fsync; the
+	// truncation target of a poison. appendedPos is durablePos plus every frame
+	// byte accepted since. Both guarded by mu.
+	durablePos  int64
+	appendedPos int64
+	// lastFramePos is the position of the last accepted frame (-1: none), and
+	// durableLastFramePos the same for the durable prefix. Guarded by mu.
+	lastFramePos        int64
+	durableLastFramePos int64
+	// segFramesAtOpen reports that the open-time scan found segment frame
+	// bytes (a frame, or corruption); set by attachSegments, read by
+	// settleLegacy, never written afterwards.
+	segFramesAtOpen bool
 
 	frames     atomic.Uint64
 	bytes      atomic.Uint64
 	syncs      atomic.Uint64
 	syncFailed atomic.Uint64
+	ctlFrames  atomic.Uint64
+	ctlBytes   atomic.Uint64
 
 	mu     sync.Mutex
 	closed atomic.Bool
 
 	// leaderActive is true while one committer is performing the group
-	// flush+fsync. While set, no other committer starts a competing fsync;
-	// arriving committers wait on groupCond. It guarantees a single leader
-	// per round so two goroutines never flush the same Writer concurrently.
+	// flush+fsync; guarded by mu.
 	leaderActive bool
+
+	// segMu guards segs, the retained segments oldest first, the active last.
+	// Lock order: mu, then segMu.
+	segMu sync.Mutex
+	segs  []segMeta
+
+	// ctlMu serialises the checkpoint side — control writes and segment
+	// unlinks — and guards ctl, the control file as last written. It is never
+	// taken under mu.
+	ctlMu sync.Mutex
+	ctl   Control
+
+	// spareMu guards the prepared spare segment and the preparer state.
+	spareMu     sync.Mutex
+	spare       WALFile
+	spareNo     uint64
+	prepRunning bool
+	prepWG      sync.WaitGroup
 }
 
-// Open opens or creates the WAL file at path for append-only
-// writing. The file is created with mode 0o600 (owner read/write
-// only) if it does not already exist; existing complete frames are
-// preserved and new frames are appended after them. The restrictive
-// mode keeps the full graph mutation stream from being world-readable.
-//
-// When the existing file ends in a benign torn frame ([ErrTornFrame] —
-// the crash-mid-write-after-last-fsync case), Open truncates the file
-// to the last durable frame boundary and fsyncs it before returning,
-// so new frames are never appended after torn junk that every reader
-// would stop at; see discardTornTail. Files whose scan stops at
-// genuine corruption (for example [ErrCRCMismatch] or [ErrBadMagic])
-// are left byte-for-byte intact.
-func Open(path string) (*Writer, error) {
-	defer metrics.Time("store.wal.Open").Stop()
+// Open opens or creates the write-ahead log at walPath (dir/wal in a store
+// directory) for appending; see [OpenWithOptions].
+func Open(walPath string) (*Writer, error) {
+	return OpenWithOptions(walPath, Options{})
+}
 
-	// Acquire an exclusive OS-level lock on the WAL directory before
-	// touching any WAL data. The lock is held for the lifetime of this
-	// Writer and released by Close. Without it two processes opening the
-	// same path would silently interleave WAL frames, corrupting the log.
-	//
-	// acquireLock creates (or opens) a "LOCK" sentinel file in the same
-	// directory as path and calls flock(2)/O_EXCL on it; see lock_unix.go
-	// and lock_other.go for the per-platform implementation.
-	lockPath := path + ".lock"
-	lockFile, err := acquireLock(lockPath)
+// OpenWithOptions opens or creates the write-ahead log at walPath for
+// appending.
+//
+// It takes an exclusive OS lock on walPath+".lock" for the Writer's lifetime
+// ([ErrWALLocked] when another process holds it). Then:
+//
+//   - A fresh directory gets a control file holding a new random store id, a
+//     first segment, and a one-frame seal stub at walPath, so a build that
+//     predates the segmented format refuses the directory instead of ignoring
+//     its segments.
+//   - A directory holding a legacy single-file log at walPath and no control
+//     file is migrated: a control file is written with a new store id and
+//     the legacy-pending flag, the first segment is created, and a seal frame
+//     is appended to the legacy file and fsynced. The legacy file's history is
+//     kept and replays as before; its benign torn tail is discarded first, and
+//     a legacy file whose scan stops at corruption is refused.
+//   - An existing segmented log is reopened: interrupted spare creations and
+//     segments wholly below the oldest retained position are deleted, the
+//     tail segment's benign torn tail is truncated and fsynced so new frames
+//     are never appended behind junk, and appending resumes at the end of the
+//     last valid frame. A tail that stops at genuine corruption is left
+//     byte-for-byte intact for recovery to report.
+//
+// Every created file has mode 0o600. [Open] is OpenWithOptions with zero
+// Options.
+func OpenWithOptions(walPath string, opts Options) (*Writer, error) {
+	defer metrics.Time("store.wal.Open").Stop()
+	segSize, err := opts.segmentSize()
+	if err != nil {
+		metrics.IncCounter("store.wal.Open.errors", 1)
+		return nil, err
+	}
+	lockFile, err := acquireLock(walPath + ".lock")
 	if err != nil {
 		metrics.IncCounter("store.wal.Open.errors", 1)
 		return nil, err // ErrWALLocked or a wrapped OS error
 	}
-
-	// Detect whether this call creates the file. A newly-created WAL file
-	// needs a parent-directory fsync so its directory entry is durable;
-	// without it, a crash inside the kernel writeback window could lose the
-	// entire WAL even after a committed Sync — a Durability violation on the
-	// first commit (audit gap F4, docs/acid-audit.md). The stat/open window
-	// is benign: if a racing opener creates the file between the stat and the
-	// OpenFile we merely skip a redundant directory fsync (the other opener
-	// performs it), and WAL files are single-writer per this constructor's
-	// contract.
-	created := false
-	if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
-		created = true
+	dirFsync := parentDirFsync
+	if lat := opts.SyncLatency; lat != nil {
+		dirFsync = func(p string) error {
+			lat.wait()
+			return parentDirFsync(p)
+		}
 	}
-	// 0o600: the WAL carries the full graph mutation stream and must not
-	// be world-readable (audit finding L2). Append/sync/durability flags
-	// are unchanged; only the create mode is tightened.
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND|walNoFollow, 0o600) //nolint:gosec // caller-supplied path is by-design; walNoFollow rejects a symlinked final component (CWE-59)
+	w, err := openSegmented(walPath, osWALFS{}, dirFsync, opts.SyncLatency, segSize, true)
 	if err != nil {
 		releaseLock(lockFile)
 		metrics.IncCounter("store.wal.Open.errors", 1)
-		return nil, fmt.Errorf("wal: open %q: %w", path, err)
+		return nil, fmt.Errorf("wal: open %q: %w", walPath, err)
 	}
-	if created {
-		// fsync the parent directory once so the new file's directory entry
-		// is durable. Done only on create: appends mutate the inode (made
-		// durable by Writer.Sync), not the directory entry, so a per-Sync
-		// directory fsync would be wasted work on the commit hot path.
-		if syncErr := parentDirFsync(path); syncErr != nil {
-			_ = f.Close()
-			releaseLock(lockFile)
-			metrics.IncCounter("store.wal.Open.errors", 1)
-			return nil, fmt.Errorf("wal: fsync parent dir of %q: %w", path, syncErr)
+	w.lockFile = lockFile
+	return w, nil
+}
+
+// openSegmented is the body shared by every segmented constructor.
+func openSegmented(walPath string, fsys walFS, dirFsync func(string) error, lat *SyncLatency, segSize int64, asyncPrepare bool) (*Writer, error) {
+	w := &Writer{
+		fsys:                fsys,
+		dirFsync:            dirFsync,
+		syncLatency:         lat,
+		path:                walPath,
+		segmented:           true,
+		asyncPrepare:        asyncPrepare,
+		segSize:             segSize,
+		fileBase:            segHeaderSize,
+		lastFramePos:        -1,
+		durableLastFramePos: -1,
+	}
+	w.groupCond = sync.NewCond(&w.mu)
+	lfs := walLogFS{fsys: fsys}
+	c, ok, err := readControl(lfs, walPath)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		if c, err = w.initControl(lfs); err != nil {
+			return nil, err
 		}
-	} else if err := discardTornTail(f); err != nil {
-		_ = f.Close()
-		releaseLock(lockFile)
-		metrics.IncCounter("store.wal.Open.errors", 1)
-		return nil, fmt.Errorf("wal: open %q: discard torn tail: %w", path, err)
 	}
-	// Record the opening size as the durable baseline: every byte
-	// already in the file at open time is presumed durable (a benign
-	// torn tail was discarded and fsynced above), so a later sync
-	// failure rolls the file back exactly here.
+	w.ctl, w.storeID = c, c.StoreID
+	if err := w.attachSegments(lfs); err != nil {
+		w.closeFiles()
+		return nil, err
+	}
+	if err := w.settleLegacy(); err != nil {
+		w.closeFiles()
+		return nil, err
+	}
+	w.bw = bufio.NewWriterSize(w.f, 64*1024)
+	w.startPreparer(w.segNo + 1)
+	return w, nil
+}
+
+// closeFiles releases the handles a failed open acquired.
+func (w *Writer) closeFiles() {
+	if w.f != nil {
+		_ = w.f.Close()
+	}
+	w.prepWG.Wait()
+	if w.spare != nil {
+		_ = w.spare.Close()
+	}
+}
+
+// initControl creates the control file of a directory that has none: a fresh
+// store, or a legacy single-file store being migrated.
+func (w *Writer) initControl(lfs LogFS) (Control, error) {
+	names, err := w.fsys.ReadDir(SegmentDir(w.path))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Control{}, fmt.Errorf("wal: list segments: %w", err)
+	}
+	for _, n := range names {
+		if _, isSeg := parseSegmentName(n); isSeg {
+			return Control{}, ErrMissingControl
+		}
+	}
+	migrating, err := legacyHasBytes(lfs, w.path)
+	if err != nil {
+		return Control{}, err
+	}
+	id, err := newStoreID()
+	if err != nil {
+		return Control{}, err
+	}
+	c := Control{
+		StoreID:          id,
+		PrevFramePosAtOR: NoFramePos,
+		CreatedUnixNano:  uint64(time.Now().UnixNano()),
+	}
+	if migrating {
+		c.Flags = ControlLegacyV1Pending
+		metrics.IncCounter("store.wal.migrate.started", 1)
+	}
+	b := encodeControl(c)
+	if err := writeFileDurably(w.fsys, w.dirFsync, ControlPath(w.path), b[:],
+		"wal.control.tmp-written-pre-rename", "wal.control.renamed-pre-dirfsync"); err != nil {
+		return Control{}, err
+	}
+	return c, nil
+}
+
+// legacyHasBytes reports whether the legacy single-file log exists and is
+// non-empty.
+func legacyHasBytes(lfs LogFS, walPath string) (bool, error) {
+	rc, err := lfs.Open(walPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("wal: probe legacy log: %w", err)
+	}
+	defer func() { _ = rc.Close() }()
+	var b [1]byte
+	n, _ := rc.Read(b[:])
+	return n > 0, nil
+}
+
+// attachSegments enumerates the segments, deletes interrupted spares and
+// leftovers below OR, establishes the end of the log from a full validating
+// scan, truncates a benign torn tail, and opens the active segment.
+func (w *Writer) attachSegments(lfs LogFS) error {
+	if err := w.fsys.MkdirAll(SegmentDir(w.path)); err != nil {
+		return fmt.Errorf("wal: create segment directory: %w", err)
+	}
+	if err := w.dirFsync(SegmentDir(w.path)); err != nil {
+		return fmt.Errorf("wal: fsync parent of segment directory: %w", err)
+	}
+	log, err := OpenLogFS(lfs, w.path)
+	if err != nil {
+		return err
+	}
+	list := log.list
+	removed := false
+	for _, p := range append(list.unfinished, list.leftovers...) {
+		if err := w.fsys.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("wal: remove stale segment %q: %w", p, err)
+		}
+		removed = true
+	}
+	retained := list.segs[list.start:]
+	if len(list.segs) == 0 {
+		retained = nil
+	}
+	for range log.Frames() {
+	}
+	tailErr := log.TailError()
+	end := log.TailOffset()
+	w.appendedPos, w.durablePos = end, end
+	w.lastFramePos = log.LastFramePos()
+	w.durableLastFramePos = w.lastFramePos
+	w.segFramesAtOpen = log.frames > 0 || (tailErr != nil && !errors.Is(tailErr, ErrTornFrame))
+
+	// The active segment is the last one holding a frame byte; with none, the
+	// first retained segment (a fresh store, or one whose retained segments are
+	// all empty), created when there is none.
+	active := -1
+	for i, s := range retained {
+		if s.firstPos >= 0 || s.partial {
+			active = i
+		}
+	}
+	if active < 0 && len(retained) > 0 {
+		active = 0
+	}
+	// Trailing empty segments past active+1 are surplus spares: delete them,
+	// and adopt active+1 as the spare.
+	for i := active + 2; i < len(retained); i++ {
+		if err := w.fsys.Remove(retained[i].path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("wal: remove surplus segment %q: %w", retained[i].path, err)
+		}
+		removed = true
+	}
+	if removed {
+		if err := w.dirFsync(SegmentPath(w.path, 0)); err != nil {
+			return fmt.Errorf("wal: fsync segment directory: %w", err)
+		}
+	}
+	if active < 0 {
+		f, err := w.createSegment(1)
+		if err != nil {
+			return err
+		}
+		w.f, w.segNo, w.segStart = f, 1, end
+		w.segs = []segMeta{{no: 1, start: end, prevFramePos: w.lastFramePos}}
+		return nil
+	}
+	act := retained[active]
+	if errors.Is(tailErr, ErrTornFrame) {
+		// Discard the benign torn tail so new frames are never appended
+		// behind junk every reader stops at. The torn bytes were never part of
+		// an acknowledged commit, so discarding them loses nothing.
+		keep := int64(segHeaderSize)
+		if no, off := log.TailSegment(); no == act.no {
+			keep = off
+		}
+		if err := truncateDurably(w.fsys, act.path, keep); err != nil {
+			return fmt.Errorf("wal: discard torn tail of segment %d: %w", act.no, err)
+		}
+		metrics.IncCounter("store.wal.Open.tornTailDiscarded", 1)
+	}
+	f, err := w.fsys.OpenFile(act.path, os.O_RDWR|os.O_APPEND)
+	if err != nil {
+		return fmt.Errorf("wal: open segment %d: %w", act.no, err)
+	}
 	size, err := f.Seek(0, io.SeekEnd)
 	if err != nil {
 		_ = f.Close()
-		releaseLock(lockFile)
-		metrics.IncCounter("store.wal.Open.errors", 1)
-		return nil, fmt.Errorf("wal: open %q: probe size: %w", path, err)
+		return fmt.Errorf("wal: probe segment %d: %w", act.no, err)
+	}
+	w.f, w.segNo = f, act.no
+	if act.firstPos >= 0 {
+		w.segStart = act.firstPos
+	} else {
+		w.segStart = end
+	}
+	// A tail that stopped at corruption is left intact; appends then land at
+	// the physical end with positions recovery never reaches, exactly as the
+	// single-file writer appended after a corrupt frame.
+	w.fileBase = size - (end - w.segStart)
+	w.segs = make([]segMeta, 0, active+1)
+	for i := 0; i <= active; i++ {
+		s := retained[i]
+		m := segMeta{no: s.no, start: s.firstPos, prevFramePos: -1}
+		if s.firstPos >= 0 && s.firstPrevLen != 0 {
+			m.prevFramePos = s.firstPos - int64(s.firstPrevLen)
+		}
+		if i == active && s.firstPos < 0 {
+			m.start, m.prevFramePos = w.segStart, w.lastFramePos
+		}
+		w.segs = append(w.segs, m)
+	}
+	if active+1 < len(retained) {
+		sf, err := w.fsys.OpenFile(retained[active+1].path, os.O_RDWR|os.O_APPEND)
+		if err != nil {
+			return fmt.Errorf("wal: open spare segment: %w", err)
+		}
+		if _, err := sf.Seek(0, io.SeekEnd); err != nil {
+			_ = sf.Close()
+			return fmt.Errorf("wal: probe spare segment: %w", err)
+		}
+		w.spare, w.spareNo = sf, retained[active+1].no
+	}
+	return nil
+}
+
+// truncateDurably truncates the file at path to size and fsyncs it.
+func truncateDurably(fsys walFS, path string, size int64) error {
+	f, err := fsys.OpenFile(path, os.O_RDWR)
+	if err != nil {
+		return err
+	}
+	if err := f.Truncate(size); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// settleLegacy completes the legacy single-file log's part of the layout: a
+// pending migration seals it, and a store with no legacy history gets the seal
+// stub that makes an older build refuse the directory.
+//
+// A store that is not migrating but whose legacy file has bytes while the
+// segments hold no frame has its legacy file sealed too, unless it already
+// ends in a seal: a crash between initControl and the stub write leaves no
+// legacy file, an older build may then start a v1 log there, and segment
+// frames appended after it would make recovery refuse with
+// [ErrLegacyNotSealed].
+func (w *Writer) settleLegacy() error {
+	seal := LegacySeal{StoreID: w.storeID}
+	migrating := w.ctl.Flags&ControlLegacyV1Pending != 0
+	if !migrating {
+		has, err := legacyHasBytes(walLogFS{fsys: w.fsys}, w.path)
+		if err != nil {
+			return err
+		}
+		if !has {
+			return writeFileDurably(w.fsys, w.dirFsync, w.path, sealFrameBytes(seal), "", "")
+		}
+		if w.segFramesAtOpen {
+			return nil
+		}
+	}
+	// Read through a read-only handle: the position of an O_APPEND handle is
+	// not guaranteed to start at 0 on every walFS (the simulator's starts at
+	// the end), and the frames must be read from the first byte.
+	// An absent file reads as empty and is created by the seal below.
+	r := NewReader(eofReader{}, nil)
+	switch rc, err := (walLogFS{fsys: w.fsys}).Open(w.path); {
+	case err == nil:
+		r = NewReader(rc, rc)
+	case !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("wal: open legacy log: %w", err)
+	}
+	sealed := false
+	for fr := range r.Frames() {
+		_, sealed = DecodeLegacySeal(fr.Payload)
+		if migrating && sealed && fr.StoreID != w.storeID {
+			_ = r.Close()
+			return fmt.Errorf("%w: legacy seal names store %016x", ErrForeignStore, fr.StoreID)
+		}
+	}
+	_ = r.Close()
+	if tErr := r.TailError(); tErr != nil && !errors.Is(tErr, ErrTornFrame) {
+		if !migrating {
+			// Not a migration: the file is left as found, and recovery
+			// reports the corruption whenever it reads the legacy history.
+			return nil
+		}
+		return fmt.Errorf("wal: legacy log is corrupt, refusing to migrate: %w", tErr)
+	}
+	if sealed {
+		return nil
+	}
+	f, err := w.fsys.OpenFile(w.path, os.O_RDWR|os.O_CREATE|os.O_APPEND)
+	if err != nil {
+		return fmt.Errorf("wal: open legacy log: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	if tail := r.TailOffset(); tail < size {
+		if err := f.Truncate(tail); err != nil {
+			return fmt.Errorf("wal: discard torn tail of legacy log: %w", err)
+		}
+	}
+	crashpoint.Breakpoint("wal.migrate.control-written-pre-seal")
+	if _, err := f.Write(sealFrameBytes(seal)); err != nil {
+		return fmt.Errorf("wal: seal legacy log: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("wal: fsync legacy seal: %w", err)
+	}
+	metrics.IncCounter("store.wal.migrate.sealed", 1)
+	crashpoint.Breakpoint("wal.migrate.sealed-pre-first-v2-frame")
+	return nil
+}
+
+// eofReader is an empty input.
+type eofReader struct{}
+
+func (eofReader) Read([]byte) (int, error) { return 0, io.EOF }
+
+// createSegment creates segment no durably: exclusive create, header, fsync,
+// directory fsync. A crash part-way leaves a short or invalid trailing
+// segment, which readers ignore and the next open deletes.
+func (w *Writer) createSegment(no uint64) (WALFile, error) {
+	p := SegmentPath(w.path, no)
+	f, err := w.fsys.OpenFile(p, os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_APPEND)
+	if err != nil {
+		return nil, fmt.Errorf("wal: create segment %d: %w", no, err)
+	}
+	hdr := encodeSegmentHeader(w.storeID, no)
+	if _, err := f.Write(hdr[:]); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("wal: write segment %d header: %w", no, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("wal: fsync segment %d: %w", no, err)
+	}
+	crashpoint.Breakpoint("wal.segment.spare-created-pre-dirfsync")
+	if err := w.dirFsync(p); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("wal: fsync segment directory: %w", err)
+	}
+	metrics.IncCounter("store.wal.segment.created", 1)
+	return f, nil
+}
+
+// startPreparer starts the background preparer for segment no when the writer
+// prepares asynchronously and no spare exists or is being prepared. The
+// preparer is short-lived: it creates one spare and exits; [Writer.Close]
+// waits for it.
+func (w *Writer) startPreparer(no uint64) {
+	if !w.asyncPrepare || w.closed.Load() {
+		return
+	}
+	w.spareMu.Lock()
+	if w.prepRunning || w.spare != nil {
+		w.spareMu.Unlock()
+		return
+	}
+	w.prepRunning = true
+	w.prepWG.Add(1)
+	w.spareMu.Unlock()
+	go pprof.Do(context.Background(), pprof.Labels("gograph", "wal-segment-preparer"), func(context.Context) {
+		defer w.prepWG.Done()
+		f, err := w.createSegment(no)
+		w.spareMu.Lock()
+		defer w.spareMu.Unlock()
+		w.prepRunning = false
+		if err != nil {
+			// The rollover slow path creates the segment synchronously and
+			// poisons the writer if that fails too.
+			metrics.IncCounter("store.wal.segment.prepareErrors", 1)
+			return
+		}
+		w.spare, w.spareNo = f, no
+	})
+}
+
+// takeSpare returns segment no ready for appending: the prepared spare, or one
+// created synchronously (the slow path). The caller holds mu; the preparer
+// never takes mu, so waiting for it here cannot deadlock.
+func (w *Writer) takeSpare(no uint64) (WALFile, error) {
+	w.prepWG.Wait()
+	w.spareMu.Lock()
+	f, fno := w.spare, w.spareNo
+	w.spare = nil
+	w.spareMu.Unlock()
+	if f != nil && fno == no {
+		return f, nil
+	}
+	if f != nil {
+		_ = f.Close()
+	}
+	if w.asyncPrepare {
+		metrics.IncCounter("store.wal.segment.syncPrepared", 1)
+	}
+	return w.createSegment(no)
+}
+
+// OpenWith builds a single-file test [Writer] over an already-open file handle.
+// The caller transfers ownership: [Writer.Close] will call f.Close().
+//
+// The Writer appends [CurrentVersion] frames with store id 0 after the file's
+// existing bytes, never rolls over and has no control file; positions equal
+// file offsets. It exists for tests that inject a *testfs.FaultFile;
+// production code uses [Open].
+func OpenWith(f WALFile) (*Writer, error) {
+	if f == nil {
+		return nil, fmt.Errorf("wal: OpenWith: nil file")
+	}
+	// Seek to the end so Append is truly append-only even when the
+	// caller opened the file without O_APPEND. The resulting position
+	// doubles as the durable baseline.
+	pos, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("wal: OpenWith: seek to end: %w", err)
 	}
 	w := &Writer{
-		f:            f,
-		path:         path,
-		fsys:         osWALFS{},
-		dirFsync:     parentDirFsync,
-		lockFile:     lockFile,
-		bw:           bufio.NewWriterSize(f, 64*1024),
-		durableSize:  size,
-		appendedSize: size,
+		f:                   f,
+		fsys:                osWALFS{},
+		dirFsync:            parentDirFsync,
+		bw:                  bufio.NewWriterSize(f, 64*1024),
+		segStart:            pos,
+		fileBase:            pos,
+		durablePos:          pos,
+		appendedPos:         pos,
+		lastFramePos:        -1,
+		durableLastFramePos: -1,
 	}
 	w.groupCond = sync.NewCond(&w.mu)
 	return w, nil
 }
 
-// discardTornTail scans an existing WAL file from offset 0 and, when
-// the scan stops at a benign torn frame ([ErrTornFrame]) before the
-// physical end of the file, truncates the file to the last durable
-// frame boundary and fsyncs the result so the discard is itself
-// durable.
-//
-// Without this, reopening a WAL whose previous writer crashed mid-frame
-// would append new frames AFTER the torn junk: O_APPEND writes land at
-// the physical end of the file, but every reader stops at the first
-// torn frame, so each transaction committed after the reopen — whose
-// Sync already acknowledged durability — would be permanently
-// unreachable on the next replay. That is a Durability violation, and
-// truncating first closes it: the torn bytes were never part of any
-// acknowledged commit, so discarding them loses nothing.
-//
-// Genuine corruption inside an already-durable frame ([ErrCRCMismatch],
-// [ErrBadMagic], [ErrUnsupportedVersion], [ErrFrameTooLarge]) is left
-// untouched: the bytes are preserved for diagnosis, and the recovery
-// layer (store/recovery) fail-stops with the same sentinel before any
-// well-behaved caller reaches Open for append.
-//
-// The scan reads the whole file once; Open is called once at startup,
-// never on the commit hot path.
-func discardTornTail(f *os.File) error {
-	r := NewReader(f, nil) // nil closer: Open retains ownership of f
-	//nolint:revive // empty-block: the loop intentionally discards every
-	// frame — iterating to exhaustion is what populates TailOffset and
-	// TailError, which are the only outputs this scan needs.
-	for range r.Frames() {
-	}
-	if tErr := r.TailError(); tErr != nil && !errors.Is(tErr, ErrTornFrame) {
-		// Not a benign torn tail: preserve the bytes and let the recovery
-		// layer surface the corruption. Reposition at the end so the
-		// handle's offset matches the append position.
-		_, err := f.Seek(0, io.SeekEnd)
-		return err
-	}
-	size, err := f.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-	tail := r.TailOffset()
-	if tail >= size {
-		return nil // every byte is a complete frame; nothing to discard
-	}
-	if err := f.Truncate(tail); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	// Reposition at the new end of file. O_APPEND writes always land at
-	// the physical end regardless of the handle's offset; the seek keeps
-	// the offset consistent for non-append operations such as
-	// [Writer.Truncate]'s size probe.
-	_, err = f.Seek(tail, io.SeekStart)
-	return err
-}
+// StoreID returns the store id stamped on every frame, or 0 for an [OpenWith]
+// writer. Safe for concurrent use.
+func (w *Writer) StoreID() uint64 { return w.storeID }
 
-// Append writes one frame with the given opaque payload to the
-// underlying file. The frame is buffered in process memory; call
-// [Writer.Sync] to durably commit.
+// Append writes one frame with the given opaque payload. The frame is
+// buffered in process memory; call [Writer.Sync] to durably commit.
 //
 // On a writer poisoned by an earlier Sync failure, Append rejects
 // the frame and returns the original sync error; see the [Writer]
@@ -416,11 +838,12 @@ func (w *Writer) AppendCtx(ctx context.Context, payload []byte) error {
 		return err
 	}
 	if w.syncErr != nil {
-		// Poisoned by an earlier Sync failure: accepting more frames
-		// would buffer them after a discarded (never-acknowledged)
-		// suffix. Fail-stop with the original error.
 		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
 		return w.syncErr
+	}
+	if err := w.maybeRolloverLocked(); err != nil {
+		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
+		return err
 	}
 	if err := w.appendLocked(payload); err != nil {
 		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
@@ -430,69 +853,44 @@ func (w *Writer) AppendCtx(ctx context.Context, payload []byte) error {
 }
 
 // AppendRun appends every frame fn emits as ONE CONTIGUOUS RUN: no other
-// appender's frame can land between them.
+// appender's frame can land between them, and a run never spans two segments.
 //
 // # Why this exists — rmp #2302, audit finding E5
 //
 // Crash recovery commits the ops carrying a marker's own TxnSeq and discards the
-// buffered prefix as orphaned (store/recovery/recovery.go:1421-1429), and that
-// reading is correct ONLY IF a transaction's frames are contiguous. Recovery says
-// so in its own words: "The store serialises commits (single writer), so a
-// transaction's frames are contiguous and never interleave with another's."
+// buffered prefix as orphaned, and that reading is correct ONLY IF a
+// transaction's frames are contiguous. Contiguity therefore lives in the
+// component that owns the log.
 //
-// That contiguity did not come from here. [Writer.AppendCtx] serialises
-// INDIVIDUAL appends; the run was held together by the store's single-writer
-// semaphore two layers up (store/txn). The instant two writers append
-// concurrently, interleaved frames make recovery drop COMMITTED ops — an
-// Atomicity and Durability violation whose only symptom is the
-// store.recovery.openCodec.orphanedOps counter.
-//
-// So contiguity moves into the component that owns the file. Recovery's
-// assumption stays TRUE rather than being relaxed, which is why this needs no
-// on-disk format change, no new frame field, and no change to
-// store/recovery at all.
-//
-// # The lock this holds, and why it is LESS than what it replaces
+// # The lock this holds
 //
 // w.mu is taken once, before fn, and released after it — so fn runs with the
-// writer exclusively held. That is a longer critical section than one Append, and
-// a strictly SHORTER one than the store semaphore it replaces, which spans a
-// commit's encoding, its append loop and everything else it does. Every other
-// writer can proceed with all of that; only the WAL append is exclusive.
-//
-// Group commit is unaffected: [Writer.SyncGroup] coalesces on Sync, not on
-// Append, and a run of appends followed by one Sync is the shape it already
-// coalesces.
+// writer exclusively held. Group commit is unaffected: [Writer.SyncGroup]
+// coalesces on sync, not on append. Rollover happens at the start of the run,
+// before fn, so the run lands whole in one segment.
 //
 // # Contract
 //
 // The emit closure handed to fn is valid ONLY for the duration of the call;
-// retaining it and calling it later writes into a writer this goroutine no longer
-// holds. fn MUST NOT call any other method on this Writer — w.mu is not
-// re-entrant and doing so deadlocks. Keep fn to encoding and appending.
+// retaining it and calling it later panics. fn MUST NOT call any other method
+// on this Writer — w.mu is not re-entrant and doing so deadlocks.
 //
 // An error from fn is returned unchanged, and frames already emitted stay in the
 // buffer: they are an un-marked, incomplete transaction, which recovery discards
-// for atomicity exactly as it does for a crash between the data frames and the
-// commit marker. An error from append itself is the same fail-stop as
-// [Writer.AppendCtx]'s — a partial frame poisons the next Sync.
+// for atomicity. An error from append itself is the same fail-stop as
+// [Writer.AppendCtx]'s.
 //
 // Prior art: PostgreSQL's XLogInsertRecord does the expensive work (assembling
 // and CRCing the record) outside its insertion lock and holds it only for the
-// copy (postgres/postgres, master, src/backend/access/transam/xlog.c). This is
-// that insight at the granularity GoGraph needs: the per-op encoding stays with
-// the caller, and the lock covers only the framing.
+// copy (postgres/postgres, master, src/backend/access/transam/xlog.c).
+//
 // # Return value — the run's own durability watermark
 //
-// AppendRun returns the writer offset immediately after the run's last frame.
-// That offset is the run's OWN watermark, and it is what the caller must hand to
-// [Writer.SyncGroup] to make this run durable.
-//
-// The caller cannot derive it afterwards. The writer's accepted offset is shared
-// mutable state: another appender advances it, and a durability failure REWINDS
-// it ([Writer.poison] resets appendedSize to durableSize). A committer that reads
-// it later is asking about somebody else's frames — which is exactly how an
-// unacknowledged transaction was resurrected after recovery (rmp #2322).
+// AppendRun returns the log position immediately after the run's last frame.
+// That position is the run's OWN watermark, and it is what the caller must hand
+// to [Writer.SyncGroup] to make this run durable. The caller cannot derive it
+// afterwards: the accepted position is shared mutable state that another
+// appender advances and a poison REWINDS (rmp #2322).
 func (w *Writer) AppendRun(fn func(emit func([]byte) error) error) (int64, error) {
 	defer metrics.Time("store.wal.AppendRun").Stop()
 	if w.closed.Load() {
@@ -502,13 +900,14 @@ func (w *Writer) AppendRun(fn func(emit func([]byte) error) error) (int64, error
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.syncErr != nil {
-		// Poisoned by an earlier Sync failure; see [Writer.AppendCtx].
 		metrics.IncCounter("store.wal.AppendRun.errors", 1)
 		return 0, w.syncErr
 	}
-	// done guards the closure against use after fn returns. It is the cheapest
-	// form of the contract above that can actually fail loudly instead of
-	// corrupting the log from a goroutine that no longer holds the mutex.
+	if err := w.maybeRolloverLocked(); err != nil {
+		metrics.IncCounter("store.wal.AppendRun.errors", 1)
+		return w.appendedPos, err
+	}
+	// done guards the closure against use after fn returns.
 	done := false
 	err := fn(func(payload []byte) error {
 		if done {
@@ -518,15 +917,8 @@ func (w *Writer) AppendRun(fn func(emit func([]byte) error) error) (int64, error
 			return aerr
 		}
 		// Crash-injection point: MID-APPEND of one transaction's run, with w.mu
-		// held and every other writer queued behind it. A kill here leaves a
-		// transaction whose frames are partly in the buffer (lost with the
-		// process) or, once the run has crossed bufio's buffer size, partly in
-		// the file with no OpCommit marker — which recovery must discard for
-		// atomicity. Combined with GOGRAPH_CRASH_AFTER it lands in the steady
-		// state of a concurrent workload rather than on the first commit.
-		//
-		// Elided to nothing in every build without the gograph_crashinject tag;
-		// see [crashpoint.Breakpoint].
+		// held and every other writer queued behind it. Elided to nothing in
+		// every build without the gograph_crashinject tag.
 		crashpoint.Breakpoint("wal.appendrun.frame-emitted")
 		return nil
 	})
@@ -534,46 +926,114 @@ func (w *Writer) AppendRun(fn func(emit func([]byte) error) error) (int64, error
 	if err != nil {
 		metrics.IncCounter("store.wal.AppendRun.errors", 1)
 	}
-	// Read under w.mu (the deferred Unlock runs after this value is taken), so the
-	// watermark is the one this run actually produced. Returned even on error: the
-	// caller still needs it to reach the poisoned writer's sticky error through
-	// SyncGroup, and a partial run carries no OpCommit marker so recovery discards
-	// it whether or not those bytes reach the platter.
-	return w.appendedSize, err
+	// Read under w.mu, so the watermark is the one this run produced. Returned
+	// even on error so the caller can still reach a poisoned writer's sticky
+	// error through SyncGroup.
+	return w.appendedPos, err
 }
 
-// appendLocked encodes one frame into the buffer. The caller must hold w.mu and
-// must have checked closed/syncErr.
-//
-// It is the body [Writer.AppendCtx] and [Writer.AppendRun] share, so a run's
-// frames are framed and accounted exactly as a lone append's are — one
-// definition, not two that can drift.
+// appendLocked encodes one frame at the current position into the buffer. The
+// caller holds w.mu and has checked closed/syncErr. It is the body
+// [Writer.AppendCtx] and [Writer.AppendRun] share.
 func (w *Writer) appendLocked(payload []byte) error {
-	n, err := Encode(w.bw, Frame{Payload: payload})
+	if len(payload) > maxFrameSize {
+		// A frame this large could be written but never read back (rmp #2742).
+		metrics.IncCounter("store.wal.Encode.errors", 1)
+		return ErrFrameTooLarge
+	}
+	pos := w.appendedPos
+	var prevLen uint32
+	if w.lastFramePos >= 0 {
+		//nolint:gosec // G115: the distance is one frame, at most HeaderSizeV2 + maxFrameSize (< 2^31)
+		prevLen = uint32(pos - w.lastFramePos)
+	}
+	// The header is built in the writer's own buffer, guarded by w.mu, so a
+	// frame costs no allocation; bufio copies it before writeFrame returns.
+	//nolint:gosec // G115: bounded by the maxFrameSize check above; positions are non-negative
+	putHeaderV2(&w.hdr, uint32(len(payload)), uint64(pos), prevLen, w.storeID, crc32.Update(0, castagnoli, payload))
+	n, err := writeFrame(w.bw, w.hdr[:], payload)
 	if err != nil {
 		// A partial frame may now sit in the buffer; bufio's sticky error
-		// guarantees the next Flush fails, so SyncCtx poisons the writer and
-		// discards the partial bytes before any later sync could acknowledge
-		// them. See [Writer.AppendCtx].
+		// guarantees the next Flush fails, so the next sync poisons the writer
+		// and discards the partial bytes before anything acknowledges them.
 		return err
 	}
-	w.appendedSize += int64(n)
+	w.lastFramePos = pos
+	w.appendedPos += int64(n)
 	w.frames.Add(1)
-	//nolint:gosec // G115: n is the byte count Encode (format.go:139) returns from w.bw, a *bufio.Writer (writer.go:132); io.Writer forbids a negative n, so the conversion is exact
+	//nolint:gosec // G115: io.Writer forbids a negative n
 	w.bytes.Add(uint64(n))
+	if len(payload) > 0 && payload[0] == ControlRecordTag {
+		w.ctlFrames.Add(1)
+		w.ctlBytes.Add(uint64(n)) //nolint:gosec // G115: io.Writer forbids a negative n
+	}
+	return nil
+}
+
+// maybeRolloverLocked rolls the active segment over when it is at or above the
+// target size. The caller holds w.mu and has checked closed/syncErr.
+func (w *Writer) maybeRolloverLocked() error {
+	if !w.segmented || w.fileBase+(w.appendedPos-w.segStart) < w.segSize {
+		return nil
+	}
+	return w.rolloverLocked()
+}
+
+// rolloverLocked makes the active segment fully durable and switches to the
+// next one (docs/design-wal-v2.md §2.3). The caller holds w.mu.
+//
+// Invariant: every non-tail segment is fully durable before any byte lands in
+// its successor, so a torn frame in a non-tail segment is corruption. Leaving
+// the old segment's fsync to the next group leader was rejected: it is
+// indistinguishable from external truncation of an acknowledged segment.
+func (w *Writer) rolloverLocked() error {
+	// Wait out an in-flight group leader, which fsyncs w.f with mu released.
+	for w.leaderActive {
+		w.groupCond.Wait()
+	}
+	if w.syncErr != nil {
+		return w.syncErr
+	}
+	if err := w.bw.Flush(); err != nil {
+		w.poison(err)
+		return w.syncErr
+	}
+	crashpoint.Breakpoint("wal.rollover.old-flushed-pre-fsync")
+	if err := w.dataSyncFile(); err != nil {
+		w.poison(err)
+		return w.syncErr
+	}
+	w.durablePos, w.durableLastFramePos = w.appendedPos, w.lastFramePos
+	w.syncs.Add(1)
+	w.groupCond.Broadcast()
+	next, err := w.takeSpare(w.segNo + 1)
+	if err != nil {
+		// The old segment is already durable, so the poison loses nothing.
+		w.poison(err)
+		return w.syncErr
+	}
+	old := w.f
+	w.f = next
+	w.bw.Reset(next)
+	_ = old.Close() // best-effort: every byte of it is durable
+	w.segNo++
+	w.segStart, w.fileBase = w.appendedPos, segHeaderSize
+	w.segMu.Lock()
+	w.segs = append(w.segs, segMeta{no: w.segNo, start: w.appendedPos, prevFramePos: w.lastFramePos})
+	w.segMu.Unlock()
+	metrics.IncCounter("store.wal.segment.rollover", 1)
+	crashpoint.Breakpoint("wal.rollover.switched-pre-first-frame")
+	w.startPreparer(w.segNo + 1)
 	return nil
 }
 
 // Sync flushes the buffered frames to the OS and then issues the
 // per-commit data sync (fdatasync(2) on Linux, [os.File.Sync] / fsync
 // elsewhere; see dataSync) so the appended frames and the grown file
-// size reach durable storage before returning. It must be invoked at
-// every transaction commit boundary.
+// size reach durable storage before returning.
 //
-// The first flush or fsync failure permanently poisons the writer:
-// the un-synced suffix of the file is discarded and every subsequent
-// Append/Sync returns the original error; see the [Writer] type
-// documentation.
+// The first flush or fsync failure permanently poisons the writer; see the
+// [Writer] type documentation.
 func (w *Writer) Sync() error {
 	defer metrics.Time("store.wal.Sync").Stop()
 	err := w.SyncCtx(context.Background())
@@ -606,96 +1066,71 @@ func (w *Writer) SyncCtx(ctx context.Context) error {
 		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
 		return w.syncErr
 	}
+	// A direct sync must not race a group leader's fsync of the same file.
+	for w.leaderActive {
+		w.groupCond.Wait()
+	}
+	if w.syncErr != nil {
+		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
+		return w.syncErr
+	}
 	if err := w.bw.Flush(); err != nil {
 		w.poison(err)
 		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
-		// The wrapped CLASS, not the bare cause: poison has just stored it into
-		// syncErr, and returning err here would hand the caller that POISONED the
-		// writer a less identifiable error than every other caller gets from now on
-		// (rmp #2306, see [ErrDurabilityFailed]).
+		// The wrapped CLASS, not the bare cause (rmp #2306).
 		return w.syncErr
 	}
-	// Per-commit WAL data durability: fdatasync on Linux, full fsync
-	// elsewhere (see dataSync). Like the group-commit leader path, this only
-	// needs the appended data and the grown file size durable, not the
-	// inode timestamps.
-	if err := dataSync(w.f); err != nil {
+	if err := w.dataSyncFile(); err != nil {
 		w.poison(err)
 		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
-		// The wrapped CLASS, not the bare cause: poison has just stored it into
-		// syncErr, and returning err here would hand the caller that POISONED the
-		// writer a less identifiable error than every other caller gets from now on
-		// (rmp #2306, see [ErrDurabilityFailed]).
 		return w.syncErr
 	}
-	w.durableSize = w.appendedSize
+	w.durablePos, w.durableLastFramePos = w.appendedPos, w.lastFramePos
 	w.syncs.Add(1)
-	// Wake any group-commit waiter: a direct Sync (e.g. the checkpointer)
-	// advances durableSize past their watermark, so they are now durable
-	// without electing their own leader.
-	if w.groupCond != nil {
-		w.groupCond.Broadcast()
-	}
+	// Wake any group-commit waiter: a direct Sync advances durablePos past
+	// their watermark, so they are durable without electing their own leader.
+	w.groupCond.Broadcast()
 	return nil
 }
 
 // SyncGroup durably commits the caller's already-appended frames, coalescing
 // the fsync with those of every other committer whose frames are buffered at
 // the same time — PostgreSQL-XLogFlush-style group commit. It returns nil only
-// after a single data sync (fdatasync on Linux, fsync elsewhere; see dataSync)
-// has made durable every byte up to and including
-// the caller's last appended frame (its OpCommit marker); a caller therefore
-// acknowledges its commit only once the marker is on stable storage, exactly
-// as [Writer.Sync] does, but without paying a private fsync per commit.
+// after a data sync has made durable every byte up to and including the
+// caller's last appended frame (its OpCommit marker).
 //
 // # Contract
 //
 // SyncGroup must be called AFTER the caller has appended all of its frames, with
-// target set to the watermark [Writer.AppendRun] returned for that run — the
-// offset immediately after the caller's last frame (its OpCommit marker). It is
-// the durability barrier for exactly those frames, then:
+// target set to the watermark [Writer.AppendRun] returned for that run. Then:
 //
-//   - If a previous sync has already advanced durableSize to target (a
-//     concurrent leader covered it), it returns nil without any I/O — the
-//     follower fast path.
-//   - Otherwise, if the writer is poisoned, it returns the sticky error (the
-//     un-synced suffix, including this caller's frames, was discarded by an
-//     earlier failed sync).
-//   - Otherwise, if no leader is flushing, the caller becomes the LEADER:
-//     it flushes the buffer and fsyncs once, covering its own and every other
-//     buffered committer's frames, publishes the new durableSize, and wakes the
-//     followers. If a leader is already flushing, the caller waits on the group
-//     condition until durableSize covers its watermark or the writer poisons.
+//   - If a previous sync has already advanced the durable position to target,
+//     it returns nil without any I/O — the follower fast path.
+//   - Otherwise, if the writer is poisoned, it returns the sticky error.
+//   - Otherwise, if no leader is flushing, the caller becomes the LEADER: it
+//     flushes the buffer and fsyncs once, covering every buffered committer's
+//     frames, publishes the new durable position, and wakes the followers. If
+//     a leader is already flushing, the caller waits until the durable
+//     position covers its watermark or the writer poisons.
 //
-// # Durability, atomicity, and failure semantics
+// A run never spans segments and a rollover makes the old segment durable
+// before switching, so the one fsync of the active segment covers every
+// buffered frame.
 //
-//   - DURABILITY: success is returned only after the fsync covering the
-//     caller's marker completes. Because all appends serialise (the buffer is
-//     FIFO and O_APPEND lands every write at EOF), a marker whose end offset
-//     is <= the flushed appendedSize is made durable by that flush's fsync;
-//     there is no prefix-only fsync on a local file system.
-//   - ATOMICITY: the on-disk frame stream is unchanged from the per-commit
-//     path — each transaction's ops are contiguous and followed by its
-//     OpCommit marker — so a crash mid-leader-fsync recovers each fully-marked
-//     transaction and discards the unmarked tail exactly as before.
-//   - FAIL-ALL: if the leader's flush or fsync fails, [Writer.poison] discards
-//     the entire un-synced suffix (every group member's frames and markers) and
-//     broadcasts; every waiter then observes the sticky error and fails its own
-//     commit. No member may believe it committed when the shared fsync failed.
+// # Failure semantics
+//
+// FAIL-ALL: if the leader's flush or fsync fails, [Writer.poison] discards the
+// entire un-synced suffix (every group member's frames and markers) and
+// broadcasts; every waiter then observes the sticky error and fails its own
+// commit.
 //
 // # Cancellation
 //
 // SyncGroup is intentionally NOT context-aware. Once a committer's frames are
-// in the shared buffer they cannot be un-appended (later committers' frames sit
-// after them, and the transaction sequence is consumed), so abandoning the wait
-// while the group still fsyncs the frames would make the transaction durable —
-// recovery replays a fully-marked transaction — while returning an error to the
-// caller, risking a double apply on retry. The caller's deadline is honoured
-// earlier, at the cancellable single-writer acquire ([Store.BeginCtx]); after
-// the append point the commit is in-flight-durable and the wait for its covering
-// fsync runs to completion (the marker either becomes durable or the writer
-// poisons and fails it). This matches PostgreSQL: a backend cannot un-write WAL
-// it has already inserted.
+// in the shared buffer they cannot be un-appended, so abandoning the wait while
+// the group still fsyncs them would make the transaction durable while
+// returning an error. This matches PostgreSQL: a backend cannot un-write WAL it
+// has already inserted.
 //
 // Concurrency: safe for concurrent calls; it serialises on the same internal
 // mutex as Append/Sync and guarantees a single leader per fsync round.
@@ -714,35 +1149,16 @@ func (w *Writer) SyncGroup(target int64) error {
 // the call, coalescing with any concurrent group round exactly as
 // [Writer.SyncGroup] does.
 //
-// It is a FLUSH, not a commit acknowledgement, and a committer must NOT use it to
-// learn whether its own frames are durable. The accepted offset is shared mutable
-// state — another appender advances it, and [Writer.poison] rewinds it — so
-// "everything accepted now" is not the caller's own watermark. Deciding a
-// commit's fate from it resurrected an unacknowledged transaction after recovery
-// (rmp #2322). Use [Writer.AppendRun]'s returned watermark with
-// [Writer.SyncGroup] for that. This exists for the callers that have nothing of
-// their own to acknowledge and merely want any buffered tail on disk.
+// It is a FLUSH, not a commit acknowledgement: the accepted position is shared
+// mutable state, so a committer must use [Writer.AppendRun]'s watermark with
+// [Writer.SyncGroup] to learn whether its own frames are durable (rmp #2322).
 //
 // # A nil return does NOT mean the Writer is healthy — rmp #2525
 //
-// On a POISONED Writer SyncBuffered returns nil. [Writer.poison] rewinds the
-// accepted offset to the durable one, so "make everything accepted durable" is
-// already satisfied and [Writer.syncToLocked]'s already-durable fast path fires
-// before the sticky error is ever tested. Measured on a Writer poisoned after
-// one 30-byte frame had been acknowledged: two consecutive SyncBuffered calls
-// both returned nil, while [Writer.Poisoned] returned the sticky
-// [ErrDurabilityFailed] and [Writer.Append] was still refused.
-//
-// The nil is defensible on its own terms — nothing accepted is un-durable — but
-// it means SyncBuffered CANNOT be used to ask whether this Writer is still
-// usable, which is the question a caller holding a flush that "succeeded" will
-// naturally believe it has answered. A caller that proceeds on that nil is
-// working against a Writer that refuses every append. [Writer.Poisoned] is the
-// probe for that, and the only one; see the [Writer] type documentation for the
-// measured per-method table.
-//
-// After [Writer.Close] SyncBuffered returns [ErrWriterClosed], so the nil is
-// specific to the poisoned-but-open state.
+// On a POISONED Writer SyncBuffered returns nil: the poison rewinds the
+// accepted position to the durable one, so the already-durable fast path fires
+// before the sticky error is tested. [Writer.Poisoned] is the health probe.
+// After [Writer.Close] SyncBuffered returns [ErrWriterClosed].
 func (w *Writer) SyncBuffered() error {
 	defer metrics.Time("store.wal.SyncBuffered").Stop()
 	if w.closed.Load() {
@@ -751,7 +1167,7 @@ func (w *Writer) SyncBuffered() error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.syncToLocked(w.appendedSize)
+	return w.syncToLocked(w.appendedPos)
 }
 
 // syncToLocked is the group-commit wait shared by [Writer.SyncGroup] and
@@ -759,27 +1175,15 @@ func (w *Writer) SyncBuffered() error {
 //
 // # Why durability is tested BEFORE the poison — rmp #2322
 //
-// The two predicates are not mutually exclusive: a committer's frames can be
-// durable AND the writer poisoned, because the poison belongs to a LATER round
-// that failed after a leader had already fsynced this caller's marker. Only one
-// order is correct.
-//
-// Testing the poison first failed such a committer. Its frames were on stable
-// storage and its OpCommit marker with them, so recovery replayed the
-// transaction — while the client had been told the commit FAILED. That is
-// uncommitted state leaking in: a durable transaction nobody acknowledged, caught
-// by the crash simulator's ACID_ATOMICITY oracle at three seeds.
-//
-// Testing durability first cannot make the opposite error. target is the caller's
-// OWN watermark and durableSize only ever advances through a completed fsync, so
-// durableSize >= target means this caller's marker is on the platter — whatever
-// happened to a later round's bytes. Frames the poison discarded are, by
-// definition, above durableSize, so their committers still take the error branch.
+// A committer's frames can be durable AND the writer poisoned, because the
+// poison belongs to a LATER round that failed after a leader had already
+// fsynced this caller's marker. Testing the poison first failed such a
+// committer while recovery replayed its transaction. Testing durability first
+// cannot make the opposite error: target is the caller's OWN watermark and the
+// durable position only advances through a completed fsync.
 func (w *Writer) syncToLocked(target int64) error {
 	for {
-		if w.durableSize >= target {
-			// A leader's fsync already covered this watermark: the follower
-			// fast path. The commit is durable with no I/O of our own.
+		if w.durablePos >= target {
 			metrics.IncCounter("store.wal.SyncGroup.coalesced", 1)
 			return nil
 		}
@@ -788,331 +1192,119 @@ func (w *Writer) syncToLocked(target int64) error {
 			return w.syncErr
 		}
 		if !w.leaderActive {
-			// Become the leader for this round and fsync the whole buffered
-			// suffix once.
 			return w.leadGroupSyncLocked()
 		}
-		// A leader is flushing; wait for durableSize to advance (success) or a
-		// poison to wake us (failure). groupCond's locker is &w.mu, so Wait
-		// atomically releases mu while parked and re-acquires on wake.
 		w.groupCond.Wait()
 	}
 }
 
 // leadGroupSyncLocked performs one group flush+fsync as the elected leader.
-// The caller holds w.mu, is not poisoned, and has set neither leaderActive nor
-// observed durableSize past its target. It flushes the buffer and fsyncs once,
-// covering its own and every concurrently-buffered committer's frames, then
-// publishes the advanced durableSize and wakes the followers.
-//
-// The fsync runs while w.mu is RELEASED so other committers may keep appending
-// into the buffer (their frames land after the flushed snapshot and are
-// captured by the next round); bufio.Flush has already drained the leader's
-// snapshot out of the buffer, so a concurrent Append touches only in-memory
-// buffer bytes while f.Sync syncs the file — the two do not race on the file.
-// leaderActive excludes a second concurrent flush of the same Writer for the
-// duration. The publish (durableSize update) and the success/failure decision
-// are performed under w.mu, with the just-flushed snapshot as the watermark, so
-// no waiter ever observes a stale durableSize from a prior round.
+// The caller holds w.mu. The fsync runs while w.mu is RELEASED so other
+// committers may keep appending into the buffer (their frames are captured by
+// the next round); leaderActive excludes a second concurrent flush and a
+// rollover for the duration. The publish runs under w.mu with the
+// just-flushed snapshot as the watermark.
 func (w *Writer) leadGroupSyncLocked() error {
 	w.leaderActive = true
-	// Snapshot the watermark this fsync will make durable. Everything buffered
-	// now will be flushed; frames appended after this point belong to the next
-	// round. Captured under mu before any unlock, per the Writer-owned-watermark
-	// invariant.
-	flushed := w.appendedSize
-
-	// Flush the buffer to the OS under mu so it does not race a concurrent
-	// Append's Encode(w.bw, ...). After this the buffer is empty and the
-	// leader's snapshot is in the file's OS page cache.
+	flushed, flushedLast := w.appendedPos, w.lastFramePos
 	if err := w.bw.Flush(); err != nil {
 		// Clear leaderActive BEFORE poison so poison's broadcast (the single
-		// wakeup) finds the flag already cleared: a Close waiter parked on
-		// `for w.leaderActive` then wakes and proceeds, and every SyncGroup
-		// follower wakes to the sticky syncErr.
+		// wakeup) finds the flag already cleared.
 		w.leaderActive = false
 		w.poison(err)
 		metrics.IncCounter("store.wal.SyncGroup.errors", 1)
-		// The wrapped CLASS, not the bare cause: poison has just stored it into
-		// syncErr, and returning err here would hand the caller that POISONED the
-		// writer a less identifiable error than every other caller gets from now on
-		// (rmp #2306, see [ErrDurabilityFailed]).
 		return w.syncErr
 	}
-
-	// Release mu for the slow fsync so followers can append into the (now
-	// empty) buffer while we wait on durable storage. The file bytes being
-	// synced are already written; concurrent Appends only mutate the in-memory
-	// bufio buffer, never the file, so f.Sync and those Appends do not race.
 	w.mu.Unlock()
 	// Crash-injection point: MID-FSYNC of a group commit. The leader's snapshot
-	// is flushed to the OS but nothing below it is durable yet, leaderActive is
-	// set, and every follower in the group is parked in SyncGroup on a watermark
-	// that will never be published. No member of the group has acknowledged, so
-	// recovery is free to restore or discard the whole flushed suffix — but
-	// whatever it restores must be complete transactions, and everything a
-	// PREVIOUS group acknowledged must still be there.
-	//
-	// SIGKILL does not drop the OS page cache, so this point tests recovery over
-	// a never-fsynced tail, not the loss of one. Losing the tail outright is what
-	// internal/sim's fsync-fault injection covers.
-	//
-	// Elided to nothing in every build without the gograph_crashinject tag;
-	// see [crashpoint.Breakpoint].
+	// is flushed to the OS but nothing below it is durable yet. Elided to
+	// nothing in every build without the gograph_crashinject tag.
 	crashpoint.Breakpoint("wal.sync.pre-datasync")
-	// fdatasync on Linux (skips the redundant inode-metadata flush), full
-	// fsync elsewhere; see dataSync. This is the per-commit WAL data
-	// durability point: the appended frames and the grown file size are made
-	// durable, which is all a commit requires.
-	syncErr := dataSync(w.f)
+	syncErr := w.dataSyncFile()
 	w.mu.Lock()
 
 	w.leaderActive = false
 	if syncErr != nil {
-		// fsync failed: discard the entire un-synced suffix (this leader's and
-		// every follower's frames and markers) and fail every member. leaderActive
-		// is already cleared above, so poison's broadcast is the single, correct
-		// wakeup for both the Close waiter and every SyncGroup follower.
 		w.poison(syncErr)
 		metrics.IncCounter("store.wal.SyncGroup.errors", 1)
-		// The wrapped CLASS, not the bare cause: poison has just stored it into
-		// syncErr, and returning err here would hand the caller that POISONED the
-		// writer a less identifiable error than every other caller gets from now on
-		// (rmp #2306, see [ErrDurabilityFailed]).
 		return w.syncErr
 	}
-	// Publish: the fsync made every byte up to `flushed` durable. Advance
-	// durableSize to the snapshot we actually flushed (not the live
-	// appendedSize, which a concurrent Append may have grown past what this
-	// fsync covered) so a waiter never concludes a not-yet-synced frame is
-	// durable.
-	if flushed > w.durableSize {
-		w.durableSize = flushed
+	// Publish the snapshot actually flushed, never the live appendedPos a
+	// concurrent append may have grown past what this fsync covered.
+	if flushed > w.durablePos {
+		w.durablePos, w.durableLastFramePos = flushed, flushedLast
 	}
 	w.syncs.Add(1)
 	metrics.IncCounter("store.wal.SyncGroup.leader", 1)
-	// Wake the followers: those whose watermark <= durableSize return success;
-	// those appended after our snapshot re-evaluate and elect the next leader.
 	w.groupCond.Broadcast()
 	return nil
 }
 
-// poison marks the writer permanently failed after a commit-path
-// flush or fsync error and physically discards the un-synced suffix
-// of the file. Callers must hold w.mu.
+// activeOffset returns the file offset of position p in the active segment.
+func (w *Writer) activeOffset(p int64) int64 { return w.fileBase + (p - w.segStart) }
+
+// poison marks the writer permanently failed after a commit-path flush or fsync
+// error and physically discards the un-synced suffix of the active segment.
+// Callers must hold w.mu.
 //
-// The truncation is the load-bearing step: after a failed fsync the
-// kernel may keep or drop the dirty pages (post-"fsyncgate" both
-// behaviours exist in the wild), and the flushed-but-unacknowledged
-// frames — including the failed transaction's commit marker — would
-// otherwise be made durable by the next successful fsync of this
-// file, resurrecting a transaction whose commit was rolled back by
-// the caller. Truncating to the last durably-synced size makes both
-// kernel behaviours equivalent: the failed suffix can never reach a
-// reader.
-//
-// After the truncation we issue a best-effort fsync so that the
-// reduced file size — not just the data below the new EOF — is
-// recorded on durable storage. Without this fsync a host crash
-// between the ftruncate(2) syscall and the kernel's writeback of the
-// updated inode metadata could leave the file at its pre-truncation
-// length on the next mount (POSIX only guarantees that ftruncate
-// modifies the in-memory inode; the metadata write is not itself
-// synchronous). The fsync is issued AFTER the truncation, not before,
-// which avoids any risk of resurrecting data above the new EOF: we
-// are shrinking the file, so the fsync can only confirm the reduced
-// inode size.
+// The truncation is the load-bearing step: after a failed fsync the kernel may
+// keep or drop the dirty pages (post-"fsyncgate" both behaviours exist), and
+// the flushed-but-unacknowledged frames would otherwise be made durable by the
+// next successful fsync of this file. Truncating to the durable position makes
+// both behaviours equivalent; the best-effort fsync after it makes the reduced
+// size durable and can only confirm the reduced end. A rollover makes the old
+// segment fully durable before switching, so the un-synced suffix always lies
+// in the active segment.
 func (w *Writer) poison(err error) {
 	w.syncFailed.Add(1)
-	// Best-effort truncation: if the device is in distress the truncate
-	// may fail, but the sticky syncErr below still fail-stops every future
-	// Append/Sync on this writer so the un-synced suffix is never
-	// acknowledged through this handle.
-	_ = w.f.Truncate(w.durableSize)
-	// Best-effort fsync after truncation: makes the reduced inode metadata
-	// durable so a host crash cannot revert the file to its pre-truncation
-	// size on the next mount. Non-actionable on failure — the writer is
-	// already poisoned and no further data will be committed through it.
+	_ = w.f.Truncate(w.activeOffset(w.durablePos))
 	_ = w.f.Sync()
-	// Drop any buffered bytes (and bufio's own sticky error): nothing
-	// further will be written through this writer.
 	w.bw.Reset(w.f)
-	w.appendedSize = w.durableSize
-	// Wrapped in [ErrDurabilityFailed] so every caller — its own committer and every
-	// group member woken below — can identify the class without matching on an I/O
-	// error's text, and can tell it from a retriable serialization conflict. The
-	// cause stays reachable through errors.Unwrap.
+	w.appendedPos, w.lastFramePos = w.durablePos, w.durableLastFramePos
+	// Wrapped in [ErrDurabilityFailed] so every caller can identify the class.
 	w.syncErr = fmt.Errorf("%w: %w", ErrDurabilityFailed, err)
-	// Wake every group-commit waiter so each observes the sticky syncErr and
-	// fails its own commit: the un-synced suffix (every group member's frames
-	// and OpCommit markers) was just discarded, so no member may believe it
-	// committed. Safe even when groupCond is nil (a zero-value/never-grouped
-	// Writer): the field is set in every constructor.
-	if w.groupCond != nil {
-		w.groupCond.Broadcast()
-	}
+	// Wake every group-commit waiter so each observes the sticky syncErr.
+	w.groupCond.Broadcast()
 }
 
 // Stats returns a snapshot of the writer's lifetime counters.
 func (w *Writer) Stats() Stats {
 	return Stats{
-		Frames:     w.frames.Load(),
-		Bytes:      w.bytes.Load(),
-		Syncs:      w.syncs.Load(),
-		SyncFailed: w.syncFailed.Load(),
+		Frames:        w.frames.Load(),
+		Bytes:         w.bytes.Load(),
+		Syncs:         w.syncs.Load(),
+		SyncFailed:    w.syncFailed.Load(),
+		ControlFrames: w.ctlFrames.Load(),
+		ControlBytes:  w.ctlBytes.Load(),
 	}
 }
 
-// Truncate empties the WAL: flushes any buffered frames, truncates
-// the underlying file to zero bytes, and fsyncs the result so the
-// empty state is durable on disk before returning. Subsequent
-// [Writer.Append] calls write to offset 0 of the freshly-empty file.
+// DurableOffset returns the log position covered by the last successful fsync:
+// the end of every frame durably committed so far. It always lands on a frame
+// boundary, because a transaction commits only after its marker has been
+// appended and fsynced.
 //
-// Truncate is intended to be called by the checkpointer after a
-// snapshot covering all WAL frames has been durably persisted; on
-// success every frame previously durable in the WAL is logically
-// folded into the snapshot.
+// It is the redo position a non-blocking checkpoint captures under the store's
+// quiesce boundary ([txn.Store.RunUnderCommitLock], which drains in-flight group
+// commits), where it equals the accepted position: exactly the prefix the
+// checkpoint's snapshot folds.
 //
-// Lifetime counters in [Writer.Stats] are NOT reset; the returned
-// int64 reports the number of bytes that were in the file at the
-// moment of truncation (after the in-memory buffer was flushed),
-// which is the canonical measure of WAL bytes freed by this call.
-//
-// On error the WAL may be in a partially-truncated state; callers
-// should not continue using the Writer.
-//
-// # On a POISONED Writer — rmp #2525
-//
-// Truncate is the one exported method that never consults the sticky poison
-// error. On a poisoned Writer it empties the file anyway, resets the durable
-// and accepted bookkeeping to zero, and leaves the Writer poisoned — so its
-// return value carries NO information about the fail-stop state, in either
-// direction. What it returns instead depends only on whether this method's own
-// fsync succeeds, which is to say on whether the failure that poisoned the
-// Writer was transient. Both regimes were measured on a Writer poisoned after
-// one 30-byte frame had been acknowledged:
-//
-//   - fsync recovered (a transient fault): Truncate returned (30, nil). A
-//     SUCCESS on a Writer that is still dead.
-//   - fsync still failing (a persistent fault): Truncate returned (30, err)
-//     where err is the raw error from its own fsync — NOT the sticky error and
-//     NOT wrapped in [ErrDurabilityFailed], so `errors.Is(err,
-//     ErrDurabilityFailed)` is false on it even though the Writer is poisoned.
-//
-// In both regimes the file went from 30 bytes to 0, [Writer.DurableOffset]
-// became 0, the lifetime [Writer.Stats] were unchanged, [Writer.Poisoned] still
-// returned the identical sticky error, and the very next [Writer.Append] was
-// still refused with it.
-//
-// That is not a durability hole. Nothing can be written onto the emptied file
-// through this handle, because every append and every commit-path sync still
-// fail-stops; and the production non-blocking checkpoint does not cut the WAL
-// with this whole-file helper but with [Writer.TruncatePrefix], which DOES
-// return the sticky error on a poisoned Writer. The behaviour is recorded here
-// so that a change to it is judged rather than absorbed: putting Truncate on a
-// live commit or checkpoint path would first have to re-examine whether
-// emptying the log of a Writer whose durability has already failed is still
-// safe.
-func (w *Writer) Truncate() (int64, error) {
-	defer metrics.Time("store.wal.Truncate").Stop()
-	if w.closed.Load() {
-		metrics.IncCounter("store.wal.Truncate.errors", 1)
-		return 0, ErrWriterClosed
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if err := w.bw.Flush(); err != nil {
-		metrics.IncCounter("store.wal.Truncate.errors", 1)
-		return 0, err
-	}
-	sz, err := w.f.Seek(0, io.SeekEnd)
-	if err != nil {
-		metrics.IncCounter("store.wal.Truncate.errors", 1)
-		return 0, err
-	}
-	if err := w.f.Truncate(0); err != nil {
-		metrics.IncCounter("store.wal.Truncate.errors", 1)
-		return sz, err
-	}
-	// The file is physically empty from this point on; keep the
-	// durable/appended bookkeeping in lockstep even if a later step in
-	// this method fails, so a subsequent sync-failure rollback never
-	// truncates to a stale (pre-Truncate) size.
-	w.durableSize = 0
-	w.appendedSize = 0
-	// NOTE (#1812): this full zero-length Truncate is NOT a production
-	// checkpoint path — the non-blocking checkpoint cuts the WAL via
-	// TruncatePrefix (which keeps the post-watermark suffix and carries its own
-	// crash-injection points, covered by the checkpoint-prefix-crash scenarios).
-	// Truncate() is a test/maintenance helper that discards the WHOLE WAL after
-	// a self-sufficient snapshot. A former "checkpoint.mid-truncate" crashpoint
-	// here was dead — no SIGKILL scenario dispatched it and its "checkpoint"
-	// naming was stale — so it was removed rather than left as misleading,
-	// unexercised instrumentation. Recovery after a complete Truncate() (WAL
-	// empty, snapshot self-sufficient) is proven by the store/recovery and
-	// cypher durability tests that call it.
-	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
-		metrics.IncCounter("store.wal.Truncate.errors", 1)
-		return sz, err
-	}
-	if err := w.f.Sync(); err != nil {
-		metrics.IncCounter("store.wal.Truncate.errors", 1)
-		return sz, err
-	}
-	w.bw.Reset(w.f)
-	return sz, nil
-}
-
-// DurableOffset returns the file size, in bytes, covered by the last
-// successful fsync — the byte length of every frame durably committed so
-// far. The value always lands on a frame boundary: a transaction commits
-// only after its [OpCommit] marker has been appended and fsynced, so the
-// durable prefix is always a whole number of complete frames.
-//
-// It is the watermark a non-blocking checkpoint captures (see
-// store/checkpoint): taken under the store's quiesce boundary
-// ([txn.Store.RunUnderCommitLock], which drains in-flight group commits)
-// the returned offset equals appendedSize — every committed frame is
-// durable and none is mid-flight — so it is exactly the prefix a
-// self-sufficient snapshot folds and [Writer.TruncatePrefix] may discard.
-//
-// Concurrency: safe for concurrent use; it reads durableSize under the
-// internal mutex.
+// Concurrency: safe for concurrent use; it reads under the internal mutex.
 func (w *Writer) DurableOffset() int64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.durableSize
+	return w.durablePos
 }
 
 // Poisoned reports the writer's fail-stop state: it returns the sticky
-// commit-failure error when a prior [Writer.Sync] / [Writer.SyncGroup] flush
-// or fsync has permanently poisoned the writer (see the [Writer] type doc),
-// and nil while the writer is healthy. The returned error is the same sentinel
-// every subsequent Append/Sync returns.
-//
-// It is the Writer's ONLY health probe, and a caller asking "can this handle
-// still accept work" must use it rather than infer health from another method's
-// nil: [Writer.SyncBuffered] returns nil on a poisoned Writer and
-// [Writer.Truncate] succeeds on one. The [Writer] type documentation carries the
-// measured per-method table (rmp #2525). Poisoned remains legible after
-// [Writer.Close], which is where every other method reports [ErrWriterClosed]
-// instead of the sticky error.
+// commit-failure error when a prior flush or fsync has permanently poisoned the
+// writer, and nil while the writer is healthy. It is the Writer's ONLY health
+// probe (rmp #2525) and remains legible after [Writer.Close].
 //
 // It is the WAL-health probe a non-blocking checkpoint consults under the
-// store's quiesce boundary ([txn.Store.RunUnderCommitLock]) BEFORE it captures
-// and publishes a snapshot (rmp #1919). A concurrent schema DDL (CREATE/DROP
-// CONSTRAINT or INDEX) whose commit fails at fsync poisons the writer and
-// discards its frame — [Writer.DurableOffset] then excludes it — yet the
-// engine's in-memory registry still reflects the attempted change until the
-// DDL's out-of-lock compensator unwinds it. Because the poison is applied
-// inside SyncGroup BEFORE the committer's in-flight token is released
-// (store/txn markInflight/doneInflight), and the checkpoint captures only
-// after RunUnderCommitLock drains in-flight commits to zero, a writer observed
-// poisoned at capture time means exactly that transient window: folding the
-// registry into constraints.bin / indexdefs.bin there would persist a
-// non-acknowledged schema change across restart, violating Atomicity. The
-// checkpoint therefore aborts (never publishing) when this returns non-nil,
-// instead of only discovering the poison at the post-publish phase-2 Sync.
+// store's quiesce boundary BEFORE it captures and publishes a snapshot
+// (rmp #1919): a writer observed poisoned there means a schema DDL whose commit
+// failed may still be reflected in the engine's registry.
 //
 // Concurrency: safe for concurrent use; it reads syncErr under the internal
 // mutex.
@@ -1122,278 +1314,230 @@ func (w *Writer) Poisoned() error {
 	return w.syncErr
 }
 
-// TruncatePrefix crash-safely discards the WAL bytes in [0, upTo) and
-// preserves every byte in [upTo, end) — the frames committed after the
-// watermark a checkpoint captured. It is the WAL-prefix-reclamation
-// primitive a non-blocking checkpoint uses: the snapshot folds the prefix
-// [0, upTo), the suffix [upTo, end) holds transactions committed
-// concurrently while the snapshot was written lock-free, and recovery
-// replays that surviving suffix on top of the self-sufficient snapshot.
+// MarkCheckpoint records in the control file that the log may from now on
+// begin at the segment holding redoPos: it sets [ControlPrefixTruncated], the
+// oldest retained position OR to the first position of the segment containing
+// redoPos, the prev-frame position at OR, and the checkpoint redo position. It
+// is phase 2 of a truncating checkpoint, called after the snapshot covering
+// redoPos is published and read back, and before [Writer.ReclaimSegments]
+// unlinks anything: PostgreSQL's UpdateControlFile before RemoveOldXlogFiles.
 //
-// # Why a copy-and-rename, not an in-place rewrite
+// redoPos must be a value [Writer.DurableOffset] returned. The control file is
+// written temp, fsync, rename, directory fsync, so a crash leaves the old or
+// the new one, and both are consistent with the segments on disk.
 //
-// The WAL is opened O_APPEND, so writes cannot be repositioned; more
-// importantly, rewriting the file in place (truncate to zero, then write
-// the suffix back) has a fatal crash window: a crash after the truncate
-// but before the suffix is rewritten leaves the suffix — committed
-// transactions NOT present in the snapshot — permanently lost, a
-// Durability violation. Instead TruncatePrefix writes the surviving
-// suffix to a sibling temp file, fsyncs it, then atomically renames it
-// over the WAL path and fsyncs the parent directory. rename(2) is atomic:
-// a crash before the rename leaves the original full WAL intact (recovery
-// = snapshot + full replay); a crash after it leaves the suffix-only WAL
-// (recovery = snapshot + suffix replay); both reconstruct the exact
-// committed state. This mirrors the file-granularity WAL reclamation of
-// RocksDB (delete whole log files below the flush point) and PostgreSQL
-// (recycle whole segments below the redo LSN), adapted to GoGraph's
-// single un-segmented WAL file.
-//
-// # Contract and ordering
-//
-// The caller MUST hold the store's quiesce boundary
-// ([txn.Store.RunUnderCommitLock]) so no concurrent [Writer.Append] races
-// the rename or the durableSize/appendedSize/buffer reset, and MUST have
-// made the covering snapshot fully durable (data fsync + snapshot
-// publish + parent-dir fsync) BEFORE calling this. upTo must be a value
-// previously returned by [Writer.DurableOffset] (a frame boundary) and
-// must satisfy 0 <= upTo <= durableSize; an out-of-range upTo is rejected
-// without touching the file. upTo == 0 is a no-op (nothing to reclaim).
-//
-// On success the returned int64 is the number of bytes reclaimed (upTo)
-// and the Writer continues against the suffix-only file. On a path-less
-// Writer ([OpenWith]) it returns [ErrPrefixTruncateUnsupported].
-//
-// On an already-POISONED Writer TruncatePrefix returns the sticky poison error
-// and touches nothing — the check precedes even the path-less and range
-// rejections, so a path-less poisoned Writer reports the poison rather than
-// [ErrPrefixTruncateUnsupported], and upTo == 0 is not the documented no-op
-// (measured, rmp #2525). It is therefore the truncation entry point that DOES
-// report a poisoned Writer, unlike the whole-file [Writer.Truncate].
-//
-// Error handling splits on the atomic rename:
-//
-//   - A failure BEFORE the rename (suffix copy, or the rename itself) leaves
-//     the ORIGINAL full WAL intact and the Writer usable; the error is
-//     returned and the caller may retry the checkpoint — the prefix is still
-//     present, so nothing is lost.
-//   - A failure AFTER the rename (parent-dir fsync, or the reopen of the new
-//     inode) cannot be undone: the on-disk state has already advanced to the
-//     durable suffix-only WAL and the old inode is unlinked. The Writer is
-//     therefore POISONED (fail-stop): the error is returned and every
-//     subsequent Append/Sync returns it, so the owner must discard the Writer
-//     and re-open the WAL, which re-validates the already-correct on-disk
-//     suffix. The committed data is safe on disk; only the in-memory handle
-//     is abandoned.
-func (w *Writer) TruncatePrefix(upTo int64) (int64, error) {
-	defer metrics.Time("store.wal.TruncatePrefix").Stop()
+// It never takes the append lock and never stalls a commit. Safe for concurrent
+// use; control writes serialise among themselves.
+func (w *Writer) MarkCheckpoint(redoPos int64) error {
+	if !w.segmented {
+		return ErrSegmentsUnsupported
+	}
 	if w.closed.Load() {
-		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
+		return ErrWriterClosed
+	}
+	w.mu.Lock()
+	durable := w.durablePos
+	w.mu.Unlock()
+	if redoPos < 0 || redoPos > durable {
+		return fmt.Errorf("wal: MarkCheckpoint: redo position %d out of range [0, %d]", redoPos, durable)
+	}
+	w.ctlMu.Lock()
+	defer w.ctlMu.Unlock()
+	or, prev := w.segmentStartAt(redoPos)
+	c := w.ctl
+	if uint64(or) < c.OldestRetainedPos { //nolint:gosec // G115: positions are non-negative
+		or, prev = int64(c.OldestRetainedPos), int64(c.PrevFramePosAtOR) //nolint:gosec // G115: positions are bounded
+		if c.PrevFramePosAtOR == NoFramePos {
+			prev = -1
+		}
+	}
+	c.Flags |= ControlPrefixTruncated
+	c.OldestRetainedPos = uint64(or) //nolint:gosec // G115: positions are non-negative
+	c.PrevFramePosAtOR = framePosToCtl(prev)
+	c.CheckpointRedoPos = uint64(redoPos)
+	b := encodeControl(c)
+	if err := writeFileDurably(w.fsys, w.dirFsync, ControlPath(w.path), b[:],
+		"checkpoint.control-tmp-pre-rename", "checkpoint.control-renamed-pre-dirfsync"); err != nil {
+		metrics.IncCounter("store.wal.MarkCheckpoint.errors", 1)
+		return err
+	}
+	w.ctl = c
+	return nil
+}
+
+func framePosToCtl(p int64) uint64 {
+	if p < 0 {
+		return NoFramePos
+	}
+	return uint64(p)
+}
+
+// segmentStartAt returns the first position of the last retained segment that
+// starts at or below pos, and the position of the frame preceding it.
+func (w *Writer) segmentStartAt(pos int64) (start, prevFramePos int64) {
+	w.segMu.Lock()
+	defer w.segMu.Unlock()
+	start, prevFramePos = w.segs[0].start, w.segs[0].prevFramePos
+	for _, s := range w.segs {
+		if s.start <= pos {
+			start, prevFramePos = s.start, s.prevFramePos
+		}
+	}
+	return start, prevFramePos
+}
+
+// ReclaimSegments unlinks every segment whose frames all lie below the oldest
+// retained position the control file records (never the active segment),
+// oldest first, and fsyncs the segment directory. When the control file still
+// marks the legacy single-file log as pending, it then replaces that file with
+// the one-frame seal stub and clears the flag. It returns the number of log
+// bytes (positions) reclaimed.
+//
+// It is phase 3 of a truncating checkpoint and needs NO commit lock: the writer
+// never touches a non-active segment, and every frame it removes lies below
+// the redo position the published snapshot covers. It never takes the append
+// lock. Safe for concurrent use; it serialises with [Writer.MarkCheckpoint].
+func (w *Writer) ReclaimSegments() (int64, error) {
+	if !w.segmented {
+		return 0, ErrSegmentsUnsupported
+	}
+	if w.closed.Load() {
 		return 0, ErrWriterClosed
 	}
+	w.ctlMu.Lock()
+	defer w.ctlMu.Unlock()
+	or := int64(w.ctl.OldestRetainedPos) //nolint:gosec // G115: positions are bounded
+	w.segMu.Lock()
+	var victims []segMeta
+	for i := 0; i+1 < len(w.segs) && w.segs[i+1].start <= or; i++ {
+		victims = append(victims, w.segs[i])
+	}
+	w.segMu.Unlock()
+	var reclaimed int64
+	if len(victims) > 0 {
+		for i, s := range victims {
+			if err := w.fsys.Remove(SegmentPath(w.path, s.no)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				metrics.IncCounter("store.wal.ReclaimSegments.errors", 1)
+				return reclaimed, fmt.Errorf("wal: unlink segment %d: %w", s.no, err)
+			}
+			if i == 0 {
+				crashpoint.Breakpoint("checkpoint.unlink-partial")
+			}
+		}
+		crashpoint.Breakpoint("checkpoint.unlink-done-pre-dirfsync")
+		if err := w.dirFsync(SegmentPath(w.path, victims[0].no)); err != nil {
+			metrics.IncCounter("store.wal.ReclaimSegments.errors", 1)
+			return reclaimed, fmt.Errorf("wal: fsync segment directory: %w", err)
+		}
+		w.segMu.Lock()
+		w.segs = w.segs[len(victims):]
+		reclaimed = w.segs[0].start - victims[0].start
+		w.segMu.Unlock()
+		metrics.IncCounter("store.wal.ReclaimSegments.segments", uint64(len(victims)))
+	}
+	if w.ctl.Flags&ControlLegacyV1Pending != 0 {
+		if err := writeFileDurably(w.fsys, w.dirFsync, w.path, sealFrameBytes(LegacySeal{StoreID: w.storeID}),
+			"", "checkpoint.legacy-stub-renamed-pre-dirfsync"); err != nil {
+			return reclaimed, err
+		}
+		c := w.ctl
+		c.Flags &^= ControlLegacyV1Pending
+		b := encodeControl(c)
+		if err := writeFileDurably(w.fsys, w.dirFsync, ControlPath(w.path), b[:], "", ""); err != nil {
+			return reclaimed, err
+		}
+		w.ctl = c
+		metrics.IncCounter("store.wal.migrate.legacyStubbed", 1)
+	}
+	return reclaimed, nil
+}
+
+// Truncate discards every frame written so far. It is a test and maintenance
+// helper, not a checkpoint path; the caller must already hold a snapshot that
+// covers every frame.
+//
+// On a segmented writer it rolls the active segment over (making it durable),
+// writes the control file with [ControlPrefixTruncated] and OR at the current
+// position, and unlinks every older segment. On an [OpenWith] writer it empties
+// the file. It returns the number of log bytes discarded.
+//
+// A poisoned or closed writer returns its sticky error or [ErrWriterClosed]
+// and touches nothing.
+func (w *Writer) Truncate() (int64, error) {
+	defer metrics.Time("store.wal.Truncate").Stop()
+	if w.closed.Load() {
+		metrics.IncCounter("store.wal.Truncate.errors", 1)
+		return 0, ErrWriterClosed
+	}
+	if !w.segmented {
+		return w.truncateSingleFile()
+	}
+	w.mu.Lock()
+	if w.syncErr != nil {
+		err := w.syncErr
+		w.mu.Unlock()
+		return 0, err
+	}
+	if err := w.rolloverLocked(); err != nil {
+		w.mu.Unlock()
+		metrics.IncCounter("store.wal.Truncate.errors", 1)
+		return 0, err
+	}
+	end := w.appendedPos
+	w.mu.Unlock()
+	w.ctlMu.Lock()
+	old := int64(w.ctl.OldestRetainedPos) //nolint:gosec // G115: positions are bounded
+	w.ctlMu.Unlock()
+	if err := w.MarkCheckpoint(end); err != nil {
+		metrics.IncCounter("store.wal.Truncate.errors", 1)
+		return 0, err
+	}
+	if _, err := w.ReclaimSegments(); err != nil {
+		metrics.IncCounter("store.wal.Truncate.errors", 1)
+		return 0, err
+	}
+	return end - old, nil
+}
+
+// truncateSingleFile is [Writer.Truncate] for an [OpenWith] writer.
+func (w *Writer) truncateSingleFile() (int64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.syncErr != nil {
-		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
 		return 0, w.syncErr
 	}
-	// Reject a path-less (OpenWith) writer before the offset checks: the
-	// atomic copy-then-rename has no path to rename over, so the operation is
-	// fundamentally unsupported regardless of the offset. The sticky-poison
-	// check above still comes FIRST, so a path-less POISONED writer reports the
-	// poison rather than ErrPrefixTruncateUnsupported (measured, rmp #2525):
-	// the fail-stop state is the more urgent fact about the handle.
-	if w.path == "" {
-		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
-		return 0, ErrPrefixTruncateUnsupported
+	for w.leaderActive {
+		w.groupCond.Wait()
 	}
-	if upTo < 0 || upTo > w.durableSize {
-		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
-		return 0, fmt.Errorf("wal: TruncatePrefix: upTo %d out of range [0, %d]", upTo, w.durableSize)
-	}
-	if upTo == 0 {
-		return 0, nil // nothing to reclaim
-	}
-
-	// Flush so the surviving suffix is entirely in the file (not split
-	// between the file and the bufio buffer). Under the quiesce boundary no
-	// Append can be buffered, but a prior commit's tail may still sit in the
-	// buffer; flushing makes the file the single source of truth for the
-	// suffix copy. A flush failure poisons the writer (the suffix bytes are
-	// not durable) and aborts before any rename.
 	if err := w.bw.Flush(); err != nil {
-		w.poison(err)
-		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
-		// The wrapped CLASS, not the bare cause: poison has just stored it into
-		// syncErr, and returning err here would hand the caller that POISONED the
-		// writer a less identifiable error than every other caller gets from now on
-		// (rmp #2306, see [ErrDurabilityFailed]).
-		return 0, w.syncErr
-	}
-
-	end := w.appendedSize // == durableSize after the flush under the quiesce boundary
-	suffixLen := end - upTo
-
-	// Write the surviving suffix to a sibling temp file. Streaming it through
-	// a 64 KiB buffer keeps memory bounded regardless of how many
-	// transactions committed during the lock-free snapshot write.
-	tmpPath := w.path + ".tmp"
-	if err := w.writeSuffixTmp(tmpPath, upTo, suffixLen); err != nil {
-		// Best-effort cleanup of a partial temp file; the original WAL is
-		// untouched, so the checkpoint simply fails and may retry.
-		_ = w.fsys.Remove(tmpPath)
-		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
 		return 0, err
 	}
-
-	// Crash-injection point: the suffix-only temp file is durable on disk but
-	// the atomic rename over the live WAL has NOT happened. A crash here must
-	// recover from the (already durable, self-sufficient) snapshot plus the
-	// ORIGINAL full WAL, which is still intact — the suffix temp is ignored.
-	// No-op in production (GOGRAPH_CRASH_AT unset).
-	crashpoint.Breakpoint("checkpoint.truncprefix.tmp-written-pre-rename")
-
-	// Atomically replace the WAL with the suffix-only file. After this the
-	// old inode (full WAL) is unlinked and path names the suffix-only inode.
-	if err := w.fsys.Rename(tmpPath, w.path); err != nil {
-		_ = w.fsys.Remove(tmpPath)
-		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
-		return 0, fmt.Errorf("wal: TruncatePrefix: rename %q: %w", w.path, err)
-	}
-
-	// Crash-injection point: the rename is done (path now names the
-	// suffix-only file) but its directory entry may not yet be durable. A
-	// crash here recovers from the snapshot plus EITHER the old full WAL (if
-	// the dirent rename was not yet persisted) OR the new suffix-only WAL —
-	// both replay to the exact committed state. No-op in production.
-	crashpoint.Breakpoint("checkpoint.truncprefix.post-rename-pre-dirfsync")
-
-	// Make the rename's directory entry durable so a host crash cannot revert
-	// path to the old inode on the next mount.
-	//
-	// Past the successful rename the on-disk state has already advanced to the
-	// suffix-only WAL and the old inode is unlinked, so a failure here must NOT
-	// be reported as a plain retryable error: w.f still points at the unlinked
-	// old inode, so continuing to use this Writer would append to a vanished
-	// file while recovery reads the new one — a silent Durability/Atomicity
-	// hole. Fail-stop instead (poisonAfterRename sets the sticky syncErr), so
-	// every subsequent Append/Sync returns the error and the owner re-opens the
-	// WAL, which re-validates the (already-correct) on-disk suffix.
-	if err := w.dirFsync(w.path); err != nil {
-		w.poisonAfterRename(fmt.Errorf("wal: TruncatePrefix: fsync parent dir of %q: %w", w.path, err))
-		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
-		return 0, w.syncErr
-	}
-
-	// Repoint the in-memory Writer state at the new (suffix-only) inode: the
-	// old fd points at the now-unlinked full-WAL inode and must be replaced,
-	// or subsequent Appends would write to a deleted file. Open the new file
-	// O_APPEND so appends land at its end, seek to confirm the size, and reset
-	// the bufio writer onto it. A failure here is also post-rename and so must
-	// fail-stop the Writer, for the same reason as the parent-dir fsync above.
-	if err := w.reopenAfterPrefixTruncate(suffixLen); err != nil {
-		w.poisonAfterRename(err)
-		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
-		return 0, w.syncErr
-	}
-
-	// Crash-injection point: the file is the durable suffix-only WAL and the
-	// in-memory bookkeeping is repointed. A crash here recovers from the
-	// snapshot plus the suffix-only WAL — the exact committed state. No-op in
-	// production.
-	crashpoint.Breakpoint("checkpoint.truncprefix.post-rename-pre-bookkeeping")
-
-	metrics.IncCounter("store.wal.TruncatePrefix.bytes_reclaimed", uint64(upTo))
-	return upTo, nil
-}
-
-// poisonAfterRename fail-stops the Writer following an error that occurs
-// AFTER the atomic suffix-rename in [Writer.TruncatePrefix] has already
-// succeeded. The caller holds w.mu.
-//
-// It differs from [Writer.poison] in one critical respect: it must NOT
-// truncate or otherwise touch a file handle. By this point the on-disk state
-// is the durable, correct suffix-only WAL and the old full-WAL inode is
-// unlinked; poison's Truncate(durableSize) would operate on the stale handle
-// (the wrong inode) and the suffix-only file on disk must be left intact for
-// recovery. So poisonAfterRename only sets the sticky syncErr and broadcasts,
-// so every subsequent Append/Sync fail-stops and the owner re-opens the WAL
-// (which re-validates the already-correct on-disk suffix). The stale handle is
-// closed by the eventual [Writer.Close].
-func (w *Writer) poisonAfterRename(err error) {
-	w.syncFailed.Add(1)
-	// Same class as [Writer.poison]'s: the writer is dead and no retry helps. See
-	// [ErrDurabilityFailed].
-	w.syncErr = fmt.Errorf("%w: %w", ErrDurabilityFailed, err)
-	if w.groupCond != nil {
-		w.groupCond.Broadcast()
-	}
-}
-
-// writeSuffixTmp copies the WAL bytes in [from, from+length) to tmpPath and
-// fsyncs it, so the surviving suffix is durable before the caller renames it
-// over the live WAL. Called by [Writer.TruncatePrefix] with w.mu held. It
-// reads through the WALFile's own handle (seeking it; the caller restores no
-// position because the handle is discarded by the subsequent reopen).
-func (w *Writer) writeSuffixTmp(tmpPath string, from, length int64) error {
-	if _, err := w.f.Seek(from, io.SeekStart); err != nil {
-		return fmt.Errorf("wal: TruncatePrefix: seek to suffix: %w", err)
-	}
-	// 0o600 (enforced by the fsys backend): the suffix carries the same graph
-	// mutation stream as the WAL and must not be world-readable. tmp.Sync below
-	// is the handle's own full-fsync Sync (NOT dataSync): the temp's creation
-	// and grown size are inode metadata that a per-commit fdatasync would not
-	// guarantee, and they must be durable before the rename publishes the temp.
-	tmp, err := w.fsys.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC)
+	sz, err := w.f.Seek(0, io.SeekEnd)
 	if err != nil {
-		return fmt.Errorf("wal: TruncatePrefix: create temp: %w", err)
+		return 0, err
 	}
-	if _, err := io.CopyN(tmp, w.f, length); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("wal: TruncatePrefix: copy suffix: %w", err)
+	if err := w.f.Truncate(0); err != nil {
+		return sz, err
 	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("wal: TruncatePrefix: fsync temp: %w", err)
+	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
+		return sz, err
 	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("wal: TruncatePrefix: close temp: %w", err)
+	if err := w.f.Sync(); err != nil {
+		return sz, err
 	}
-	return nil
+	// Positions never reset: the file now starts at the current position.
+	w.durablePos, w.durableLastFramePos = w.appendedPos, w.lastFramePos
+	w.segStart, w.fileBase = w.appendedPos, 0
+	w.bw.Reset(w.f)
+	return sz, nil
 }
 
-// reopenAfterPrefixTruncate replaces the Writer's file handle with a fresh
-// O_APPEND handle on the (just-renamed) suffix-only WAL and resets the size
-// bookkeeping and bufio writer. Called by [Writer.TruncatePrefix] with w.mu
-// held, after the atomic rename. The old handle is closed best-effort: it
-// points at the unlinked full-WAL inode and is no longer usable.
-func (w *Writer) reopenAfterPrefixTruncate(suffixLen int64) error {
-	nf, err := w.fsys.OpenFile(w.path, os.O_RDWR|os.O_CREATE|os.O_APPEND)
-	if err != nil {
-		return fmt.Errorf("wal: TruncatePrefix: reopen %q: %w", w.path, err)
-	}
-	if _, err := nf.Seek(0, io.SeekEnd); err != nil {
-		_ = nf.Close()
-		return fmt.Errorf("wal: TruncatePrefix: seek reopened: %w", err)
-	}
-	_ = w.f.Close() // best-effort: old inode is unlinked
-	w.f = nf
-	w.bw.Reset(nf)
-	w.durableSize = suffixLen
-	w.appendedSize = suffixLen
-	return nil
-}
-
-// Close flushes any buffered frames, calls Sync once, and releases
-// the underlying file.
+// Close flushes any buffered frames, fsyncs the active segment, waits for the
+// segment preparer, and releases every file and the lock.
 //
-// On a writer poisoned by an earlier Sync failure, Close skips the
-// flush (which would buffer new data) but performs a second-chance
-// truncation followed by a best-effort fsync. The truncation to
-// durableSize discards any suffix that poison() may have failed to
-// discard on a device in transient distress. The subsequent fsync
-// makes the reduced inode metadata durable; it is safe to issue
-// because the Truncate has already shrunk the file — the fsync can
-// only confirm the reduced EOF, never resurrect data above it.
+// On a writer poisoned by an earlier sync failure, Close skips the flush and
+// performs a second-chance truncation of the un-synced suffix followed by a
+// best-effort fsync, then returns the sticky error.
 func (w *Writer) Close() error {
 	defer metrics.Time("store.wal.Close").Stop()
 	if !w.closed.CompareAndSwap(false, true) {
@@ -1402,60 +1546,95 @@ func (w *Writer) Close() error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	// Self-safe against an in-flight group-commit leader: leadGroupSyncLocked
-	// releases w.mu across its f.Sync() and re-acquires it to publish, so a
-	// Close that grabbed w.mu in that window must NOT flush+close the file while
-	// the leader is mid-fsync (that would race the leader's f.Sync and could
-	// make un-acknowledged frames durable). Wait until the leader finishes and
-	// clears leaderActive. The store-layer quiesce (RunUnderCommitLock's inflight
-	// drain) is the primary guard; this is defence-in-depth so Close is correct
-	// even when called without that drain. groupCond's locker is w.mu, so Wait
-	// atomically releases it while parked.
+	// Self-safe against an in-flight group-commit leader, which fsyncs with
+	// w.mu released: never close the file under it.
 	for w.leaderActive {
 		w.groupCond.Wait()
 	}
-	if w.syncErr != nil {
-		// Second-chance discard: poison's own truncate may have failed
-		// on a device in transient distress. Best-effort — the sticky
-		// error is returned regardless.
-		_ = w.f.Truncate(w.durableSize)
-		// Best-effort fsync after the second-chance truncation: makes
-		// the reduced inode metadata durable. Safe to issue here because
-		// the Truncate above has already removed the failed suffix; this
-		// fsync can only confirm the reduced EOF, not acknowledge it.
-		_ = w.f.Sync()
-		_ = w.f.Close() // best-effort: the poison error takes precedence
+	w.prepWG.Wait()
+	w.spareMu.Lock()
+	if w.spare != nil {
+		_ = w.spare.Close() // the prepared spare stays on disk as an empty tail segment
+		w.spare = nil
+	}
+	w.spareMu.Unlock()
+	release := func() {
 		if w.lockFile != nil {
 			releaseLock(w.lockFile)
 		}
+	}
+	if w.syncErr != nil {
+		_ = w.f.Truncate(w.activeOffset(w.durablePos))
+		_ = w.f.Sync()
+		_ = w.f.Close()
+		release()
 		metrics.IncCounter("store.wal.Close.errors", 1)
 		return w.syncErr
 	}
 	if err := w.bw.Flush(); err != nil {
-		_ = w.f.Close() // best-effort: already on error path, flush err preserved
-		if w.lockFile != nil {
-			releaseLock(w.lockFile)
-		}
+		_ = w.f.Close()
+		release()
 		metrics.IncCounter("store.wal.Close.errors", 1)
 		return err
 	}
 	if err := w.f.Sync(); err != nil {
-		_ = w.f.Close() // best-effort: already on error path, sync err preserved
-		if w.lockFile != nil {
-			releaseLock(w.lockFile)
-		}
+		_ = w.f.Close()
+		release()
 		metrics.IncCounter("store.wal.Close.errors", 1)
 		return err
 	}
 	if err := w.f.Close(); err != nil {
-		if w.lockFile != nil {
-			releaseLock(w.lockFile)
-		}
+		release()
 		metrics.IncCounter("store.wal.Close.errors", 1)
 		return err
 	}
-	if w.lockFile != nil {
-		releaseLock(w.lockFile)
+	release()
+	return nil
+}
+
+// prefixMarkerSuffix is appended to the WAL path to name the legacy
+// prefix-truncation marker; see [PrefixTruncatedMarkerPath].
+const prefixMarkerSuffix = ".prefix-truncated"
+
+// prefixMarkerBody is the marker's content. Only the file's presence is
+// significant.
+const prefixMarkerBody = "GoGraph WAL: the prefix of this log was truncated by a checkpoint; " +
+	"recovery requires the snapshot that folded it.\n"
+
+// PrefixTruncatedMarkerPath returns the path of the legacy prefix-truncation
+// marker next to the WAL at walPath: the record a single-file log used to state
+// that its history requires a snapshot (rmp #2990). Writers of the segmented
+// format record that fact in the control file ([ControlPrefixTruncated]) and
+// never write the marker; recovery still honours a marker it finds, and writes
+// one for a legacy store loaded from a self-sufficient snapshot before that
+// store is migrated (rmp #3002).
+//
+// It is a pure function of walPath and is safe for concurrent use.
+func PrefixTruncatedMarkerPath(walPath string) string { return walPath + prefixMarkerSuffix }
+
+// WritePrefixMarker makes the legacy prefix-truncation marker for the WAL at
+// walPath durable on the operating-system filesystem (temp, fsync, rename,
+// parent-directory fsync). Recovery uses it for a legacy store (rmp #3002).
+//
+// Safe for concurrent use with respect to other directories; two concurrent
+// calls for the same walPath share a temp file and must not overlap.
+func WritePrefixMarker(walPath string) error {
+	return writePrefixMarkerFS(osWALFS{}, parentDirFsync, walPath)
+}
+
+// WritePrefixMarkerFS is [WritePrefixMarker] over a caller-supplied filesystem
+// backend, whose ParentDirSync makes the rename durable. It is the seam the
+// deterministic-simulation harness uses.
+func WritePrefixMarkerFS(fsys walFS, walPath string) error {
+	if fsys == nil {
+		return fmt.Errorf("wal: WritePrefixMarkerFS: nil filesystem")
+	}
+	return writePrefixMarkerFS(fsys, fsys.ParentDirSync, walPath)
+}
+
+func writePrefixMarkerFS(fsys walFS, dirFsync func(string) error, walPath string) error {
+	if err := writeFileDurably(fsys, dirFsync, PrefixTruncatedMarkerPath(walPath), []byte(prefixMarkerBody), "", ""); err != nil {
+		return fmt.Errorf("wal: prefix marker: %w", err)
 	}
 	return nil
 }

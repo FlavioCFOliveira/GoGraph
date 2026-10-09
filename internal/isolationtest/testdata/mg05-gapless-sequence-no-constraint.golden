@@ -1,0 +1,625 @@
+spec mg05-gapless-sequence-no-constraint: 2 sessions, 20 permutations
+# MG05, no constraint. A gapless per-year sequence: each transaction reads max(n)
+# for 2026 and creates max + 1. Without a constraint both read 1 and both create 2:
+# write skew, permitted under snapshot isolation (F1). With UNIQUE on (:Inv).n the
+# second CREATE is a ConstraintViolation and the sequence stays gapless.
+
+starting permutation: s1r s1w s1c s2r s2w s2c
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s1r s1w s2r s1c s2w s2c
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s1r s1w s2r s2w s1c s2c
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s1r s1w s2r s2w s2c s1c
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s1r s2r s1w s1c s2w s2c
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s1r s2r s1w s2w s1c s2c
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s1r s2r s1w s2w s2c s1c
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s1r s2r s2w s1w s1c s2c
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s1r s2r s2w s1w s2c s1c
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s1r s2r s2w s2c s1w s1c
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s2r s1r s1w s1c s2w s2c
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s2r s1r s1w s2w s1c s2c
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s2r s1r s1w s2w s2c s1c
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s2r s1r s2w s1w s1c s2c
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s2r s1r s2w s1w s2c s1c
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s2r s1r s2w s2c s1w s1c
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s2r s2w s1r s1w s1c s2c
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s2r s2w s1r s1w s2c s1c
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s2r s2w s1r s2c s1w s1c
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)
+
+starting permutation: s2r s2w s2c s1r s1w s1c
+step s2r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s2w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1r: MATCH (i:Inv {y:2026}) RETURN max(i.n) AS m
+m
+-
+1
+(1 row)
+step s1w: MATCH (i:Inv {y:2026}) WITH max(i.n) AS m CREATE (j:Inv {y:2026, n:m + 1}) RETURN j.n AS n
+n
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (i:Inv {y:2026}) RETURN i.n AS n ORDER BY n
+n
+-
+1
+2
+2
+(3 rows)

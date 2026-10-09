@@ -68,9 +68,8 @@ func TestGate_StrongExcludesWeak(t *testing.T) {
 	// WAITING FOR IT IS THE POINT, and this used to be a bare end-of-test check
 	// that weakRuns != 0. That check is correct but it is not a control: it made
 	// the test's validity depend on the scheduler. The strong loop below is tight,
-	// and a strong holder keeps `blocked` write-locked for its whole tenure while
-	// Go's RWMutex prefers a queued writer — so 2000 back-to-back strong
-	// acquisitions can starve every weak acquirer for the entire run. That is
+	// and a strong holder keeps the gate shut for its whole tenure, so 2000
+	// back-to-back strong acquisitions can starve every weak acquirer for the entire run. That is
 	// exactly what happened under `make ci`'s loaded coverage pass: the control
 	// fired, correctly reporting that the exclusion had never been exercised, and
 	// the test failed for want of SCHEDULING rather than for want of exclusion.

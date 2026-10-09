@@ -226,6 +226,47 @@ const (
 		"CREATE (x)-[:" + relPaired + "]->(y)"
 )
 
+// # Why the fixed key pools carry no namespace and no lease (rmp #2737)
+//
+// The names below, [mergeHandleNodeKeys], [mergePairKeys], [mergeZeroKeys] and
+// [mergeZeroAbsentName] are fixed strings. rmp #2728 and #2729 removed exactly
+// that shape from the wire-parameter probe and the contended counters, which
+// broke when two runs drove ONE shared [SimServer]; #2729's fix is a
+// caller-supplied namespace, a seed-derived default, and a lease that refuses an
+// overlap. These pools do not get that fix, and the reason is not the
+// single-goroutine contract on [SchemaMutationWriter].
+//
+// The unit of sharing is the GRAPH, and every graph this surface writes is
+// private to the run that created it. The fixture is seeded only by
+// [runSchemaMutationCfg] (and by tests, each on a Simulator of its own), and the
+// writer is placed in a workload only by [schemaMutationWorkload]. Every driver
+// that accepts a caller's workload builds its own engine as well: [New] for a
+// [Config.Workload], and [RunUpgrade] and [RunWithMetricsOracle] over a fresh
+// store each. [New] always constructs a fresh engine over either a fresh in-memory
+// graph or a fresh [SimDisk] (an in-memory filesystem owned by that Simulator),
+// and [Config] has no field through which a caller can hand it an existing
+// engine, graph, store or server (its one hook, the unexported beforeFixture,
+// receives that same fresh Simulator and is used only to position its key
+// sequence). Node keys are minted from the graph's own
+// [lpg.KeySequence], so no process-global state crosses graphs either. Two runs
+// overlapping in time, in one process, therefore share no node a pool key could
+// name, and a namespace would separate nothing. The writer is a stateless zero
+// value, so even two Simulators calling it at once share nothing through it.
+//
+// This verdict stops holding, and the #2729 shape (namespace from the seed, a
+// lease keyed by the shared target, a typed refusal on overlap) becomes
+// required, the moment any of these is true:
+//
+//   - [SchemaMutationWriter] ops, or [seedMergeHandleCollision], are driven
+//     against an engine or [SimServer] that another run can also reach — for
+//     example a [ConcurrentMix] role that issues this writer's ops through a
+//     shared server;
+//   - [Config] or [New] gains a way to inject an existing engine, graph, store
+//     or [SimDisk];
+//   - [seedMergeHandleCollision] runs twice against one graph, which would
+//     create a second "hc-src"/"hc-dst"/"hc-decoy" and break the fixture's
+//     one-node-per-name premise even with no concurrency at all.
+
 // The handle-collision fixture's node names (rmp #2515). They are in their own
 // namespace, disjoint from every name the workload binds — [HonestWriter.uniqueName]
 // always produces "<FirstName>-<n>", [mergePairKeys] is "wp<n>" and [mergeZeroKeys]
@@ -250,10 +291,9 @@ const (
 	// A node's id is [graph.NodeID](intraShardIndex<<8 | shard), so id 0 means
 	// "first key interned in shard 0". Which shard a node lands in is decided by
 	// the FNV-1a hash of the synthetic key the engine mints for it
-	// (cypher/exec: "__cx_"+hex(globalNodeCounter)), and that counter is
-	// PROCESS-GLOBAL: its value when this fixture runs depends on how many nodes
-	// every earlier test in the process created. The scenario's seed does not
-	// reach it, so on roughly 0.4% of process histories the first decoy lands on
+	// (cypher/exec: "__cx_"+hex(n), n drawn from the graph's lpg.KeySequence).
+	// The sequence belongs to the fixture's graph, but a graph that already holds
+	// nodes, or a change to how keys are minted, can still put the first decoy on
 	// id 0 through no fault of the engine.
 	//
 	// One alternative always suffices, and deterministically: if the first

@@ -49,7 +49,9 @@ func TestPlanLineDepth_ReconstructsTheWalksOwnNesting(t *testing.T) {
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "KNOWS")
+	if err := g.SetEdgeLabel("a", "b", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
 	eng := NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 

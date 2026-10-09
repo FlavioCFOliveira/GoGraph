@@ -261,9 +261,13 @@ func TestCompare_TemporalKinds(t *testing.T) {
 	if Compare(b, a) <= 0 {
 		t.Errorf("Compare(later, earlier) = %d; want +1", Compare(b, a))
 	}
-	// Cross-kind ordering: Date(21) > Float(7).
-	if Compare(a, FloatValue(1.0)) <= 0 {
-		t.Errorf("Date should sort after Float per kindOrder")
+	// Cross-kind ordering (CIP2016-06-14): every temporal type sorts after
+	// Path and before String, so a Date sorts before every number.
+	if Compare(a, FloatValue(1.0)) >= 0 {
+		t.Errorf("Date should sort before Float per kindOrder")
+	}
+	if Compare(a, StringValue("a")) >= 0 {
+		t.Errorf("Date should sort before String per kindOrder")
 	}
 	// Null sorts last.
 	if Compare(Null, a) <= 0 {

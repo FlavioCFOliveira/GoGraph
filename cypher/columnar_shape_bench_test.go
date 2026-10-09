@@ -58,7 +58,9 @@ func seedShapeGraph(b *testing.B) *lpg.Graph[string, float64] {
 		if err := g.AddEdge(keys[i], keys[i+1], 1.0); err != nil {
 			b.Fatalf("AddEdge: %v", err)
 		}
-		g.SetEdgeLabel(keys[i], keys[i+1], "K")
+		if err := g.SetEdgeLabel(keys[i], keys[i+1], "K"); err != nil {
+			b.Fatal(err)
+		}
 	}
 	return g
 }

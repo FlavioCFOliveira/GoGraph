@@ -2,11 +2,12 @@ package cypher_test
 
 // ddl_barrier_test.go — task #1417
 //
-// Regression gate: CREATE INDEX and CREATE CONSTRAINT must register their
-// in-memory structures (index backing store + value-set seed) inside the
-// graph's visibility barrier (Graph.ApplyAtomically / visMu.Lock), so
-// concurrent Graph.View readers never observe a partially-constructed
-// index or constraint.
+// Regression gate: a concurrent reader never observes a partially-constructed
+// index or constraint. A CREATE INDEX backfills its index before it registers
+// it with the index.Manager, under the engine's schema gate held exclusively,
+// which excludes every concurrent write statement; a read takes no barrier
+// (rmp #2344 removed Graph.View) and reaches the index only through the
+// Manager's catalog, so it finds either no index or a complete one.
 //
 // Before this fix, runCreateBTreeIndex and createConstraintLocked called
 // runDDLOp (which registers the index/constraint with the Manager) and

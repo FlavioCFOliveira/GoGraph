@@ -322,7 +322,11 @@ func runReplayCase(tb testing.TB, arm *replayArm, door *replayDoor, withIndex bo
 	)
 	if withIndex {
 		// EXACTLY the DDL's order: open the recording, snapshot, then backfill.
-		buildLog, scanView, release = e.beginIndexBuild(mgr, "Person", arm.prop)
+		var err error
+		buildLog, scanView, release, err = e.beginIndexBuild(ctx, mgr, "Person", arm.prop)
+		if err != nil {
+			tb.Fatalf("beginIndexBuild: %v", err)
+		}
 		defer mgr.AbandonBuild(buildLog)
 		defer release()
 		sub = arm.build(tb, e, ctx, scanView)

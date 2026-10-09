@@ -50,6 +50,7 @@ package snapshot
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -507,9 +508,22 @@ func collectNodePropertyRecords[N comparable, W any](
 	}
 	for _, id := range collectInternedNodeIDs(g) {
 		curNodeID = uint64(id)
+		start := len(out)
 		g.NodePropertiesByIDFuncAsOf(id, at, visit)
 		if visitErr != nil {
 			return nil, visitErr
+		}
+		// Emit each node's records in ascending KeyIdx order, exactly as
+		// [collectEdgePropertyRecords] does for a pair. The bag is visited in
+		// its own order, and a bag promoted to the map tier (more than
+		// smallBagMax entries, or a kind the stream does not model, such as a
+		// list) is visited in Go's randomised map order, so two snapshots of
+		// the IDENTICAL graph would otherwise disagree byte for byte
+		// (rmp #2519). A node carries few properties, so the sort is cheap.
+		if len(out)-start > 1 {
+			slices.SortFunc(out[start:], func(a, b NodePropertyEntry) int {
+				return cmp.Compare(a.KeyIdx, b.KeyIdx)
+			})
 		}
 	}
 	return out, nil

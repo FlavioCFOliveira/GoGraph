@@ -1,6 +1,7 @@
 package mvcc
 
-// publish_fastpath_test.go — the lock-free publication fast path (rmp #2362).
+// publish_fastpath_test.go — the in-order publication fast path (rmp #2362) and,
+// since rmp #2932, the lock-free commit registry behind it.
 //
 // graph/mvcc/frontier_liveness_test.go is the BLACK-BOX oracle: it asserts the
 // frontier's liveness, monotonicity and safety through the public API, and it
@@ -8,28 +9,27 @@ package mvcc
 // complement, and they exist because a fast path that is never TAKEN also passes
 // the oracle. Three things need pinning that the oracle cannot see:
 //
-//   - that the common in-order publication really does skip the lock and the
-//     bitmap, which is the entire point of the change;
-//   - that skipping the bitmap for a long run does not then cost a block per
-//     4096 timestamps when a publisher finally does take the lock;
-//   - the fast-path/locked-path RACE named in the task's acceptance criteria,
-//     which no single-goroutine test can reach.
+//   - that the common in-order publication really does skip the slow path, which
+//     is the entire point of the fast path;
+//   - that a long in-order run followed by out-of-order publication resumes from
+//     the right place;
+//   - the race between an in-order publication and an out-of-order one, which no
+//     single-goroutine test can reach.
 
 import (
 	"sync"
 	"testing"
 )
 
-// TestClock_InOrderPublicationSkipsTheCommitLog is the evidence that the fast
-// path is taken at all.
+// TestClock_InOrderPublicationSkipsTheRing is the evidence that the fast path is
+// taken at all.
 //
-// It is a white-box assertion on purpose. The fast path's whole claim is that an
-// in-order publication touches neither pubMu nor the bitmap, and the only
-// observable difference between "took the fast path" and "took a very quick
-// locked path" is that the log is left untouched: `oldest` never moves and no
-// block is ever allocated. Asserting the frontier alone would pass against an
-// implementation that quietly did all the work under the lock.
-func TestClock_InOrderPublicationSkipsTheCommitLog(t *testing.T) {
+// It is a white-box assertion on purpose. The only observable difference between
+// "took the fast path" and "took a very quick slow path" is that no record is
+// marked finished and none is published on another's behalf. Asserting the
+// frontier alone would pass against an implementation that quietly took the slow
+// path for every publication.
+func TestClock_InOrderPublicationSkipsTheSlowPath(t *testing.T) {
 	var c Clock
 	const n = 1000
 	for i := 0; i < n; i++ {
@@ -38,88 +38,64 @@ func TestClock_InOrderPublicationSkipsTheCommitLog(t *testing.T) {
 	if got := c.ReadTS(); got != n {
 		t.Fatalf("ReadTS = %d after %d in-order commits, want %d", got, n, n)
 	}
-	if c.log.oldest != 0 {
-		t.Fatalf("commitLog.oldest = %d after %d in-order commits: the log was touched, so "+
-			"the publication fast path did NOT run and rmp #2362 delivered nothing",
-			c.log.oldest, n)
+	if got := c.OutOfOrderPublications(); got != 0 {
+		t.Fatalf("OutOfOrderPublications = %d after %d in-order commits, want 0", got, n)
 	}
-	if got := c.log.liveBlocks(); got != 0 {
-		t.Fatalf("liveBlocks = %d after %d in-order commits, want 0: the fast path must not "+
-			"allocate a bitmap it never reads", got, n)
-	}
-	if got := c.log.blocked.Load(); got != 0 {
-		t.Fatalf("blocked = %d with no publisher in the locked path and no bit above the "+
-			"frontier, want 0 — a non-zero count disables the fast path for ever", got)
+	if got := c.HelpedPublications(); got != 0 {
+		t.Fatalf("HelpedPublications = %d after %d in-order commits, want 0", got, n)
 	}
 }
 
-// TestClock_LockedPathCatchesUpWithoutAllocatingABlockPerRun covers the sharp
-// edge docs/mvcc-publish-fast-path.md names: block management.
-//
-// After a long fast-path run the log's `oldest` is far behind the published
-// frontier. A locked path that walked from that stale position would have
-// [commitLog.blockFor] extend the chain one block per [clIDsPerBlock] timestamps
-// — memory proportional to the number of commits, which is exactly the growth
-// the log's design exists to avoid. [commitLog.syncTo] must retire instead.
-func TestClock_LockedPathCatchesUpWithoutAllocatingABlockPerRun(t *testing.T) {
+// TestClock_OutOfOrderAfterALongInOrderRun covers the seam between the two paths:
+// after a long fast-path run, the first out-of-order publication must find its
+// record and the frontier must resume exactly where the fast path left it.
+func TestClock_OutOfOrderAfterALongInOrderRun(t *testing.T) {
 	var c Clock
-	// Long enough to span several blocks, so a stale walk is unmistakable.
-	const run = 5 * clIDsPerBlock
+	const run = 5 * registrySlots // several laps' worth of timestamps
 	for i := 0; i < run; i++ {
 		c.PublishCommitTS(c.NextCommitTS())
 	}
 
-	// Now force the locked path: publish out of order, which the fast path
-	// refuses, and which leaves a bit above the frontier.
 	first, second := c.NextCommitTS(), c.NextCommitTS()
 	c.PublishCommitTS(second)
 	if got, want := c.ReadTS(), uint64(run); got != want {
 		t.Fatalf("ReadTS = %d with %d still in flight, want %d", got, first, want)
 	}
-	if got := c.log.liveBlocks(); got > 2 {
-		t.Fatalf("liveBlocks = %d after a %d-commit fast-path run, want at most 2: the locked "+
-			"path walked from a stale position and allocated a block per %d timestamps",
-			got, run, clIDsPerBlock)
-	}
+	table := c.reg.slots.Load()
 
 	c.PublishCommitTS(first)
 	if got, want := c.ReadTS(), second; got != want {
 		t.Fatalf("ReadTS = %d after the gap closed, want %d", got, want)
 	}
-	if got := c.log.liveBlocks(); got > 2 {
-		t.Fatalf("liveBlocks = %d once the window closed, want at most 2", got)
+	if c.reg.slots.Load() != table {
+		t.Fatal("the registry was reallocated")
 	}
-	if got := c.log.blocked.Load(); got != 0 {
-		t.Fatalf("blocked = %d once every commit finished, want 0", got)
+	if got := c.InFlightCommits(); got != 0 {
+		t.Fatalf("InFlightCommits = %d once every commit finished, want 0", got)
 	}
 }
 
 // TestClock_FrontierSurvivesTheFastPathLockedPathRace is acceptance criterion 2's
 // last clause, and the only property here that needs two goroutines.
 //
-// The interleaving it hunts is precise. A publisher takes pubMu and reads the
-// frontier to catch the log up to it; a fast path then advances the frontier past
-// that read and returns, and the publisher — computing from what it read — never
-// installs the higher value. Its own bit sits above the frontier for ever:
+// The interleaving it hunts is precise. An out-of-order publication marks its
+// record finished while the in-order publication below it advances the frontier; if
+// neither then carries the frontier over the recorded timestamp, it sits above
+// the frontier for ever:
 //
 //	frontier f, commits f+1 and f+2 in flight
-//	B (f+2, out of order) reads the frontier: f
-//	A (f+1, in order)     CAS f -> f+1, re-checks, returns
-//	B                     records f+2 above f, computes frontier f, installs nothing
+//	B (f+2, out of order) marks f+2 finished, reads the frontier: f, nothing to carry
+//	A (f+1, in order)     CAS f -> f+1, does not look at f+2, returns
 //	=> frontier f+1, commit f+2 durable, acknowledged, and invisible for ever
 //
 // Each round recreates exactly that shape and starts both goroutines from a
-// barrier, so the window is hit rather than hoped for. Removing
-// [commitLog.enterPublish] from Clock.finishCommitTS — the half of
-// [commitLog.blocked] that has no effect in any single-goroutine test — makes
-// this fail within a few hundred rounds; removing the post-CAS re-check makes it
-// fail within a few tens of thousands. Both were verified by injection.
+// barrier, so the window is hit rather than hoped for. Both halves of the
+// pairing are load-bearing; see the injection record in the rmp #2932 report.
 func TestClock_FrontierSurvivesTheFastPathLockedPathRace(t *testing.T) {
 	// 100 000 rather than a few thousand, because the count is sized to the SLOWER
-	// of the two defects it must catch, MEASURED rather than guessed. Deleting the
-	// publisher bracket ([commitLog.enterPublish]) failed at rounds 348 and 10 406;
-	// deleting the post-CAS re-check failed at 3 407, 12 813, 15 605, 17 792 and
-	// 23 282. The worst observed is 23 282, so this leaves a factor of four in hand.
+	// of the defects it must catch, MEASURED rather than guessed: the locked design
+	// rmp #2932 replaced had an injected defect that survived to round 23 282, so
+	// this keeps a wide margin.
 	const rounds = 100000
 	var c Clock
 	for r := 0; r < rounds; r++ {
@@ -148,10 +124,6 @@ func TestClock_FrontierSurvivesTheFastPathLockedPathRace(t *testing.T) {
 		if got := c.InFlightCommits(); got != 0 {
 			t.Fatalf("round %d: InFlightCommits = %d once both commits finished, want 0", r, got)
 		}
-	}
-	if got := c.log.blocked.Load(); got != 0 {
-		t.Fatalf("blocked = %d after %d rounds, want 0: the count leaked and the fast path is "+
-			"now disabled for the life of the clock", got, rounds)
 	}
 }
 
@@ -220,8 +192,8 @@ func TestClock_FrontierIsMonotoneUnderConcurrentPublication(t *testing.T) {
 	select {
 	case r := <-regress:
 		t.Fatalf("frontier went BACKWARDS, %d -> %d: a reader would observe a state no serial "+
-			"order produced. The locked path must install its frontier with a compare-and-swap "+
-			"loop, because the fast path raises it without pubMu", r[0], r[1])
+			"order produced. Every advance of the frontier must be a compare-and-swap, because "+
+			"every publication raises it without a lock", r[0], r[1])
 	default:
 	}
 
@@ -231,8 +203,5 @@ func TestClock_FrontierIsMonotoneUnderConcurrentPublication(t *testing.T) {
 	}
 	if got := c.InFlightCommits(); got != 0 {
 		t.Fatalf("InFlightCommits = %d once every commit finished, want 0", got)
-	}
-	if got := c.log.blocked.Load(); got != 0 {
-		t.Fatalf("blocked = %d once every commit finished, want 0", got)
 	}
 }

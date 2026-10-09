@@ -28,6 +28,8 @@ package lpg
 import (
 	"sync"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
@@ -53,6 +55,11 @@ type Snapshot struct {
 	// slot is the horizon slot this reader occupies, returned to
 	// [Graph.EndRead].
 	slot int
+	// interned is the mapper watermark taken at this snapshot's instant by
+	// [Graph.BeginCaptureRead], or nil for every other snapshot. When set,
+	// [Graph.NodeInternedAsOf] answers from it exactly instead of inferring
+	// from the life records (rmp #2991).
+	interned *graph.MapperWatermark
 	// verdict PINS this snapshot's visibility answer for each commit record it has
 	// already classified (rmp #2378).
 	//
@@ -98,13 +105,108 @@ type Snapshot struct {
 	// never consults the verdict on those reads. Dropping that counter alone does
 	// not fix it either (measured 3/100), because the verdict still moves mid-read.
 	// Together: 0 failures in 300 runs.
+	//
+	// # Why the memo is behind a pointer (rmp #2965, round 5)
+	//
+	// A shared snapshot's memo is guarded by a mutex, and a mutex held INSIDE the
+	// snapshot makes every *Snapshot the read paths receive escape to the heap
+	// (sync.Mutex's slow path leaks its receiver). The direct present-state
+	// accessors read through a snapshot of their own on the caller's stack
+	// ([Graph.latestCommitted]), and that stack value must stay on the stack for
+	// a read to allocate nothing. So the shared memo lives behind memo, and a
+	// snapshot with a nil memo is OWNED by the one goroutine that made it and pins
+	// into owned instead, without a lock.
+	memo *snapMemo
+	// owned is the pin of an owned snapshot (memo == nil): the first len(owned)
+	// in-flight records it has classified, with their verdicts. A single-object
+	// read meets few in-flight records — one per transaction holding a version
+	// on that object — so the array covers it. A read that walks MANY objects
+	// through one owned snapshot ([Graph.TombstonedIDs] and
+	// [Graph.committedLifeCounts] do) can meet more distinct in-flight
+	// transactions than that, and stops pinning the excess: an unpinned record
+	// is classified afresh at each visit, so one such transaction committing
+	// part-way through the walk can be seen as uncommitted on objects visited
+	// before its commit and as committed on objects visited after it. Those
+	// walks therefore promise each object's committed state as of its visit,
+	// not one instant for the whole walk.
+	owned [4]pinnedVerdict
+}
+
+// snapMemo is a shared snapshot's verdict memo; see [Snapshot.memo].
+type snapMemo struct {
 	mu      sync.Mutex
 	verdict map[*commitInfo]bool
+	// pruneAt is the memo size at which the next pin first drops the entries
+	// that no longer change an answer; see [snapMemo.pruneLocked]. Zero means
+	// [snapMemoPruneFloor].
+	pruneAt int
+}
+
+// snapMemoPruneFloor is the smallest memo [snapMemo.pruneLocked] runs on. A
+// snapshot meets few in-flight transactions at once, so most memos never reach
+// it and never pay for a sweep.
+const snapMemoPruneFloor = 64
+
+// pruneLocked drops every pinned verdict that a fresh classification now gives
+// unchanged, and sets the size of the next prune to twice what survives (rmp
+// #3026). The caller holds m.mu.
+//
+// # Why dropping such an entry changes no answer
+//
+// An entry is dropped only when its record has RESOLVED — committed or aborted,
+// both terminal states whose stamp is never written again — and [mvcc.Visible]
+// on that final stamp equals the pinned verdict. A later visit misses the memo,
+// classifies the record afresh, gets that same verdict, and does not pin it
+// again, because a terminal record is never pinned. The test is the verdict
+// itself, not an argument about when the record committed, so it holds for every
+// snapshot: a reader at a real instant, whose in-flight pins commit above its
+// start and stay invisible, sheds them all; the snapshot's own record, pinned
+// visible and committed above the start, keeps its pin, as does every pin of a
+// snapshot at the top of the commit space (a store commit's apply, a direct
+// write), where a record pinned invisible commits below the start.
+//
+// # Why the memo stays bounded
+//
+// Before this, a long-lived snapshot kept one entry per transaction it ever met
+// in flight, for its whole life (found in rmp #2873). Now the memo never exceeds
+// pruneAt, which is the larger of [snapMemoPruneFloor] and twice the entries the
+// last prune kept, and a prune visits the memo once per that many new pins, so
+// its cost is amortised to a constant per pin.
+func (m *snapMemo) pruneLocked(startTS, txID uint64) {
+	for info, v := range m.verdict {
+		cur := info.TS()
+		if (cur < mvcc.TxIDBase || cur == mvcc.AbortedTS) && mvcc.Visible(cur, startTS, txID) == v {
+			delete(m.verdict, info)
+		}
+	}
+	m.pruneAt = max(snapMemoPruneFloor, 2*len(m.verdict))
+}
+
+// pinnedVerdict is one pinned classification of an owned snapshot.
+type pinnedVerdict struct {
+	info    *commitInfo
+	visible bool
+}
+
+// sharedSnapshot is a [Snapshot] together with its memo, so a shared snapshot
+// costs one allocation, as it did before the memo moved behind a pointer.
+type sharedSnapshot struct {
+	Snapshot
+	m snapMemo
+}
+
+// newSharedSnapshot returns a snapshot that may be read by several goroutines
+// at once.
+func newSharedSnapshot(startTS, txID uint64, slot int) *Snapshot {
+	p := &sharedSnapshot{Snapshot: Snapshot{startTS: startTS, txID: txID, slot: slot}}
+	p.memo = &p.m
+	return &p.Snapshot
 }
 
 // visible reports whether a change stamped by info — or by the raw ts when info
 // is nil — is visible to this snapshot, PINNING the answer for any record this
-// snapshot classifies more than once. See the verdict field.
+// snapshot first classifies while it is still in flight. A committed or aborted
+// record needs no pin: its stamp is final. See the verdict field.
 //
 // A nil snapshot, or a raw timestamp with no record, resolves straight through:
 // there is nothing mutable to pin. Safe for concurrent use, because a ReadView
@@ -113,16 +215,58 @@ func (s *Snapshot) visible(info *commitInfo, ts, startTS, txID uint64) bool {
 	if s == nil || info == nil {
 		return mvcc.Visible(ts, startTS, txID)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if v, ok := s.verdict[info]; ok {
+	m := s.memo
+	if m == nil {
+		return s.visibleOwned(info, startTS, txID)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if v, ok := m.verdict[info]; ok {
 		return v
 	}
-	v := mvcc.Visible(info.TS(), startTS, txID)
-	if s.verdict == nil {
-		s.verdict = make(map[*commitInfo]bool, 4)
+	cur := info.TS()
+	v := mvcc.Visible(cur, startTS, txID)
+	// Only an IN-FLIGHT record's verdict can move: committed and aborted are
+	// terminal states of [mvcc.CommitInfo], whose stamp is never written again,
+	// so re-deciding such a record gives the answer pinned here every time.
+	// Memoising it only grew the map — once per distinct committed transaction a
+	// read touched, which a 4000-slot run resolved per statement made the
+	// dominant cost of typing it (rmp #2888). The in-flight case, the one the
+	// pin exists for, is recorded exactly as before.
+	if cur >= mvcc.TxIDBase && cur != mvcc.AbortedTS {
+		if m.verdict == nil {
+			m.verdict = make(map[*commitInfo]bool, 4)
+		} else if len(m.verdict) >= max(m.pruneAt, snapMemoPruneFloor) {
+			m.pruneLocked(startTS, txID)
+		}
+		m.verdict[info] = v
 	}
-	s.verdict[info] = v
+	return v
+}
+
+// visibleOwned is [Snapshot.visible] for an owned snapshot: the same pin, kept
+// in the inline array and taken without a lock, because only the goroutine that
+// made the snapshot reads through it.
+func (s *Snapshot) visibleOwned(info *commitInfo, startTS, txID uint64) bool {
+	for i := range s.owned {
+		p := &s.owned[i]
+		if p.info == nil {
+			break
+		}
+		if p.info == info {
+			return p.visible
+		}
+	}
+	cur := info.TS()
+	v := mvcc.Visible(cur, startTS, txID)
+	if cur >= mvcc.TxIDBase && cur != mvcc.AbortedTS {
+		for i := range s.owned {
+			if s.owned[i].info == nil {
+				s.owned[i] = pinnedVerdict{info: info, visible: v}
+				break
+			}
+		}
+	}
 	return v
 }
 
@@ -158,7 +302,49 @@ func (g *Graph[N, W]) BeginRead() *Snapshot {
 	slot := g.horizon.EnterHolding()
 	startTS := g.mvccClock.ReadTS()
 	g.horizon.Publish(slot, startTS)
-	return &Snapshot{startTS: startTS, slot: slot}
+	return newSharedSnapshot(startTS, 0, slot)
+}
+
+// BeginCaptureRead is [Graph.BeginRead] for a snapshot capture: it also records
+// the mapper's watermark ([graph.Mapper.Watermark]) just after the snapshot's
+// instant, so [Graph.NodeInternedAsOf] answers from the per-shard high-water
+// marks instead of inferring from life records (rmp #2991), and the capture can
+// write those marks to the image's nodeids.bin (WAL v2 step 1).
+//
+// # What the capture does with it
+//
+// The watermark covers every id assigned at or before the instant, and may also
+// cover ids not born at the instant: a key interned by a transaction still open
+// at the instant (the commit serialiser's drain waits for store-registered
+// writers, not for an lpg write transaction or an eager engine write), one later
+// rolled back, or one interned between the instant and the watermark read. The
+// capture's membership is "covered AND ever born as of the instant"
+// ([Graph.NodeBornAsOf]); every other covered id is a HOLE — absent from
+// mapper.bin and not a tombstone — which graph.Mapper.LoadFrom accepts below the
+// recorded marks. A key created after the instant is then a new key to the WAL
+// replay, so it comes back alive whichever record created it (design risk 7).
+//
+// The extra cost is one O(shards) read of the mapper; ordinary reads use
+// [Graph.BeginRead] and pay nothing. It returns nil when versioning is disarmed,
+// exactly as BeginRead does. The result is released with [Graph.EndRead].
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) BeginCaptureRead() *Snapshot {
+	s := g.BeginRead()
+	if s == nil {
+		return nil
+	}
+	s.interned = g.adj.Mapper().Watermark()
+	return s
+}
+
+// InternWatermark returns the mapper watermark a [Graph.BeginCaptureRead]
+// snapshot recorded at its instant, or nil for any other snapshot.
+func (s *Snapshot) InternWatermark() *graph.MapperWatermark {
+	if s == nil {
+		return nil
+	}
+	return s.interned
 }
 
 // EndRead releases a read view obtained from [Graph.BeginRead].
@@ -190,4 +376,74 @@ func snapshotTimes(s *Snapshot) (startTS, txID uint64, walk bool) {
 		return 0, 0, false
 	}
 	return s.startTS, s.txID, true
+}
+
+// latestCommitted prepares cs as the read position of a direct present-state
+// accessor — [Graph.GetNodeProperty], [Graph.HasNodeLabel], [Graph.NodeLabels]
+// and every other accessor that takes no snapshot — and returns it, or nil when
+// the versioning substrate is disarmed and the stored value is the only state.
+//
+// # Committed only (rmp #2965, round 5, finding R5-F3)
+//
+// A version a transaction has written and not yet published is invisible to
+// every other reader. Before this, the direct accessors read the stored value,
+// which carries every such version: a durable commit applied but not yet fsynced
+// was readable through GetNodeProperty, HasNodeLabel and AdjList().HasEdge, and
+// if the fsync then failed the commit was withdrawn — the reader had seen a
+// write that never happened. The accessors now resolve as an implicit
+// transaction reads: every committed version is visible and every uncommitted
+// one is stepped back over, to the pre-image it replaced.
+//
+// The position needs no horizon slot: the versions it steps over are
+// uncommitted, which no reclaimer frees, and it stops at the first committed
+// one. cs is the caller's stack value, so a read whose newest version is
+// committed — the common case — allocates nothing; the snapshot's verdict memo
+// pins any in-flight transaction it classifies, so a transaction that commits
+// mid-read is seen wholly or not at all.
+//
+// This is how Memgraph's accessors resolve a read: ApplyDeltasForRead walks an
+// object's delta chain from the newest version back, undoing every delta the
+// reading transaction may not see, and stops at the first one it may
+// (memgraph/memgraph commit 3f2d6f8ed27ef6610933a218403f05f7a51a4d81;
+// src/storage/v2/mvcc.hpp). PostgreSQL's HeapTupleSatisfiesMVCC likewise
+// treats a tuple whose inserting transaction is still in progress as invisible
+// to every other backend (postgres/postgres commit
+// 50d6e533e4d9a0f70d798c534254007c83c0d428;
+// src/backend/access/heap/heapam_visibility.c). A transaction reading its own
+// writes does so through its own view ([Graph.WriterViewOf], [Graph.Writer]).
+func (g *Graph[N, W]) latestCommitted(cs *Snapshot) *Snapshot {
+	if !g.mvccArmed {
+		return nil
+	}
+	cs.startTS = implicitStartTS
+	return cs
+}
+
+// admittedRead returns the position a write of tx reads at once an admit check
+// on the object has passed: tx's own snapshot when tx began at a real instant,
+// and otherwise a fresh view of every committed version plus tx's own, built on
+// the caller's stack value cs (rmp #3032). tx must not be nil.
+//
+// A transaction that began at the top of the commit space — a store commit's
+// bounded apply, or a direct write's implicit transaction — admits a version as
+// soon as it commits, but its snapshot keeps the verdict "invisible" for any
+// record an EARLIER read classified in flight. A read through that snapshot
+// after the admit can therefore deny a version the admit just accepted: a store
+// commit whose OpRemoveNode had read a peer in flight later found the peer's
+// committed edge handle absent and inserted it a second time, while replay,
+// idempotent on the handle, kept one. The fresh view has no pins, so it
+// classifies the admitted head anew; every version it sees committed precedes tx
+// in the log, because tx mints its sequence after its apply.
+//
+// A transaction that began at a real instant keeps its snapshot, which is
+// already consistent with the admit: a record it pinned in flight can only
+// commit above its start, so the admit refuses that record rather than accepting
+// it. Reading the latest state there would instead show commits made after tx
+// began, which its snapshot isolation must not.
+func (g *Graph[N, W]) admittedRead(cs *Snapshot, tx *writeCtx) *Snapshot {
+	if tx.startTS != implicitStartTS {
+		return &tx.snap
+	}
+	cs.startTS, cs.txID = implicitStartTS, tx.txID
+	return cs
 }

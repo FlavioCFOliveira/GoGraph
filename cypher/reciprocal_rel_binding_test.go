@@ -315,8 +315,12 @@ func TestReciprocalRelBinding_GoAPIEdges(t *testing.T) {
 	if _, err := g.AddEdgeH("B", "A", 1); err != nil {
 		t.Fatalf("AddEdgeH(B,A): %v", err)
 	}
-	g.SetEdgeLabel("A", "B", "KNOWS")
-	g.SetEdgeLabel("B", "A", "KNOWS")
+	if err := g.SetEdgeLabel("A", "B", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("B", "A", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.SetEdgeProperty("A", "B", "tag", lpg.StringValue("AB")); err != nil {
 		t.Fatalf("SetEdgeProperty(A,B): %v", err)
 	}

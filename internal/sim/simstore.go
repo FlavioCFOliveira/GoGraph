@@ -303,13 +303,10 @@ func openSimTypedStore[N comparable, W any](
 		return nil, err
 	}
 
-	// Open the WAL for append over the (now clean-tailed) SimDisk image through
-	// the path-backed FS seam (wal.OpenFS), so a Checkpointer driving this store
-	// can reclaim the WAL prefix via Writer.TruncatePrefix — the temp-write,
-	// rename, parent-dir fsync and reopen all route through the SimDisk. The
-	// benign torn tail was already discarded by recoverSimGraph (auditor finding
-	// F1), which is the precondition OpenFS documents in lieu of its own
-	// discardTornTail.
+	// Open the WAL for append over the SimDisk image through the path-backed FS
+	// seam (wal.OpenFS), so a Checkpointer driving this store writes the control
+	// file and unlinks segments through the SimDisk. OpenFS discards a benign
+	// torn tail of the tail segment itself (auditor finding F1).
 	wlog, err := wal.OpenFS(simWALFS{disk: disk}, walPath)
 	if err != nil {
 		return nil, fmt.Errorf("sim: WAL OpenFS: %w", err)
@@ -500,32 +497,28 @@ func recoverSimGraph[N comparable, W any](
 	}
 
 	// WAL-only recovery (no snapshot, or legacy mode): replay the committed prefix
-	// into a graph with the simulator's configured shape.
+	// into a graph with the simulator's configured shape. The log is read whole —
+	// the legacy single-file log of a store written before the segmented format,
+	// then the segments — through the same reader recovery uses.
 	g := lpg.New[N, W](cfg.graphConfig)
-	if !disk.Exists(walPath) {
-		return g, recoveredSchema{}, true, nil
-	}
-	rh, err := disk.OpenFile(walPath, os.O_RDONLY)
+	log, err := wal.OpenLogFS(simLogFS{disk: disk}, walPath)
 	if err != nil {
 		return nil, recoveredSchema{}, false, fmt.Errorf("sim: open WAL for replay: %w", err)
 	}
-	reader := wal.NewReader(rh, rh)
 	replay, err := recovery.ReplayWAL[N, W](
-		context.Background(), reader, g, codec, wcodec,
+		context.Background(), log, g, codec, wcodec,
 		resolveSimMaxTxnOps(cfg.maxTxnOps),
 	)
-	_ = reader.Close()
+	_ = log.Close()
 	if err != nil {
 		return nil, recoveredSchema{}, false, fmt.Errorf("sim: WAL replay: %w", err)
 	}
 	if !replay.IsClean() {
 		return nil, recoveredSchema{}, false, fmt.Errorf("sim: WAL recovery found corruption: %w", replay.TailErr)
 	}
-	// Auditor finding F1: truncate the benign torn tail before the caller reopens
-	// for append, so new frames are not written behind junk every reader stops at.
-	if err := truncateSimWALAt(disk, walPath, replay.WALTailOffset); err != nil {
-		return nil, recoveredSchema{}, false, fmt.Errorf("sim: truncate torn WAL tail: %w", err)
-	}
+	// Auditor finding F1 — never append behind a benign torn tail — is the
+	// writer's own job for a segmented log: wal.OpenFS truncates the tail
+	// segment to its last valid frame before it appends.
 	// The MVCC clock floor is restored by [recovery.ReplayWAL] itself (rmp #2522),
 	// as it always was on the full-stack path: this harness used to carry a
 	// hand-copied duplicate of that restore, which is exactly the shape of bug

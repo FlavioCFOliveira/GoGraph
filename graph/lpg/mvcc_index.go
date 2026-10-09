@@ -33,6 +33,8 @@ package lpg
 //     the caller falls back to counting the filtered scan otherwise.
 
 import (
+	"context"
+	"math/bits"
 	"slices"
 	"sync"
 
@@ -58,7 +60,69 @@ type idxEntry struct {
 // Lazily allocated, so a graph that has never removed a label holds nothing.
 type deferredIdx struct {
 	pending map[idxEntry]commitStamp
-	mu      sync.Mutex
+	// retiring names the pending keys a node RETIREMENT deferred, as opposed to
+	// a label removal (rmp #2964). The distinction decides who may cancel one: a
+	// label removal is withdrawn by the label coming back
+	// ([Graph.setNodeLabelInfo]); a retirement's removals only by the node coming
+	// back ([Graph.restoreLabelBitmaps]). A label re-asserted on a node whose
+	// retirement is in flight or done does not make it a member again, and
+	// cancelling on it left a deleted node in the label bitmap for good.
+	//
+	// A SEPARATE map that only retirements populate, so label churn pays nothing
+	// for it: a flag in pending's value widened every slot of that map, which a
+	// plain add/remove cycle reallocates (measured at +64 B/op). Every key in it
+	// is also in pending, and it is guarded by mu with pending.
+	retiring map[idxEntry]struct{}
+	// shadow keeps, for a pending key whose stamp a deferral by ANOTHER
+	// transaction replaced, the stamp it replaced (rmp #2947, audit F4). One key
+	// is one removal of one bitmap entry, but two transactions can owe it at once:
+	// a node retirement claims the node's existence and not its label store, so a
+	// peer's label removal on the same node can still defer the same key before
+	// that peer is refused by its own cross-check. Replacing the stamp outright
+	// made the removal hang on the LAST deferrer alone — when the peer then
+	// aborted, its withdrawal dropped the key, and with it the retirement's
+	// removal: the deleted node stayed in the label bitmap for good. Withdrawing an
+	// aborted stamp now reinstates the one it replaced instead.
+	//
+	// One level is enough: two removals of the same label by two transactions
+	// conflict on the label store, and two retirements of the same node on the
+	// existence store, so at most one of each can be pending on a key at once.
+	// Allocated only when a replacement first happens, guarded by mu.
+	shadow map[idxEntry]shadowStamp
+	mu     sync.Mutex
+}
+
+// shadowStamp is a replaced pending stamp and whether the key was a
+// retirement's removal under it; see [deferredIdx.shadow].
+type shadowStamp struct {
+	st       commitStamp
+	retiring bool
+}
+
+// dropLocked removes k from every map, releasing each when it empties. The
+// caller holds mu.
+func (d *deferredIdx) dropLocked(k idxEntry) {
+	delete(d.pending, k)
+	if len(d.pending) == 0 {
+		d.pending = nil
+	}
+	if d.retiring != nil {
+		delete(d.retiring, k)
+		if len(d.retiring) == 0 {
+			d.retiring = nil
+		}
+	}
+	d.dropShadowLocked(k)
+}
+
+// dropShadowLocked forgets k's replaced stamp. The caller holds mu.
+func (d *deferredIdx) dropShadowLocked(k idxEntry) {
+	if d.shadow != nil {
+		delete(d.shadow, k)
+		if len(d.shadow) == 0 {
+			d.shadow = nil
+		}
+	}
 }
 
 // deferLabelIndexRemoval records that id should leave lid's bitmap, without
@@ -66,6 +130,10 @@ type deferredIdx struct {
 //
 // Returns false when versioning is disarmed, in which case the caller removes
 // the entry immediately as it always did.
+//
+// retire marks a removal made by a node retirement; see [deferredIdx.retiring].
+// It is sticky: a key once deferred by a retirement stays a retirement's removal
+// when a later label removal re-defers it.
 //
 // # Whose instant the removal is stamped with (rmp #2303, MVCC B1)
 //
@@ -125,7 +193,7 @@ type deferredIdx struct {
 // label can still find it, and no reader's snapshot can legitimately see an add
 // made by a transaction that is aborting. This is the same exemption
 // [writeCtx.undoing] already grants the conflict test, and for the same reason.
-func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID, tx *writeCtx) bool {
+func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID, tx *writeCtx, retire bool) bool {
 	if !g.indexRemovalDeferrable(tx) {
 		return false
 	}
@@ -135,8 +203,28 @@ func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID, tx *wr
 	if g.idxDeferred.pending == nil {
 		g.idxDeferred.pending = make(map[idxEntry]commitStamp, 8)
 	}
-	_, existed := g.idxDeferred.pending[k]
+	prev, existed := g.idxDeferred.pending[k]
+	if existed && (prev.info == nil || prev.info != info) {
+		// Another transaction's removal of the same entry is pending: keep its
+		// stamp, so this one's abort reinstates it ([deferredIdx.shadow]).
+		if g.idxDeferred.shadow == nil {
+			g.idxDeferred.shadow = make(map[idxEntry]shadowStamp, 1)
+		}
+		_, wasRetiring := g.idxDeferred.retiring[k]
+		g.idxDeferred.shadow[k] = shadowStamp{st: prev, retiring: wasRetiring}
+	}
 	g.idxDeferred.pending[k] = commitStamp{info: info, ts: ts}
+	if tx != nil {
+		// An abort sweeps the deferred removals only when it wrote one; see
+		// [Graph.withdrawAbortedNow].
+		tx.tx.Touch(touchedIdxRemoval)
+	}
+	if retire {
+		if g.idxDeferred.retiring == nil {
+			g.idxDeferred.retiring = make(map[idxEntry]struct{}, 4)
+		}
+		g.idxDeferred.retiring[k] = struct{}{}
+	}
 	g.idxDeferred.mu.Unlock()
 	if !existed {
 		g.idxPendingActive.Add(1)
@@ -180,18 +268,24 @@ func (g *Graph[N, W]) indexRemovalDeferrable(tx *writeCtx) bool {
 // failed statement stripped, and without this the strip's deferred removal
 // would still fire at the next sweep and delete an entry that is legitimately
 // present again.
-func (g *Graph[N, W]) cancelDeferredIndexRemoval(lid uint32, id graph.NodeID) {
+//
+// retirements says whether a removal made by a node retirement may be withdrawn
+// too. Only a revival passes true; a label re-assert passes false, because the
+// node it re-labels is still going away (rmp #2964, see [deferredIdx.retiring]).
+func (g *Graph[N, W]) cancelDeferredIndexRemoval(lid uint32, id graph.NodeID, retirements bool) {
 	if g.idxPendingActive.Load() == 0 {
 		return
 	}
 	k := idxEntry{id: id, lid: lid}
 	g.idxDeferred.mu.Lock()
 	_, existed := g.idxDeferred.pending[k]
-	if existed {
-		delete(g.idxDeferred.pending, k)
-		if len(g.idxDeferred.pending) == 0 {
-			g.idxDeferred.pending = nil
+	if existed && !retirements {
+		if _, retiring := g.idxDeferred.retiring[k]; retiring {
+			existed = false
 		}
+	}
+	if existed {
+		g.idxDeferred.dropLocked(k)
 	}
 	g.idxDeferred.mu.Unlock()
 	if existed {
@@ -247,10 +341,7 @@ func (g *Graph[N, W]) applyDeferredIndexRemovals(watermark uint64) int {
 		}
 	}
 	for _, k := range ready {
-		delete(g.idxDeferred.pending, k)
-	}
-	if len(g.idxDeferred.pending) == 0 {
-		g.idxDeferred.pending = nil
+		g.idxDeferred.dropLocked(k)
 	}
 	// Under the lock. See the comment above for the lost row this closes; the
 	// lock order is idxDeferred.mu then the index's own lock, which is the order
@@ -307,9 +398,36 @@ func (g *Graph[N, W]) IndexRemovalBacklog() int64 { return g.idxPendingActive.Lo
 // only thing entitled to mutate it allocated NOTHING — it never ran. The copy
 // existed solely to satisfy a promise no caller was using.
 //
+// It cannot be cancelled. A caller holding a statement's context uses
+// [Graph.LabelBitmapAsOfContext], which runs the same correction and abandons it
+// when the context ends.
+//
 // Safe for concurrent use.
 func (g *Graph[N, W]) LabelBitmapAsOf(lid LabelID, s *Snapshot) *roaring64.Bitmap {
-	return g.labelBitmapAsOfFiltered(s, oneLabel(lid),
+	// context.Background is never cancelled, so the error is always nil.
+	bm, _ := g.LabelBitmapAsOfContext(context.Background(), lid, s)
+	return bm
+}
+
+// LabelBitmapAsOfContext is [Graph.LabelBitmapAsOf] under a context: the same
+// answer, with the correction abandoned when ctx ends (rmp #3010).
+//
+// The correction is O(suspects) — the churn the reclaimer has not yet caught up
+// with — and with 150 000 uncommitted nodes in a label it measured tens of
+// milliseconds, several hundred under the race detector, during which a cancelled
+// statement could not return. It now observes ctx between its phases and every
+// [correctCtxStride] suspects.
+//
+// On cancellation it returns (nil, ctx.Err()). It NEVER returns a partially
+// corrected bitmap: the correction mutates a private copy, and an abandoned copy
+// is dropped rather than handed back, because a half-corrected membership set is
+// a wrong answer with nothing to mark it as one. The quiet path — no live history
+// for the label — does no work worth abandoning and does not consult ctx at all,
+// so a read-only workload pays nothing for the context.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) LabelBitmapAsOfContext(ctx context.Context, lid LabelID, s *Snapshot) (*roaring64.Bitmap, error) {
+	return g.labelBitmapAsOfFiltered(ctx, s, oneLabel(lid),
 		func() (*roaring64.Bitmap, bool) { return g.nodeIdx.BitmapShared(uint32(lid)), false },
 		func(bag labelBag) bool { return bag.has(lid) })
 }
@@ -383,25 +501,18 @@ func (g *Graph[N, W]) LabelBitmapAsOf(lid LabelID, s *Snapshot) *roaring64.Bitma
 // costs a bitmap probe and, until the gate short-circuits it, two shard read locks.
 // The correction is idempotent so the duplicates were harmless; they were never
 // free.
-func (g *Graph[N, W]) labelBitmapAsOfFiltered(s *Snapshot, ls labelSet, acquire func() (*roaring64.Bitmap, bool), want func(labelBag) bool) *roaring64.Bitmap {
-	preLive := g.churnLive(ls)
-	var pre []graph.NodeID
-	if preLive {
-		pre = g.appendSuspects(nil)
-	}
-	bm, owned := acquire()
-	postLive := g.churnLive(ls)
-	if !preLive && !postLive {
-		// No label this read concerns has a live suspect on either side of the
-		// acquire, so no member of this bitmap can differ from what s should see.
-		return bm
-	}
-	if !g.labelBitmapNeedsFilter(s) && len(pre) == 0 {
-		return bm
-	}
-	sus := pre
-	if postLive {
-		sus = g.appendSuspects(sus)
+//
+// # Cancellation (rmp #3010)
+//
+// ctx is consulted only once work worth abandoning has been done or is about to
+// be: after each suspect sample, before the private copy, and inside
+// [Graph.correctBitmapOver]. A cancelled read returns (nil, ctx.Err()) and drops
+// its private copy; nothing it touched is shared, so abandoning it leaves no
+// trace. The quiet path never reads ctx.
+func (g *Graph[N, W]) labelBitmapAsOfFiltered(ctx context.Context, s *Snapshot, ls labelSet, acquire func() (*roaring64.Bitmap, bool), want func(labelBag) bool) (*roaring64.Bitmap, error) {
+	bm, owned, sus, correct, err := g.labelAsOfSample(ctx, s, ls, acquire)
+	if err != nil || !correct {
+		return bm, err
 	}
 	if !owned {
 		// The correction mutates, so it needs a private copy — and only here.
@@ -410,24 +521,234 @@ func (g *Graph[N, W]) labelBitmapAsOfFiltered(s *Snapshot, ls labelSet, acquire 
 		// where it was.
 		bm = bm.Clone()
 	}
-	g.correctBitmapOver(bm, s, want, dedupSuspects(sus))
-	return bm
+	if err := g.correctBitmapOver(ctx, bm, s, want, sus); err != nil {
+		// bm is private and half-corrected: drop it, never return it.
+		return nil, err
+	}
+	return bm, nil
 }
 
-// dedupSuspects sorts and compacts the suspect union in place.
+// labelAsOfSample is the gate-acquire-sample half of
+// [Graph.labelBitmapAsOfFiltered], shared with [Graph.labelCountAsOfFiltered] so
+// the two answers rest on ONE sampling protocol rather than two copies of it.
 //
-// Sorting rather than hashing: the set is small (tens to low thousands), the ids
-// are integers, and a map would allocate on a path whose entire purpose is to
-// allocate as little as possible. The ascending order is a small extra win — the
-// two probes that follow are keyed on the id, so the shard each one lands in walks
-// in a repeating cycle rather than at random.
+// It returns the acquired image bm and whether it is private (owned), and, when a
+// correction is owed (correct), the deduplicated suspect set it must run over.
+// When correct is false, bm is already the answer for s. On cancellation it
+// returns ctx.Err() and nothing else is meaningful.
+//
+// Every ordering claim [Graph.labelBitmapAsOfFiltered] documents is a claim about
+// THIS function: the pre-sample before acquire, the post-sample and the departed
+// comparison after it. bm is never written here.
+func (g *Graph[N, W]) labelAsOfSample(ctx context.Context, s *Snapshot, ls labelSet, acquire func() (*roaring64.Bitmap, bool)) (bm *roaring64.Bitmap, owned bool, sus []graph.NodeID, correct bool, err error) {
+	preLive := g.churnLive(ls)
+	var pre []graph.NodeID
+	if preLive {
+		pre = g.appendSuspects(nil)
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, false, nil, false, cerr
+		}
+	}
+	// The image identities are taken BEFORE the acquire for a conjunction, whose
+	// acquire builds a private intersection. A single-label acquire returns the
+	// shared image itself, which IS its identity, so it costs no extra lookup.
+	var imgs labelImageIDs
+	if ls.conj {
+		imgs = g.labelImages(ls)
+	}
+	bm, owned = acquire()
+	if !ls.conj {
+		imgs.one = bm
+		if owned {
+			imgs = g.labelImages(ls)
+		}
+	}
+	postLive := g.churnLive(ls)
+	// quiet: no label this read concerns has a live suspect on either side of
+	// the acquire. unfiltered: no history a snapshot could disagree with, and
+	// nothing sampled before the acquire. Either way the post-sample is not
+	// taken, exactly as before.
+	quiet := !preLive && !postLive
+	unfiltered := !quiet && !g.labelBitmapNeedsFilter(s) && len(pre) == 0
+	sus = pre
+	if postLive && !unfiltered {
+		sus = g.appendSuspects(sus)
+	}
+	// A member that ARRIVED and LEFT around the samples (rmp #2999). An aborted
+	// CREATE puts its node into the index, its rollback's undo takes it out, and
+	// the abort then withdraws its records and releases the gate — so a sample
+	// taken before the CREATE and one taken after the abort both miss it, and
+	// both gate reads can be quiet, while the acquired image still holds it. A
+	// reader older than the node counted a node that never existed for it.
+	//
+	// Such a member is exactly one the index no longer holds, so it is found by
+	// comparing the image with the present, and the comparison is skipped while
+	// no image this read concerns has been replaced. It is taken AFTER the
+	// post-sample, and that order is what closes the window: the paths that drop
+	// an entry of a node with suspect records — the undo of a label add, the
+	// withdrawal of an aborted one ([Graph.reclaimAbortedLabelsLocked]) and the
+	// deferred-removal sweep ([Graph.applyDeferredIndexRemovals]) — drop it
+	// before the records, or under the same lock, so a member the post-sample
+	// missed had already lost its entry, and this comparison sees that. Taken
+	// before the post-sample, it missed a rollback that completed in between.
+	departed := g.departedSince(ls, imgs, bm)
+	if (quiet || unfiltered) && len(departed) == 0 {
+		return bm, owned, nil, false, nil
+	}
+	sus = append(sus, departed...)
+	sus = dedupSuspects(sus)
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, false, nil, false, cerr
+	}
+	return bm, owned, sus, true, nil
+}
+
+// labelImageIDs is the identity of every label image a read of ls depends on:
+// [label.Index.BitmapShared]'s shared images, which the index REPLACES on every
+// mutation of the label and never edits. Two equal sets therefore mean no
+// member was added to or removed from any of those labels in between.
+//
+// The single-label form allocates nothing.
+type labelImageIDs struct {
+	one  *roaring64.Bitmap
+	many []*roaring64.Bitmap
+}
+
+// labelImages returns the current [labelImageIDs] of ls.
+func (g *Graph[N, W]) labelImages(ls labelSet) labelImageIDs {
+	if !ls.conj {
+		return labelImageIDs{one: g.nodeIdx.BitmapShared(uint32(ls.one))}
+	}
+	many := make([]*roaring64.Bitmap, len(ls.many))
+	for i, lid := range ls.many {
+		many[i] = g.nodeIdx.BitmapShared(uint32(lid))
+	}
+	return labelImageIDs{many: many}
+}
+
+// same reports whether no image changed between im and o.
+func (im labelImageIDs) same(o labelImageIDs) bool {
+	if im.one != o.one || len(im.many) != len(o.many) {
+		return false
+	}
+	for i := range im.many {
+		if im.many[i] != o.many[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// departedSince returns the members of bm, an image acquired after before was
+// taken, that the index no longer holds — the members a withdrawal or a sweep
+// removed after the acquire. It returns nil without comparing anything while
+// none of the label images before names has been replaced, and when bm is
+// empty.
+//
+// A departed member is handed to [Graph.correctBitmapOver] as a suspect, which
+// decides it from the versioned stores like any other: a member whose removal
+// the reader can see, or which never existed for it, leaves; one the reader
+// still sees as a member stays.
+func (g *Graph[N, W]) departedSince(ls labelSet, before labelImageIDs, bm *roaring64.Bitmap) []graph.NodeID {
+	if bm.IsEmpty() || before.same(g.labelImages(ls)) {
+		return nil
+	}
+	var now *roaring64.Bitmap
+	if ls.conj {
+		raw := make([]uint32, len(ls.many))
+		for i, l := range ls.many {
+			raw[i] = uint32(l)
+		}
+		now = g.nodeIdx.Intersect(raw...)
+	} else {
+		now = g.nodeIdx.BitmapShared(uint32(ls.one))
+	}
+	gone := roaring64.AndNot(bm, now)
+	if gone.IsEmpty() {
+		return nil
+	}
+	out := make([]graph.NodeID, 0, gone.GetCardinality())
+	it := gone.Iterator()
+	for it.HasNext() {
+		out = append(out, graph.NodeID(it.Next()))
+	}
+	return out
+}
+
+// dedupSuspects returns the suspect union deduplicated and in ascending order,
+// reusing ids' backing array.
+//
+// No hashing: a map would allocate on a path whose entire purpose is to allocate
+// as little as possible. The ascending order is a small extra win — the two
+// probes that follow are keyed on the id, so the shard each one lands in walks in
+// a repeating cycle rather than at random — and [Graph.correctBitmapOver] fills
+// its batched edits by appending in that order.
+//
+// # A bitset when the ids are dense, a sort otherwise (rmp #3011)
+//
+// The union is NOT always small. Every uncommitted node appears in two sources
+// (its label delta and its birth record) and the set is sampled twice, so 150 000
+// uncommitted nodes arrive as ~600 000 ids, and sorting them was 68% of a whole
+// correction: 26 ms of 38 ms, measured on example 37's L17 shape. Node ids are
+// allocated densely, so the union of a churning population usually spans a range
+// not much wider than itself. When it does — when one bit per id of the span
+// costs no more memory than the slice already holds — the ids are marked in a
+// bitset and read back in order: O(n + span/64) with one allocation of span/8
+// bytes. Measured against the sort on a 4x-duplicated dense union, Apple M4:
+// 36.8 ns vs 108 ns at 8 distinct ids, 22.0 µs vs 536 µs at 4096, 0.76 ms vs
+// 33.7 ms at 150 000.
+//
+// A SPARSE union — a few ids spread over a wide range — would make the bitset
+// larger than the input, so it keeps the in-place sort, which allocates nothing.
 func dedupSuspects(ids []graph.NodeID) []graph.NodeID {
 	if len(ids) < 2 {
 		return ids
 	}
-	slices.Sort(ids)
-	return slices.Compact(ids)
+	lo, hi := ids[0], ids[0]
+	for _, v := range ids[1:] {
+		lo = min(lo, v)
+		hi = max(hi, v)
+	}
+	words := uint64(hi-lo)/64 + 1
+	if words > uint64(len(ids)) {
+		slices.Sort(ids)
+		return slices.Compact(ids)
+	}
+	set := make([]uint64, words)
+	for _, v := range ids {
+		d := uint64(v - lo)
+		set[d>>6] |= 1 << (d & 63)
+	}
+	// Writing into ids while reading set is safe: the marks are complete, and
+	// the output can never be longer than the input it replaces.
+	out := ids[:0]
+	for wi, w := range set {
+		for w != 0 {
+			out = append(out, lo+graph.NodeID(uint64(wi)<<6|uint64(bits.TrailingZeros64(w))))
+			w &= w - 1
+		}
+	}
+	return out
 }
+
+// correctCtxStride is how many suspects [Graph.correctBitmapOver] decides
+// between two reads of its context (rmp #3010). A power of two, so the test is a
+// mask.
+//
+// It is sized by the per-suspect cost, measured on example 37's L17 shape (150 000
+// uncommitted nodes, Apple M4): a correction of 150 000 suspects took 7.2-10.3 ms,
+// so 4096 suspects cost 0.20-0.28 ms between two reads, and 4.1 ms under the race
+// detector (150 ms per correction). The read itself — one ctx.Err() per 4096
+// suspects — is lost in the cost of the probes around it. The two suspect samples
+// before the walk (~5 ms for 600 000 ids, ~24 ms under race) are now the longest
+// stretch without a read.
+const correctCtxStride = 4096
+
+// correctInlineEdits is how many removals, and separately how many additions,
+// [Graph.correctBitmapOver] applies to the bitmap in place before it gathers the
+// rest for one bulk set operation. Below it a correction allocates nothing; above
+// it the per-edit container re-sizing would dominate (rmp #2996).
+const correctInlineEdits = 64
 
 // correctBitmapOver adjusts bm in place so it describes s rather than the present,
 // against a suspect set the CALLER sampled — so that the sample can span the clone
@@ -455,40 +776,112 @@ func dedupSuspects(ids []graph.NodeID) []graph.NodeID {
 // ([label.Index.BitmapShared]), and it clones it before calling this precisely
 // because this mutates. Calling this with a shared bitmap corrupts the index's
 // published image for every concurrent reader, silently.
-func (g *Graph[N, W]) correctBitmapOver(bm *roaring64.Bitmap, s *Snapshot, want func(labelBag) bool, suspects []graph.NodeID) {
+//
+// # The decisions are COLLECTED, then applied as two set operations (rmp #2996)
+//
+// Each per-member bm.Remove re-sizes the container it lands in — a run
+// container recounts every run to choose its cheapest form — so k removals
+// cost O(k × runs). With 150 000 uncommitted nodes of eight open transactions
+// in the label, a correction measured 61-67 ms, paid twice by the planner's
+// cardinality estimate and again by every scan's Init. The first
+// [correctInlineEdits] edits of each kind are still applied in place, which
+// keeps the common handful of edits allocation-free; every edit after them is
+// gathered into a bitmap, which an ascending suspect list fills by appending,
+// and applied with one AndNot or one Or.
+//
+// Deferring an edit changes no decision: each decision reads bm.Contains for
+// its own id only, the suspects are deduplicated by the caller, and a member
+// that leaves fails exactly the test that would add it back, so no id is both
+// removed and added.
+//
+// # Cancellation (rmp #3010)
+//
+// ctx is read every [correctCtxStride] suspects. On cancellation this returns
+// ctx.Err() with bm PARTIALLY corrected — some edits applied in place, the
+// batched ones not — and the caller must discard bm. That is why the context is
+// read here and not by a caller between chunks: only the owner of the private
+// copy can guarantee it is dropped.
+func (g *Graph[N, W]) correctBitmapOver(ctx context.Context, bm *roaring64.Bitmap, s *Snapshot, want func(labelBag) bool, suspects []graph.NodeID) error {
 	// Every shard lock is RELEASED before the first check runs; see
 	// [Graph.suspectNodes].
 	//
-	// The MEMBERSHIP TEST IS FIRST, and it decides which of the two probes is
-	// worth taking first after it. bm.Contains is a lock-free read of a bitmap
-	// this goroutine owns; NodeExistsAsOf takes the LIFE shard lock and
-	// labelBagTest takes the LABEL shard lock, in that order and never nested —
-	// the two are different locks, and the bag is consumed inside its own.
-	// `should` is the same predicate on both arms; only the order in which its
-	// two halves are evaluated differs, and && makes the cheaper refutation the
-	// one that runs first.
-	for _, id := range suspects {
+	// The MEMBERSHIP TEST IS FIRST: bm.Contains is a lock-free read of a bitmap
+	// this goroutine owns, and it selects the arm of [Graph.suspectFlips].
+	var drop, add *roaring64.Bitmap
+	var drops, adds int
+	for i, id := range suspects {
+		if i&(correctCtxStride-1) == correctCtxStride-1 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		if bm.Contains(uint64(id)) {
-			// A member LEAVES when the node is dead as of s, or when it has lost
-			// the label. Existence first: a suspect that is in this bitmap is
-			// normally there because it carries the label, so the discriminating
-			// half is the life record, and a dead node needs no bag resolution
-			// at all.
-			if !g.NodeExistsAsOf(id, s) || !g.labelBagTest(id, s, want) {
-				bm.Remove(uint64(id))
+			if g.suspectFlips(id, true, s, want) {
+				switch {
+				case drops < correctInlineEdits:
+					bm.Remove(uint64(id))
+				case drop == nil:
+					drop = roaring64.New()
+					fallthrough
+				default:
+					drop.Add(uint64(id))
+				}
+				drops++
 			}
 			continue
 		}
-		// A non-member is ADDED back only when the versioned bag actually wants
-		// the label — the hoisted add window of rmp #2681, or an index entry
-		// dropped despite the deferral. Label first: a suspect that is churning
-		// some OTHER label fails this test, and then the life shard is never
-		// touched for it at all. Adding it back is the safe direction when it
-		// does pass: a missing member is a silently lost row.
-		if g.labelBagTest(id, s, want) && g.NodeExistsAsOf(id, s) {
-			bm.Add(uint64(id))
+		if g.suspectFlips(id, false, s, want) {
+			switch {
+			case adds < correctInlineEdits:
+				bm.Add(uint64(id))
+			case add == nil:
+				add = roaring64.New()
+				fallthrough
+			default:
+				add.Add(uint64(id))
+			}
+			adds++
 		}
 	}
+	if drop != nil {
+		bm.AndNot(drop)
+	}
+	if add != nil {
+		bm.Or(add)
+	}
+	return nil
+}
+
+// suspectFlips reports whether suspect id's membership in an image acquired by
+// [Graph.labelAsOfSample] is WRONG for s: a member that s sees dead or without
+// the wanted labels, or a non-member that s sees alive and carrying them.
+//
+// It is the one decision [Graph.correctBitmapOver] applies to a private copy and
+// [Graph.labelCountAsOfFiltered] applies to a count, so the bitmap and the number
+// cannot disagree about any suspect.
+//
+// The MEMBERSHIP TEST is the caller's, and it decides which of the two probes is
+// worth taking first. NodeExistsAsOf takes the LIFE shard lock and labelBagTest
+// takes the LABEL shard lock, in that order and never nested — the two are
+// different locks, and the bag is consumed inside its own. The predicate is the
+// same on both arms; only the order in which its halves are evaluated differs,
+// and && makes the cheaper refutation the one that runs first.
+func (g *Graph[N, W]) suspectFlips(id graph.NodeID, member bool, s *Snapshot, want func(labelBag) bool) bool {
+	if member {
+		// A member LEAVES when the node is dead as of s, or when it has lost
+		// the label. Existence first: a suspect that is in this bitmap is
+		// normally there because it carries the label, so the discriminating
+		// half is the life record, and a dead node needs no bag resolution
+		// at all.
+		return !g.NodeExistsAsOf(id, s) || !g.labelBagTest(id, s, want)
+	}
+	// A non-member is ADDED back only when the versioned bag actually wants
+	// the label — the hoisted add window of rmp #2681, or an index entry
+	// dropped despite the deferral. Label first: a suspect that is churning
+	// some OTHER label fails this test, and then the life shard is never
+	// touched for it at all. Adding it back is the safe direction when it
+	// does pass: a missing member is a silently lost row.
+	return g.labelBagTest(id, s, want) && g.NodeExistsAsOf(id, s)
 }
 
 // suspectNodes returns every node a reader might disagree with the present
@@ -585,13 +978,26 @@ func (g *Graph[N, W]) appendSuspects(out []graph.NodeID) []graph.NodeID {
 // copy it must own in order to AND into — but a caller cannot tell the two apart
 // and must not have to.
 //
+// It cannot be cancelled; see [Graph.LabelsBitmapAsOfContext].
+//
 // Safe for concurrent use.
 func (g *Graph[N, W]) LabelsBitmapAsOf(lids []LabelID, s *Snapshot) *roaring64.Bitmap {
+	// context.Background is never cancelled, so the error is always nil.
+	bm, _ := g.LabelsBitmapAsOfContext(context.Background(), lids, s)
+	return bm
+}
+
+// LabelsBitmapAsOfContext is [Graph.LabelsBitmapAsOf] under a context, with the
+// cancellation contract of [Graph.LabelBitmapAsOfContext]: on cancellation it
+// returns (nil, ctx.Err()) and never a partially corrected bitmap.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) LabelsBitmapAsOfContext(ctx context.Context, lids []LabelID, s *Snapshot) (*roaring64.Bitmap, error) {
 	raw := make([]uint32, len(lids))
 	for i, l := range lids {
 		raw[i] = uint32(l)
 	}
-	return g.labelBitmapAsOfFiltered(s, manyLabels(lids),
+	return g.labelBitmapAsOfFiltered(ctx, s, manyLabels(lids),
 		func() (*roaring64.Bitmap, bool) { return g.nodeIdx.Intersect(raw...), true },
 		func(bag labelBag) bool {
 			for _, l := range lids {
@@ -650,6 +1056,11 @@ func (g *Graph[N, W]) labelBitmapNeedsFilter(s *Snapshot) bool {
 // filtered scan.
 //
 // Safe for concurrent use.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (g *Graph[N, W]) LabelCountExact(lid LabelID, s *Snapshot) (int64, bool) {
 	// THE GATE IS SAMPLED ON BOTH SIDES OF THE CARDINALITY, and the second
 	// sample is the whole of rmp #2688.
@@ -812,20 +1223,127 @@ func (g *Graph[N, W]) LabelCountExact(lid LabelID, s *Snapshot) (int64, bool) {
 // the first arm is that function's own post-sample, so any state it would answer
 // is answered here without a clone as well.
 //
+// It cannot be cancelled; see [Graph.LabelCountAsOfContext].
+//
 // Safe for concurrent use.
 func (g *Graph[N, W]) LabelCountAsOf(lid LabelID, s *Snapshot) int64 {
+	// context.Background is never cancelled, so the error is always nil.
+	n, _ := g.LabelCountAsOfContext(context.Background(), lid, s)
+	return n
+}
+
+// LabelCountAsOfContext is [Graph.LabelCountAsOf] under a context. When a
+// correction is owed it runs under ctx with the contract of
+// [Graph.LabelBitmapAsOfContext], and a cancelled count returns (0, ctx.Err())
+// rather than a partially corrected count.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) LabelCountAsOfContext(ctx context.Context, lid LabelID, s *Snapshot) (int64, error) {
 	n := int64(g.nodeIdx.Count(uint32(lid)))
 	// The seam sits HERE, between the two reads, because that is the only place
 	// from which the order above can be tested at all. See
 	// [Graph.labelCountAsOfWindowProbe].
 	g.fireLabelCountAsOfWindowProbe()
 	if !g.labelBitmapNeedsFilter(s) || !g.churnLive(oneLabel(lid)) {
-		return n
+		return n, nil
 	}
-	// A correction is genuinely owed, so the filtered bitmap is the only source
-	// of the number and its clone is not waste. This is the same cost the scan on
-	// this label pays anyway.
-	return int64(g.LabelBitmapAsOf(lid, s).GetCardinality())
+	// A correction is genuinely owed. It is COUNTED, not materialised (rmp #2776):
+	// see [Graph.labelCountAsOfFiltered].
+	return g.labelCountAsOfFiltered(ctx, s, lid)
+}
+
+// labelCountAsOfFiltered is [Graph.LabelBitmapAsOfContext]'s answer for one label,
+// reduced to its cardinality WITHOUT building the corrected bitmap (rmp #2776).
+//
+// # What it replaced
+//
+// With churn live on the counted label, [Graph.LabelCountAsOfContext] used to call
+// [Graph.LabelBitmapAsOfContext], which clones the label's shared image so that
+// [Graph.correctBitmapOver] can edit it, and then read GetCardinality off the
+// edited copy. The copy existed only to be counted: rmp #2776 recorded the
+// labelled count at 38 allocations with churn on the label against 20 drained.
+// Re-measured on cypher's TestReadPathAllocationCeiling third arm, Apple M4: 35
+// before this function and 23 after it in the plain build, 37 and 25 under -race;
+// the drained arms stay at 20.
+//
+// # Why counting gives the bitmap's number, exactly
+//
+// The sampling is not re-implemented: it is [Graph.labelAsOfSample], the very
+// function the bitmap path runs, with the same acquire the single-label bitmap
+// uses ([label.Index.BitmapShared]). Its suspects are deduplicated, and
+// [Graph.correctBitmapOver] decides each of them from that suspect's OWN
+// membership in the image and from [Graph.suspectFlips] alone, so no decision
+// depends on another edit. Its effect on the cardinality is therefore exactly
+// −1 for every member that flips and +1 for every non-member that flips, and
+// that sum is what this returns on top of the image's cardinality.
+//
+// # The cardinality and the membership are ONE observation
+//
+// Both are read from the same image, and the image is one instant of the label's
+// set: [label.Index.BitmapShared] publishes an object that is written once and
+// never again, because a write to the label replaces it rather than editing it.
+// So the raw count and every membership test describe the set at the acquire —
+// the instant [Graph.labelAsOfSample] brackets between its two suspect samples —
+// however long the walk takes and whatever writes land meanwhile.
+//
+// That is stronger than reading them under one entry lock, which rmp #2776 named
+// as the means: a lock bounds one critical section, and the post-acquire suspect
+// sample is gathered AFTER the instant it must be judged against, so its
+// memberships could not be read inside the same section. The image keeps the
+// instant available after the lock is gone. What must NOT happen is the
+// cardinality and the membership coming from two separate reads of the live
+// index — nodeIdx.Count and nodeIdx.Has — because a write landing between them
+// changes one and not the other, which is the race [Graph.LabelCountAsOf]'s
+// ordering defeats. [TestLabelCountAsOf_CountedCorrectionReadsOneInstant] lands
+// that write and fails on both inversions.
+//
+// # Cost
+//
+// No copy of the label: the image is shared with every other reader and is built
+// only on the first read after a write to the label, exactly as the bitmap path
+// builds it. What remains is the suspect sample, which the bitmap path pays too.
+//
+// On cancellation it returns (0, ctx.Err()), never a partial count.
+func (g *Graph[N, W]) labelCountAsOfFiltered(ctx context.Context, s *Snapshot, lid LabelID) (int64, error) {
+	want := func(bag labelBag) bool { return bag.has(lid) }
+	img, _, sus, correct, err := g.labelAsOfSample(ctx, s, oneLabel(lid),
+		func() (*roaring64.Bitmap, bool) {
+			g.fireLabelCountCorrectWindowProbe()
+			return g.nodeIdx.BitmapShared(uint32(lid)), false
+		})
+	if err != nil {
+		return 0, err
+	}
+	n := int64(img.GetCardinality())
+	if !correct {
+		return n, nil
+	}
+	for i, id := range sus {
+		if i&(correctCtxStride-1) == correctCtxStride-1 {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+		}
+		// img is shared and immutable: Contains is a lock-free read, and the image
+		// is never written here or anywhere else.
+		member := img.Contains(uint64(id))
+		if g.suspectFlips(id, member, s, want) {
+			if member {
+				n--
+			} else {
+				n++
+			}
+		}
+	}
+	return n, nil
+}
+
+// fireLabelCountCorrectWindowProbe runs the test-only seam described on
+// [Graph.labelCountCorrectWindowProbe]. It is a nil check in production.
+func (g *Graph[N, W]) fireLabelCountCorrectWindowProbe() {
+	if p := g.labelCountCorrectWindowProbe; p != nil {
+		p()
+	}
 }
 
 // fireLabelCountGateProbe runs the test-only seam described on
@@ -937,6 +1455,11 @@ func (g *Graph[N, W]) fireLabelCountAsOfWindowProbe() {
 // for that limit stated in full.
 //
 // Safe for concurrent use.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (g *Graph[N, W]) LabelCountBound(lid LabelID, s *Snapshot) (n int64, exact bool) {
 	raw := int64(g.nodeIdx.Count(uint32(lid)))
 	// The seam sits HERE, between the two reads, because that is the only place
@@ -993,6 +1516,11 @@ func (g *Graph[N, W]) LabelCountBound(lid LabelID, s *Snapshot) (n int64, exact 
 // for that limit stated in full.
 //
 // Safe for concurrent use.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (g *Graph[N, W]) LabelsCountExact(lids []LabelID, s *Snapshot) (int64, bool) {
 	if len(lids) == 0 {
 		return 0, false
@@ -1025,6 +1553,66 @@ func (g *Graph[N, W]) LabelsCountExact(lids []LabelID, s *Snapshot) (int64, bool
 		return int64(g.LabelsBitmapAsOf(lids, s).GetCardinality()), true
 	}
 	return int64(n), true
+}
+
+// LabelHistoryBacklog returns, in O(1), an upper bound on the number of suspects
+// a snapshot correction of any label bitmap would visit: the sum of the three
+// active counters [Graph.LabelCountBound] adds to the raw count. It is the
+// MVCC history — uncommitted, or committed and not yet reclaimed — that a
+// correction walks, so a caller can bound what an exact count would cost before
+// paying for it (rmp #3010).
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) LabelHistoryBacklog() int64 {
+	return g.labelDeltaActive.Load() + g.nodeLifeActive.Load() + g.idxPendingActive.Load()
+}
+
+// LabelsCountBound is [Graph.LabelCountBound] for a CONJUNCTION of at least two
+// labels: an UPPER BOUND on the number of nodes carrying every lid as of s,
+// whether that bound is exact, and ok=false when the conjunction is not
+// answerable (fewer than two labels).
+//
+// It exists for the planner's label-intersection gate (rmp #3010), which only
+// CHOOSES between two result-identical plans. [Graph.LabelsCountExact] answers it
+// by correcting the conjunction bitmap whenever any history is live, an
+// O(suspects) walk that the planning of a statement could not cancel. This
+// answers it in O(labels) with no correction at all.
+//
+// # Why the bound is sound
+//
+// It is [Graph.LabelCountBound]'s argument unchanged. The corrected conjunction
+// starts from the raw intersection and is corrected over the SUSPECT set, adding
+// at most one member per suspect, so
+//
+//	countAsOf(lids, s)  ≤  rawIntersection(lids) + |suspects|
+//
+// and the three active counters bound |suspects| without walking a shard. The
+// raw cardinality is read FIRST and the gate second, in the order — and with the
+// seam — [Graph.LabelCountBound] documents, so a write landing between the two
+// can only enlarge the answer.
+//
+// Because every label's bound adds the SAME churn term, comparing the bound of a
+// conjunction with the bound of one of its labels compares the raw counts: the
+// gate decides under churn exactly as it would on the raw index.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) LabelsCountBound(lids []LabelID, s *Snapshot) (n int64, exact, ok bool) {
+	if len(lids) < 2 {
+		return 0, false, false
+	}
+	raw := make([]uint32, len(lids))
+	for i, l := range lids {
+		raw[i] = uint32(l)
+	}
+	c, ok := g.nodeIdx.IntersectCardinality(raw...)
+	if !ok {
+		return 0, false, false
+	}
+	g.fireLabelCountWindowProbe()
+	if !g.labelBitmapNeedsFilter(s) {
+		return int64(c), true, true
+	}
+	return int64(c) + g.labelDeltaActive.Load() + g.nodeLifeActive.Load() + g.idxPendingActive.Load(), false, true
 }
 
 // deferralStamp resolves the instant a deferred index removal is charged to.

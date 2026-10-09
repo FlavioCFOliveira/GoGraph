@@ -116,7 +116,9 @@ func TestWriteLabels_BreakRequiresBothCollectors(t *testing.T) {
 	if err := g.SetNodeLabel("a", "Person"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "KNOWS")
+	if err := g.SetEdgeLabel("a", "b", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
 
 	fired := false
 	calls := 0
@@ -127,7 +129,9 @@ func TestWriteLabels_BreakRequiresBothCollectors(t *testing.T) {
 			fired = true
 			// Fresh label on the EXISTING edge: visible to the edge walk,
 			// absent from the just-captured snapshot; node labels unchanged.
-			g.SetEdgeLabel("a", "b", "FRESH_EDGE")
+			if err := g.SetEdgeLabel("a", "b", "FRESH_EDGE"); err != nil {
+				t.Fatal(err)
+			}
 		}
 		return out
 	}

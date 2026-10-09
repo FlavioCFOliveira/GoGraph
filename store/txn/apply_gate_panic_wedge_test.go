@@ -45,6 +45,9 @@ package txn_test
 import (
 	"errors"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -386,6 +389,66 @@ func TestApplyGate_NoCommitPathPanicSiteWedgesTheStore(t *testing.T) {
 	}
 }
 
+// callerScopedBackend forwards to inner only the events emitted by the goroutine
+// that installed it, and drops every other (rmp #2978).
+//
+// The backend is process-wide, so while one is installed it also receives the
+// events of goroutines the commit under test does not own — above all the
+// graph's background vacuum ([lpg.Graph] vacuumLoop), which samples
+// "lpg.mvcc.vacuum.pass" and publishes gauges on its own schedule. Unscoped, the
+// recording backend appended from two goroutines (a data race), the vacuum's
+// events entered the enumerated surface, and an injected panic could fire on the
+// vacuum goroutine, where nothing recovers it, and crash the process. The commit
+// entry points run on the caller's goroutine, so scoping by goroutine keeps every
+// commit-path site and admits nothing else.
+//
+// owner and inner are set before the backend is published and never written
+// again, so the other goroutines only read them; inner is called only by owner.
+type callerScopedBackend struct {
+	owner uint64
+	inner metrics.Backend
+}
+
+// scopeToCaller returns inner scoped to the calling goroutine.
+func scopeToCaller(inner metrics.Backend) metrics.Backend {
+	return &callerScopedBackend{owner: goroutineID(), inner: inner}
+}
+
+func (b *callerScopedBackend) IncCounter(name string, delta uint64) {
+	if goroutineID() == b.owner {
+		b.inner.IncCounter(name, delta)
+	}
+}
+
+func (b *callerScopedBackend) ObserveLatency(name string, d time.Duration) {
+	if goroutineID() == b.owner {
+		b.inner.ObserveLatency(name, d)
+	}
+}
+
+func (b *callerScopedBackend) SetGauge(name string, v float64) {
+	if goroutineID() == b.owner {
+		b.inner.SetGauge(name, v)
+	}
+}
+
+// goroutineID returns the calling goroutine's id, parsed from the header line
+// runtime.Stack writes ("goroutine 42 [running]:"). Test-only: the runtime
+// exposes no other way to name the goroutine an event comes from.
+func goroutineID() uint64 {
+	var buf [64]byte
+	s := string(buf[:runtime.Stack(buf[:], false)])
+	s = strings.TrimPrefix(s, "goroutine ")
+	if i := strings.IndexByte(s, ' '); i > 0 {
+		s = s[:i]
+	}
+	id, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		panic("goroutineID: unparsable stack header: " + err.Error())
+	}
+	return id
+}
+
 // enumerateCommitEvents runs one clean commit under a recording backend and
 // returns the ordered names of the metrics events it emitted.
 func enumerateCommitEvents(t *testing.T, kind commitKind) []string {
@@ -396,7 +459,7 @@ func enumerateCommitEvents(t *testing.T, kind commitKind) []string {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	rec := &recordingBackend{}
-	metrics.SetBackend(rec)
+	metrics.SetBackend(scopeToCaller(rec))
 	err := kind.run(tx)
 	metrics.SetBackend(nil)
 	if err != nil {
@@ -409,7 +472,7 @@ func enumerateCommitEvents(t *testing.T, kind commitKind) []string {
 // whatever the commit panics with — standing in for the embedder's own
 // containment boundary — and restores the default backend immediately.
 func commitUnderBackend(tx *txn.Tx[string, int64], kind commitKind, backend metrics.Backend) (recovered any) {
-	metrics.SetBackend(backend)
+	metrics.SetBackend(scopeToCaller(backend))
 	defer metrics.SetBackend(nil)
 	defer func() { recovered = recover() }()
 	_ = kind.run(tx)

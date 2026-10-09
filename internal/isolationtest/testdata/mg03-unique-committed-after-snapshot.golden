@@ -1,0 +1,52 @@
+spec mg03-unique-committed-after-snapshot: 2 sessions, 3 permutations
+# MG03. UNIQUE on (:K).k. s2 begins; s1 creates k='u' in an autocommit statement;
+# s2 MERGEs k='u'. When s1 committed first, s2's snapshot cannot see the node, so
+# its MERGE tries to create it and meets the committed value: a ConstraintViolation.
+# When s2's MERGE runs first, s2 holds the reservation and s1's CREATE is refused.
+# PostgreSQL REPEATABLE READ raises a serialization failure in the first case.
+
+starting permutation: s1c s2m s2c
+step s1c: CREATE (p:K {k:'u', v:'s1'}) RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2m: MERGE (p:K {k:'u'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+ERROR: exec: Merge: ON CREATE SetNodeProperty: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"u"|"s1"
+(1 row)
+
+starting permutation: s2m s1c s2c
+step s2m: MERGE (p:K {k:'u'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1c: CREATE (p:K {k:'u', v:'s1'}) RETURN p.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"u"|"s2"
+(1 row)
+
+starting permutation: s2m s2c s1c
+step s2m: MERGE (p:K {k:'u'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+step s1c: CREATE (p:K {k:'u', v:'s1'}) RETURN p.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"u"|"s2"
+(1 row)

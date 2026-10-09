@@ -2,7 +2,6 @@ package sim
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -146,11 +145,10 @@ func TestCrossLayer_ReplayIdempotence(t *testing.T) {
 	// non-faithful replay would diverge.
 	replayOnce := func() (int, int) {
 		g := lpg.New[string, float64](simulatorStoreConfig().graphConfig)
-		rh, err := disk.OpenFile(simWALPath, os.O_RDONLY)
+		reader, err := wal.OpenLogFS(simLogFS{disk: disk}, simWALPath)
 		if err != nil {
 			t.Fatalf("open WAL: %v", err)
 		}
-		reader := wal.NewReader(rh, rh)
 		rr, err := recovery.ReplayWAL[string, float64](
 			ctx, reader, g, txn.NewStringCodec(), txn.NewFloat64WeightCodec(),
 			txn.DefaultMaxTxnOps,

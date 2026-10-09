@@ -1,0 +1,125 @@
+spec ww04-update-rollback-then-delete-explicit: 2 sessions, 6 permutations
+# WW04, rollback arm (update rolls back), explicit second writer. s1 updates n and
+# ROLLS BACK; the vacuum is drained immediately after (H1); s2, open since before
+# s1's write, deletes n and commits. Only interleavings with the drain adjacent to
+# the rollback run.
+# The second writer is an EXPLICIT transaction that BEGINs before
+# either session's first step, so its snapshot predates the ROLLBACK. A ROLLBACK
+# aborts its transaction (rmp #2973): once it is drained, the older snapshot's write
+# must succeed, exactly as the autocommit arm's does. Before #2973 the ROLLBACK
+# published a commit record and this write was refused.
+
+starting permutation: s1u s1rb s1dr s2d s2c
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x ORDER BY name
+name|x
+----+-
+"m" |0
+(1 row)
+
+starting permutation: s1u s2d s1rb s1dr s2c
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s2d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2c: COMMIT
+ERROR: serialization conflict
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x ORDER BY name
+name|x
+----+-
+"m" |0
+"n" |0
+(2 rows)
+
+starting permutation: s1u s2d s2c s1rb s1dr
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s2d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x ORDER BY name
+name|x
+----+-
+"m" |0
+"n" |0
+(2 rows)
+
+starting permutation: s2d s1u s1rb s1dr s2c
+step s2d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x ORDER BY name
+name|x
+----+-
+"m" |0
+(1 row)
+
+starting permutation: s2d s1u s2c s1rb s1dr
+step s2d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x ORDER BY name
+name|x
+----+-
+"m" |0
+(1 row)
+
+starting permutation: s2d s2c s1u s1rb s1dr
+step s2d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x ORDER BY name
+name|x
+----+-
+"m" |0
+(1 row)

@@ -7,6 +7,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // disk_remove_tolerance_test.go — the engine-level half of rmp #2536.
@@ -125,6 +126,14 @@ func TestRemoveTolerance_RecoveryStaleStagingCleanupIsReachedFromTheRemovalSide(
 			writeSnapshotTo(t, disk, "db", g1, cs1)
 			// An aborted publish of a 9-node snapshot leaves a real staging tree.
 			strandStagingDirectory(t, disk, "db", 9)
+			// The store already carries its WAL prefix marker, as every store that
+			// has checkpointed does (rmp #3002). Without it the first recovery
+			// writes it, and that write's parent-directory fsync persists the
+			// pending unlink of the staging tree, closing the window this test
+			// crashes inside.
+			if err := wal.WritePrefixMarkerFS(simWALFS{disk: disk}, "db/wal"); err != nil {
+				t.Fatalf("write prefix marker: %v", err)
+			}
 
 			// First recovery. Its best-effort RemoveAll of the staging tree must
 			// find the leftover, and the arm decides whether that unlink sticks.

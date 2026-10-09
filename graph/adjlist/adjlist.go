@@ -36,6 +36,9 @@ import (
 	"context"
 	"errors"
 	"iter"
+	mathbits "math/bits"
+	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -215,6 +218,12 @@ type AdjList[N comparable, W any] struct {
 
 	size atomic.Uint64
 
+	// removeAllRoundsHookForTest is a TEST-ONLY seam, nil in production and with
+	// no exported setter: it is told how many rounds each undirected
+	// [AdjList.RemoveAllEdgesFrom] took to find a stable locked set, so a test can
+	// pin the bound of rmp #2947's audit finding F8.
+	removeAllRoundsHookForTest func(rounds int)
+
 	// handleSeq mints stable per-slot edge handles. It starts at 0 and every
 	// handle is handleSeq.Add(1), so handles begin at 1 and are never reused.
 	//
@@ -348,10 +357,46 @@ type adjShard[W any] struct {
 }
 
 // shardSlots holds the slot-pointer slice for a shard. It is replaced
-// atomically when the shard grows.
+// atomically when the shard grows, and whenever a write must not touch a
+// version that a [Snapshot] has pinned.
+//
+// # Pin-gated copy-on-write (rmp #2882)
+//
+// A write outside a commit window used to clone the WHOLE slot array, 8·V/256
+// bytes per write, so building a graph by unbracketed writes cost O(E·V):
+// 170.6 GiB, 44% of every byte the examples laboratory allocated
+// (docs/campaign-waste-hunt-2026-09-24.md, F1). The clone exists for one
+// reader only: a [Snapshot] must see its pinned version unchanged. Every other
+// reader — [loadEntry], the MVCC as-of accessors, the non-blocking
+// checkpointer — is already sound against an in-place atomic slot store, which
+// is exactly what a commit window's builder does (see [loadEntry] and
+// [AdjList.storeEntry]). No production code pins a Snapshot.
+//
+// So an unbracketed write stores the slot IN PLACE unless the version has been
+// pinned, and clones only then. state arbitrates between a writer and
+// [AdjList.PinSnapshot] without a lock: 0 = writable, 1 = an in-place store is
+// in progress, 2 = frozen by a pin, forever. A writer claims 0→1, stores, and
+// releases 1→0; a pinner claims 0→2, waiting out a claimed store. A pin
+// therefore either precedes a store (the writer's claim fails and it clones) or
+// follows it (the pin captures the stored slot), and a frozen version is never
+// written again.
+//
+// state shares a cache line with the slots header readers load, deliberately.
+// A writer's claim invalidates that line once per write, exactly as the
+// slotsRef store of the clone it replaces invalidated the line readers load
+// slotsRef from. Padding state onto its own 128-byte line was measured under
+// rmp #2882 at +6-12% on LoadEntry with no concurrent writer at all: it moves
+// shardSlots from the 32-byte size class to the 144-byte one.
 type shardSlots struct {
 	slots []unsafe.Pointer // each element holds *adjEntry[W]
+	state atomic.Uint32
 }
+
+const (
+	slotsWritable uint32 = iota
+	slotsStoring
+	slotsFrozen
+)
 
 // adjEntry is an immutable snapshot of a node's outgoing adjacency.
 // Once an entry is published to a shard slot via atomic.StorePointer
@@ -546,12 +591,22 @@ func (a *AdjList[N, W]) Mapper() *graph.Mapper[N] {
 // the authoritative registry. Order is O(shardCount) and intended for
 // occasional inspection rather than hot-path use. Implements
 // [graph.Graph].
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (a *AdjList[N, W]) Order() uint64 { return uint64(a.mapper.Len()) }
 
 // Size returns the number of edges currently in the graph. For an
 // undirected graph each AddEdge call is counted once; the mirrored
 // neighbour entry is stored but not double-counted. In multigraph
 // mode every parallel edge counts. Implements [graph.Graph].
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (a *AdjList[N, W]) Size() uint64 { return a.size.Load() }
 
 // Directed reports whether the graph is directed.
@@ -595,6 +650,11 @@ func (a *AdjList[N, W]) AddNode(n N) error { a.mapper.Intern(n); return nil }
 // HasEdge reports whether an edge from src to dst is present.
 // HasEdge is lock-free and allocation-free on the hot path.
 // Implements [graph.Graph].
+//
+// It reads the newest COMMITTED state: an entry a transaction has written and
+// not published is stepped back over to the one it replaced (rmp #2965, round
+// 5; see committedEntry). A transaction reads its own writes through its own
+// snapshot.
 func (a *AdjList[N, W]) HasEdge(src, dst N) bool {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
@@ -604,7 +664,7 @@ func (a *AdjList[N, W]) HasEdge(src, dst N) bool {
 	if !ok {
 		return false
 	}
-	e := loadEntry[W](&a.shards[srcID&shardMask], uint64(srcID)>>shardBits)
+	e := a.committedEntry(srcID)
 	if e == nil {
 		return false
 	}
@@ -790,6 +850,13 @@ func (ex edgeExtra) mirror() edgeExtra {
 // insertion can interleave between the two appends — so both directions
 // always reflect the same slot ordering.
 func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra, tx mvcc.Tx) error {
+	_, err := a.addEdgeReport(src, dst, w, ex, tx)
+	return err
+}
+
+// addEdgeReport is [AdjList.addEdge] reporting whether a slot was inserted: false
+// for a simple graph's duplicate, which leaves the adjacency as it was.
+func (a *AdjList[N, W]) addEdgeReport(src, dst N, w W, ex edgeExtra, tx mvcc.Tx) (bool, error) {
 	// EVERY slot gets a handle (rmp #2317). A caller that supplied one — the
 	// Cypher write path, a WAL replay re-stamping the handle the log recorded —
 	// keeps it, so identity is preserved verbatim across recovery. A caller that
@@ -805,71 +872,48 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra, tx mvcc.Tx) error
 	if a.cfg.Directed || srcID == dstID {
 		inserted, err := a.upsertEdge(srcID, dstID, w, ex, tx)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if inserted {
 			a.size.Add(1)
 		}
-		return nil
+		return inserted, nil
 	}
 
 	// Undirected, non-self-loop: both directions must be appended atomically.
-	srcShard := srcID & shardMask
-	dstShard := dstID & shardMask
+	// Both shard locks are taken in ascending shard order (once when the two
+	// endpoints share a shard), the order every multi-shard path in this package
+	// uses, so no concurrent goroutine can interleave between the two appends and
+	// no two such paths can deadlock.
+	lo, hi := a.lockPair(srcID, dstID)
+	defer a.unlockPair(lo, hi)
 
-	if srcShard == dstShard {
-		// Single shard covers both endpoints: one lock suffices.
-		inserted, err := a.upsertEdge(srcID, dstID, w, ex, tx)
-		if err != nil {
-			return err
-		}
-		if !inserted {
-			return nil
-		}
-		a.size.Add(1)
-		if _, err := a.upsertEdge(dstID, srcID, w, ex.mirror(), tx); err != nil {
-			// Both endpoints share a shard, so the forward append and this
-			// mirror append are already serialised; just undo the forward.
-			a.removeOneEdge(srcID, dstID, tx)
-			a.size.Add(^uint64(0))
-			return err
-		}
-		return nil
+	// A write that carries no transaction checks BOTH entries before it writes
+	// either, so a conflict on the mirror leaves the forward entry untouched
+	// (rmp #2947, see direct_conflict.go). A no-op for a transactional write.
+	if err := a.directConflictLockedID(tx, srcID); err != nil {
+		return false, err
 	}
-
-	// Different shards: acquire both locks in canonical (lower-index-first)
-	// order to prevent deadlock, then perform both appends inside the combined
-	// critical section so no concurrent goroutine can interleave between them.
-	sLo := &a.shards[min(srcShard, dstShard)]
-	sHi := &a.shards[max(srcShard, dstShard)]
-	sLo.mu.Lock()
-	sHi.mu.Lock()
+	if err := a.directConflictLockedID(tx, dstID); err != nil {
+		return false, err
+	}
 
 	inserted, err := a.upsertEdgeLocked(srcID, dstID, w, ex, tx)
-	if err != nil {
-		sHi.mu.Unlock()
-		sLo.mu.Unlock()
-		return err
+	if err != nil || !inserted {
+		return false, err
 	}
-	if !inserted {
-		sHi.mu.Unlock()
-		sLo.mu.Unlock()
-		return nil
-	}
-	// Forward slot appended. Now append the mirror under the same lock pair.
+	// Forward slot appended. Now append the mirror under the same locks.
 	if _, err := a.upsertEdgeLocked(dstID, srcID, w, ex.mirror(), tx); err != nil {
-		// Undo the forward append before releasing — we still hold both locks
-		// so the rollback is atomic with respect to any reader.
-		a.removeOneEdgeLocked(srcID, dstID, tx)
-		sHi.mu.Unlock()
-		sLo.mu.Unlock()
-		return err
+		// Undo the forward append before releasing — the locks are still held, so
+		// the rollback is atomic with respect to any reader. The mirror can fail
+		// only on shard capacity: both entries were checked above.
+		if cerr := a.removeOneEdgeLocked(srcID, dstID, tx); cerr != nil {
+			return false, errors.Join(err, cerr)
+		}
+		return false, err
 	}
-
-	sHi.mu.Unlock()
-	sLo.mu.Unlock()
 	a.size.Add(1)
-	return nil
+	return true, nil
 }
 
 // upsertEdge publishes a new adjacency snapshot for src that includes
@@ -929,6 +973,13 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 func (a *AdjList[N, W]) upsertEdgeSlotLocked(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) (bool, error) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
+	// FIRST, before any no-op early return: a write carrying no transaction
+	// that finds nothing to change may be looking at a peer's uncommitted
+	// change, and returning then would lose it to the peer's rollback
+	// (rmp #2947, the shape of rmp #2943). No-op for a transactional write.
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return false, err
+	}
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil {
@@ -1132,38 +1183,60 @@ func (a *AdjList[N, W]) growAuxEx(cur AuxColumn, oldLen int, ex edgeExtra) AuxCo
 // both directions. When no handle is present (plain AddEdge path) the mirror
 // falls back to first-match behaviour, which is correct in the single-writer
 // case that plain AddEdge implies.
-func (a *AdjList[N, W]) RemoveEdge(src, dst N) {
-	a.removeEdgeTx(src, dst, mvcc.Tx{})
+//
+// It returns a [*mvcc.Conflict] for [mvcc.StoreAdjacency], and changes
+// nothing, when an entry the removal would replace was published by a
+// transaction that has not committed (rmp #2947, see direct_conflict.go). An
+// undirected removal checks both entries under both shard locks before it
+// writes either.
+//
+// RemoveEdge is safe for concurrent use.
+func (a *AdjList[N, W]) RemoveEdge(src, dst N) error {
+	return a.removeEdgeTx(src, dst, mvcc.Tx{})
 }
 
 // removeEdgeTx is [AdjList.RemoveEdge] with the write's own transaction carried in
 // rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
 // none, which is what the exported form above passes.
-func (a *AdjList[N, W]) removeEdgeTx(src, dst N, tx mvcc.Tx) {
+func (a *AdjList[N, W]) removeEdgeTx(src, dst N, tx mvcc.Tx) error {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
-		return
+		return nil
 	}
 	dstID, ok := a.mapper.Lookup(dst)
 	if !ok {
-		return
+		return nil
 	}
-	removed, removedHandle := a.removeOneEdgeWithHandle(srcID, dstID, tx)
-	if !removed {
-		return
+	if a.cfg.Directed || srcID == dstID {
+		removed, _, err := a.removeOneEdgeWithHandle(srcID, dstID, tx)
+		if removed {
+			a.size.Add(^uint64(0))
+		}
+		return err
+	}
+	// Undirected: both entries under both locks, checked before either is
+	// written, so the two directions retire together or not at all.
+	lo, hi := a.lockPair(srcID, dstID)
+	defer a.unlockPair(lo, hi)
+	if err := a.directConflictLockedID(tx, srcID); err != nil {
+		return err
+	}
+	if err := a.directConflictLockedID(tx, dstID); err != nil {
+		return err
+	}
+	removed, removedHandle, err := a.removeOneEdgeWithHandleLocked(srcID, dstID, tx)
+	if err != nil || !removed {
+		return err
 	}
 	a.size.Add(^uint64(0))
-
-	if a.cfg.Directed || srcID == dstID {
-		return
-	}
 	// Mirror removal: prefer handle-based targeting when the removed slot
 	// carried a non-zero handle; fall back to first-match otherwise.
 	if removedHandle != 0 {
-		a.removeOneEdgeByHandle(dstID, srcID, removedHandle, tx)
+		_, err = a.removeOneEdgeByHandleLocked(dstID, srcID, removedHandle, tx)
 	} else {
-		a.removeOneEdge(dstID, srcID, tx)
+		err = a.removeOneEdgeLocked(dstID, srcID, tx)
 	}
+	return err
 }
 
 // RemoveEdgeByHandle removes the single directed-edge slot from src to dst
@@ -1182,36 +1255,53 @@ func (a *AdjList[N, W]) removeEdgeTx(src, dst N, tx mvcc.Tx) {
 // after concurrent parallel adds reshuffled slot positions. The edge counter
 // is decremented once for the logical edge.
 //
+// It refuses with a [*mvcc.Conflict], reporting false and changing nothing, on
+// the same terms as [AdjList.RemoveEdge] (rmp #2947).
+//
 // RemoveEdgeByHandle is safe for concurrent use.
-func (a *AdjList[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
+func (a *AdjList[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) (bool, error) {
 	return a.removeEdgeByHandleTx(src, dst, handle, mvcc.Tx{})
 }
 
 // removeEdgeByHandleTx is [AdjList.RemoveEdgeByHandle] with the write's own transaction carried in
 // rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
 // none, which is what the exported form above passes.
-func (a *AdjList[N, W]) removeEdgeByHandleTx(src, dst N, handle uint64, tx mvcc.Tx) bool {
+func (a *AdjList[N, W]) removeEdgeByHandleTx(src, dst N, handle uint64, tx mvcc.Tx) (bool, error) {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
-		return false
+		return false, nil
 	}
 	dstID, ok := a.mapper.Lookup(dst)
 	if !ok {
-		return false
+		return false, nil
 	}
-	if !a.removeOneEdgeByHandle(srcID, dstID, handle, tx) {
-		return false
+	if a.cfg.Directed || srcID == dstID {
+		removed, err := a.removeOneEdgeByHandle(srcID, dstID, handle, tx)
+		if removed {
+			a.size.Add(^uint64(0))
+		}
+		return removed, err
+	}
+	lo, hi := a.lockPair(srcID, dstID)
+	defer a.unlockPair(lo, hi)
+	if err := a.directConflictLockedID(tx, srcID); err != nil {
+		return false, err
+	}
+	if err := a.directConflictLockedID(tx, dstID); err != nil {
+		return false, err
+	}
+	removed, err := a.removeOneEdgeByHandleLocked(srcID, dstID, handle, tx)
+	if err != nil || !removed {
+		return false, err
 	}
 	a.size.Add(^uint64(0))
-
-	if a.cfg.Directed || srcID == dstID {
-		return true
-	}
 	// Undirected: retire the mirror slot carrying the same handle. A false
 	// return here is benign (the mirror may already be gone); the logical edge
 	// counter was decremented once above.
-	a.removeOneEdgeByHandle(dstID, srcID, handle, tx)
-	return true
+	if _, err := a.removeOneEdgeByHandleLocked(dstID, srcID, handle, tx); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // RemoveAllEdgesFrom removes all edges incident from src in O(d) time for a
@@ -1220,84 +1310,341 @@ func (a *AdjList[N, W]) removeEdgeByHandleTx(src, dst N, handle uint64, tx mvcc.
 //
 // For directed graphs the method zeroes src's adjacency slot atomically and
 // decrements the edge counter by the number of removed edges. For undirected
-// graphs it additionally removes the mirror entry (src from each dst's list)
-// with one removeOneEdge call per neighbour; those calls are each O(degree-of-
-// dst), which is O(1) for typical star topologies.
+// graphs it additionally removes the mirror entry (src from each dst's list).
 //
-// Concurrent readers observe either the full pre-deletion state or the post-
-// deletion state; no partial state is ever visible (the src slot is published
-// atomically, and each mirror removal is a separate atomic store).
+// An undirected removal holds the lock of every shard it writes — src's and
+// each neighbour's, taken in ascending shard order — for its whole duration, so
+// concurrent readers observe either the full pre-deletion state or the
+// post-deletion state of every entry it touches, and a write that carries no
+// transaction checks every one of those entries before it writes any. It
+// refuses with a [*mvcc.Conflict], changing nothing, when one of them was
+// published by a transaction that has not committed (rmp #2947).
 //
 // RemoveAllEdgesFrom is safe for concurrent use.
-func (a *AdjList[N, W]) RemoveAllEdgesFrom(src N) {
-	a.removeAllEdgesFromTx(src, mvcc.Tx{})
+func (a *AdjList[N, W]) RemoveAllEdgesFrom(src N) error {
+	return a.removeAllEdgesFromTx(src, mvcc.Tx{})
 }
 
 // removeAllEdgesFromTx is [AdjList.RemoveAllEdgesFrom] with the write's own transaction carried in
 // rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
 // none, which is what the exported form above passes.
-func (a *AdjList[N, W]) removeAllEdgesFromTx(src N, tx mvcc.Tx) {
+func (a *AdjList[N, W]) removeAllEdgesFromTx(src N, tx mvcc.Tx) error {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
-		return
+		return nil
 	}
-
-	s := &a.shards[srcID&shardMask]
-	intraIdx := uint64(srcID) >> shardBits
-
-	s.mu.Lock()
-	old := loadEntry[W](s, intraIdx)
-	if old == nil || len(old.neighbours) == 0 {
-		s.mu.Unlock()
-		return
-	}
-	// Publish nil atomically: readers after this store see an empty adjacency
-	// for src. storeEntry cannot fail here because the slot already exists.
-	_ = a.storeEntry(s, intraIdx, nil, tx)
-	removed := len(old.neighbours)
-	// Copy neighbour IDs before releasing the lock so the mirror-removal loop
-	// below is not affected by concurrent writes to the shard.
-	dsts := make([]graph.NodeID, removed)
-	copy(dsts, old.neighbours)
-	s.mu.Unlock()
-
-	// Every slot just published away was an in-edge of its destination. One
-	// call per SLOT, not per distinct destination, so parallel edges lose
-	// exactly as many recorded in-edges as the forward entry held.
-	for _, dstID := range dsts {
-		a.rev.remove(dstID, srcID)
-	}
-
-	// Adjust the edge counter atomically. The two's-complement trick
-	// (^uint64(removed-1)) is equivalent to -removed for unsigned arithmetic.
-	a.size.Add(^uint64(removed - 1))
 
 	if a.cfg.Directed {
-		return // no mirrors to clean up for directed graphs
+		// The destinations land in a caller-owned buffer, so a small degree costs
+		// no allocation, as the inline copy this replaced did not.
+		var buf [8]graph.NodeID
+		dsts, info, ts, err := a.removeAllEdgesDirectedLocked(srcID, tx, buf[:0])
+		if err != nil || len(dsts) == 0 {
+			return err
+		}
+		// Every slot just published away was an in-edge of its destination.
+		// One call per SLOT, not per distinct destination, so parallel edges
+		// lose exactly as many recorded in-edges as the forward entry held.
+		for _, dstID := range dsts {
+			a.rev.remove(dstID, srcID, info, ts)
+		}
+		// The two's-complement trick (^uint64(removed-1)) is -removed.
+		a.size.Add(^uint64(len(dsts) - 1))
+		return nil
 	}
-	// Undirected: remove src from each dst's list. Self-loops are already
-	// cleared by the slot zeroing above and must not be processed again.
-	for _, dstID := range dsts {
-		if dstID != srcID {
-			a.removeOneEdge(dstID, srcID, tx)
+
+	// Undirected: the set of entries to write is src's plus every neighbour's,
+	// and it is known only once src's entry has been read under its lock.
+	//
+	// THE LOCKED SET ONLY GROWS (rmp #2947, audit F8). Each round locks every
+	// shard of the set in ascending order and reads src's entry; when every shard
+	// the entry names is already in the set, the round removes and returns, and
+	// otherwise it adds the missing shards and starts again. A round that does
+	// not finish adds at least one shard, so a call finishes in at most
+	// shardCount rounds whatever concurrent appenders do. The previous form
+	// locked exactly the entry's CURRENT shards and restarted whenever the entry
+	// changed in between, which nothing bounded: measured at 1985 restarts and
+	// 3.17 s for one call against 64 appenders to the same node.
+	var locked shardSet
+	locked.add(uint64(srcID) & shardMask)
+	for round := 1; ; round++ {
+		need, finished, err := a.removeAllEdgesUndirectedRound(srcID, &locked, tx)
+		if finished {
+			a.noteRemoveAllRounds(round)
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		locked = need
+	}
+}
+
+// removeAllEdgesDirectedLocked is the locked half of a directed
+// [AdjList.RemoveAllEdgesFrom]: under src's shard lock it tests and empties
+// src's entry, and returns the destinations it held with the removal's stamp, so
+// the caller retires the reverse-index arcs after the lock is released. It
+// returns no destination when the entry was already empty. The destinations are
+// appended to dst, which the caller sizes.
+//
+// The lock is released by a deferred call, so a panic under it cannot leave the
+// shard locked: an implicit transaction's deferred settlement withdraws its
+// entries under these same shard locks ([AdjList.WithdrawTx]), and would
+// otherwise deadlock on the way out of the panic.
+func (a *AdjList[N, W]) removeAllEdgesDirectedLocked(srcID graph.NodeID, tx mvcc.Tx, dst []graph.NodeID) ([]graph.NodeID, *mvcc.CommitInfo, uint64, error) {
+	s := &a.shards[srcID&shardMask]
+	intraIdx := uint64(srcID) >> shardBits
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Before the empty-entry return, for the reason given on
+	// [AdjList.updateEntryAuxTx]: an entry a peer emptied and has not
+	// committed looks empty (rmp #2947).
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return nil, nil, 0, err
+	}
+	old := loadEntry[W](s, intraIdx)
+	if old == nil || len(old.neighbours) == 0 {
+		return nil, nil, 0, nil
+	}
+	// Publish nil atomically: readers after this store see an empty
+	// adjacency for src. It fails only on the direct-write conflict test,
+	// before anything is changed.
+	if err := a.storeEntry(s, intraIdx, nil, tx); err != nil {
+		return nil, nil, 0, err
+	}
+	info, ts := a.removalStamp(s, intraIdx)
+	return append(dst, old.neighbours...), info, ts, nil
+}
+
+// removeAllEdgesUndirectedRound is one round of an undirected
+// [AdjList.RemoveAllEdgesFrom]: it locks every shard in locked, in ascending
+// order, and either finishes the removal — finished is true and err is its
+// outcome — or returns the larger set the next round must lock. A conflict
+// refuses with finished false and err set, having changed nothing.
+//
+// locked is not modified, and the locks are released by a deferred call over
+// that same set, so a panic under them cannot leave any shard locked; see
+// [AdjList.removeAllEdgesDirectedLocked] for the deadlock that prevents.
+func (a *AdjList[N, W]) removeAllEdgesUndirectedRound(srcID graph.NodeID, locked *shardSet, tx mvcc.Tx) (need shardSet, finished bool, err error) {
+	s := &a.shards[srcID&shardMask]
+	intraIdx := uint64(srcID) >> shardBits
+	a.lockSet(locked)
+	defer a.unlockSet(locked)
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return need, false, err
+	}
+	old := loadEntry[W](s, intraIdx)
+	if old == nil || len(old.neighbours) == 0 {
+		return need, true, nil
+	}
+	need = *locked
+	for _, nb := range old.neighbours {
+		need.add(uint64(nb) & shardMask)
+	}
+	if need == *locked {
+		return need, true, a.removeAllEdgesUndirectedLocked(srcID, old, tx)
+	}
+	return need, false, nil
+}
+
+// shardSet is a set of adjacency shard indexes, one bit per shard, so the
+// expanding lock set of an undirected [AdjList.RemoveAllEdgesFrom] costs no
+// allocation per round.
+type shardSet [shardCount / 64]uint64
+
+// add puts shard sh in the set.
+func (ss *shardSet) add(sh uint64) { ss[sh>>6] |= 1 << (sh & 63) }
+
+// lockSet locks every shard in ss in ascending shard order, the order every
+// multi-shard path in this package takes.
+func (a *AdjList[N, W]) lockSet(ss *shardSet) {
+	for w, bits := range ss {
+		for b := bits; b != 0; b &= b - 1 {
+			a.shards[uint64(w)<<6|uint64(mathbits.TrailingZeros64(b))].mu.Lock()
 		}
 	}
+}
+
+// unlockSet releases every shard [AdjList.lockSet] locked.
+func (a *AdjList[N, W]) unlockSet(ss *shardSet) {
+	for w, bits := range ss {
+		for b := bits; b != 0; b &= b - 1 {
+			a.shards[uint64(w)<<6|uint64(mathbits.TrailingZeros64(b))].mu.Unlock()
+		}
+	}
+}
+
+// noteRemoveAllRounds reports how many rounds an undirected
+// [AdjList.RemoveAllEdgesFrom] took to a test-only observer.
+func (a *AdjList[N, W]) noteRemoveAllRounds(rounds int) {
+	if h := a.removeAllRoundsHookForTest; h != nil {
+		h(rounds)
+	}
+}
+
+// removeAllEdgesUndirectedLocked is the body of an undirected
+// [AdjList.RemoveAllEdgesFrom] once every shard it writes is locked and cur is
+// src's current entry.
+func (a *AdjList[N, W]) removeAllEdgesUndirectedLocked(srcID graph.NodeID, cur *adjEntry[W], tx mvcc.Tx) error {
+	// Every entry is checked before any is written (rmp #2947).
+	if err := a.directConflictLockedID(tx, srcID); err != nil {
+		return err
+	}
+	for _, dstID := range cur.neighbours {
+		if dstID == srcID {
+			continue
+		}
+		if err := a.directConflictLockedID(tx, dstID); err != nil {
+			return err
+		}
+	}
+	s := &a.shards[srcID&shardMask]
+	intraIdx := uint64(srcID) >> shardBits
+	if err := a.storeEntry(s, intraIdx, nil, tx); err != nil {
+		return err
+	}
+	info, ts := a.removalStamp(s, intraIdx)
+	removed := len(cur.neighbours)
+	for _, dstID := range cur.neighbours {
+		a.rev.remove(dstID, srcID, info, ts)
+	}
+	a.size.Add(^uint64(removed - 1))
+	// Remove src from each dst's list, ONE rewrite per distinct neighbour: a
+	// neighbour reached by k parallel edges loses its k mirror slots in a single
+	// compaction instead of k compactions of the same entry, so the work under
+	// the held locks is linear in the entries touched rather than quadratic in
+	// the multiplicity (rmp #2947, audit F8). Self-loops are already cleared by
+	// the slot zeroing above and must not be processed again.
+	dsts := slices.Clone(cur.neighbours)
+	slices.Sort(dsts)
+	for i := 0; i < len(dsts); {
+		j := i + 1
+		for j < len(dsts) && dsts[j] == dsts[i] {
+			j++
+		}
+		if dstID := dsts[i]; dstID != srcID {
+			if err := a.removeOccurrencesLocked(dstID, srcID, j-i, tx); err != nil {
+				return err
+			}
+		}
+		i = j
+	}
+	return nil
+}
+
+// removeOccurrencesLocked removes the first n slots of src's entry that point at
+// dst, in one rewrite of the entry, and retires one in-edge record per slot. It
+// is a no-op when the entry holds none. The caller holds src's shard lock.
+func (a *AdjList[N, W]) removeOccurrencesLocked(src, dst graph.NodeID, n int, tx mvcc.Tx) error {
+	s := &a.shards[src&shardMask]
+	intraIdx := uint64(src) >> shardBits
+	current := loadEntry[W](s, intraIdx)
+	if current == nil {
+		return nil
+	}
+	idxs := make([]int, 0, n)
+	for i, nb := range current.neighbours {
+		if nb == dst {
+			idxs = append(idxs, i)
+			if len(idxs) == n {
+				break
+			}
+		}
+	}
+	if len(idxs) == 0 {
+		return nil
+	}
+	var next *adjEntry[W]
+	if len(idxs) < len(current.neighbours) {
+		next = compactEntryAt(current, idxs)
+	}
+	if err := a.storeEntry(s, intraIdx, next, tx); err != nil {
+		return err
+	}
+	info, ts := a.removalStamp(s, intraIdx)
+	for range idxs {
+		a.rev.remove(dst, src, info, ts)
+	}
+	return nil
+}
+
+// compactEntryAt is [compactEntry] for several slots at once: it returns a new
+// entry equal to current with every slot in idxs — ascending, distinct, valid —
+// removed, every surviving slot keeping its handle, label and aux value.
+func compactEntryAt[W any](current *adjEntry[W], idxs []int) *adjEntry[W] {
+	if len(idxs) == 1 {
+		return compactEntry(current, idxs[0])
+	}
+	n := len(current.neighbours) - len(idxs)
+	drop := make([]bool, len(current.neighbours))
+	for _, i := range idxs {
+		drop[i] = true
+	}
+	next := &adjEntry[W]{neighbours: make([]graph.NodeID, 0, n)}
+	if current.weights != nil {
+		next.weights = make([]W, 0, n)
+	}
+	if current.handles != nil {
+		next.handles = make([]uint64, 0, n)
+	}
+	if current.labels != nil {
+		next.labels = make([]uint32, 0, n)
+	}
+	for i, nb := range current.neighbours {
+		if drop[i] {
+			continue
+		}
+		next.neighbours = append(next.neighbours, nb)
+		if current.weights != nil {
+			next.weights = append(next.weights, current.weights[i])
+		}
+		if current.handles != nil {
+			next.handles = append(next.handles, current.handles[i])
+		}
+		if current.labels != nil {
+			next.labels = append(next.labels, current.labels[i])
+		}
+	}
+	if current.aux != nil {
+		// AuxColumn excises one slot per call; descending order keeps every
+		// index still to be excised valid.
+		aux := current.aux
+		for k := len(idxs) - 1; k >= 0; k-- {
+			aux = aux.CompactSlot(idxs[k])
+		}
+		next.aux = aux
+	}
+	return next
 }
 
 // removeOneEdgeWithHandle publishes a new adjacency snapshot for src that
 // omits one occurrence of dst (first match). Returns (true, handle) when an
 // edge was removed, where handle is the handle value stored in the removed
-// slot (0 when no handle column is present).
-func (a *AdjList[N, W]) removeOneEdgeWithHandle(src, dst graph.NodeID, tx mvcc.Tx) (removed bool, handle uint64) {
+// slot (0 when no handle column is present), and the conflict that refused
+// the write, if any.
+func (a *AdjList[N, W]) removeOneEdgeWithHandle(src, dst graph.NodeID, tx mvcc.Tx) (removed bool, handle uint64, err error) {
 	s := &a.shards[src&shardMask]
-	intraIdx := uint64(src) >> shardBits
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return a.removeOneEdgeWithHandleLocked(src, dst, tx)
+}
+
+// removeOneEdgeWithHandleLocked is [AdjList.removeOneEdgeWithHandle] for a
+// caller that already holds src's shard lock.
+func (a *AdjList[N, W]) removeOneEdgeWithHandleLocked(src, dst graph.NodeID, tx mvcc.Tx) (removed bool, handle uint64, err error) {
+	s := &a.shards[src&shardMask]
+	intraIdx := uint64(src) >> shardBits
+	// FIRST, before any no-op early return: a write carrying no transaction
+	// that finds nothing to change may be looking at a peer's uncommitted
+	// change, and returning then would lose it to the peer's rollback
+	// (rmp #2947, the shape of rmp #2943). No-op for a transactional write.
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return false, 0, err
+	}
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil {
-		return false, 0
+		return false, 0, nil
 	}
 	idx := -1
 	for i, n := range current.neighbours {
@@ -1307,76 +1654,68 @@ func (a *AdjList[N, W]) removeOneEdgeWithHandle(src, dst graph.NodeID, tx mvcc.T
 		}
 	}
 	if idx < 0 {
-		return false, 0
+		return false, 0, nil
 	}
 	var removedH uint64
 	if current.handles != nil {
 		removedH = current.handles[idx]
 	}
-	if len(current.neighbours) == 1 {
-		// storeEntry cannot fail here because the slot already exists
-		// in the shard's slot array; no growth is required. Publish nil
-		// instead of an empty struct to avoid a small allocation on each
-		// last-edge removal; loadEntry handles nil slots correctly.
-		_ = a.storeEntry(s, intraIdx, nil, tx)
-		a.rev.remove(dst, src)
-		return true, removedH
+	if err := a.retireSlotLocked(s, intraIdx, current, idx, src, dst, tx); err != nil {
+		return false, 0, err
 	}
-	newEntry := compactEntry(current, idx)
-	// storeEntry cannot fail here: same slot, no growth required.
-	_ = a.storeEntry(s, intraIdx, newEntry, tx)
-	a.rev.remove(dst, src)
-	return true, removedH
+	return true, removedH, nil
 }
 
-// removeOneEdge publishes a new adjacency snapshot for src that omits
-// one occurrence of dst. Returns true when an edge was removed.
-func (a *AdjList[N, W]) removeOneEdge(src, dst graph.NodeID, tx mvcc.Tx) bool {
-	removed, _ := a.removeOneEdgeWithHandle(src, dst, tx)
-	return removed
+// retireSlotLocked publishes current without the slot at idx — or nil when it
+// is the last one, which avoids a small allocation per last-edge removal and
+// which loadEntry handles — and retires the matching in-edge record. The store
+// can fail only on the direct-write conflict test, before anything changed, so
+// a failure records nothing. The caller holds s.mu.
+func (a *AdjList[N, W]) retireSlotLocked(s *adjShard[W], intraIdx uint64, current *adjEntry[W], idx int, src, dst graph.NodeID, tx mvcc.Tx) error {
+	var next *adjEntry[W]
+	if len(current.neighbours) > 1 {
+		next = compactEntry(current, idx)
+	}
+	if err := a.storeEntry(s, intraIdx, next, tx); err != nil {
+		return err
+	}
+	info, ts := a.removalStamp(s, intraIdx)
+	a.rev.remove(dst, src, info, ts)
+	return nil
 }
 
-// removeOneEdgeLocked is the lock-free body of [AdjList.removeOneEdge].
-// The caller must already hold the shard mutex for src. This variant is
-// used by [AdjList.addEdge] to roll back a forward append while still
-// holding both shard locks.
-func (a *AdjList[N, W]) removeOneEdgeLocked(src, dst graph.NodeID, tx mvcc.Tx) {
-	s := &a.shards[src&shardMask]
-	intraIdx := uint64(src) >> shardBits
-
-	current := loadEntry[W](s, intraIdx)
-	if current == nil {
-		return
-	}
-	idx := -1
-	for i, n := range current.neighbours {
-		if n == dst {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return
-	}
-	if len(current.neighbours) == 1 {
-		_ = a.storeEntry(s, intraIdx, nil, tx)
-		a.rev.remove(dst, src)
-		return
-	}
-	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
-	a.rev.remove(dst, src)
+// removeOneEdgeLocked removes one occurrence of dst from src's entry.
+// The caller must already hold the shard mutex for src. It is used by
+// [AdjList.addEdge] to roll back a forward append while still holding both
+// shard locks, and by the undirected removals for the mirror entry.
+func (a *AdjList[N, W]) removeOneEdgeLocked(src, dst graph.NodeID, tx mvcc.Tx) error {
+	_, _, err := a.removeOneEdgeWithHandleLocked(src, dst, tx)
+	return err
 }
 
 // removeOneEdgeByHandle publishes a new adjacency snapshot for src that omits
 // the slot whose handle equals targetHandle. The search scans dst-directed
 // neighbours for a matching handle. Returns true when a slot was removed.
 // Falls back silently when no slot with the target handle exists.
-func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandle uint64, tx mvcc.Tx) bool {
+func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandle uint64, tx mvcc.Tx) (bool, error) {
 	s := &a.shards[src&shardMask]
-	intraIdx := uint64(src) >> shardBits
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return a.removeOneEdgeByHandleLocked(src, dst, targetHandle, tx)
+}
+
+// removeOneEdgeByHandleLocked is [AdjList.removeOneEdgeByHandle] for a caller
+// that already holds src's shard lock.
+func (a *AdjList[N, W]) removeOneEdgeByHandleLocked(src, dst graph.NodeID, targetHandle uint64, tx mvcc.Tx) (bool, error) {
+	s := &a.shards[src&shardMask]
+	intraIdx := uint64(src) >> shardBits
+	// FIRST, before any no-op early return: a write carrying no transaction
+	// that finds nothing to change may be looking at a peer's uncommitted
+	// change, and returning then would lose it to the peer's rollback
+	// (rmp #2947, the shape of rmp #2943). No-op for a transactional write.
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return false, err
+	}
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil || current.handles == nil {
@@ -1392,24 +1731,20 @@ func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandl
 		}
 	}
 	if idx < 0 {
-		return false
+		return false, nil
 	}
-	if len(current.neighbours) == 1 {
-		_ = a.storeEntry(s, intraIdx, nil, tx)
-		a.rev.remove(dst, src)
-		return true
+	if err := a.retireSlotLocked(s, intraIdx, current, idx, src, dst, tx); err != nil {
+		return false, err
 	}
-	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
-	a.rev.remove(dst, src)
-	return true
+	return true, nil
 }
 
 // removeOneEdgeFallback is the first-match fallback used inside
 // [AdjList.removeOneEdgeByHandle] when the handle column is absent.
 // The caller must hold s.mu.
-func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, current *adjEntry[W], src, dst graph.NodeID, tx mvcc.Tx) bool {
+func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, current *adjEntry[W], src, dst graph.NodeID, tx mvcc.Tx) (bool, error) {
 	if current == nil {
-		return false
+		return false, nil
 	}
 	idx := -1
 	for i, n := range current.neighbours {
@@ -1419,16 +1754,12 @@ func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, c
 		}
 	}
 	if idx < 0 {
-		return false
+		return false, nil
 	}
-	if len(current.neighbours) == 1 {
-		_ = a.storeEntry(s, intraIdx, nil, tx)
-		a.rev.remove(dst, src)
-		return true
+	if err := a.retireSlotLocked(s, intraIdx, current, idx, src, dst, tx); err != nil {
+		return false, err
 	}
-	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
-	a.rev.remove(dst, src)
-	return true
+	return true, nil
 }
 
 // compactEntry returns a new adjEntry[W] equal to current with the slot at
@@ -1489,13 +1820,18 @@ func compactEntry[W any](current *adjEntry[W], idx int) *adjEntry[W] {
 // For a weightless graph (see [Config.Weightless]) the entry carries no
 // weights column, so every neighbour is yielded with the zero value of W —
 // the all-zero "unweighted" representation.
+//
+// It reads the newest COMMITTED state: an entry a transaction has written and
+// not published is stepped back over to the one it replaced (rmp #2965, round
+// 5; see committedEntry). A transaction reads its own writes through its own
+// snapshot.
 func (a *AdjList[N, W]) Neighbours(src N) iter.Seq2[N, W] {
 	return func(yield func(N, W) bool) {
 		srcID, ok := a.mapper.Lookup(src)
 		if !ok {
 			return
 		}
-		e := loadEntry[W](&a.shards[srcID&shardMask], uint64(srcID)>>shardBits)
+		e := a.committedEntry(srcID)
 		if e == nil {
 			return
 		}
@@ -1562,6 +1898,11 @@ func (a *AdjList[N, W]) Neighbours(src N) iter.Seq2[N, W] {
 // consistent snapshot of src's adjacency at the moment of the load; a concurrent
 // mutation of src is either fully included or fully absent, never partially
 // observed.
+//
+// It reads the newest COMMITTED state: an entry a transaction has written and
+// not published is stepped back over to the one it replaced (rmp #2965, round
+// 5; see committedEntry). A transaction reads its own writes through its own
+// snapshot.
 func (a *AdjList[N, W]) OutDegree(src N) (int, bool) {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
@@ -1591,8 +1932,13 @@ func (a *AdjList[N, W]) OutDegree(src N) (int, bool) {
 //
 // Safe for concurrent use with readers and writers, and lock-free, on the same
 // terms as [AdjList.OutDegree].
+//
+// It reads the newest COMMITTED state: an entry a transaction has written and
+// not published is stepped back over to the one it replaced (rmp #2965, round
+// 5; see committedEntry). A transaction reads its own writes through its own
+// snapshot.
 func (a *AdjList[N, W]) OutDegreeByID(srcID graph.NodeID) (int, bool) {
-	e := loadEntry[W](&a.shards[srcID&shardMask], uint64(srcID)>>shardBits)
+	e := a.committedEntry(srcID)
 	if e == nil {
 		return 0, true
 	}
@@ -1619,12 +1965,17 @@ func (a *AdjList[N, W]) OutDegreeByID(srcID graph.NodeID) (int, bool) {
 // O(d) in the node's degree, not O(1): the labels column has to be read to
 // decide which slots match. It is still free of allocation and of neighbour
 // resolution, and it never touches the graph beyond one node's columns.
+//
+// It reads the newest COMMITTED state: an entry a transaction has written and
+// not published is stepped back over to the one it replaced (rmp #2965, round
+// 5; see committedEntry). A transaction reads its own writes through its own
+// snapshot.
 func (a *AdjList[N, W]) OutDegreeByType(src N, relType uint32) (int, bool) {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
 		return 0, false
 	}
-	e := loadEntry[W](&a.shards[srcID&shardMask], uint64(srcID)>>shardBits)
+	e := a.committedEntry(srcID)
 	if e == nil || e.labels == nil {
 		return 0, true
 	}
@@ -1659,12 +2010,17 @@ func (a *AdjList[N, W]) OutDegreeByType(src N, relType uint32) (int, bool) {
 //
 // Safe for concurrent use with readers and writers, and lock-free: it reads one
 // atomically-published immutable entry, so keep observes a consistent snapshot.
+//
+// It reads the newest COMMITTED state: an entry a transaction has written and
+// not published is stepped back over to the one it replaced (rmp #2965, round
+// 5; see committedEntry). A transaction reads its own writes through its own
+// snapshot.
 func (a *AdjList[N, W]) OutDegreeFunc(src N, keep func(dst graph.NodeID, relType uint32) bool) (int, bool) {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
 		return 0, false
 	}
-	e := loadEntry[W](&a.shards[srcID&shardMask], uint64(srcID)>>shardBits)
+	e := a.committedEntry(srcID)
 	if e == nil {
 		return 0, true
 	}
@@ -1703,6 +2059,11 @@ func (a *AdjList[N, W]) OutDegreeFunc(src N, keep func(dst graph.NodeID, relType
 //
 // Safe for concurrent use with readers and writers, and lock-free, on the same
 // terms as [AdjList.OutDegreeFunc].
+//
+// It reads the newest COMMITTED state: an entry a transaction has written and
+// not published is stepped back over to the one it replaced (rmp #2965, round
+// 5; see committedEntry). A transaction reads its own writes through its own
+// snapshot.
 func (a *AdjList[N, W]) OutDegreeFuncBounded(src N, limit int, keep func(dst graph.NodeID, relType uint32) bool) (int, bool) {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
@@ -1718,7 +2079,7 @@ func (a *AdjList[N, W]) OutDegreeFuncBoundedByID(srcID graph.NodeID, limit int, 
 	if limit <= 0 {
 		return 0, true
 	}
-	e := loadEntry[W](&a.shards[srcID&shardMask], uint64(srcID)>>shardBits)
+	e := a.committedEntry(srcID)
 	if e == nil {
 		return 0, true
 	}
@@ -1831,7 +2192,8 @@ func (a *AdjList[N, W]) compactShard(s *adjShard[W]) {
 }
 
 // trimEntry returns a new adjEntry whose every column is allocated at exact
-// length (cap == len), or nil when e already has no slack in any column (so
+// length (cap == len) and which carries e's version chain, or nil when e
+// already has no slack in any column (so
 // the caller can skip republishing it). The optional handles/labels columns
 // preserve the nil-vs-empty distinction: a nil source column stays nil in the
 // result, exactly as [compactEntry] does, so downstream code that branches on
@@ -1882,7 +2244,15 @@ func trimEntry[W any](e *adjEntry[W]) *adjEntry[W] {
 	// stays nil — so a graph that uses edge properties keeps its column logically
 	// unchanged while both the topology arrays and the column backing are
 	// right-sized.
-	return &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls, aux: auxTrimmed}
+	t := &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls, aux: auxTrimmed}
+	// The trimmed entry REPLACES e in its slot, so it carries e's version chain,
+	// as [clipEntry] does. Dropping it made the entry look committed since the
+	// beginning of time: a snapshot reader no longer stepped back over an
+	// uncommitted write, [AdjList.directConflictLocked] no longer refused a
+	// writer over it, and [AdjList.WithdrawTx] no longer recognised the aborting
+	// transaction's entry, so an aborted arc survived its rollback.
+	t.ver.Store(e.ver.Load())
+	return t
 }
 
 // MaxNodeID returns one more than the largest [graph.NodeID] that has
@@ -1903,6 +2273,11 @@ func (a *AdjList[N, W]) MaxNodeID() graph.NodeID {
 // always nil even when neighbours is non-empty; callers that index it
 // positionally must nil-check and treat an absent weight as the zero value
 // of W.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (a *AdjList[N, W]) LoadEntry(id graph.NodeID) (neighbours []graph.NodeID, weights []W) {
 	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
 	if e == nil {
@@ -1922,6 +2297,11 @@ func (a *AdjList[N, W]) LoadEntry(id graph.NodeID) (neighbours []graph.NodeID, w
 // For a weightless graph (see [Config.Weightless]) the weights return is
 // always nil even when neighbours is non-empty; the CSR builder relies on
 // this to skip the weights array (see [graph/csr.BuildFromAdjList]).
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (a *AdjList[N, W]) LoadEntryH(id graph.NodeID) (neighbours []graph.NodeID, weights []W, handles []uint64) {
 	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
 	if e == nil {
@@ -1938,6 +2318,11 @@ func (a *AdjList[N, W]) LoadEntryH(id graph.NodeID) (neighbours []graph.NodeID, 
 // "no label on that slot"). adjlist never interprets the value; the higher
 // layer owns its meaning. The returned slice is owned by the current adjacency
 // snapshot and must not be mutated by the caller.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (a *AdjList[N, W]) LoadEntryLabels(id graph.NodeID) []uint32 {
 	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
 	if e == nil {
@@ -1957,6 +2342,11 @@ func (a *AdjList[N, W]) LoadEntryLabels(id graph.NodeID) []uint32 {
 // snapshot after the column is loaded).
 //
 // LoadEntryAux is lock-free and safe for concurrent use.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (a *AdjList[N, W]) LoadEntryAux(id graph.NodeID) AuxColumn {
 	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
 	if e == nil {
@@ -1990,7 +2380,7 @@ func (a *AdjList[N, W]) LoadEntryAux(id graph.NodeID) AuxColumn {
 func (a *AdjList[N, W]) UpdateEntryAux(
 	src graph.NodeID,
 	fn func(cur AuxColumn, neighbours []graph.NodeID) (AuxColumn, bool),
-) bool {
+) (bool, error) {
 	return a.updateEntryAuxTx(src, fn, mvcc.Tx{})
 }
 
@@ -2001,20 +2391,27 @@ func (a *AdjList[N, W]) updateEntryAuxTx(
 	src graph.NodeID,
 	fn func(cur AuxColumn, neighbours []graph.NodeID) (AuxColumn, bool),
 	tx mvcc.Tx,
-) bool {
+) (bool, error) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// FIRST, before any no-op early return: a write carrying no transaction
+	// that finds nothing to change may be looking at a peer's uncommitted
+	// change, and returning then would lose it to the peer's rollback
+	// (rmp #2947, the shape of rmp #2943). No-op for a transactional write.
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return false, err
+	}
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil {
-		return false
+		return false, nil
 	}
 	newAux, changed := fn(current.aux, current.neighbours)
 	if !changed {
-		return false
+		return false, nil
 	}
 	entry := &adjEntry[W]{
 		neighbours: current.neighbours,
@@ -2023,10 +2420,10 @@ func (a *AdjList[N, W]) updateEntryAuxTx(
 		labels:     current.labels,
 		aux:        newAux,
 	}
-	// storeEntry cannot fail here: the slot already exists, so no growth is
-	// required.
-	_ = a.storeEntry(s, intraIdx, entry, tx)
-	return true
+	if err := a.storeEntry(s, intraIdx, entry, tx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // SetEdgeLabelSlot stores the opaque label value v on the first adjacency
@@ -2052,23 +2449,30 @@ func (a *AdjList[N, W]) updateEntryAuxTx(
 // store-pointer mechanism as [AdjList.AddEdgeH]; the slot's existing index is
 // never mutated in place, so a concurrent lock-free reader holding the prior
 // snapshot is unaffected. SetEdgeLabelSlot is safe for concurrent use.
-func (a *AdjList[N, W]) SetEdgeLabelSlot(src, dst graph.NodeID, v uint32) bool {
+func (a *AdjList[N, W]) SetEdgeLabelSlot(src, dst graph.NodeID, v uint32) (bool, error) {
 	return a.setEdgeLabelSlotTx(src, dst, v, mvcc.Tx{})
 }
 
 // setEdgeLabelSlotTx is [AdjList.SetEdgeLabelSlot] with the write's own transaction carried in
 // rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
 // none, which is what the exported form above passes.
-func (a *AdjList[N, W]) setEdgeLabelSlotTx(src, dst graph.NodeID, v uint32, tx mvcc.Tx) bool {
+func (a *AdjList[N, W]) setEdgeLabelSlotTx(src, dst graph.NodeID, v uint32, tx mvcc.Tx) (bool, error) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// FIRST, before any no-op early return: a write carrying no transaction
+	// that finds nothing to change may be looking at a peer's uncommitted
+	// change, and returning then would lose it to the peer's rollback
+	// (rmp #2947, the shape of rmp #2943). No-op for a transactional write.
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return false, err
+	}
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil {
-		return false
+		return false, nil
 	}
 	idx := -1
 	for i, n := range current.neighbours {
@@ -2078,7 +2482,7 @@ func (a *AdjList[N, W]) setEdgeLabelSlotTx(src, dst graph.NodeID, v uint32, tx m
 		}
 	}
 	if idx < 0 {
-		return false
+		return false, nil
 	}
 	// Copy-on-write the label column. Sharing the immutable neighbours/weights/
 	// handles headers into the new entry is safe (they are never mutated after
@@ -2096,10 +2500,10 @@ func (a *AdjList[N, W]) setEdgeLabelSlotTx(src, dst graph.NodeID, v uint32, tx m
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	// storeEntry cannot fail here: the slot already exists, so no growth is
-	// required.
-	_ = a.storeEntry(s, intraIdx, entry, tx)
-	return true
+	if err := a.storeEntry(s, intraIdx, entry, tx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ClearEdgeLabelSlotValue clears the opaque label of the FIRST adjacency slot
@@ -2112,26 +2516,33 @@ func (a *AdjList[N, W]) setEdgeLabelSlotTx(src, dst graph.NodeID, v uint32, tx m
 //
 // Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe
 // for concurrent use.
-func (a *AdjList[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32) bool {
+func (a *AdjList[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32) (bool, error) {
 	return a.clearEdgeLabelSlotValueTx(src, dst, v, mvcc.Tx{})
 }
 
 // clearEdgeLabelSlotValueTx is [AdjList.ClearEdgeLabelSlotValue] with the write's own transaction carried in
 // rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
 // none, which is what the exported form above passes.
-func (a *AdjList[N, W]) clearEdgeLabelSlotValueTx(src, dst graph.NodeID, v uint32, tx mvcc.Tx) bool {
+func (a *AdjList[N, W]) clearEdgeLabelSlotValueTx(src, dst graph.NodeID, v uint32, tx mvcc.Tx) (bool, error) {
 	if v == 0 {
-		return false
+		return false, nil
 	}
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// FIRST, before any no-op early return: a write carrying no transaction
+	// that finds nothing to change may be looking at a peer's uncommitted
+	// change, and returning then would lose it to the peer's rollback
+	// (rmp #2947, the shape of rmp #2943). No-op for a transactional write.
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return false, err
+	}
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil || current.labels == nil {
-		return false
+		return false, nil
 	}
 	idx := -1
 	for i, n := range current.neighbours {
@@ -2141,7 +2552,7 @@ func (a *AdjList[N, W]) clearEdgeLabelSlotValueTx(src, dst graph.NodeID, v uint3
 		}
 	}
 	if idx < 0 {
-		return false
+		return false, nil
 	}
 	newL := make([]uint32, len(current.labels))
 	copy(newL, current.labels)
@@ -2155,8 +2566,10 @@ func (a *AdjList[N, W]) clearEdgeLabelSlotValueTx(src, dst graph.NodeID, v uint3
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	_ = a.storeEntry(s, intraIdx, entry, tx)
-	return true
+	if err := a.storeEntry(s, intraIdx, entry, tx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // SetEdgeLabelSlotsAt stores the opaque label value v on every adjacency slot of
@@ -2187,26 +2600,33 @@ func (a *AdjList[N, W]) clearEdgeLabelSlotValueTx(src, dst graph.NodeID, v uint3
 //
 // Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe for
 // concurrent use.
-func (a *AdjList[N, W]) SetEdgeLabelSlotsAt(src, dst graph.NodeID, idxs []int, v uint32) int {
+func (a *AdjList[N, W]) SetEdgeLabelSlotsAt(src, dst graph.NodeID, idxs []int, v uint32) (int, error) {
 	return a.setEdgeLabelSlotsAtTx(src, dst, idxs, v, mvcc.Tx{})
 }
 
 // setEdgeLabelSlotsAtTx is [AdjList.SetEdgeLabelSlotsAt] with the write's own transaction carried in
 // rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
 // none, which is what the exported form above passes.
-func (a *AdjList[N, W]) setEdgeLabelSlotsAtTx(src, dst graph.NodeID, idxs []int, v uint32, tx mvcc.Tx) int {
+func (a *AdjList[N, W]) setEdgeLabelSlotsAtTx(src, dst graph.NodeID, idxs []int, v uint32, tx mvcc.Tx) (int, error) {
 	if len(idxs) == 0 {
-		return 0
+		return 0, nil
 	}
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// FIRST, before any no-op early return: a write carrying no transaction
+	// that finds nothing to change may be looking at a peer's uncommitted
+	// change, and returning then would lose it to the peer's rollback
+	// (rmp #2947, the shape of rmp #2943). No-op for a transactional write.
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return 0, err
+	}
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil {
-		return 0
+		return 0, nil
 	}
 	var newL []uint32
 	written := 0
@@ -2222,7 +2642,7 @@ func (a *AdjList[N, W]) setEdgeLabelSlotsAtTx(src, dst graph.NodeID, idxs []int,
 		written++
 	}
 	if newL == nil {
-		return 0
+		return 0, nil
 	}
 	entry := &adjEntry[W]{
 		neighbours: current.neighbours,
@@ -2233,10 +2653,10 @@ func (a *AdjList[N, W]) setEdgeLabelSlotsAtTx(src, dst graph.NodeID, idxs []int,
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	// storeEntry cannot fail here: the slots already exist, so no growth is
-	// required.
-	_ = a.storeEntry(s, intraIdx, entry, tx)
-	return written
+	if err := a.storeEntry(s, intraIdx, entry, tx); err != nil {
+		return 0, err
+	}
+	return written, nil
 }
 
 // ClearEdgeLabelSlotsValue clears the opaque label of EVERY adjacency slot of src
@@ -2255,26 +2675,33 @@ func (a *AdjList[N, W]) setEdgeLabelSlotsAtTx(src, dst graph.NodeID, idxs []int,
 //
 // Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe for
 // concurrent use.
-func (a *AdjList[N, W]) ClearEdgeLabelSlotsValue(src, dst graph.NodeID, v uint32) int {
+func (a *AdjList[N, W]) ClearEdgeLabelSlotsValue(src, dst graph.NodeID, v uint32) (int, error) {
 	return a.clearEdgeLabelSlotsValueTx(src, dst, v, mvcc.Tx{})
 }
 
 // clearEdgeLabelSlotsValueTx is [AdjList.ClearEdgeLabelSlotsValue] with the write's own transaction carried in
 // rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
 // none, which is what the exported form above passes.
-func (a *AdjList[N, W]) clearEdgeLabelSlotsValueTx(src, dst graph.NodeID, v uint32, tx mvcc.Tx) int {
+func (a *AdjList[N, W]) clearEdgeLabelSlotsValueTx(src, dst graph.NodeID, v uint32, tx mvcc.Tx) (int, error) {
 	if v == 0 {
-		return 0
+		return 0, nil
 	}
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// FIRST, before any no-op early return: a write carrying no transaction
+	// that finds nothing to change may be looking at a peer's uncommitted
+	// change, and returning then would lose it to the peer's rollback
+	// (rmp #2947, the shape of rmp #2943). No-op for a transactional write.
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return 0, err
+	}
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil || current.labels == nil {
-		return 0
+		return 0, nil
 	}
 	var newL []uint32
 	cleared := 0
@@ -2290,7 +2717,7 @@ func (a *AdjList[N, W]) clearEdgeLabelSlotsValueTx(src, dst graph.NodeID, v uint
 		cleared++
 	}
 	if newL == nil {
-		return 0
+		return 0, nil
 	}
 	entry := &adjEntry[W]{
 		neighbours: current.neighbours,
@@ -2301,8 +2728,10 @@ func (a *AdjList[N, W]) clearEdgeLabelSlotsValueTx(src, dst graph.NodeID, v uint
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	_ = a.storeEntry(s, intraIdx, entry, tx)
-	return cleared
+	if err := a.storeEntry(s, intraIdx, entry, tx); err != nil {
+		return 0, err
+	}
+	return cleared, nil
 }
 
 // ClearEdgeLabelSlots clears the opaque label of EVERY adjacency slot of src
@@ -2315,23 +2744,30 @@ func (a *AdjList[N, W]) clearEdgeLabelSlotsValueTx(src, dst graph.NodeID, v uint
 //
 // Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe
 // for concurrent use.
-func (a *AdjList[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) {
-	a.clearEdgeLabelSlotsTx(src, dst, mvcc.Tx{})
+func (a *AdjList[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) error {
+	return a.clearEdgeLabelSlotsTx(src, dst, mvcc.Tx{})
 }
 
 // clearEdgeLabelSlotsTx is [AdjList.ClearEdgeLabelSlots] with the write's own transaction carried in
 // rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
 // none, which is what the exported form above passes.
-func (a *AdjList[N, W]) clearEdgeLabelSlotsTx(src, dst graph.NodeID, tx mvcc.Tx) {
+func (a *AdjList[N, W]) clearEdgeLabelSlotsTx(src, dst graph.NodeID, tx mvcc.Tx) error {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// FIRST, before any no-op early return: a write carrying no transaction
+	// that finds nothing to change may be looking at a peer's uncommitted
+	// change, and returning then would lose it to the peer's rollback
+	// (rmp #2947, the shape of rmp #2943). No-op for a transactional write.
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return err
+	}
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil || current.labels == nil {
-		return
+		return nil
 	}
 	// Find dst-matching slots that still carry a label; skip the allocation
 	// when there is nothing to clear.
@@ -2347,7 +2783,7 @@ func (a *AdjList[N, W]) clearEdgeLabelSlotsTx(src, dst graph.NodeID, tx mvcc.Tx)
 		newL[i] = 0
 	}
 	if newL == nil {
-		return
+		return nil
 	}
 	entry := &adjEntry[W]{
 		neighbours: current.neighbours,
@@ -2358,7 +2794,10 @@ func (a *AdjList[N, W]) clearEdgeLabelSlotsTx(src, dst graph.NodeID, tx mvcc.Tx)
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	_ = a.storeEntry(s, intraIdx, entry, tx)
+	if err := a.storeEntry(s, intraIdx, entry, tx); err != nil {
+		return err
+	}
+	return nil
 }
 
 // SetEdgeLabelSlots stores opaque label values on many of src's adjacency
@@ -2381,26 +2820,33 @@ func (a *AdjList[N, W]) clearEdgeLabelSlotsTx(src, dst graph.NodeID, tx mvcc.Tx)
 // existing column is never mutated in place — a fresh column is published via
 // the same atomic store-pointer mechanism — so a concurrent lock-free reader
 // holding the prior snapshot is unaffected. Safe for concurrent use.
-func (a *AdjList[N, W]) SetEdgeLabelSlots(src graph.NodeID, updates map[graph.NodeID]uint32) int {
+func (a *AdjList[N, W]) SetEdgeLabelSlots(src graph.NodeID, updates map[graph.NodeID]uint32) (int, error) {
 	return a.setEdgeLabelSlotsTx(src, updates, mvcc.Tx{})
 }
 
 // setEdgeLabelSlotsTx is [AdjList.SetEdgeLabelSlots] with the write's own transaction carried in
 // rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
 // none, which is what the exported form above passes.
-func (a *AdjList[N, W]) setEdgeLabelSlotsTx(src graph.NodeID, updates map[graph.NodeID]uint32, tx mvcc.Tx) int {
+func (a *AdjList[N, W]) setEdgeLabelSlotsTx(src graph.NodeID, updates map[graph.NodeID]uint32, tx mvcc.Tx) (int, error) {
 	if len(updates) == 0 {
-		return 0
+		return 0, nil
 	}
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// FIRST, before any no-op early return: a write carrying no transaction
+	// that finds nothing to change may be looking at a peer's uncommitted
+	// change, and returning then would lose it to the peer's rollback
+	// (rmp #2947, the shape of rmp #2943). No-op for a transactional write.
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return 0, err
+	}
 
 	current := loadEntry[W](s, intraIdx)
 	if current == nil {
-		return 0
+		return 0, nil
 	}
 	// One pass over the neighbours applies every requested write into a single
 	// copied column. done records which neighbours have taken their first-slot
@@ -2429,7 +2875,7 @@ func (a *AdjList[N, W]) setEdgeLabelSlotsTx(src graph.NodeID, updates map[graph.
 		}
 	}
 	if newL == nil {
-		return 0
+		return 0, nil
 	}
 	entry := &adjEntry[W]{
 		neighbours: current.neighbours,
@@ -2440,8 +2886,10 @@ func (a *AdjList[N, W]) setEdgeLabelSlotsTx(src graph.NodeID, updates map[graph.
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	_ = a.storeEntry(s, intraIdx, entry, tx)
-	return len(done)
+	if err := a.storeEntry(s, intraIdx, entry, tx); err != nil {
+		return 0, err
+	}
+	return len(done), nil
 }
 
 // loadEntry atomically reads the entry stored at intraIdx within s.
@@ -2507,10 +2955,11 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 //
 // # Immutable-version invariant (task #1526, F3.2)
 //
-// A [shardSlots] value, once FROZEN — published into s.slotsRef and no longer
-// the active commit window's private builder — is NEVER mutated in place again;
-// a write to a frozen shard produces a fresh slot array. This per-shard
-// copy-on-write is what makes a pinned adjacency version ([AdjList.PinSnapshot])
+// A [shardSlots] value, once FROZEN by [AdjList.PinSnapshot], is NEVER mutated in
+// place again; a write to a frozen shard produces a fresh slot array. Since
+// rmp #2882 a version is frozen by a PIN, not by publication: an unbracketed
+// write to an unpinned version stores its slot in place (see [shardSlots]).
+// This per-shard copy-on-write is what makes a pinned adjacency version
 // stable for a reader's lifetime: the per-shard atomic.Pointer[shardSlots] is
 // itself the published immutable-version root for this stage (no separate
 // Snapshot object). The previous implementation mutated the live shared slot
@@ -2538,8 +2987,9 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 // version chain — never on a lock.
 //
 // [AdjList.EndCommit] freezes every dirty builder (clears s.building),
-// after which it is immutable forever. Outside any window every write is its
-// own 1-op window: clone-and-publish once (correct, just no dedup).
+// after which it is never written through the builder again. Outside any
+// window a write stores its slot in place into the published array, or clones
+// it when a Snapshot has pinned it (rmp #2882; see [shardSlots]).
 //
 // # F3.5 / #1671 UNWIND ITEM — RESOLVED BY VERSIONING, NOT BY REMOVAL
 //
@@ -2579,6 +3029,14 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 // against a build in which the in-window mutation is left unversioned, and all four
 // fail there — so a pass is informative rather than merely quiet.
 func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEntry[W], tx mvcc.Tx) error {
+	// FIRST, before any state of the shard is touched: a write that carries no
+	// transaction may not publish over an uncommitted entry (rmp #2947, see
+	// direct_conflict.go). Every adjacency write funnels through here, so this is
+	// the backstop under the shard lock; the multi-entry paths also check every
+	// entry up front so that a refusal never leaves one of them written.
+	if err := a.directConflictLocked(tx, s, intraIdx); err != nil {
+		return err
+	}
 	maxCap := a.cfg.MaxShardCapacity
 	// The transaction now writing, as an identity. Zero means "no transaction",
 	// in which case this write is its own one-op window and always clones — the
@@ -2590,8 +3048,15 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 	// present the same owner and mutate each other's unpublished builders; the
 	// note at [AdjList.builderOwner] recorded the obligation and this discharges
 	// it.
+	//
+	// An IMPLICIT transaction — one direct write of the layer above — is treated
+	// as carrying none here (rmp #2947). It is a single operation, so no later
+	// write of its own can reuse a private builder, and taking one would clone
+	// the shard's whole slot array on every direct write: the per-edge copy rmp
+	// #2882 removed from the unbracketed path. Its entry is stored in place like
+	// any unbracketed write's; the version it carries is still its own record.
 	owner := tx.ID()
-	if owner == 0 {
+	if owner == 0 || tx.Implicit() {
 		owner = a.builderOwner()
 	}
 	inWindow := owner != 0
@@ -2644,7 +3109,11 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 				entry = &adjEntry[W]{}
 			}
 			info, ts := a.versionStamp(tx)
-			a.linkVersion(entry, prev, info, ts)
+			if a.linkVersion(entry, prev, info, ts) && tx.Valid() {
+				// The transaction's write set gains this entry, so its abort
+				// withdraws exactly the entries it wrote (rmp #2965).
+				tx.NoteAdjacency(intraIdx<<shardBits | a.shardIndex(s))
+			}
 			// Index the slot so reclamation need not scan the shard.
 			if s.versioned == nil {
 				s.versioned = make(map[uint64]struct{}, 8)
@@ -2686,9 +3155,23 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 		return nil
 	}
 
-	// First touch of this shard (in a window or not): clone the frozen array,
-	// set the slot in the clone, publish it. Within a window the clone becomes
-	// the shard's private builder for the rest of the window.
+	if !inWindow && base.state.CompareAndSwap(slotsWritable, slotsStoring) {
+		// Unbracketed write to a version no Snapshot has pinned: store the slot
+		// in place instead of cloning the array (rmp #2882; see [shardSlots]).
+		// Sound for every lock-free reader by the same four properties as the
+		// in-window builder mutation above: an atomic store paired with the
+		// readers' atomic load, an immutable entry, an array never resized in
+		// place, and the version chain for isolation. The claim keeps a
+		// concurrent PinSnapshot from freezing this version mid-store.
+		atomic.StorePointer(&base.slots[intraIdx], unsafe.Pointer(entry)) //nolint:gosec // atomic publication of *adjEntry[W] into an unpinned published array
+		base.state.Store(slotsWritable)
+		return nil
+	}
+
+	// First touch of this shard in a window, or an unbracketed write to a
+	// version a Snapshot has pinned: clone the frozen array, set the slot in
+	// the clone, publish it. Within a window the clone becomes the shard's
+	// private builder for the rest of the window.
 	next := &shardSlots{slots: make([]unsafe.Pointer, len(base.slots))}
 	copy(next.slots, base.slots)
 	next.slots[intraIdx] = unsafe.Pointer(entry) //nolint:gosec // typed publication of *adjEntry[W] into a fresh clone
@@ -2697,6 +3180,12 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 	}
 	s.slotsRef.Store(next)
 	return nil
+}
+
+// shardIndex returns the index of s in a.shards, which is the low part of the
+// node id of every slot s holds.
+func (a *AdjList[N, W]) shardIndex(s *adjShard[W]) uint64 {
+	return uint64((uintptr(unsafe.Pointer(s)) - uintptr(unsafe.Pointer(&a.shards[0]))) / unsafe.Sizeof(a.shards[0])) //nolint:gosec // s is an element of a.shards
 }
 
 // markDirtyAndBuild adopts next as s's private builder on behalf of owner's
@@ -2746,9 +3235,17 @@ func (a *AdjList[N, W]) builderOwner() uint64 {
 	//
 	// This function is now the FALLBACK only. rmp #2320 made the transaction a
 	// parameter that travels with the write ([AdjList.storeEntry] prefers tx.ID()),
-	// so an ambient lookup happens only for a write that carries no transaction at
-	// all — the exclusive bulk builds, WAL replay, snapshot apply and the direct Go
-	// API — where there is no second writer to be confused with.
+	// so an ambient lookup happens only for a write that carries no transaction of
+	// a bracket's: a write with none, or an implicit one.
+	//
+	// The answer is an IDENTITY for builder reuse and nothing else (rmp #2967).
+	// Such a write may store into the open exclusive bracket's builder, which is
+	// already published, exactly as an unbracketed write stores into the published
+	// array; its version still carries its own stamp ([AdjList.versionStamp]) and
+	// its conflict test still treats the bracket as another transaction
+	// ([AdjList.directConflictLocked]), so sharing the builder joins it to
+	// nothing. Presenting another owner instead would release and re-clone the
+	// bracket's builder on every such write.
 	if a.stamp != nil {
 		if id := a.stamp.OpenTxID(); id != 0 {
 			// A transaction id is unique, monotonic and never reused, so it
@@ -3079,10 +3576,11 @@ func growShardLocked[W any](minLen uint64, maxCap int, cur *shardSlots) (*shardS
 
 // Snapshot is an immutable, pinned view of an [AdjList]'s adjacency captured at
 // one instant: it holds, per shard, the [shardSlots] version that was current
-// when the snapshot was taken (task #1526, F3.2). Because every adjacency write
-// now publishes a FRESH immutable shardSlots (copy-on-write — see [storeEntry])
-// rather than mutating the published one in place, the per-shard versions a
-// Snapshot captured stay valid and unchanged for the snapshot's whole lifetime,
+// when the snapshot was taken (task #1526, F3.2). Because pinning FREEZES each
+// captured version, and a write to a frozen version publishes a FRESH
+// shardSlots (copy-on-write — see [shardSlots] and [storeEntry]) rather than
+// mutating it in place, the per-shard versions a Snapshot captured stay valid
+// and unchanged for the snapshot's whole lifetime,
 // even while concurrent writers publish newer versions the Snapshot does not
 // see. The Go garbage collector reclaims a retired version once the last
 // Snapshot (and any other reader) holding it is released — the runtime supplies
@@ -3126,6 +3624,13 @@ func growShardLocked[W any](minLen uint64, maxCap int, cur *shardSlots) (*shardS
 // The adjacency read is 0.62% of read-path CPU and holds 0% of mutex delay at
 // every concurrency level, so there is no contention here to relieve.
 //
+// Since rmp #2882 a pin also FREEZES each captured version, which makes it
+// dearer: 308.1 ns to 515.1 ns per pin on a 50 000-node graph, same 2304 B
+// (BenchmarkSlotCOW_PinSnapshot, interleaved, n=8), and the first unbracketed
+// write to each shard after a pin clones that shard's slot array once. That is
+// the price of unbracketed writes storing in place the rest of the time, and
+// no production code pins.
+//
 // The type is retained deliberately, not as dead code: it is a correct
 // lock-free topology pin. It is simply not the instrument for an isolation job
 // the version chain already does, and wiring reads onto it as it stands would
@@ -3145,22 +3650,49 @@ type Snapshot[N comparable, W any] struct {
 }
 
 // PinSnapshot captures the current per-shard adjacency versions and returns an
-// immutable [Snapshot] over them. It performs one atomic load per shard
-// (shardCount loads total — 256, measured at 353.2 ns and 2304 B per pin under
-// rmp #2704) and allocates a single Snapshot; it takes no lock and never blocks
-// a writer. A nil shard version (a shard that has never been
+// immutable [Snapshot] over them. Per shard it loads the current version and
+// FREEZES it (see [shardSlots]): the next unbracketed write to that shard
+// clones instead of storing in place, so the captured version stays unchanged
+// for the Snapshot's lifetime. It allocates a single Snapshot; it takes no lock
+// and never blocks a writer. A nil shard version (a shard that has never been
 // written) is captured as nil and read back as an empty adjacency, so an empty
 // or partially-populated graph is handled without special-casing.
 //
-// PinSnapshot is lock-free and safe for concurrent use. The returned Snapshot
-// is valid until it is dropped; the captured versions are kept alive by the
-// reference and reclaimed by GC afterwards.
+// PinSnapshot is safe for concurrent use. It never blocks a writer, but it may
+// spin while a writer finishes one in-place slot store on a shard it is
+// freezing (rmp #2882): the wait is bounded by that single store, not by any
+// lock. The returned Snapshot is valid until it is dropped; the captured
+// versions are kept alive by the reference and reclaimed by GC afterwards.
 func (a *AdjList[N, W]) PinSnapshot() *Snapshot[N, W] {
 	snap := &Snapshot[N, W]{mapper: a.mapper, cfg: a.cfg}
 	for i := range a.shards {
-		snap.shards[i] = a.shards[i].slotsRef.Load()
+		snap.shards[i] = freezeCurrent(&a.shards[i].slotsRef)
 	}
 	return snap
+}
+
+// freezeCurrent loads the version published in ref and freezes it, returning
+// it. A version replaced after the load is returned as it is: a writer only
+// ever stores into the version it loaded from slotsRef under the shard mutex,
+// and once that version is frozen its claim fails, so the version returned
+// here is never written again either way.
+func freezeCurrent(ref *atomic.Pointer[shardSlots]) *shardSlots {
+	for {
+		ss := ref.Load()
+		if ss == nil {
+			return nil
+		}
+		switch ss.state.Load() {
+		case slotsFrozen:
+			return ss
+		case slotsWritable:
+			if ss.state.CompareAndSwap(slotsWritable, slotsFrozen) {
+				return ss
+			}
+		}
+		// A writer holds the claim for one atomic store; let it finish.
+		runtime.Gosched()
+	}
 }
 
 // loadEntryPinned resolves the entry for id through the pinned per-shard

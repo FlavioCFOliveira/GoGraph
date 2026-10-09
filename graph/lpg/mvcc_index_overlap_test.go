@@ -74,7 +74,7 @@ func TestDeferredIndexRemoval_IsChargedToTheRemovingTransaction_NotAConcurrentOn
 	if !ok {
 		t.Fatal("seeded node not interned")
 	}
-	lid := g.reg.Intern("L")
+	lid := g.reg.intern("L")
 
 	var (
 		aOpen      = make(chan struct{})
@@ -107,7 +107,9 @@ func TestDeferredIndexRemoval_IsChargedToTheRemovingTransaction_NotAConcurrentOn
 		close(aOpen)
 		<-bPublished // the ambient slot now names B
 		// The removal that defers the index entry.
-		g.Writer(tx).RemoveNodeLabel("n", "L")
+		if err := g.Writer(tx).RemoveNodeLabel("n", "L"); err != nil {
+			t.Fatal(err)
+		}
 		aRecord = tx.w.tx.OpenRecord()
 		return nil
 	})
@@ -181,7 +183,7 @@ func TestDeferredIndexRemoval_MisChargingWouldMoveTheSweepInstantBothWays(t *tes
 			if !ok {
 				t.Fatal("seeded node not interned")
 			}
-			lid := uint32(g.reg.Intern("L"))
+			lid := uint32(g.reg.intern("L"))
 
 			var (
 				aOpen      = make(chan struct{})
@@ -213,7 +215,9 @@ func TestDeferredIndexRemoval_MisChargingWouldMoveTheSweepInstantBothWays(t *tes
 				aErr = g.ApplyVersioned(func(tx WriteTx) error {
 					close(aOpen)
 					<-bPublished // the ambient slot names B from here on
-					g.Writer(tx).RemoveNodeLabel("n", "L")
+					if err := g.Writer(tx).RemoveNodeLabel("n", "L"); err != nil {
+						t.Error(err)
+					}
 					aRecord = tx.w.tx.OpenRecord()
 					close(aDeferred)
 					if tc.bFirst {

@@ -40,8 +40,9 @@ func TestWAL_CrashMidFsync_Simulation(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Record the durable file size.
-	info, err := os.Stat(path)
+	// Record the durable size of the tail segment.
+	seg := tailSegment(t, path)
+	info, err := os.Stat(seg)
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
@@ -64,7 +65,7 @@ func TestWAL_CrashMidFsync_Simulation(t *testing.T) {
 	_ = w2.Close()
 
 	// Step 3: truncate back to the durable state.
-	if err := os.Truncate(path, durableSize); err != nil {
+	if err := os.Truncate(seg, durableSize); err != nil {
 		t.Fatalf("Truncate: %v", err)
 	}
 

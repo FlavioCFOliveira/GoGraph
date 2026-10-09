@@ -145,6 +145,19 @@ func Run(ctx context.Context, plan Operator, cols []string) *ResultSet {
 		cols: cols,
 		ctx:  ctx,
 	}
+	// A statement cancelled while it was being planned stops here, before Init
+	// (rmp #2996). Init is not free: a label scan's Init resolves its MVCC
+	// snapshot bitmap, which costs O(uncommitted writes in the label) and does
+	// not consult ctx, so a cancellation that landed during planning used to pay
+	// for every scan's Init before Next observed it. The plan is released
+	// exactly as on the Init-error path; Close is idempotent and tolerates an
+	// operator whose Init never ran.
+	if err := ctx.Err(); err != nil {
+		_ = plan.Close()
+		rs.err = err
+		rs.closed = true
+		return rs
+	}
 	if err := plan.Init(ctx); err != nil {
 		// A partially-initialised plan may already hold resources: a child
 		// operator whose own Init succeeded (e.g. ParallelScanProject, which

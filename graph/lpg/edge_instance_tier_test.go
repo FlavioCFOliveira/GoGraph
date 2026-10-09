@@ -35,12 +35,16 @@ func TestEdgeInstanceAndHandleTiering(t *testing.T) {
 		pk := "p" + string(rune('a'+i))
 		wantProps[pk] = true
 		// per-instance (idx-keyed)
-		g.SetEdgeLabelAt("a", "b", 1, lbl)
+		if err := g.SetEdgeLabelAt("a", "b", 1, lbl); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgePropertyAt("a", "b", 1, pk, Int64Value(int64(i))); err != nil {
 			t.Fatal(err)
 		}
 		// per-handle
-		g.SetEdgeLabelByHandle("a", "b", 7, lbl)
+		if err := g.SetEdgeLabelByHandle("a", "b", 7, lbl); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgePropertyByHandle("a", "b", 7, pk, Int64Value(int64(i))); err != nil {
 			t.Fatal(err)
 		}
@@ -75,14 +79,14 @@ func TestEdgeInstanceAndHandleTiering(t *testing.T) {
 	checkProps("EdgePropertiesByHandle", g.EdgePropertiesByHandle("a", "b", 7))
 
 	// RemoveEdgeInstance / RemoveEdgeInstanceByHandle clear the stores.
-	g.RemoveEdgeInstance("a", "b", 1)
+	must(t).E(g.RemoveEdgeInstance("a", "b", 1))
 	if got := g.EdgeLabelsAt("a", "b", 1); got != nil {
 		t.Fatalf("EdgeLabelsAt after RemoveEdgeInstance = %v, want nil", got)
 	}
 	if got := g.EdgePropertiesAt("a", "b", 1); got != nil {
 		t.Fatalf("EdgePropertiesAt after RemoveEdgeInstance = %v, want nil", got)
 	}
-	g.RemoveEdgeInstanceByHandle("a", "b", 7)
+	must(t).E(g.RemoveEdgeInstanceByHandle("a", "b", 7))
 	if got := g.EdgeLabelsByHandle("a", "b", 7); got != nil {
 		t.Fatalf("EdgeLabelsByHandle after remove = %v, want nil", got)
 	}

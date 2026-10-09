@@ -53,16 +53,23 @@ package prometheus
 // What is left is the goroutine's own STACK ADDRESS. Every goroutine has its
 // own stack, so the address of a local is a per-goroutine value that is stable
 // between stack growths, which is exactly the convergence random selection
-// lacks, and it costs 0.529ns — an address computation, a shift and a mask.
+// lacks. It costs an address computation, a shift and a multiply; the earlier
+// shift-and-mask form measured 0.529ns.
 //
 // The low bits are useless: they encode the frame's offset within the stack,
 // identical for every goroutine running this function. The stack BASE is what
-// differs, so the address is shifted past Go's 2 KiB minimum stack before
-// masking. Which bit that is was measured, not assumed; see [minStackShift]. Multiplicative (Fibonacci) mixing was tried and MADE IT WORSE —
-// 0.642ns +/-99% against 0.319ns +/-41% at eight goroutines — because Go
-// allocates goroutine stacks in a regular pattern, so adjacent stacks map to
-// adjacent shards, and hashing destroys that spread. The raw shift-and-mask
-// won on both mean and variance.
+// differs, so the address is shifted past Go's 2 KiB minimum stack before it
+// is used. Which bit that is was measured, not assumed; see [minStackShift].
+//
+// The shifted address is then MIXED, not masked; see [fibMul]. A plain mask
+// reads only five bits of the stack base, and their spread depends on the
+// stride at which the runtime happens to place stacks. Under -race that stride
+// is 4 KiB, not 2 KiB: bit 11 was measured constant across 1280 of 1280
+// goroutines, so a mask reached only the 16 odd shards and 64 goroutines could
+// never occupy more than 16 of 32. An earlier benchmark had rejected mixing on
+// 0.642ns +/-99% against 0.319ns +/-41% at eight goroutines; spreads that wide
+// do not separate the two arms, and the occupancy measurement in
+// [minStackShift] is the evidence that decides.
 //
 // The choice is a HINT and never a correctness input. A goroutine whose stack
 // moves simply starts using a different shard; nothing is lost, because every
@@ -109,8 +116,9 @@ const cacheLine = 128
 
 // shardCount is the number of per-core accumulators a promoted series holds.
 //
-// It is a power of two so the index is a mask rather than a division, and it is
-// a COMPILE-TIME constant so the array index needs no bounds check.
+// It is a power of two so the index is the top [shardBits] bits of a product
+// rather than a division, and it is a COMPILE-TIME constant so the array index
+// needs no bounds check.
 //
 // 32 was chosen by measurement, not by the core count. Because shard selection
 // has no per-CPU identity to work from it is effectively a random assignment,
@@ -131,10 +139,27 @@ const cacheLine = 128
 // The constant is sized for hosts of this order. A host with substantially more
 // cores should re-run BenchmarkIncCounterParallel before assuming it still
 // holds; that benchmark is committed for exactly that purpose.
-const shardCount = 32
+const shardCount = 1 << shardBits
 
-// shardMask selects a shard from a stack address.
-const shardMask = shardCount - 1
+// shardBits is log2([shardCount]): the number of high product bits
+// [shardIndex] keeps.
+const shardBits = 5
+
+// fibMul is Knuth's multiplicative-hashing constant, 2^64 divided by the golden
+// ratio, rounded to odd (The Art of Computer Programming, vol. 3, section 6.4).
+//
+// Multiplying by it carries every bit of the shifted stack address into the
+// TOP bits of the product, so [shardIndex] takes its shard from those rather
+// than from five raw address bits. Measured on real stack addresses captured
+// in the shape of TestShardIndex_SpreadsAcrossShards, 200 rounds each, with
+// every goroutine alive while sampling (Go 1.27.1, darwin/arm64):
+//
+//	                 mask, 8 / 64 goroutines     mix, 8 / 64 goroutines
+//	-race            5.79 / 15.85 shards         7.52 / 28.16 shards
+//	without -race    7.46 / 27.82 shards         7.09 / 28.11 shards
+//
+// The mix removes the -race ceiling of 16 and costs one multiply.
+const fibMul = 0x9E3779B97F4A7C15
 
 // minStackShift is how far the stack address is shifted before masking.
 //
@@ -173,7 +198,8 @@ func shardIndex() uint64 {
 	// stack: a stack copy changes which shard this goroutine prefers and
 	// nothing else.
 	var x byte
-	return uint64(uintptr(unsafe.Pointer(&x))>>minStackShift) & shardMask //nolint:gosec // G103: address sampled as an integer hint; never dereferenced.
+	base := uint64(uintptr(unsafe.Pointer(&x)) >> minStackShift) //nolint:gosec // G103: address sampled as an integer hint; never dereferenced.
+	return (base * fibMul) >> (64 - shardBits)
 }
 
 // counterShard is one core's share of a counter. It owns a whole cache line so

@@ -13,6 +13,7 @@ package cypher
 import (
 	"context"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -25,18 +26,51 @@ import (
 // ctx is polled every 4096 nodes, matching the CREATE INDEX backfill loops.
 const statsScanPollMask = 0xFFF
 
-// RefreshStatisticsLocked is [Engine.RefreshStatistics] for a caller that ALREADY holds
-// the visibility barrier — specifically db.stats.refresh(), which runs inside query
-// execution (#2196).
+// statsNodeRef is one interned (NodeID, key) pair captured by the statistics scan's
+// first phase ([Engine.scanStatsLocked]).
+type statsNodeRef struct {
+	key string
+	id  graph.NodeID
+}
+
+// statsNodeRefPool recycles the pair buffers of [Engine.scanStatsLocked]. It holds
+// *[]statsNodeRef so a Put does not allocate.
+var statsNodeRefPool = sync.Pool{New: func() any { return new([]statsNodeRef) }}
+
+// getStatsNodeRefs returns an empty pooled pair buffer with capacity for at least n
+// pairs.
+func getStatsNodeRefs(n int) *[]statsNodeRef {
+	bp, _ := statsNodeRefPool.Get().(*[]statsNodeRef)
+	if bp == nil {
+		bp = new([]statsNodeRef)
+	}
+	if cap(*bp) < n {
+		*bp = make([]statsNodeRef, 0, n)
+	}
+	*bp = (*bp)[:0]
+	return bp
+}
+
+// putStatsNodeRefs returns bp to the pool unless it outgrew [walkPoolMaxCap]. The
+// used prefix is cleared first so a pooled buffer holds no key strings.
+func putStatsNodeRefs(bp *[]statsNodeRef) {
+	if cap(*bp) > walkPoolMaxCap {
+		return
+	}
+	clear(*bp)
+	*bp = (*bp)[:0]
+	statsNodeRefPool.Put(bp)
+}
+
+// RefreshStatisticsLocked is [Engine.RefreshStatistics] for a caller inside query
+// execution — specifically db.stats.refresh() (#2196).
 //
-// It exists because visMu is a non-re-entrant sync.RWMutex: taking it again from a
-// goroutine already inside Graph.View would DEADLOCK the engine. The re-entrancy guard
-// turns that into a panic, but only in a debug or race build — a production binary would
-// hang. So the barrier-taking and barrier-free entry points must be distinct, and the
-// caller has to pick correctly.
-//
-// Correctness is unchanged: the scan only reads, and the caller's read barrier already
-// pins the consistent snapshot it needs.
+// It exists because query execution used to run inside Graph.View, a non-re-entrant
+// read barrier, so the in-query caller needed an entry point that took no barrier. rmp
+// #2344 removed Graph.View, and neither entry point takes a barrier now: both scan the
+// PRESENT stored state through [Engine.scanStatsLocked], which states why an
+// approximate statistic tolerates that. It also publishes the result and resets the
+// misestimate set, as RefreshStatistics does.
 func (e *Engine) RefreshStatisticsLocked(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -62,10 +96,11 @@ func (e *Engine) RefreshStatisticsLocked(ctx context.Context) error {
 // maintained by a background goroutine, so a caller (a maintenance task, a
 // scheduled job, or a test) drives the rebuild.
 //
-// The scan resolves against one pinned snapshot, so it observes a consistent
-// instant and does not block concurrent writers (which serialise elsewhere). It
-// takes no barrier — see the note on the internal builder below for why wrapping
-// it in the old lpg.Graph.View would not have given the property it claimed.
+// The scan takes no barrier and pins no snapshot: it reads the PRESENT stored state
+// while writers may be mid-apply, and does not block them — see
+// [Engine.scanStatsLocked] for why an approximate statistic tolerates that, and the
+// note on the internal builder below for why wrapping it in the old lpg.Graph.View
+// would not have given the property it claimed.
 //
 // Statistics built here DO change plans, as of rmp #2766. The disjoint-component
 // reorder ([computeReorderSwaps]) reads them to estimate how many rows a filtered
@@ -250,15 +285,13 @@ func finishStatsSnapshot(
 	return out
 }
 
-// scanStatsLocked is the body of the statistics scan, WITHOUT acquiring the visibility
-// barrier: the caller must already hold it (#2196).
+// scanStatsLocked is the body of the statistics scan. It acquires no barrier and pins no
+// snapshot (#2196).
 //
-// The split exists because the scan has two callers with opposite needs.
-// [Engine.RefreshStatistics] is invoked from outside any barrier and must take one, so it
-// wraps this in Graph.View. db.stats.refresh() runs INSIDE query execution and must NOT,
-// because visMu is not re-entrant: a second acquisition from the same goroutine deadlocks
-// the engine. The re-entrancy guard catches that as a panic, but only in a debug/race
-// build; a production binary would simply hang.
+// The split dates from when the scan had two callers with opposite needs:
+// [Engine.RefreshStatistics] wrapped it in Graph.View, and db.stats.refresh(), which runs
+// inside query execution, could not, because Graph.View was not re-entrant. rmp #2344
+// removed Graph.View; both callers now call this directly.
 //
 // # What the in-query caller actually holds (rmp #2290, #2304)
 //
@@ -295,25 +328,39 @@ func (e *Engine) scanStatsLocked(ctx context.Context) (
 	pk := g.PropertyKeys()
 	nodeIdx := g.NodeIndex()
 
-	i := 0
+	// Phase 1 snapshots the interned (id, key) pairs; phase 2 reads labels and
+	// properties after Walk has released its last shard lock (rmp #2897). Both
+	// reads Lookup the key in the Mapper, on the shard being walked, and the scan
+	// runs while writers intern (see above), so doing them inside the callback
+	// deadlocked against a writer queued on that shard's write lock.
+	// The pair buffer is pooled ([statsNodeRefPool]).
+	bp := getStatsNodeRefs(mapper.Len())
+	defer putStatsNodeRefs(bp)
+	refs := *bp
 	mapper.Walk(func(id graph.NodeID, key string) bool {
+		refs = append(refs, statsNodeRef{id: id, key: key})
+		return true
+	})
+	*bp = refs
+
+	for i := range refs {
 		if i&statsScanPollMask == 0 {
 			if err := ctx.Err(); err != nil {
 				scanErr = err
-				return false
+				break
 			}
 		}
-		i++
-		if g.IsTombstoned(id) {
-			return true
+		id, key := refs[i].id, refs[i].key
+		if g.IsTombstonedStored(id) {
+			continue
 		}
-		labels := g.NodeLabels(key)
+		labels := g.NodeLabelsAsOf(key, nil)
 		if len(labels) == 0 {
-			return true
+			continue
 		}
-		props := g.NodeProperties(key)
+		props := g.NodePropertiesAsOf(key, nil)
 		if len(props) == 0 {
-			return true
+			continue
 		}
 		for _, lname := range labels {
 			lid, ok := reg.Lookup(lname)
@@ -342,7 +389,6 @@ func (e *Engine) scanStatsLocked(ctx context.Context) (
 				acc.feed(v)
 			}
 		}
-		return true
-	})
+	}
 	return byKey, labelN, generation, scanErr
 }

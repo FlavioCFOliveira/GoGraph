@@ -148,17 +148,35 @@ func startFloodServer(t *testing.T, log *slog.Logger) (string, *addrCountingList
 	return addr, ln
 }
 
+// floodWindow bounds how many refused connections flood lets sit in the kernel
+// accept queue, uncounted, at any moment. It must stay well below the listen
+// backlog (kern.ipc.somaxconn is 128 on macOS): once that queue overflows the
+// kernel resets new connects ("connection reset by peer") and may drop queued
+// ones, so those connections never reach Accept and no server-side counter can
+// see them (rmp #3066).
+const floodWindow = 32
+
 // flood opens and immediately closes n connections against addr, all of which
 // the server refuses because the single semaphore slot is already held.
-func flood(t *testing.T, addr string, n int) {
+//
+// Every connection must reach the accept loop, so a dial error is fatal rather
+// than skipped. To make that deterministic on a loaded host, flood waits — on
+// the rejected counter, never on a sleep — until every earlier refusal has been
+// counted before it opens each new window of floodWindow connections.
+func flood(t *testing.T, addr string, n int, probe *serverMetricsProbe) {
 	t.Helper()
+	base := probe.get("bolt.server.conn.rejected")
 	for i := 0; i < n; i++ {
+		if i > 0 && i%floodWindow == 0 {
+			want := uint64(i)
+			if !waitFor(func() bool { return probe.get("bolt.server.conn.rejected")-base >= want }, 10*time.Second) {
+				t.Fatalf("flood: only %d of the first %d refusals were counted",
+					probe.get("bolt.server.conn.rejected")-base, i)
+			}
+		}
 		c, err := net.DialTimeout("tcp", addr, 2*time.Second)
 		if err != nil {
-			// A refused TCP connect is itself a valid outcome under a flood; the
-			// counter assertion below is what decides the test, and it counts only
-			// what the accept loop actually saw.
-			continue
+			t.Fatalf("flood: dial %d of %d: %v", i+1, n, err)
 		}
 		_ = c.Close()
 	}
@@ -180,7 +198,7 @@ func TestServe_RejectLogIsBoundedAndCounterIsExact(t *testing.T) {
 	t.Cleanup(func() { cmetrics.SetBackend(nil) })
 
 	h := &lineCountingHandler{level: slog.LevelDebug}
-	addr, _ := startFloodServer(t, slog.New(h))
+	addr, ln := startFloodServer(t, slog.New(h))
 
 	// Hold the one slot, so every later connection is refused.
 	held, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -192,8 +210,8 @@ func TestServe_RejectLogIsBoundedAndCounterIsExact(t *testing.T) {
 		t.Fatalf("the first connection was not admitted: accepted=%d", probe.get("bolt.server.conn.accepted"))
 	}
 
-	flood(t, addr, small)
-	flood(t, addr, large)
+	flood(t, addr, small, probe)
+	flood(t, addr, large, probe)
 
 	total := uint64(small + large)
 	if !waitFor(func() bool { return probe.get("bolt.server.conn.rejected") >= total }, 10*time.Second) {
@@ -203,6 +221,15 @@ func TestServe_RejectLogIsBoundedAndCounterIsExact(t *testing.T) {
 	// Exactly, not merely at least: no refusal may be counted twice either.
 	if got := probe.get("bolt.server.conn.rejected"); got != total {
 		t.Errorf("bolt.server.conn.rejected = %d, want exactly %d", got, total)
+	}
+	// And exactly what the accept loop received: every connection the listener
+	// handed over, except the one admitted connection, is one refusal.
+	ln.mu.Lock()
+	refusedAtListener := uint64(len(ln.conns) - 1)
+	ln.mu.Unlock()
+	if got := probe.get("bolt.server.conn.rejected"); got != refusedAtListener {
+		t.Errorf("bolt.server.conn.rejected = %d, but the listener handed the accept loop %d refused connections",
+			got, refusedAtListener)
 	}
 
 	lines := h.rejectLines()
@@ -265,7 +292,7 @@ func TestServe_RejectDoesNotResolveRemoteAddrWhenDiscarded(t *testing.T) {
 			t.Fatal("the first connection was not admitted")
 		}
 
-		flood(t, addr, refusals)
+		flood(t, addr, refusals, probe)
 		if !waitFor(func() bool { return probe.get("bolt.server.conn.rejected")-base >= refusals }, 10*time.Second) {
 			t.Fatalf("only %d of %d refusals were counted", probe.get("bolt.server.conn.rejected")-base, refusals)
 		}

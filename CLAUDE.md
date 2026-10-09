@@ -70,9 +70,9 @@ When asking for clarification:
 
 **Every piece of work in this project is delegated to a specialist sub-agent**, chosen as the best available match for the objectives that work must achieve. The coordinating agent never performs the work itself.
 
-**Exactly one sub-agent runs at a time.** Use as many sub-agents as the objective needs — in series, never in parallel: each one finishes before the next starts.
+**Exactly one sub-agent runs at a time, alongside the main conversation — never more than one.** Use as many sub-agents as the objective needs — in series, never in parallel: each one finishes before the next starts.
 
-**The only exception is the user's explicit prior authorisation**, granted for a named piece of work and revoked automatically when that work ends; it never carries over to the next piece of work. The full contract is in [Sub-Agents (Specialists)](#sub-agents-specialists).
+**The only exception is the user's explicit authorisation to run more than one sub-agent in parallel**, granted for a named piece of work and revoked automatically when that work ends; it never carries over to the next piece of work. The full contract is in [Sub-Agents (Specialists)](#sub-agents-specialists).
 
 ### Language
 
@@ -114,7 +114,7 @@ repeats until the objectives are met:
 
 Then iterate: when step 3 shows the objectives are not yet met, return to step 1
 carrying the evidence the tests produced. The cycle closes only once the objectives
-are met.
+are met, and it is run to reach them in the fewest possible iterations.
 
 **Batch tasks of similar scope into the same iteration.** Whenever several open
 tasks share a scope — the same component, the same kind of change, the same body of
@@ -168,18 +168,29 @@ is skipped or reordered.
   stability is affected** — direct dependents, and any component the change can
   reach. Decide this from the change itself: a package the change cannot reach does
   not warrant a run.
-- **The full `make ci` gate is reserved for very special moments**, and there are
-  exactly three: the close of a sprint, any push, and a specific request from the
-  user. Nothing else qualifies — it is never a per-task step and never a reflex at
+- **Tests are slow, so every change runs only the tests it needs.** New features,
+  fixes, improvements and adjustments run only the tests that cover the change and
+  the components it affects — never the full battery.
+- **The full `make ci` gate is reserved for key moments**, and there are exactly
+  four: release preparation, the close of a sprint, any push, and a specific request
+  from the user. At any other moment the full battery runs only when the change is
+  large or has wide impact, and that judgement is stated explicitly. For a push,
+  only its correctness stages decide; measurement stages are
+  reported, never gating (see [Tests and validation](#concrete-applications)). The full gate is never a per-task step and never a reflex at
   the end of an iteration.
+- **Every new test is effective at minimum cost.** When writing a test, size its
+  workload, iterations, goroutine counts, data and duration to the smallest that
+  still proves its claim, so that it can still fail on the defect it guards. Never
+  spend CPU, memory, disk or wall-clock time beyond what the test's evidence needs,
+  and never cut effectiveness to save cost.
 - The enforceable detail — what the targeted validation must cover, which
   compliance gates a change drags in, what `make ci` still guarantees, and how to
   read its exit status — is in [Tests and validation](#concrete-applications).
 
 ### Volunteering and proactivity
 
-- **Action is directed strictly at the objective of the work in hand.** Nothing
-  outside that objective is started, changed, or explored.
+- **Action is directed strictly and highly at the objective of the work in hand.**
+  Nothing outside that objective is started, changed, or explored.
 - **Starting any work that was not explicitly requested is forbidden** — no
   speculative feature, no adjacent refactor, no unrequested improvement, no
   groundwork for work nobody has asked for.
@@ -285,10 +296,13 @@ Correctness outranks security, and security outranks speed: never trade a higher
 carried as one effort; splitting it pays for the same analysis, context loading,
 and validation twice.
 
-**Across work items.** Whenever open work items — tasks in `rmp`, and any work in
-hand that is not tracked as a task — are substantially close functionally or
-technically, join them into a **single development effort**, and maximise what
-that one effort delivers across all of them. The batching rule in
+**Objectives are reached with the fewest possible tasks and iterations.** This is
+the measure of every plan and every execution.
+
+**Across work items.** Whenever open work items — tasks in `rmp`, and any work the
+user requests ad hoc that is not tracked as a task — are verifiably close
+functionally or technically, join them into a **single development effort**, and
+maximise what that one effort delivers across all of them. The batching rule in
 [Development workflow](#development-workflow) and the unit of work in
 [Execution](#execution) are this principle applied to tasks.
 
@@ -309,6 +323,32 @@ never a reason to start work that was not requested (see
 [Volunteering and proactivity](#volunteering-and-proactivity)), to widen a task
 beyond its stated objectives, or to deliver any part of it less than completely
 (see [Self-contained development](#self-contained-development)).
+
+### Work convergence policy
+
+**Always look for convergence between the individual objectives of the tasks, and
+turn that convergence into synergy.** Tasks with complementary objectives, or with
+functional or technical proximity, are **always** worked as one optimised effort
+that maximises the synergy between them.
+
+- **One pass per kind of work.** Write all the code in one pass, all the
+  documentation in one pass, and run the tests over all the changed code in one
+  pass.
+- **Aggregate work of the same kind** wherever aggregation makes delivery faster.
+- **Quality never drops.** Synergy and convergence must deliver **better** work
+  than task-by-task development, never lower-quality work. An aggregation that
+  would lower the quality of any deliverable is not made.
+- **Maximise the internal resources available** — specialists, skills, local
+  tooling — so that deliveries are faster and cost the user less, always within
+  the one-sub-agent-at-a-time rule (see
+  [Delegation to sub-agents](#delegation-to-sub-agents)).
+
+**This is the default way of working, never an on-request mode.** The user never
+needs to ask for synergy or convergence to be sought. The motto is: **"Make the
+effort pay: deliver the most with the least work."**
+
+**Neither policy is ever recorded as a task in `rmp`.** They govern how work is
+done; they are not work items.
 
 ---
 
@@ -374,10 +414,11 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
 
 **Tests and validation.**
 
-- **`make ci` runs ONCE, at SPRINT CLOSE — never per task.** The full gate takes
+- **`make ci` runs at the key moments only — release preparation, sprint close, a push, or the user's request — never per task.** The full gate takes
   roughly fifteen minutes and re-runs the entire module, so running it after every
-  task spends hours re-proving what has not changed. It runs at the close of the
-  sprint, before any push, and whenever the user asks for it.
+  task spends hours re-proving what has not changed. Outside those moments it runs
+  only when a change is large or has wide impact, as
+  [What to test, and when](#what-to-test-and-when) states.
 - **Per task, run the targeted validation instead** — this is step 3 of the
   [Development workflow](#development-workflow) loop: the package under change, its
   direct dependents, and any gate the change can plausibly move — plus the
@@ -389,12 +430,90 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
   single test, not its whole package. This narrows a run's **extent**; it never
   licenses a trickle of small edits each followed by its own run (see
   [Work synergy policy](#work-synergy-policy)).
+- **Every test runs on the RAM drive by default — this is very important.** Every
+  test run, in every package, takes the RAM drive for the graph data files it
+  creates, unless doing so compromises the test's effectiveness (see the
+  exceptions below). The largest gain is in suites whose cost is I/O: the whole
+  persistence component (`store/` — `wal`, `checkpoint`, `snapshot`, `recovery`,
+  `txn`, `bulkimport` — and `internal/crashinject/`), the MVCC machinery
+  (`graph/mvcc`, the MVCC paths of `graph/lpg`, and the MVCC examples such as
+  `examples/37_mvcc_write_contention`, 17 and 25), and any other suite that writes
+  temporary files intensively or runs for a very long time on disk.
+  - **Purpose — acceleration only, never realism.** The RAM drive exists for one
+    reason: to speed up the I/O on the graph's data files, which is substantially
+    slower on a real disk (SSD/HDD), so that persistence, durability and MVCC
+    scenarios execute faster. It is **never** a realistic deployment scenario: no
+    conclusion about production performance, latency, throughput or durability
+    cost is drawn from a run on it. Such conclusions require a real disk.
+  - **What the RAM drive holds — and what it never holds.** Both rules are absolute.
+    - **It holds the graph's data files only:** the directories and files that
+      `store.Open`, `graph/lpg` and the persistence layer create for the graph —
+      store directories, WAL files and segments, snapshots, checkpoints, control
+      and marker files, and the `t.TempDir()` / `os.MkdirTemp` directories a test
+      creates for them. The graph is created and persisted there, so writes,
+      reads and traversals run through the real persistence path at RAM speed; the
+      drive stands in for a real disk and the graph behaves exactly as on one.
+    - **It never holds anything else:** no executables, no test binaries
+      (`go test -c` output), no build output or Go build temporaries, no logs, no
+      profiles or traces, no benchmark or `benchstat` output, no scratch scripts.
+      Those go to disk (the session scratchpad or the build cache).
+  - **Exceptions — only where effectiveness would be compromised.** A test stays on
+    disk only when the RAM drive would weaken what it proves: a test that measures
+    real-device fsync latency or throughput, and any test whose finding depends on
+    real-disk timing that injected latency cannot reproduce. A CPU-bound suite
+    (parser, planner, algorithms) also runs with the RAM-drive environment; it
+    creates few or no data files, so it neither gains nor loses.
+  - Races that live in an fsync window are hidden by the RAM drive's microsecond
+    fsync. Concurrency tests therefore inject a seeded fsync latency
+    (`internal/synclatency.ForTest`, `store.Options.SyncLatency`); it is switched
+    off (`GOGRAPH_FSYNC_LATENCY=off`) for CPU and allocation benchmarks.
+  - Mechanics on macOS. **Reuse first:** if a RAM volume is already mounted
+    (`mount | grep -i ram`, or `diskutil info` showing `Virtual: Yes`), work in a
+    fresh subdirectory on it; create a drive only when none exists. To create one:
+    `dev=$(hdiutil attach -nomount ram://<sectors>)`, then
+    `diskutil erasevolume APFS <Name> $dev`, which formats it and mounts it at
+    `/Volumes/<Name>`. `newfs_apfs` followed by `mount -t apfs` fails (exit 66) and
+    leaves images that cannot be detached until a reboot. The build and the test
+    process need different directories, and **under Go 1.27 `t.TempDir()` follows
+    `GOTMPDIR`, not `TMPDIR`** (measured: with `TMPDIR` on the RAM drive and
+    `GOTMPDIR` on disk, `t.TempDir()` writes to disk). So:
+    - **`go`'s own environment** keeps `GOTMPDIR` and `GOCACHE` **on disk**: the
+      build temporaries and the test binaries stay there.
+    - **The test process** gets the RAM drive for both variables through `-exec`:
+      `GOTMPDIR=<disk> go test -exec "env TMPDIR=<ram>/<sub> GOTMPDIR=<ram>/<sub>" ./pkg/...`.
+      `t.TempDir()` and `os.MkdirTemp` then create the graph directories on the
+      RAM drive while the binary itself stays on disk. A binary built with
+      `go test -c -o <disk>` is run the same way, with both variables on the RAM
+      drive in its own environment only.
+    - A test harness builds its child binaries through `internal/testbin`, which
+      writes them and the child `go` command's temporaries under
+      `os.UserCacheDir()/gograph-testbin` on disk, never under `TMPDIR` or `GOTMPDIR`.
+    - Logs, profiles and benchmark files are written to disk.
+    At the end, delete the subdirectory, and eject the drive
+    (`diskutil eject $dev`) only if this run created it.
+  - Tests whose workload is sized by elapsed time grow with the medium's speed and
+    can exhaust the drive or time out. They are tracked and fixed as defects, not
+    run on disk forever.
+  - Prove equivalence once before relying on it: a short slice of the suite on disk
+    and on the RAM drive gives the same pass set.
+  - Crash tests (`kill -9`, fault injection) remain valid on a RAM drive, because a
+    process kill loses no page cache on either medium. Only tests that measure
+    real-device fsync latency or throughput stay on disk.
+  - This relaxes no gate and changes no test: it changes only the medium the run
+    uses.
 - **This relaxes no gate, it relocates one.** `make ci` — `go test -race ./...`,
   the TCK regression gate, `goleak`, and the lint pass — still runs in full, and
   every [Compliance Mandate](#compliance-mandates) and
   [Reliability and Concurrency Mandate](#reliability-and-concurrency-mandates)
   still has to be green before the sprint closes and before anything is pushed. What
   changes is the frequency, not the standard.
+- **A push is validated by correctness alone — never by a benchmark or a
+  measurement.** The gate before a push is the correctness evidence: build, vet, lint,
+  the race-enabled tests, `goleak`, the TCK regression gate, the crash/recovery
+  battery, and the knowledge-graph fidelity check. A benchmark, a wall-clock or
+  throughput gate, or a per-package test-time budget **never blocks a push**: its
+  result is reported, and a regression it shows is recorded as a task, not used to
+  hold the push.
 - **Read the exit status from inside the log, never from the wrapper.** A
   `make ci | tail` pipeline reports the exit code of `tail`: a real
   `make: *** [test-short] Error 1` has been masked as success this way. Redirect the
@@ -442,7 +561,7 @@ Use the **Knowledge Graph** to identify the **foundational and highest-leverage 
 
 **Prioritisation.** By default, always work from the highest-gain, highest-impact tasks down to the least essential. Foundational tasks, and tasks that unblock other tasks or features, are always tackled first.
 
-**Task sizing.** When a task is too large to be completed in a single pass by an AI agent, subdivide it into parts, each of which still honours the self-contained-development principle.
+**Task sizing.** Plan the fewest tasks that reach the objective (see [Work synergy policy](#work-synergy-policy)). Subdivide a task only when it is too large to be completed in a single pass, and then into the fewest parts possible, each of which still honours the self-contained-development principle.
 
 ### Execution
 
@@ -548,7 +667,7 @@ Reach for whatever fits the problem at hand: for example RocksDB, LevelDB, or SQ
 - **It serves four quality axes.** Every insight harvested must make GoGraph a more exemplary implementation in **Performance**, **Efficiency**, **Correctness**, and **Security**. An insight that serves none of these is noise.
 - **It makes decisions objective and assertive.** A design choice backed by how two or three mature engines actually solved the same problem is a settled question; an unbacked preference is not. Use prior art to close decisions, not to widen them.
 - **It is evidence, not authority.** The [Decision framework — correct → secure → fast](#decision-framework--correct--secure--fast) still ranks the trade-offs, and [Measure to decide](#measure-to-decide) still requires that any claimed win be measured **in GoGraph itself**: a technique that is fast in C++ or on the JVM may lose in Go. Benchmark before adopting, and record the result.
-- **Extract the insight, not the code.** Take the structural idea — the algorithm, the memory layout, the ordering of operations — and re-implement it idiomatically in Go. Copying source from a reference project into GoGraph is forbidden; see [Never copy — reimplement](#never-copy--reimplement).
+- **Extract the insight; copy code only under a compatible licence.** Take the structural idea — the algorithm, the memory layout, the ordering of operations — and implement it idiomatically in Go. Code itself may be copied or ported to Go only under the rules in [Copying open-source code](#copying-open-source-code).
 - **Cite what you consulted.** When a reference project influences a non-obvious decision, record which project, which version or commit, and which file or component you read — in the task description, a code comment, or the audit document — exactly as [Sub-Agents (Specialists)](#sub-agents-specialists) requires of specialist findings.
 - **Store what outlives the task.** Comparisons and insights of lasting value belong in the [Knowledge Graph](#knowledge-graph), so the project's understanding of the prior art compounds instead of being re-derived each cycle.
 
@@ -556,7 +675,7 @@ Reach for whatever fits the problem at hand: for example RocksDB, LevelDB, or SQ
 
 Before designing or implementing any component, **state clearly and objectively what that component is for**. Only then — and always as a function of that objective, the macro objective first — study how the leading or most successful open-source projects solved the same problem, and use that knowledge to take better-informed decisions **for this project**.
 
-Reference projects are treated as **good practice to be analysed**, never as a solution to be adopted automatically. What is extracted from them is **understanding** — the structure, the algorithm, the reason for the decision, the trade-offs accepted — never code to transcribe.
+Reference projects are treated as **good practice to be analysed**, never as a solution to be adopted automatically. What is extracted from them is **understanding** — the structure, the algorithm, the reason for the decision, the trade-offs accepted. Their code is copied only under the rules in [Copying open-source code](#copying-open-source-code).
 
 Follow this sequence for each component:
 
@@ -575,13 +694,17 @@ Follow this sequence for each component:
 8. **Document the decision.** Record the decision taken, the alternatives considered, the sources consulted, and the reasoning, in a form that can be audited and revisited.
 9. **Validate empirically.** When the approach has a measurable impact, measure it **in this project** rather than trusting the reference's claims (see [Measure to decide](#measure-to-decide)).
 
-### Never copy — reimplement
+### Copying open-source code
 
-- **Copying code directly from open-source projects into GoGraph is forbidden**: whole files, blocks of code, or line-by-line transcription or translation into another language.
-- The implementation must be **original**, idiomatic for Go and for this project's conventions, and designed for the objectives defined in [The inspiration protocol](#the-inspiration-protocol).
-- **Copying a decision without understanding it is equally forbidden.** Adopting an approach merely because a reference project uses it is a form of guessing (see [Never guess — evidence over assumption](#never-guess--evidence-over-assumption)). If you cannot explain why it suits this component, do not adopt it.
-- **Licences and legal obligations.** Inspiration does not dispense with respecting the source project's licence. Several primary references are copyleft or source-available — Neo4j is GPLv3, MariaDB GPLv2, Memgraph BSL 1.1 — and none of their licences is GoGraph's to redistribute. Never incorporate third-party code without checking the licence **and without the user's explicit authorisation**. If you conclude that reusing code or adopting a dependency is the best route, **ask the user first** (see [Decision autonomy](#decision-autonomy)), presenting the options and identifying the licence of each.
-- **Attribution.** Record in the [Knowledge Graph](#knowledge-graph) and in the documentation which source inspired each decision — for traceability and credit, never as a way of legitimising a copy.
+- **Copying code from an open-source repository is allowed** when its licence is **compatible** with GoGraph's (MIT) and the code is **useful** to GoGraph as a whole or to one of its parts. The copy may be whole files or blocks of code, and may be used as copied.
+- **The same applies across languages.** When the source is written in another language, its functionality, concept or solution may be ported, translated or reimplemented in Go under exactly the same rules: compatible licence, useful to GoGraph, free to evolve, licence notice and attribution kept.
+- **The Go ecosystem is a source too.** Code from any Go module with a compatible licence may be copied whole or in part when it benefits GoGraph or one of its features. It is already Go, so the only work needed is adapting it to this project's conventions and mandates. Search for candidate modules and packages on <https://pkg.go.dev>, which shows each one's licence, version, and importers. Confirm the licence in the module's own repository at the version you copy from.
+- **The copied or ported code becomes GoGraph code.** It evolves with the project like any other code — adapted, refactored, optimised, or rewritten. Preserving the original version is **not** a requirement.
+- **Copied code meets the same bar as original code.** It is idiomatic Go, follows this project's conventions, satisfies every [Compliance Mandate](#compliance-mandates), and is tested.
+- **Incompatible licences stay forbidden.** Copyleft and source-available code is never copied: Neo4j is GPLv3, MariaDB and InnoDB (MySQL) GPLv2, Memgraph BSL 1.1. From these, only the insight is taken and re-implemented. When compatibility is in doubt, **ask the user** (see [Decision autonomy](#decision-autonomy)), identifying the licence.
+- **Licence obligations are honoured.** Keep the copyright and licence notice the source licence requires, in the copied file or in a `THIRD_PARTY_NOTICES` entry, and record the source repository, the commit, and the path.
+- **Copying a decision without understanding it is forbidden.** Adopting an approach merely because a reference project uses it is a form of guessing (see [Never guess — evidence over assumption](#never-guess--evidence-over-assumption)). If you cannot explain why it suits this component, do not adopt it — copied or not.
+- **Attribution.** Record in the [Knowledge Graph](#knowledge-graph) and in the documentation which source each copied block or inspired decision comes from, for traceability and credit.
 
 ### Prior-art safeguards
 
@@ -672,7 +795,7 @@ This module must operate **without failure under sustained high load and high co
 ### Acceptance gates
 
 - **Soak test (periodic reliability exercise; not a release gate).** A multi-hour mixed-workload run under `GODEBUG=gctrace=1` should show zero growth in heap, file descriptors, and goroutine count after warm-up. Run it periodically — and ideally before a major release — but it does **not** block a release.
-- **Concurrency stress test in the local gate.** A short variant of the soak workload runs as part of the race-enabled short test layer (`make ci`) before every push.
+- **Concurrency stress test in the local gate.** A short variant of the soak workload runs as part of the race-enabled short test layer (`make ci`) before every push. It gates on correctness (no race, no deadlock, no lost or phantom write), never on its timing.
 - **Load-test report alongside benchmarks.** Each release ships latency and throughput numbers at multiple concurrency levels (1, 8, 64, 256, 1024 goroutines), recorded in `docs/benchmarks/`.
 
 ---

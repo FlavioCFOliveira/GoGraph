@@ -73,7 +73,7 @@ type LoadedSnapshot struct {
 // manifest indexing them. When the underlying [graph.Mapper] is
 // string-keyed (N=string) the writer additionally emits mapper.bin —
 // the durable (NodeID -> natural key) interning table — and the
-// manifest is stamped at [ManifestVersion] (v3). For any other N the
+// manifest is stamped at [ManifestVersion] (v4). For any other N the
 // writer falls back to the v2 layout (no mapper.bin) and the manifest
 // records [manifestVersionV2]; recovery from a v2 snapshot continues
 // to rely on WAL replay to re-intern keys.
@@ -419,6 +419,37 @@ func WriteSnapshotFullWithWeightCodecCtx[N comparable, W any](
 	return err
 }
 
+// WriteSnapshotFullWithWeightCodecCtxFS is the filesystem-seam variant of
+// [WriteSnapshotFullWithWeightCodecCtx]: it routes every filesystem operation
+// of the snapshot publish through fsys instead of the default OS backend. It is
+// the entry point store/bulkimport's seamed publish uses, so the deterministic-
+// simulation harness (internal/sim) can inject faults into a bulk-import
+// publish and crash it mid-way (rmp #2518).
+//
+// The fsys parameter type ([fileSystem]) is intentionally unexported, as on
+// [WriteSnapshotFullWithMapperCodecAndConstraintsFS]. Passing osBackend{}
+// reproduces [WriteSnapshotFullWithWeightCodecCtx] byte for byte. A nil wcodec
+// behaves exactly as [WriteSnapshotFullCtx] over fsys.
+func WriteSnapshotFullWithWeightCodecCtxFS[N comparable, W any](
+	ctx context.Context,
+	fsys fileSystem,
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	wcodec weightEncoder[W],
+) error {
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithWeightCodecCtxFS").Stop()
+	if fsys == nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithWeightCodecCtxFS.errors", 1)
+		return errors.New("snapshot: nil filesystem")
+	}
+	err := captureAndWriteW[N, W](ctx, fsys, dir, c, g, nil, wcodec, nil, nil)
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithWeightCodecCtxFS.errors", 1)
+	}
+	return err
+}
+
 // WriteCapture publishes a [Capture] taken earlier to dir, emitting
 // constraints.bin from constraints and indexdefs.bin from indexDefs (each
 // omitted when nil or empty). It touches no graph: every graph-derived byte was
@@ -550,6 +581,16 @@ func writeCaptureCore[W any](
 	mapperSize, mapperCRC, haveMapper := capt.mapper.size, capt.mapper.crc, capt.mapper.present
 	if haveMapper {
 		if err := writeCapturedComponent(fsys, filepath.Join(tmp, MapperFile), capt.mapper); err != nil {
+			_ = fsys.RemoveAll(tmp)
+			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+			return err
+		}
+	}
+	// nodeids.bin — the mapper's per-shard high-water marks, with every
+	// mapper.bin (WAL v2 step 1).
+	haveNodeIDs := capt.nodeIDs.present
+	if haveNodeIDs {
+		if err := writeCapturedComponent(fsys, filepath.Join(tmp, NodeIDsFile), capt.nodeIDs); err != nil {
 			_ = fsys.RemoveAll(tmp)
 			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 			return err
@@ -705,6 +746,9 @@ func writeCaptureCore[W any](
 		manifestVersion = ManifestVersion
 		files = append(files, FileEntry{Name: MapperFile, Size: mapperSize, CRC32C: mapperCRC})
 	}
+	if haveNodeIDs {
+		files = append(files, FileEntry{Name: NodeIDsFile, Size: capt.nodeIDs.size, CRC32C: capt.nodeIDs.crc})
+	}
 	// The tombstones.bin entry is additive and does NOT change the manifest
 	// version: it is an optional component (like indexes/<name>.bin),
 	// present only when the graph has removed nodes. A reader that predates
@@ -793,6 +837,13 @@ func writeCaptureCore[W any](
 			Multigraph: cfg.Multigraph,
 			Weightless: cfg.Weightless,
 		},
+	}
+	// The WAL position the image covers, written only into a version-4
+	// manifest (one that carries mapper.bin), the only version that defines it.
+	if manifestVersion == ManifestVersion && capt.walStoreID != 0 {
+		m.StoreID = fmt.Sprintf("%016x", capt.walStoreID)
+		m.WALRedoPos = capt.walRedoPos
+		m.WALFormat = WALFormatSegmented
 	}
 
 	manifestPath := filepath.Join(tmp, "manifest.json")
@@ -1071,6 +1122,18 @@ func loadSnapshotFullWith(fsys fileSystem, dir string) (LoadedSnapshot, error) {
 			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
 			return LoadedSnapshot{}, err
 		}
+	}
+
+	// nodeids.bin — the mapper's per-shard high-water marks (WAL v2 step 1).
+	// Absent before manifest version 4; the mapper then loads with the marks
+	// derived from its highest restored index per shard.
+	if niEntry := findEntry(m.Files, NodeIDsFile); niEntry != nil {
+		next, nerr := readVerifiedNodeIDs(fsys, filepath.Join(dir, NodeIDsFile), niEntry.CRC32C)
+		if nerr != nil {
+			metrics.IncCounter("store.snapshot.LoadSnapshotFull.errors", 1)
+			return LoadedSnapshot{}, nerr
+		}
+		mapperParsed.Next = next
 	}
 
 	// tombstones.bin — optional node-removal set. Absent for older

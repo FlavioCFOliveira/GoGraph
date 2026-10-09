@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	pathpkg "path"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1275,12 +1276,16 @@ func (d *SimDisk) wouldExceedLocked(oldLen, newLen int64) bool {
 // returns a handle positioned per the flags: at end when os.O_APPEND is set, at
 // zero otherwise. When os.O_TRUNC is set the file's contents are discarded. It
 // returns an error wrapping fs.ErrNotExist when the file is absent and
-// os.O_CREATE is not set.
+// os.O_CREATE is not set, and one wrapping fs.ErrExist when os.O_CREATE and
+// os.O_EXCL are both set and the file exists.
 func (d *SimDisk) OpenFile(path string, flag int) (*SimFileHandle, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	f, ok := d.files[path]
+	if ok && flag&os.O_CREATE != 0 && flag&os.O_EXCL != 0 {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrExist}
+	}
 	if !ok {
 		if flag&os.O_CREATE == 0 {
 			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
@@ -2365,6 +2370,59 @@ func (d *SimDisk) Stat(path string) (fs.FileInfo, error) {
 	return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
 }
 
+// ReadDir lists the immediate children of the directory at dir, sorted by
+// name, as [os.ReadDir] does. A child is a file directly under dir, or a
+// directory — tracked explicitly through MkdirAll or implied by a file beneath
+// it. A missing dir is reported with an error wrapping fs.ErrNotExist, and a
+// path naming a file with one wrapping syscall.ENOTDIR.
+//
+// It exists for the store/bulkimport filesystem seam, whose empty-directory
+// check lists the target directory (rmp #2518). It reads the CURRENT image,
+// including names a crash would still revoke, exactly as a directory listing on
+// a live filesystem does.
+func (d *SimDisk) ReadDir(dir string) ([]fs.DirEntry, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dir = pathpkg.Clean(dir)
+	if _, isFile := d.files[dir]; isFile {
+		return nil, &fs.PathError{Op: "readdirent", Path: dir, Err: syscall.ENOTDIR}
+	}
+	if !d.dirExistsLocked(dir) {
+		return nil, &fs.PathError{Op: "open", Path: dir, Err: fs.ErrNotExist}
+	}
+	prefix := dir + "/"
+	children := make(map[string]simFileInfo)
+	for p, f := range d.files {
+		rest, ok := strings.CutPrefix(p, prefix)
+		if !ok {
+			continue
+		}
+		if name, _, nested := strings.Cut(rest, "/"); nested {
+			children[name] = simFileInfo{name: name, dir: true}
+		} else {
+			children[name] = simFileInfo{name: name, size: int64(len(f.data))}
+		}
+	}
+	for dp := range d.dirs {
+		rest, ok := strings.CutPrefix(dp, prefix)
+		if !ok {
+			continue
+		}
+		name, _, _ := strings.Cut(rest, "/")
+		children[name] = simFileInfo{name: name, dir: true}
+	}
+	names := make([]string, 0, len(children))
+	for name := range children {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	out := make([]fs.DirEntry, 0, len(names))
+	for _, name := range names {
+		out = append(out, fs.FileInfoToDirEntry(children[name]))
+	}
+	return out, nil
+}
+
 // ReadFile returns a copy of the whole contents of the file at path, or an
 // error wrapping fs.ErrNotExist when absent. The copy keeps the returned slice
 // independent of later writes, mirroring os.ReadFile.
@@ -2492,11 +2550,11 @@ func (d *SimDisk) ArmDirSyncFaultForPath(dir string) {
 // fsync, one shared body, one fire count — differing only in being keyed on the
 // exact childPath rather than on the directory, so it targets a specific fsync
 // robustly where several fsyncs of the SAME parent directory occur in one
-// operation (see the field docs on [SimDisk]). It models the post-rename
-// parent-directory fsync failing inside [wal.Writer.TruncatePrefix]: that
-// failure must poison the WAL writer (store/wal/writer.go poisonAfterRename)
-// while the on-disk suffix-only WAL — and any snapshot published before it —
-// stays intact and recoverable. It draws nothing from the [Seed], so arming
+// operation (see the field docs on [SimDisk]). It models, for example, the
+// post-rename parent-directory fsync of the WAL control file failing inside a
+// checkpoint ([wal.Writer.MarkCheckpoint]): that failure must fail the
+// checkpoint while the log — and any snapshot published before it — stays
+// intact and recoverable. It draws nothing from the [Seed], so arming
 // never perturbs the reproducible fault stream, and must be called from the
 // controlling goroutine before the operation that will trigger it.
 func (d *SimDisk) ArmParentDirSyncFaultForPath(childPath string) {

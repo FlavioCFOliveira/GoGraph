@@ -10,7 +10,9 @@ package recovery
 //
 // #1418 (by-handle). txn.applyOp and recovery.applySetEdgePropertyByHandle both
 // discarded the error from lpg.Graph.SetEdgePropertyByHandle. Fixed by
-// propagating it: ErrCommittedNotApplied on Commit, `return false` on recovery.
+// propagating it: Commit returns the refusal, `return false` on recovery. Since
+// the ACID audit of rmp #2965 Commit applies before its WAL record, so the
+// refusal is returned with nothing durable rather than as ErrCommittedNotApplied.
 //
 // #2707 (by pair). The header this file carried until then ASSERTED that the
 // sibling op OpSetEdgeProperty already propagated on BOTH paths. Half of that was
@@ -27,7 +29,7 @@ package recovery
 //
 // Tests:
 //  1. Txn path, by handle (txn.go): Commit with a rejecting validator returns
-//     ErrCommittedNotApplied — consistent with OpSetNodeProperty.
+//     the refusal and leaves nothing durable — consistent with OpSetNodeProperty.
 //  2. Recovery path, by handle (recovery.go): applySetEdgePropertyByHandle
 //     returns false when the validator rejects (white-box via the internal
 //     function).
@@ -83,11 +85,14 @@ func buildSetEdgePropertyByHandleRest(key string, val int64, handle uint64) []by
 	return buf
 }
 
-// TestEdgePropertyByHandle_Txn_ValidatorRejection_ReportsErrCommittedNotApplied
-// exercises the txn.go applyOp path.
+// TestEdgePropertyByHandle_Txn_ValidatorRejection_RefusesBeforeTheWAL exercises
+// the txn.go applyOp path.
 //
-// Pre-fix: _ = g.SetEdgePropertyByHandle(...) silences the error → Commit nil.
-// Post-fix: return g.SetEdgePropertyByHandle(...) propagates ErrCommittedNotApplied.
+// Pre-#1418: _ = g.SetEdgePropertyByHandle(...) silenced the error → Commit nil.
+// #1418: the error propagated, as ErrCommittedNotApplied after the fsync.
+// Since the ACID audit of rmp #2965 the apply runs BEFORE the WAL record, so
+// Commit returns the refusal itself and the WAL holds nothing of the
+// transaction.
 //
 // THE VALIDATOR IS NOW INSTALLED AFTER BUFFERING, and that is the only way left
 // to reach this path. Since rmp #2602 txn.Tx.SetEdgePropertyByHandle validates
@@ -101,7 +106,7 @@ func buildSetEdgePropertyByHandleRest(key string, val int64, handle uint64) []by
 // real ordering. It is also the ordering that keeps the ORIGINAL guard alive —
 // the apply path must PROPAGATE a rejection rather than silence it — which the
 // buffer-time check does not subsume.
-func TestEdgePropertyByHandle_Txn_ValidatorRejection_ReportsErrCommittedNotApplied(t *testing.T) {
+func TestEdgePropertyByHandle_Txn_ValidatorRejection_RefusesBeforeTheWAL(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal")
@@ -126,19 +131,30 @@ func TestEdgePropertyByHandle_Txn_ValidatorRejection_ReportsErrCommittedNotAppli
 	// Buffered with NO validator installed, so the op reaches t.ops...
 	mustTx(t, tx.SetEdgePropertyByHandle("x", "y", 1, propKey, lpg.Int64Value(42)))
 
-	// ...and the validator arrives before the apply phase, which runs after the
-	// WAL fsync. This is the ordering the apply-path guard exists for.
+	// ...and the validator arrives before the apply phase. This is the ordering
+	// the apply-path guard exists for.
 	g.SetValidator(&rejectingValidator{key: propKey})
 
 	commitErr := tx.Commit()
 	if commitErr == nil {
-		t.Fatal("Commit returned nil with a rejecting validator; expected ErrCommittedNotApplied")
+		t.Fatal("Commit returned nil with a rejecting validator; expected the validator's refusal")
 	}
-	if !errors.Is(commitErr, txn.ErrCommittedNotApplied) {
-		t.Fatalf("Commit error = %v; want errors.Is(..., txn.ErrCommittedNotApplied)", commitErr)
+	if errors.Is(commitErr, txn.ErrCommittedNotApplied) { //nolint:staticcheck // SA1019: asserts the deprecated sentinel is never returned
+		t.Fatalf("Commit error = %v; a refused apply must not be reported as durable", commitErr)
 	}
-
-	_ = w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatalf("wal.Close: %v", err)
+	}
+	res, err := Open[string, float64](dir, Options[string, float64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewFloat64WeightCodec(),
+	})
+	if err != nil {
+		t.Fatalf("recovery.Open: %v", err)
+	}
+	if res.WALOps != 0 {
+		t.Fatalf("WALOps = %d, want 0 (the refused transaction must not be durable)", res.WALOps)
+	}
 }
 
 // TestEdgePropertyByHandle_Recovery_ValidatorRejection_IsFailStop exercises

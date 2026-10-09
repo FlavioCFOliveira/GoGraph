@@ -12,13 +12,13 @@ import (
 // metadata stores (#1284). [Graph.EdgeCreateCount] and the per-instance
 // surfaces [Graph.EdgeLabelsAt] / [Graph.EdgePropertiesAt] are each guarded by
 // their own per-shard mutex and are only per-operation atomic; they are NOT
-// cross-store consistent outside the transaction-visibility barrier. A reader
-// that correlates the CREATE count with the number of populated per-instance
-// property indices — WITHOUT [Graph.View] — can observe a multi-CREATE
+// cross-store consistent. A reader that correlates the CREATE count with the
+// number of populated per-instance property indices can observe a multi-CREATE
 // multigraph transaction half-applied (count already at 2 while only one
-// instance is populated). The same correlation wrapped in [Graph.View] never
-// observes that partial state because the writer holds the barrier for the
-// whole apply.
+// instance is populated). Wrapping the correlation in Graph.View used to close
+// that window; rmp #2344 removed Graph.View, and no snapshot can close it,
+// because [Graph.EdgeCreateCount] has no version chain (see HALF 2 below). The
+// test name records the Graph.View era.
 //
 // This is a CONTRACT/characterization test, not a bug fix: it locks the behaviour
 // described on those accessors and in docs/isolation-design.md, under a
@@ -68,18 +68,22 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 	// indices. The instance index is the 1-based value IncEdgeCreateCount
 	// returns, exactly as CreateRelationship wires it.
 	applyTwoParallelEdges := func(beforeSecond func()) error {
-		return g.ApplyAtomically(func() error {
-			h1, err := g.AddEdgeH("a", "b", 0)
+		return g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			h1, err := g.Writer(tx).AddEdgeH("a", "b", 0)
 			if err != nil {
 				return err
 			}
 			i1 := g.IncEdgeCreateCount("a", "b")
-			g.SetEdgeLabelAt("a", "b", i1, "R")
-			if err := g.SetEdgePropertyAt("a", "b", i1, "seq", Int64Value(i1)); err != nil {
+			if err := g.Writer(tx).SetEdgeLabelAt("a", "b", i1, "R"); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.Writer(tx).SetEdgePropertyAt("a", "b", i1, "seq", Int64Value(i1)); err != nil {
 				return err
 			}
-			g.SetEdgeLabelByHandle("a", "b", h1, "R")
-			if err := g.SetEdgePropertyByHandle("a", "b", h1, "seq", Int64Value(i1)); err != nil {
+			if err := g.Writer(tx).SetEdgeLabelByHandle("a", "b", h1, "R"); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.Writer(tx).SetEdgePropertyByHandle("a", "b", h1, "seq", Int64Value(i1)); err != nil {
 				return err
 			}
 
@@ -87,17 +91,21 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 				beforeSecond()
 			}
 
-			h2, err := g.AddEdgeH("a", "b", 0)
+			h2, err := g.Writer(tx).AddEdgeH("a", "b", 0)
 			if err != nil {
 				return err
 			}
 			i2 := g.IncEdgeCreateCount("a", "b")
-			g.SetEdgeLabelAt("a", "b", i2, "R")
-			if err := g.SetEdgePropertyAt("a", "b", i2, "seq", Int64Value(i2)); err != nil {
+			if err := g.Writer(tx).SetEdgeLabelAt("a", "b", i2, "R"); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.Writer(tx).SetEdgePropertyAt("a", "b", i2, "seq", Int64Value(i2)); err != nil {
 				return err
 			}
-			g.SetEdgeLabelByHandle("a", "b", h2, "R")
-			if err := g.SetEdgePropertyByHandle("a", "b", h2, "seq", Int64Value(i2)); err != nil {
+			if err := g.Writer(tx).SetEdgeLabelByHandle("a", "b", h2, "R"); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.Writer(tx).SetEdgePropertyByHandle("a", "b", h2, "seq", Int64Value(i2)); err != nil {
 				return err
 			}
 			return nil

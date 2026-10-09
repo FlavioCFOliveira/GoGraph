@@ -19,13 +19,14 @@ package cypher_test
 //
 // THE FIX: txn.Store.RunUnderCommitLock runs a closure under the same commit
 // mutex Begin holds, and the checkpointer runs its snapshot+truncate window
-// under it via checkpoint.WithCommitSerialiser. The snapshot is additionally
-// taken inside Graph.View (defence in depth). Both windows are then closed.
+// under it via checkpoint.WithCommitSerialiser. Both windows are then closed.
+// The fix also took the snapshot inside Graph.View (defence in depth); rmp #2344
+// removed Graph.View, and the checkpointer now captures the image at an MVCC
+// instant it opens under the commit lock (rmp #2310, store/checkpoint).
 //
 // The test wires the CORRECT (fixed) configuration and asserts both
-// invariants hold under -race. Reverting either half of the fix
-// (WithCommitSerialiser, or the View capture) reintroduces a failure — see the
-// task notes for the manual-revert verification.
+// invariants hold under -race. Reverting WithCommitSerialiser reintroduces a
+// failure — see the task notes for the manual-revert verification.
 
 import (
 	"context"
@@ -40,6 +41,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
@@ -121,7 +123,7 @@ func TestCheckpoint_SnapshotUnderBarrier_NoPartialTransaction(t *testing.T) {
 
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal")
-	w, err := wal.Open(walPath)
+	w, err := wal.OpenWithSyncLatency(walPath, synclatency.ForTest(t))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}

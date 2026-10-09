@@ -60,7 +60,9 @@ func TestSetEdgeLabel_TypesEveryFreeParallelSlot(t *testing.T) {
 					t.Fatalf("AddEdge: %v", err)
 				}
 			}
-			g.SetEdgeLabel("a", "b", "K")
+			if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+				t.Fatal(err)
+			}
 
 			if got, _ := g.OutDegree("a"); got != n {
 				t.Fatalf("fixture: OutDegree(a) = %d, want %d", got, n)
@@ -111,11 +113,15 @@ func TestSetEdgeLabel_TwoTypesPerSlotVersusPerPair(t *testing.T) {
 		if err := g.AddEdge("a", "b", 1); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
-		g.SetEdgeLabel("a", "b", "K")
+		if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.AddEdge("a", "b", 1); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
-		g.SetEdgeLabel("a", "b", "M")
+		if err := g.SetEdgeLabel("a", "b", "M"); err != nil {
+			t.Fatal(err)
+		}
 
 		if got := typedDegree(t, g, "a", "K"); got != 1 {
 			t.Errorf("OutDegreeByType(a, K) = %d, want 1", got)
@@ -133,8 +139,12 @@ func TestSetEdgeLabel_TwoTypesPerSlotVersusPerPair(t *testing.T) {
 				t.Fatalf("AddEdge: %v", err)
 			}
 		}
-		g.SetEdgeLabel("a", "b", "K")
-		g.SetEdgeLabel("a", "b", "M")
+		if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.SetEdgeLabel("a", "b", "M"); err != nil {
+			t.Fatal(err)
+		}
 
 		// K took both free slots; M then found none free, so it applies to the pair
 		// — which, SetEdgeLabel naming the pair, means to both of its slots.
@@ -152,8 +162,12 @@ func TestSetEdgeLabel_TwoTypesPerSlotVersusPerPair(t *testing.T) {
 		if err := g.AddEdge("a", "b", 1); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
-		g.SetEdgeLabel("a", "b", "K")
-		g.SetEdgeLabel("a", "b", "M")
+		if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.SetEdgeLabel("a", "b", "M"); err != nil {
+			t.Fatal(err)
+		}
 
 		if got := typedDegree(t, g, "a", "K"); got != 1 {
 			t.Errorf("OutDegreeByType(a, K) = %d, want 1", got)
@@ -215,7 +229,9 @@ func TestSelfLoop_PerSlotRelType(t *testing.T) {
 				t.Fatalf("AddEdge: %v", err)
 			}
 		}
-		g.SetEdgeLabel("a", "a", "K")
+		if err := g.SetEdgeLabel("a", "a", "K"); err != nil {
+			t.Fatal(err)
+		}
 		if got := typedDegree(t, g, "a", "K"); got != 12 {
 			t.Errorf("OutDegreeByType(a, K) = %d, want 12", got)
 		}
@@ -233,14 +249,20 @@ func TestRemoveEdgeLabel_ClearsEveryParallelSlot(t *testing.T) {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	g.SetEdgeLabel("a", "b", "K")
-	g.SetEdgeLabel("a", "b", "M") // no free slot: applies to the pair via overflow
+	if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("a", "b", "M"); err != nil {
+		t.Fatal(err)
+	} // no free slot: applies to the pair via overflow
 
 	if got := typedDegree(t, g, "a", "K"); got != 3 {
 		t.Fatalf("precondition: OutDegreeByType(a, K) = %d, want 3", got)
 	}
 
-	g.RemoveEdgeLabel("a", "b", "K")
+	if err := g.RemoveEdgeLabel("a", "b", "K"); err != nil {
+		t.Fatal(err)
+	}
 	if got := typedDegree(t, g, "a", "K"); got != 0 {
 		t.Errorf("after RemoveEdgeLabel(K): OutDegreeByType(a, K) = %d, want 0", got)
 	}
@@ -256,7 +278,9 @@ func TestRemoveEdgeLabel_ClearsEveryParallelSlot(t *testing.T) {
 		t.Errorf("after RemoveEdgeLabel(K): OutDegree(a) = %d, want 3", got)
 	}
 
-	g.RemoveEdgeLabel("a", "b", "M")
+	if err := g.RemoveEdgeLabel("a", "b", "M"); err != nil {
+		t.Fatal(err)
+	}
 	if got := typedDegree(t, g, "a", "M"); got != 0 {
 		t.Errorf("after RemoveEdgeLabel(M): OutDegreeByType(a, M) = %d, want 0", got)
 	}
@@ -282,7 +306,9 @@ func TestPerSlotRelType_BoundedAgreesWithUnbounded(t *testing.T) {
 					t.Fatalf("AddEdge: %v", err)
 				}
 			}
-			g.SetEdgeLabel("a", "b", "K")
+			if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+				t.Fatal(err)
+			}
 		}, 2},
 		{"one typed and one untyped slot", func(t *testing.T, g *lpg.Graph[string, float64]) {
 			if err := g.AddEdgeLabeled("a", "b", 1, "K"); err != nil {
@@ -296,8 +322,12 @@ func TestPerSlotRelType_BoundedAgreesWithUnbounded(t *testing.T) {
 			if err := g.AddEdge("a", "b", 1); err != nil {
 				t.Fatalf("AddEdge: %v", err)
 			}
-			g.SetEdgeLabel("a", "b", "M")
-			g.SetEdgeLabel("a", "b", "K")
+			if err := g.SetEdgeLabel("a", "b", "M"); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+				t.Fatal(err)
+			}
 		}, 1},
 	}
 	for _, b := range builds {

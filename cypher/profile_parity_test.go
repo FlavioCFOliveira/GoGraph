@@ -119,7 +119,9 @@ func profileCorpusGraph(t *testing.T) *lpg.Graph[string, float64] {
 			if err := g.AddEdge(src, dst, float64(d)); err != nil {
 				t.Fatalf("AddEdge %s->%s: %v", src, dst, err)
 			}
-			g.SetEdgeLabel(src, dst, "K")
+			if err := g.SetEdgeLabel(src, dst, "K"); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	return g
@@ -326,23 +328,24 @@ func TestProfile_DerivedCorpusShapeCardinalityAndCompleteness(t *testing.T) {
 // asserted to be exact and disjoint against what the corpus renders, so this list
 // cannot rot silently in either direction.
 var profileCorpusExcluded = map[string]string{
-	// PROFILE refuses a writing statement — executing a write as the side effect of
-	// a diagnostic is not something a user asks for — so no write operator can ever
-	// appear in a profiled plan.
-	"CreateNode":         "write operator; Engine.Profile refuses writing statements",
-	"CreateRelationship": "write operator; Engine.Profile refuses writing statements",
-	"DeleteNode":         "write operator; Engine.Profile refuses writing statements",
-	"DeleteRelationship": "write operator; Engine.Profile refuses writing statements",
-	"DetachDelete":       "write operator; Engine.Profile refuses writing statements",
-	"Foreach":            "write operator; Engine.Profile refuses writing statements",
-	"Merge":              "write operator; Engine.Profile refuses writing statements",
-	"MergePattern":       "write operator; Engine.Profile refuses writing statements",
-	"MergeRelationship":  "write operator; Engine.Profile refuses writing statements",
-	"RemoveLabels":       "write operator; Engine.Profile refuses writing statements",
-	"RemoveProperty":     "write operator; Engine.Profile refuses writing statements",
-	"SetAllProperties":   "write operator; Engine.Profile refuses writing statements",
-	"SetLabels":          "write operator; Engine.Profile refuses writing statements",
-	"SetProperty":        "write operator; Engine.Profile refuses writing statements",
+	// The corpus is a READ corpus: its parity check compares PROFILE against
+	// Engine.Run, which refuses a writing statement. A profiled write is measured
+	// on the write path since rmp #2790 and is gated separately, in
+	// profile_write_test.go, against the unprefixed statement's counters and graph.
+	"CreateNode":         "write operator; outside the read corpus, gated by profile_write_test.go",
+	"CreateRelationship": "write operator; outside the read corpus, gated by profile_write_test.go",
+	"DeleteNode":         "write operator; outside the read corpus, gated by profile_write_test.go",
+	"DeleteRelationship": "write operator; outside the read corpus, gated by profile_write_test.go",
+	"DetachDelete":       "write operator; outside the read corpus, gated by profile_write_test.go",
+	"Foreach":            "write operator; outside the read corpus, gated by profile_write_test.go",
+	"Merge":              "write operator; outside the read corpus, gated by profile_write_test.go",
+	"MergePattern":       "write operator; outside the read corpus, gated by profile_write_test.go",
+	"MergeRelationship":  "write operator; outside the read corpus, gated by profile_write_test.go",
+	"RemoveLabels":       "write operator; outside the read corpus, gated by profile_write_test.go",
+	"RemoveProperty":     "write operator; outside the read corpus, gated by profile_write_test.go",
+	"SetAllProperties":   "write operator; outside the read corpus, gated by profile_write_test.go",
+	"SetLabels":          "write operator; outside the read corpus, gated by profile_write_test.go",
+	"SetProperty":        "write operator; outside the read corpus, gated by profile_write_test.go",
 	"Eager":              "built only by the write planner (cypher/ir/writes.go) to break a read-write dependency",
 
 	// DDL is planned and executed outside the physical read plan: Engine.Profile

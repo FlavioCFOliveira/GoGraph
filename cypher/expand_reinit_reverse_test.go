@@ -58,7 +58,9 @@ func TestExpandReInit_ExistsReverseDoesNotLeakPriorSource(t *testing.T) {
 		if err := g.AddEdge(e[0], e[1], 1); err != nil {
 			t.Fatalf("AddEdge(%v): %v", e, err)
 		}
-		g.SetEdgeLabel(e[0], e[1], "K")
+		if err := g.SetEdgeLabel(e[0], e[1], "K"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	eng := cypher.NewEngine(g)
 

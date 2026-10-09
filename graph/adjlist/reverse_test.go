@@ -83,7 +83,7 @@ func TestReverseIndexAgreesWithFullScan(t *testing.T) {
 							t.Fatalf("AddEdge: %v", err)
 						}
 					default:
-						a.RemoveEdge(s, d)
+						must(t).E(a.RemoveEdge(s, d))
 					}
 				}
 				sawIn += assertReverseAgrees(t, a, fmt.Sprintf("round %d", round))
@@ -95,7 +95,7 @@ func TestReverseIndexAgreesWithFullScan(t *testing.T) {
 			// failure mode that would leave DETACH DELETE with edges to remove that
 			// it can no longer see.
 			for i := 0; i < nodes; i++ {
-				a.RemoveAllEdgesFrom(fmt.Sprintf("n%d", i))
+				must(t).E(a.RemoveAllEdgesFrom(fmt.Sprintf("n%d", i)))
 			}
 			assertReverseAgrees(t, a, "after draining every node")
 			if got := a.RecordedInEdges(); got != 0 {
@@ -151,13 +151,13 @@ func TestReverseIndexParallelEdgesCollapse(t *testing.T) {
 		t.Fatalf("with %d parallel edges, in-neighbours = %v, want [%d] once", parallel, got, sID)
 	}
 	for i := 0; i < parallel-1; i++ {
-		a.RemoveEdge("s", "d")
+		must(t).E(a.RemoveEdge("s", "d"))
 		if got := a.InNeighbourIDs(dID); !slices.Equal(got, []graph.NodeID{sID}) {
 			t.Fatalf("after removing %d of %d parallel edges, in-neighbours = %v, want [%d]",
 				i+1, parallel, got, sID)
 		}
 	}
-	a.RemoveEdge("s", "d")
+	must(t).E(a.RemoveEdge("s", "d"))
 	if got := a.InNeighbourIDs(dID); len(got) != 0 {
 		t.Fatalf("after removing the last parallel edge, in-neighbours = %v, want none", got)
 	}

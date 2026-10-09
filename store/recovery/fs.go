@@ -10,9 +10,9 @@ import (
 
 // recoveryFS is the filesystem seam the recovery package performs its
 // snapshot-side operations through: the interrupted-publish repair (stat +
-// rename + remove + parent-dir fsync), the WAL probe/open, and the snapshot
+// rename + remove + parent-dir fsync), the WAL log open, and the snapshot
 // load. The default backend ([osBackend]) delegates verbatim to today's os.*
-// calls, the build-tagged parentDirFsync, the path-based wal.OpenReader, and
+// calls, the build-tagged parentDirFsync, wal.OpenLog, and
 // snapshot.LoadSnapshotFull, so the production recovery path is byte-identical
 // to the pre-seam code. The deterministic-simulation harness (internal/sim)
 // supplies an in-memory backend so it can recover a snapshot + WAL image
@@ -39,10 +39,15 @@ type recoveryFS interface {
 	// ParentDirSync fsyncs the parent directory of childPath, making the
 	// snapshot-backup promotion rename durable.
 	ParentDirSync(childPath string) error
-	// OpenWALReader opens the WAL at path for replay.
-	OpenWALReader(path string) (*wal.Reader, error)
+	// OpenWALLog opens the write-ahead log at walPath (the control file, the
+	// segments and the legacy single-file log) for replay.
+	OpenWALLog(walPath string) (*wal.Log, error)
 	// LoadSnapshot loads the snapshot rooted at snapDir.
 	LoadSnapshot(snapDir string) (snapshot.LoadedSnapshot, error)
+	// WritePrefixMarker makes the WAL prefix marker for walPath durable (temp,
+	// fsync, rename, parent-dir fsync): the control record recovery gives a
+	// store created before the marker existed (rmp #3002).
+	WritePrefixMarker(walPath string) error
 }
 
 // osBackend is the production recovery filesystem backend: every method
@@ -61,7 +66,9 @@ func (osBackend) RemoveAll(path string) error { return os.RemoveAll(path) }
 
 func (osBackend) ParentDirSync(childPath string) error { return parentDirFsync(childPath) }
 
-func (osBackend) OpenWALReader(path string) (*wal.Reader, error) { return wal.OpenReader(path) }
+func (osBackend) OpenWALLog(walPath string) (*wal.Log, error) { return wal.OpenLog(walPath) }
+
+func (osBackend) WritePrefixMarker(walPath string) error { return wal.WritePrefixMarker(walPath) }
 
 func (osBackend) LoadSnapshot(snapDir string) (snapshot.LoadedSnapshot, error) {
 	return snapshot.LoadSnapshotFull(snapDir)

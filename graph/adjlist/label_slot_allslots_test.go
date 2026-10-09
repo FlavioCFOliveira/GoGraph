@@ -38,7 +38,7 @@ func TestAdjList_SetEdgeLabelSlotsAt_WritesEveryListedSlot(t *testing.T) {
 	t.Parallel()
 	a, srcID, dstID, _ := threeParallel(t)
 
-	if got := a.SetEdgeLabelSlotsAt(srcID, dstID, []int{0, 1, 2}, 7); got != 3 {
+	if got := must(t).N(a.SetEdgeLabelSlotsAt(srcID, dstID, []int{0, 1, 2}, 7)); got != 3 {
 		t.Fatalf("SetEdgeLabelSlotsAt wrote %d slots, want 3", got)
 	}
 	// Slot 3 is the a→c edge and must be untouched.
@@ -62,18 +62,18 @@ func TestAdjList_SetEdgeLabelSlotsAt_SkipsIndexesThatNoLongerMatch(t *testing.T)
 	a, srcID, dstID, cID := threeParallel(t)
 
 	// Index 3 addresses the a→c slot, not a→b: it must be skipped.
-	if got := a.SetEdgeLabelSlotsAt(srcID, dstID, []int{0, 3}, 5); got != 1 {
+	if got := must(t).N(a.SetEdgeLabelSlotsAt(srcID, dstID, []int{0, 3}, 5)); got != 1 {
 		t.Fatalf("SetEdgeLabelSlotsAt wrote %d slots, want 1 (index 3 is a→c)", got)
 	}
 	if got := labelsOf(t, a, "a"); got[3] != 0 {
 		t.Fatalf("the a→c slot was stamped: label column = %v", got)
 	}
 	// Out-of-range and negative indexes are skipped too, not panics.
-	if got := a.SetEdgeLabelSlotsAt(srcID, dstID, []int{-1, 99}, 5); got != 0 {
+	if got := must(t).N(a.SetEdgeLabelSlotsAt(srcID, dstID, []int{-1, 99}, 5)); got != 0 {
 		t.Fatalf("SetEdgeLabelSlotsAt wrote %d slots for out-of-range indexes, want 0", got)
 	}
 	// A neighbour the source has no slot for writes nothing.
-	if got := a.SetEdgeLabelSlotsAt(srcID, cID, []int{0}, 5); got != 0 {
+	if got := must(t).N(a.SetEdgeLabelSlotsAt(srcID, cID, []int{0}, 5)); got != 0 {
 		t.Fatalf("SetEdgeLabelSlotsAt wrote %d slots for a non-matching dst, want 0", got)
 	}
 }
@@ -87,17 +87,17 @@ func TestAdjList_SetEdgeLabelSlotsAt_NoWriteNoColumn(t *testing.T) {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	srcID, dstID := slotID(t, a, "a"), slotID(t, a, "b")
-	if got := a.SetEdgeLabelSlotsAt(srcID, dstID, nil, 3); got != 0 {
+	if got := must(t).N(a.SetEdgeLabelSlotsAt(srcID, dstID, nil, 3)); got != 0 {
 		t.Fatalf("SetEdgeLabelSlotsAt(nil) wrote %d, want 0", got)
 	}
-	if got := a.SetEdgeLabelSlotsAt(srcID, dstID, []int{7}, 3); got != 0 {
+	if got := must(t).N(a.SetEdgeLabelSlotsAt(srcID, dstID, []int{7}, 3)); got != 0 {
 		t.Fatalf("SetEdgeLabelSlotsAt(out of range) wrote %d, want 0", got)
 	}
 	if got := labelsOf(t, a, "a"); got != nil {
 		t.Fatalf("label column = %v, want nil after a no-write call", got)
 	}
 	// An unknown source is a no-op, not a panic.
-	if got := a.SetEdgeLabelSlotsAt(graph.NodeID(1<<30), dstID, []int{0}, 3); got != 0 {
+	if got := must(t).N(a.SetEdgeLabelSlotsAt(graph.NodeID(1<<30), dstID, []int{0}, 3)); got != 0 {
 		t.Fatalf("SetEdgeLabelSlotsAt on an unknown source wrote %d, want 0", got)
 	}
 }
@@ -110,14 +110,14 @@ func TestAdjList_ClearEdgeLabelSlotsValue_ClearsEveryMatchingSlot(t *testing.T) 
 	a, srcID, dstID, _ := threeParallel(t)
 
 	// Slots 0 and 2 carry 7; slot 1 carries 9.
-	if got := a.SetEdgeLabelSlotsAt(srcID, dstID, []int{0, 2}, 7); got != 2 {
+	if got := must(t).N(a.SetEdgeLabelSlotsAt(srcID, dstID, []int{0, 2}, 7)); got != 2 {
 		t.Fatalf("SetEdgeLabelSlotsAt(7) wrote %d, want 2", got)
 	}
-	if got := a.SetEdgeLabelSlotsAt(srcID, dstID, []int{1}, 9); got != 1 {
+	if got := must(t).N(a.SetEdgeLabelSlotsAt(srcID, dstID, []int{1}, 9)); got != 1 {
 		t.Fatalf("SetEdgeLabelSlotsAt(9) wrote %d, want 1", got)
 	}
 
-	if got := a.ClearEdgeLabelSlotsValue(srcID, dstID, 7); got != 2 {
+	if got := must(t).N(a.ClearEdgeLabelSlotsValue(srcID, dstID, 7)); got != 2 {
 		t.Fatalf("ClearEdgeLabelSlotsValue(7) cleared %d slots, want 2", got)
 	}
 	want := []uint32{0, 9, 0, 0}
@@ -128,11 +128,11 @@ func TestAdjList_ClearEdgeLabelSlotsValue_ClearsEveryMatchingSlot(t *testing.T) 
 		}
 	}
 	// Idempotent: nothing carries 7 any more.
-	if got := a.ClearEdgeLabelSlotsValue(srcID, dstID, 7); got != 0 {
+	if got := must(t).N(a.ClearEdgeLabelSlotsValue(srcID, dstID, 7)); got != 0 {
 		t.Fatalf("second ClearEdgeLabelSlotsValue(7) cleared %d, want 0", got)
 	}
 	// The 0 sentinel is never a target.
-	if got := a.ClearEdgeLabelSlotsValue(srcID, dstID, 0); got != 0 {
+	if got := must(t).N(a.ClearEdgeLabelSlotsValue(srcID, dstID, 0)); got != 0 {
 		t.Fatalf("ClearEdgeLabelSlotsValue(0) cleared %d, want 0", got)
 	}
 }
@@ -146,13 +146,13 @@ func TestAdjList_ClearEdgeLabelSlotsValue_NoColumnIsNoOp(t *testing.T) {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	srcID, dstID := slotID(t, a, "a"), slotID(t, a, "b")
-	if got := a.ClearEdgeLabelSlotsValue(srcID, dstID, 4); got != 0 {
+	if got := must(t).N(a.ClearEdgeLabelSlotsValue(srcID, dstID, 4)); got != 0 {
 		t.Fatalf("ClearEdgeLabelSlotsValue with no column cleared %d, want 0", got)
 	}
 	if got := labelsOf(t, a, "a"); got != nil {
 		t.Fatalf("label column = %v, want nil", got)
 	}
-	if got := a.ClearEdgeLabelSlotsValue(graph.NodeID(1<<30), dstID, 4); got != 0 {
+	if got := must(t).N(a.ClearEdgeLabelSlotsValue(graph.NodeID(1<<30), dstID, 4)); got != 0 {
 		t.Fatalf("ClearEdgeLabelSlotsValue on an unknown source cleared %d, want 0", got)
 	}
 }
@@ -189,8 +189,8 @@ func TestAdjList_AllSlotLabelWrites_RaceWithReaders(t *testing.T) {
 		}()
 	}
 	for i := uint32(1); i <= 2000; i++ {
-		a.SetEdgeLabelSlotsAt(srcID, dstID, []int{0, 1, 2}, i)
-		a.ClearEdgeLabelSlotsValue(srcID, dstID, i)
+		must(t).N(a.SetEdgeLabelSlotsAt(srcID, dstID, []int{0, 1, 2}, i))
+		must(t).N(a.ClearEdgeLabelSlotsValue(srcID, dstID, i))
 	}
 	close(stop)
 	wg.Wait()

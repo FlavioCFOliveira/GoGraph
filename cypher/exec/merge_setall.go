@@ -37,6 +37,45 @@ type MergeSetAllAction struct {
 	Eval      ExprValueEvalFn
 	TargetVar string
 	IsReplace bool
+	// Ord is the item's position in its ON CREATE / ON MATCH list; see
+	// [applyMergeItemsInOrder] (rmp #2953).
+	Ord int
+}
+
+// applyMergeItemsInOrder applies one ON CREATE / ON MATCH list in source order.
+// The list reaches the operators split in two — the per-property and label
+// items as mergeActions, the whole-entity items as [MergeSetAllAction]s — and
+// both halves are ordered by position, so a merge walk restores the order.
+//
+// openCypher evaluates a clause's items against a state that includes the
+// changes the clause itself has made (CIP2015-10-27 "State visibility between
+// clauses": "Each clause lives in its own state, which includes all the changes
+// of clauses coming before it, including changes performed by itself"), and the
+// plain SET clause applies its items one after another. Applying every
+// per-property item before every whole-entity item made `ON MATCH SET
+// n += {a: 1}, n.b = n.a + 1` read a as null, and `n += {a: 1}, n.a = 2` end with
+// a = 1 (rmp #2953).
+func applyMergeItemsInOrder(
+	actions []mergeAction,
+	setAll []MergeSetAllAction,
+	applyAction func(*mergeAction) error,
+	applySetAll func(MergeSetAllAction) error,
+) error {
+	i, j := 0, 0
+	for i < len(actions) || j < len(setAll) {
+		if j >= len(setAll) || (i < len(actions) && actions[i].ord <= setAll[j].Ord) {
+			if err := applyAction(&actions[i]); err != nil {
+				return err
+			}
+			i++
+			continue
+		}
+		if err := applySetAll(setAll[j]); err != nil {
+			return err
+		}
+		j++
+	}
+	return nil
 }
 
 // applyWholeEntityValueToNode applies a whole-entity SET value v to the node
@@ -53,7 +92,9 @@ func applyWholeEntityValueToNode(
 	if v == nil || expr.IsNull(v) {
 		// `SET n = null` clears all properties; `SET n += null` is a no-op.
 		if isReplace {
-			clearNodeProps(mut, nodeKey)
+			if err := clearNodeProps(mut, nodeKey); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -64,10 +105,14 @@ func applyWholeEntityValueToNode(
 			return err
 		}
 		if isReplace {
-			clearNodeProps(mut, nodeKey)
+			if err := clearNodeProps(mut, nodeKey); err != nil {
+				return err
+			}
 		}
 		for _, k := range nullKeys {
-			delNodeProp(mut, nodeKey, k)
+			if err := delNodeProp(mut, nodeKey, k); err != nil {
+				return err
+			}
 		}
 		for _, p := range props {
 			if err := setNodeProp(mut, nodeKey, p.key, p.value); err != nil {
@@ -120,7 +165,9 @@ func applyWholeEntityValueToEdge(
 	if v == nil || expr.IsNull(v) {
 		// `SET r = null` clears all properties; `SET r += null` is a no-op.
 		if isReplace {
-			clearEdgeProps(mut, srcKey, dstKey, handle)
+			if err := clearEdgeProps(mut, srcKey, dstKey, handle); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -131,10 +178,14 @@ func applyWholeEntityValueToEdge(
 			return err
 		}
 		if isReplace {
-			clearEdgeProps(mut, srcKey, dstKey, handle)
+			if err := clearEdgeProps(mut, srcKey, dstKey, handle); err != nil {
+				return err
+			}
 		}
 		for _, k := range nullKeys {
-			delEdgeProp(mut, srcKey, dstKey, handle, k)
+			if err := delEdgeProp(mut, srcKey, dstKey, handle, k); err != nil {
+				return err
+			}
 		}
 		for _, p := range props {
 			if err := setEdgeProp(mut, srcKey, dstKey, handle, p.key, p.value); err != nil {
@@ -195,7 +246,9 @@ func copyPropsToEdge(
 		snap[k] = v
 	}
 	if isReplace {
-		clearEdgeProps(mut, srcKey, dstKey, handle)
+		if err := clearEdgeProps(mut, srcKey, dstKey, handle); err != nil {
+			return err
+		}
 	}
 	for k, v := range snap {
 		if err := setEdgeProp(mut, srcKey, dstKey, handle, k, v); err != nil {
@@ -209,27 +262,39 @@ func copyPropsToEdge(
 // the per-pair aggregate keys plus, when the handle is resolved, the targeted
 // instance's own bag — [relClearKeys]'s union, because the aggregate alone can
 // miss a key only the instance carries (#2502).
-func clearEdgeProps(mut GraphMutator, srcKey, dstKey string, handle uint64) {
+func clearEdgeProps(mut GraphMutator, srcKey, dstKey string, handle uint64) error {
 	for k := range relClearKeys(mut, srcKey, dstKey, handle) {
-		delEdgeProp(mut, srcKey, dstKey, handle, k)
+		if err := delEdgeProp(mut, srcKey, dstKey, handle, k); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // delEdgeProp removes one property from the edge. With a resolved handle and a
 // mutator implementing [relInstancePropRemover], the removal is gated on that
 // instance's OWN bag so -properties is not counted for a key only a parallel
 // sibling carried (#2501); the handle-less fallback is the pairwise removal.
-func delEdgeProp(mut GraphMutator, srcKey, dstKey string, handle uint64, key string) {
+func delEdgeProp(mut GraphMutator, srcKey, dstKey string, handle uint64, key string) error {
 	if handle != 0 {
 		if m, ok := mut.(relInstancePropRemover); ok {
-			m.DelEdgePropertyOnInstance(srcKey, dstKey, handle, key)
-			return
+			if err := m.DelEdgePropertyOnInstance(srcKey, dstKey, handle, key); err != nil {
+				return err
+			}
+			return nil
 		}
-		mut.DelEdgeProperty(srcKey, dstKey, key)
-		mut.DelEdgePropertyByHandle(srcKey, dstKey, handle, key)
-		return
+		if err := mut.DelEdgeProperty(srcKey, dstKey, key); err != nil {
+			return err
+		}
+		if err := mut.DelEdgePropertyByHandle(srcKey, dstKey, handle, key); err != nil {
+			return err
+		}
+		return nil
 	}
-	mut.DelEdgeProperty(srcKey, dstKey, key)
+	if err := mut.DelEdgeProperty(srcKey, dstKey, key); err != nil {
+		return err
+	}
+	return nil
 }
 
 // setEdgeProp writes one (key, value) pair to the edge: the per-pair aggregate
@@ -267,7 +332,9 @@ func copyPropsToNode(
 		snap[k] = v
 	}
 	if isReplace {
-		clearNodeProps(mut, nodeKey)
+		if err := clearNodeProps(mut, nodeKey); err != nil {
+			return err
+		}
 	}
 	for k, v := range snap {
 		if err := setNodeProp(mut, nodeKey, k, v); err != nil {
@@ -280,23 +347,27 @@ func copyPropsToNode(
 // clearNodeProps removes every property from nodeKey. Each removal releases its
 // constrained value at the mutator choke point, so none leaks as a phantom
 // reservation (rmp #2358).
-func clearNodeProps(mut GraphMutator, nodeKey string) {
-	props := mut.NodeProperties(nodeKey)
-	keys := make([]string, 0, len(props))
-	for k := range props {
-		keys = append(keys, k)
+//
+// The keys come from [nodeClearKeys], not the raw present; see its rmp #2943
+// commentary. It returns a fresh set, so deleting while ranging over it is safe.
+func clearNodeProps(mut GraphMutator, nodeKey string) error {
+	for k := range nodeClearKeys(mut, nodeKey) {
+		if err := delNodeProp(mut, nodeKey, k); err != nil {
+			return err
+		}
 	}
-	for _, k := range keys {
-		delNodeProp(mut, nodeKey, k)
-	}
+	return nil
 }
 
 // delNodeProp removes one property from nodeKey. DelNodeProperty releases its
 // constrained value at the mutator choke point (rmp #2358), so this no longer
 // carries a registry — which is why it lost the "Constrained" suffix its old name
 // promised and no longer delivered.
-func delNodeProp(mut GraphMutator, nodeKey, key string) {
-	mut.DelNodeProperty(nodeKey, key)
+func delNodeProp(mut GraphMutator, nodeKey, key string) error {
+	if err := mut.DelNodeProperty(nodeKey, key); err != nil {
+		return err
+	}
+	return nil
 }
 
 // setNodeProp writes one (key,value) pair to nodeKey. SetNodeProperty enforces

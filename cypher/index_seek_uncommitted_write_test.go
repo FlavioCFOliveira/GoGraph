@@ -299,14 +299,16 @@ func TestIndexSeekUncommittedWrite_SingleAutocommitStatement(t *testing.T) {
 //
 // # Why each arm is shaped the way it is
 //
-// Every one of these paths declines when the STALE index answers with zero
-// postings — "an empty result is correct but pointless to seek", the rule stated
-// in [buildSeekSetOperator] and applied by the range seek's selectivity gate — so
-// the obvious shape (write a brand-new key and then seek it) makes them fall back
-// to a scan for a reason that has nothing to do with rmp #2814, and the arm
-// becomes one that CANNOT FAIL. Measured: with the guard fully reverted,
-// `SET m.p = 999999` followed by `MATCH (m:L {p: 999999})` PASSED, because the
-// range seek declined the empty range on its own.
+// When these arms were written, every one of these paths declined when the STALE
+// index answered with zero postings — "an empty result is correct but pointless
+// to seek", the rule stated in [buildSeekSetOperator] and then also applied by the
+// range seek's selectivity gate — so the obvious shape (write a brand-new key and
+// then seek it) made them fall back to a scan for a reason that has nothing to do
+// with rmp #2814, and the arm became one that CANNOT FAIL. Measured then: with the
+// guard fully reverted, `SET m.p = 999999` followed by `MATCH (m:L {p: 999999})`
+// PASSED, because the range seek declined the empty range on its own. The range
+// gate now seeks an empty range (rmp #3061); the seek set still declines one, and
+// the populated-key shape below serves both.
 //
 // So each arm below writes into a key space the stale index ALREADY populates.
 // The seek then returns a non-empty but WRONG candidate set — everything the
@@ -513,8 +515,8 @@ func TestPendingIndexDelta_DeclineIsKeyedPerCoordinate(t *testing.T) {
 // path free.
 func TestPendingIndexDelta_FromBuffer(t *testing.T) {
 	_, g := idxUncommittedEngine(t)
-	sID := uint32(g.PropertyKeys().Intern("s"))
-	lID := uint32(g.Registry().Intern("L"))
+	sID := keyIDOf(g.PropertyKeys(), "s")
+	lID := labelIDOf(g.Registry(), "L")
 
 	if d := newPendingIndexDelta(nil, g); d != nil {
 		t.Errorf("a nil buffer must yield nil, got %+v", d)

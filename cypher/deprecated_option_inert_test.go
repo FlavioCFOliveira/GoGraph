@@ -71,7 +71,9 @@ func buildInertOptionFixture(t *testing.T) *lpg.Graph[string, float64] {
 		if err := g.AddEdge(e[0], e[1], 1); err != nil {
 			t.Fatalf("AddEdge(%v): %v", e, err)
 		}
-		g.SetEdgeLabel(e[0], e[1], e[2])
+		if err := g.SetEdgeLabel(e[0], e[1], e[2]); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return g
 }

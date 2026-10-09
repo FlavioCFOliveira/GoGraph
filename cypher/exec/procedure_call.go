@@ -54,6 +54,10 @@ type ProcedureCallOp struct {
 
 	rowIdx    int
 	doneChild bool // true once the child (or synthetic single row) is exhausted
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewProcedureCallOp creates a ProcedureCallOp.
@@ -131,8 +135,7 @@ func (op *ProcedureCallOp) Next(out *Row) (bool, error) {
 
 		var driverRow Row
 		if op.child != nil {
-			var childOut Row
-			ok, err := op.child.Next(&childOut)
+			childOut, ok, err := nextRow(op.child, &op.pull)
 			if err != nil {
 				return false, err
 			}

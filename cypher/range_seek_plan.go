@@ -182,7 +182,7 @@ func buildRangeSeekIfEnabled(
 		return nil, false
 	}
 	return tryBuildRangeSeekChild(sel, schema, idxMgr, g, params,
-		bopts.prefixSeekEnabled, bopts.bitmapIntersectEnabled, bopts.pendingIdx)
+		bopts.prefixSeekEnabled, bopts.bitmapIntersectEnabled, bopts.pendingIdx, bopts.idxSnap)
 }
 
 // tryBuildRangeSeekChild attempts to build a NodeByIndexRangeScan to replace
@@ -238,6 +238,7 @@ func tryBuildRangeSeekChild(
 	prefixSeek bool,
 	intersectSeek bool,
 	pending *pendingIndexDelta,
+	snap seekSnapshot,
 ) (exec.Operator, bool) {
 	if idxMgr == nil || g == nil || sel.PredicateExpr == nil {
 		// No index, or no AST predicate to build the residual Filter from:
@@ -263,16 +264,35 @@ func tryBuildRangeSeekChild(
 	// composition falls straight through to the single-property paths below.
 	if intersectSeek {
 		if op, ok := tryIndexIntersectionSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, prefixSeek, pending); ok {
-			return op, true
+			return rangeScanAtSnapshot(op, snap), true
 		}
 	}
 	// Try the string-btree path first (a string range over a string-typed
 	// index). When the predicate is not a string range — typically a numeric
 	// range n.age > 30 — fall through to the unified numeric companion.
 	if op, ok := tryStringRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, prefixSeek, pending); ok {
-		return op, true
+		return rangeScanAtSnapshot(op, snap), true
 	}
-	return tryNumericRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, pending)
+	op, ok := tryNumericRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, pending)
+	if !ok {
+		return nil, false
+	}
+	return rangeScanAtSnapshot(op, snap), true
+}
+
+// rangeScanAtSnapshot makes a range, prefix or intersection scan built above ask,
+// after its lookups, whether the index described the reader's snapshot, and emit
+// the label scan it replaced when it did not (rmp #2937). Every one of them is
+// built with the label restriction of the scan leaf it replaces, which is that
+// fallback, and keeps the original predicate as the residual Filter the caller
+// stacks on top, which refines it. The range family cannot fabricate a row
+// through a stale index — the Filter reads the snapshot — but it loses one when a
+// peer's commit has moved a node the snapshot still holds in range out of it.
+func rangeScanAtSnapshot(op exec.Operator, snap seekSnapshot) exec.Operator {
+	if rs, ok := op.(*exec.NodeByIndexRangeScan); ok && snap.guarded() {
+		rs.AtSnapshot(snap.proof, snap.startTS)
+	}
+	return op
 }
 
 // tryStringRangeSeek builds a NodeByIndexRangeScan over a bound string btree
@@ -345,9 +365,9 @@ func tryStringRangeSeek(
 
 // rangeCountWins applies the shared selectivity/population gate: the label
 // population must be at least rangeSeekMinLabelPopulation, and the EXACT
-// in-range count (early-exit at budget) must be non-empty and within
-// rangeSeekMaxSelectivity of the population. count is the type-specific
-// RangeCount closure (string or float64). The count is INCLUSIVE [lo, hi]
+// in-range count (early-exit at budget) must be within
+// rangeSeekMaxSelectivity of the population; an empty range seeks (rmp #3061).
+// count is the type-specific RangeCount closure (string or float64). The count is INCLUSIVE [lo, hi]
 // (a tiny over-count of at most the two boundary values when a bound is
 // exclusive), which only makes the gate marginally more conservative; the
 // residual Selection Filter re-checks every row regardless.
@@ -389,7 +409,13 @@ func rangeCountWinsFn(
 // (#2266). Sharing the derivation is what keeps the two paths from drifting: the
 // population floor and the selectivity ceiling are defined here and nowhere else.
 func rangeSeekBudget(g *lpg.ReadView[string, float64], label string) (uint64, bool) {
-	nLabel := g.NodeIndex().Count(uint32(g.Registry().Intern(label)))
+	lid, err := g.Registry().Intern(label)
+	if err != nil {
+		// A label over lpg.MaxTokenLen cannot exist, so its population is zero
+		// and no seek can win (rmp #2748).
+		return 0, false
+	}
+	nLabel := g.NodeIndex().Count(uint32(lid))
 	if nLabel < rangeSeekMinLabelPopulation {
 		return 0, false
 	}
@@ -398,13 +424,16 @@ func rangeSeekBudget(g *lpg.ReadView[string, float64], label string) (uint64, bo
 
 // rangeCountWithinBudget is the selectivity half of the shipped gate, applied to
 // a count already taken against budget: the count must be exact (not
-// early-exited), non-empty, and within budget.
+// early-exited) and within budget.
 //
-// Over budget, unknown, or empty: keep the scan. (An empty range is correct but
-// pointless to seek; the scan+filter yields the same zero rows without an index
-// descent.)
+// Over budget or unknown: keep the scan. An EMPTY range seeks (rmp #3061): the
+// count that proved it empty has already paid the index descent, and the scan it
+// used to fall back to reads every node of the label to return the same zero
+// rows. Measured on a btree-only string equality whose value is absent: 1.39 ms
+// and 20 071 allocs/op at 20 000 nodes on the scan, 3.6 us and 82 allocs/op on
+// the seek.
 func rangeCountWithinBudget(count uint64, exact bool, budget uint64) bool {
-	return exact && count != 0 && count <= budget
+	return exact && count <= budget
 }
 
 // findBoundStringBTree returns the first bound string btree index covering

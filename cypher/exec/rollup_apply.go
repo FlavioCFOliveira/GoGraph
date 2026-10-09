@@ -56,6 +56,10 @@ type RollUpApply struct {
 	// ceiling: a positive value is an active limit and zero disables the cap
 	// (the explicit opt-out). See [resolveRollUpItems].
 	maxItems int
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewRollUpApply creates a RollUpApply operator with the default per-list
@@ -118,8 +122,7 @@ func (op *RollUpApply) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var outerRow Row
-	ok, err := op.outer.Next(&outerRow)
+	outerRow, ok, err := nextRow(op.outer, &op.pull)
 	if err != nil {
 		return false, err
 	}
@@ -166,12 +169,11 @@ func (op *RollUpApply) Next(out *Row) (bool, error) {
 // for very large lists, every 4096 collected items.
 func (op *RollUpApply) drainInner() (expr.ListValue, error) {
 	var list expr.ListValue
-	var innerRow Row
 	for {
 		if err := op.ctx.Err(); err != nil {
 			return nil, err
 		}
-		ok, err := op.inner.Next(&innerRow)
+		innerRow, ok, err := nextRow(op.inner, &op.pull)
 		if err != nil {
 			return nil, err
 		}

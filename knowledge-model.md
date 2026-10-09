@@ -14,7 +14,7 @@ edge type, or property is added or removed, update both in the same change.
   element was last confirmed) and `gitDate` (ISO `YYYY-MM-DD`).
 
 Counts as of commit `567253c` + in-flight worktree (2026-06-11): **11,867 nodes**, **15,360 edges**.
-Re-measured live 2026-09-08: **15,447 nodes**, **19,507 edges**, **0 indexes**, **0 constraints**.
+Current counts come from the graph (`MATCH (n) RETURN count(n)`, `SHOW CONSTRAINTS`, `SHOW INDEXES`), not from this file.
 
 > ## ⚠️ Read this before copying any command out of this file
 >
@@ -35,9 +35,10 @@ Re-measured live 2026-09-08: **15,447 nodes**, **19,507 edges**, **0 indexes**, 
 > passages as what was true on their date, never as instructions for today.
 >
 > What did **not** change: **pattern-`MERGE` still creates every node in the pattern
-> afresh unless the whole pattern matches**, which is the cause of the 249 stub
-> `Package` nodes recorded under Constraints. The new `counters` block in every
-> write's response is now the detector for it.
+> afresh unless the whole pattern matches**. It created the stub `Package` nodes that
+> rmp #2802 repaired. The UNIQUE constraints under [Constraints](#constraints) now
+> reject such a duplicate, and the `counters` block in every write's response
+> reports `nodesCreated`.
 Incrementally synced at commit `257ce96` (2026-06-14, task #1502): +4 nodes
 (`NodePropertiesByIDFunc` Method, `nodePropsToExprMap` Function,
 `TestNodePropertiesByIDFunc_MatchesByID` Test, `BenchmarkNodeReturnToPackstream`
@@ -1282,6 +1283,7 @@ rather than introduced:
 | `Benchmark` | A `func BenchmarkXxx` (name prefix `Benchmark`). | `name`, `pkg`, `file` |
 | `FuzzTarget` | A `func FuzzXxx` (name prefix `Fuzz`). | `name`, `pkg`, `file` |
 | `Example` | A runnable godoc `func ExampleXxx` (name prefix `Example`). | `name`, `pkg`, `file` |
+| `File` | A repository file of any kind (Go source, test, generated code, grammar, Makefile, document) that a commit's diff touched. **Present in the live graph before this table documented it; documented 2026-09-28.** The label is populated per commit, not by a tree survey: a file with no touching `Commit` in the synced ranges has no node, and a Go symbol is still located through its own `file` property, never through this node. | `path` (STRING — repo-relative, slash-separated, no leading `./`; the identity), `gitCommit`/`gitDate` (the last synced commit that touched the file). Heterogeneous on the older nodes, which variously carry `note`, `package`, `kind`, `purpose`, `role` |
 | `Spec` | A documentation/specification file under `docs/` (plus root `README.md`/`CHANGELOG.md`). | `name` (basename), `path` (repo-relative), `title` (first `# ` heading) |
 | `Feature` | A curated major capability of the module. | `name`, `description` |
 | `Task` | An `rmp` roadmap task. **Present in the live graph long before this table documented it** (207 `IMPLEMENTED_IN` edges start at one); documented 2026-08-18 (`0f288333`, rmp #2481). **Schema unified 2026-08-25 (rmp #2612)** — see the canonical shape below. | **`id` (INTEGER — the rmp ticket number, the identity; the type is part of the contract, see below), `title`, `status`, `type`, `sprint` (int), `closedAt` (`YYYY-MM-DD`), `commit`.** Optional, evidence-bearing, and deliberately heterogeneous: `severity` (int), `priority` (int), `foundDuring` (what surfaced the task, for one filed from a review rather than planned), `measured` (the figures a filing rests on), `note`, `outcome`, `verdict`, `evidence`, `gap`, `blockers` — the same shape `Defect` carries, because a bug filed and then left in the backlog keeps only what its filing recorded. A `Task` whose `type` is `BUG` is itself a defect record, which is why `TAUGHT` accepts it as a source. `status` ∈ `BACKLOG`\|`SPRINT`\|`DOING`\|`TESTING`\|`COMPLETED` — **`rmp` is the authority and these five are the only admissible values**; a graph-only value (`SUPERSEDED` was found on task 2140) duplicates something the rmp title already says |
@@ -1291,11 +1293,12 @@ rather than introduced:
 | `Agent` | A specialist sub-agent mandated by `CLAUDE.md`. | `name`, `kind` (`subagent`), `description`, `source` |
 | `Skill` | A project-relevant Claude Code skill. | `name`, `kind` (`skill`), `description`, `path` |
 | `Memory` | A persistent assistant memory file (mirror of the harness memory directory). | `name` (frontmatter slug), `file` (basename), `type` (`user`\|`feedback`\|`project`\|`reference`), `description` |
-| `Document` | A prose document under `docs/` that records a decision, a design, an audit or a certification. Present in the live graph since before this table existed (see the data-quality note below); its certification use was documented 2026-08-09 (sprint 337). | `path` (repo-relative, the identity), `title`, `kind` (`certification`\|`design`\|`audit`), `verdict` (certifications only — the cycle's stated outcome) |
+| `Document` | A prose document under `docs/` that records a decision, a design, an audit or a certification. Present in the live graph since before this table existed (see the data-quality note below); its certification use was documented 2026-08-09 (sprint 337). | `path` (repo-relative, the identity), `title`, `kind` (`certification`\|`design`\|`audit`\|`survey`), `verdict` (certifications only — the cycle's stated outcome) |
 | `Defect` | A confirmed defect in the module or in its test harness, whether fixed or still open. **Present in the live graph long before this table documented it** (18 nodes at 2026-08-18); its property set is deliberately heterogeneous, because each defect records the evidence its own diagnosis produced. | `id` (the rmp ticket number, the identity) or `ref`; `title`, `status` (`OPEN`\|`FIXED`), `severity`, `component`, `rootCause`, `evidence`/`measured`, `fixCommit`, `regressionTest`. Added 2026-08-18 (`0ed5d4d1`, rmp #2547): `backlog` (bool — true while the defect is filed but in no sprint), `family` (a named class of related defects, e.g. `crash-model fidelity: rmp #2514, #2535, #2538`), `foundDuring` (what surfaced it, when that is not an audit). Added 2026-08-18 (`124eca54`): `fixedWith` (the ticket a defect was closed *inside*, when the two were inseparable), `verification` (the probe that shows it fixed), `originalFilingUnderstated` (recording that the filed scope was narrower than the measured one) |
 | `DSTScenario` | **REVIVED and now the primary model, 2026-08-20 (`f3c40f22`, sprint 349).** One node per scenario registered in `sim.DefaultRegistry` (`internal/sim/catalogue.go`) — the full catalogue of **49** was surveyed and written in one pass, closing the gap that had left the label with 6 nodes against 49 registered scenarios. The label was previously described as *dormant*, with sprint-348 scenarios modelled as bare `internal/sim` `Type`/`Function`/`Method`/`Test` nodes; that guidance is **superseded** — a scenario now gets a `DSTScenario` node **as well as** whatever symbol nodes its implementation contributes, because the catalogue key, the execution mode, the run override and above all the scenario's *stated non-coverage* have nowhere else to live. **Two shapes coexist and `kind` tells them apart:** `kind='registered'` is a real catalogue key; `kind='coverage-cluster'` is one of the three curated 2026-07-13 cluster nodes (`storage-fault-cluster`, `search-battery-16`, `cypher-surface-extended`) that are **not** registry keys and were left in place, marked, rather than deleted. | `id` (the kebab-case catalogue key — the identity, byte-equal to the `Scenario*` constant's value), `title`, `note` (**the load-bearing property**: what the scenario asserts AND what it explicitly does not — several scenarios document their own unreachable fault regimes in a header comment and those claims are transcribed here), `mode` (`deterministic`\|`concurrent`\|`liveness`\|`bulk-vs-online` — the `ExecMode.String()` value; only `deterministic` is bit-reproducible and therefore eligible for trace record/replay/shrink), `file`, `testFile`, `runOverride` (the unexported `run` field's function name, or `''` when the scenario uses the default mode dispatch — 36 of the 49 carry one), `defaultSeed` (as written in source, hex literal or named constant), `tasks` (comma-separated rmp ticket numbers cited in the implementing file), `kind`, `gitCommit`, `gitDate`. The three legacy cluster nodes keep the older `commit`/`date` pair and additionally carry `note2` saying they are not registry keys |
 | `Lesson` | A generalisable conclusion drawn from a defect — the part worth keeping once the ticket is closed. Present in the live graph before this table documented it; documented 2026-08-18. **Data-quality divergence observed 2026-08-20 (`f3c40f22`):** one node, `threshold-harness-vs-runtime-2026-08-20`, is keyed on `id` and carries `title`/`note`/`commit`/`date` — the `DSTScenario` shape, not this label's — so it is invisible to every `{name:…}` lookup and to any query reading `summary`. Reach it by `id`, or `coalesce(l.name, l.id)`. Not corrected here (it is a live, correct lesson; only its keying diverges). | `name` (a slug, the identity), `summary` (the lesson itself, stated so it applies beyond the originating defect), `claim`/`date` on the older nodes. Added 2026-08-18 (`124eca54`): `generalises` (the wider class the lesson covers), `method` (what to do differently), and — when a lesson survives but its worked example does not — `illustrationWithdrawn` plus `correctedAt`, so a corrected lesson is distinguishable from a rewritten one |
 | `Component` | A named unit of implementation finer than a `Package` and coarser than a symbol — a type plus the machinery around it, a subsystem, or a named mechanism. **Present in the live graph long before this table documented it** (48 nodes at 2026-08-20); documented 2026-08-20 (`f3c40f22`, sprint 349), when 22 nodes were added for the DST harness's units. | `name` (the identity — a dotted or qualified name, e.g. `sim.SimDisk`, `mvcc.Horizon`), `path` (**the file or directory the unit lives in — this label uses `path`, not `file`**), `responsibility` (one sentence stating what the unit owns, per the *Exemplary components* mandate), `note` (the non-obvious behaviour, fidelity limits, or traps), `gitCommit`, `gitDate`. Heterogeneous on the older nodes, which variously carry `location`, `mvcc_verdict`, `commit`, `commit_date`, `sprint`, `task` |
+| `GoModule` | An external Go module recorded as a candidate source of code GoGraph may copy, port or adapt under CLAUDE.md *Copying open-source code*. Introduced 2026-10-08 (`2a8ea15a`). | `path` (the module or package import path, the identity, with no annotation), `repo` (URL), `licence` (SPDX-style name), `verdict` (`compatible`\|`conditional`\|`incompatible` — against GoGraph's MIT licence; `incompatible` means insight-only), `checkedAt` (the commit checked and how: `R` code read, `L` files listed, `M` metadata only), `areas` (the survey sections it appears in), `useful` (what it contains), `targets` (the GoGraph packages it could serve), `dependency` (set only when GoGraph already depends on it: `dependency`, `indirect dependency`, or a note), `gitCommit`, `gitDate` |
 | `Decision` | A recorded decision or standing convention, with the reasoning that settles it. **Present in the live graph long before this table documented it** (21 nodes at 2026-08-20); documented 2026-08-20 (`f3c40f22`), when the 7 DST conventions were added as `dst-*` nodes. | `name` (a slug, the identity), `statement` (the convention or decision, stated so it can be applied without reading the source), `kind` (`convention` on the `dst-*` nodes; older nodes use it differently), `date`, `gitCommit`, `gitDate`. Heterogeneous on the older nodes, which variously carry `verdict`, `reason`, `supersededBy`, `audit`, `task`, `premise`, `mechanism`, `justification`, `behaviourChange`, `sideEffect`, `ref` — and at least one older node has **no `name` at all**, so it is unreachable by identity |
 
 ### The `pkg` and `file` key conventions (rmp #2719)
@@ -1440,6 +1443,7 @@ All edges carry `gitCommit` and `gitDate`.
 | `FIXES` | `(Commit)-[:FIXES]->(Feature)` | A commit fixes a bug in (or hardens) a feature area. |
 | `IMPROVES` | `(Commit)-[:IMPROVES]->(Feature)` | A commit improves (perf/observability/tests) a feature area without fixing a defect. |
 | `TOUCHES` | `(Commit)-[:TOUCHES]->(Package\|Type\|Function\|Spec)` | A commit's diff touched this element; drives provenance re-stamping. |
+| `TOUCHES` | `(Commit)-[:TOUCHES]->(File)` | The commit's diff added, modified or deleted this file. Documented 2026-09-28. Optional property `change` (STRING — the `git log --name-status` letter: `A`, `M`, `D`, `R`). |
 | `IMPLEMENTED_IN` | `(Task)-[:IMPLEMENTED_IN]->(Commit)` | The commit that delivered a task's work. **The direction is load-bearing, not incidental:** every documented read starts at the `Task`, so an edge written the other way round makes the work *invisible* to `MATCH (t:Task)-[:IMPLEMENTED_IN]->(c:Commit)` rather than merely awkward to reach — a query returning nothing reads as "no such work exists". Four sprint-347 edges (tasks #2480, #2514, #2535, #2537 — the whole DST crash-model family) were found reversed as `(Commit)-[:IMPLEMENTED_IN]->(Task)` and **repaired at `0ed5d4d1` (2026-08-18)**: the correct-direction edges carry `reconciledAt` and `reconciledNote` so the repair is auditable. Verify after any sync with `MATCH (a)-[e:IMPLEMENTED_IN]->(b) RETURN labels(a)[0], labels(b)[0], count(*)` — a `Commit`→`Task` row is a defect. |
 | `DEPENDS_ON` | `(Task)-[:DEPENDS_ON]->(Task)` | A task cannot start/complete until another task (a genuine prerequisite) does. Contrast `FOLLOWED_BY`, which is explicitly non-blocking. Optional property added 2026-08-19 (`201370e0`): `note` — why the dependency exists, for a prerequisite discovered mid-task rather than planned, since rmp's own `depends_on` list is empty for such a pair and the edge would otherwise carry no evidence (#2485 depended on #2567: `make ci` could not go green until the security gate stopped scoring a slow machine as a failed subject). |
 | `FOLLOWED_BY` | `(Task)-[:FOLLOWED_BY]->(Task)` | A completed task's work surfaced a distinct, non-blocking follow-up tracked as a new task — NOT a prerequisite (contrast `DEPENDS_ON`). Introduced 2026-07-02 (task #1866 → #1875). |
@@ -1461,6 +1465,9 @@ All edges carry `gitCommit` and `gitDate`.
 | `ABOUT` | `(Task)-[:ABOUT]->(Feature\|Package\|Component\|DSTScenario)` | **Widened 2026-08-20 (`f3c40f22`).** Previously `Memory` → `Feature\|Sprint`. The 10 sprint-349 tasks (#2489–#2498) each point at the feature, the packages, the harness components and the existing scenarios their coverage gap concerns, which is how a brief is reached from the thing it is about (48 edges). |
 | `SPECIFIED_IN` | `(Decision)-[:SPECIFIED_IN]->(Spec)` | **Widened 2026-08-20 (`f3c40f22`).** Previously `Feature` → `Spec`. The 7 `dst-*` convention nodes point at `docs/dst.md` or `docs/test-layers.md`, the documents that state them at length. |
 | `ABOUT` | `(Lesson)-[:ABOUT]->(Doc)` | **Widened 2026-09-17 (`2e2f33a0`).** Previously `Memory` → `Feature`/`Sprint` and `Task` → `Feature`/`Package`/`Component`/`DSTScenario`. The 7 edges written at `551584dd` (2026-09-16) tie the six Cypher-parsing-campaign lessons to the documents that record them, `docs/campaign-cypher-parsing-2026-09-16.md` and `docs/prior-art-cypher-parsing-2026-09-16.md`. **The form is documented rather than the edges removed because no `Lesson` node carries a `ref`, or any other document property**, so this edge is the only record of which document holds each lesson and deleting it would destroy knowledge held nowhere else. The sibling shape written in the same sync, `(Function)-[:IMPLEMENTED_IN]->(File)`, was **removed instead** and deliberately not documented: it restated each function's own `file` property, and admitting it would have blessed a second idiom for symbol location beside the 3040 live uses of `(Package)-[:CONTAINS]->(Function)`. `Doc` itself stays an undocumented label coexisting with the documented `Document`; documenting an endpoint form does not document its labels, and reconciling the two remains a separate hygiene task. |
+| `CATALOGUES` | `(Document)-[:CATALOGUES]->(GoModule)` | A survey document lists an external Go module as a candidate source of reusable code. Introduced 2026-10-08 (`2a8ea15a`). |
+| `SOURCED_FROM` | `(Task)-[:SOURCED_FROM]->(GoModule)` | A task proposes to copy, port or adapt code from an external Go module. Introduced 2026-10-08 (`2a8ea15a`). |
+| `SPECIFIED_IN` | `(Task)-[:SPECIFIED_IN]->(File)` | A task's design is written down in a repository document, so the brief is reachable from the task. Written at `7615ac4e` (2026-10-07) for tasks #2195, #3014, #3020 and #3021 → `docs/design-wal-v2.md`; documented 2026-10-08 (`5247ef83`). |
 
 **Data-quality note (observed 2026-07-02, partially remediated):** the live graph has
 accumulated several more edge types across incremental syncs than this table documents in
@@ -1636,10 +1643,9 @@ single node property:** `IS UNIQUE` (reported type `UNIQUE`) and `IS NOT NULL`
 enforced** — a violating write is rejected with exit 1 — which makes it the only
 real defence against the pattern-`MERGE` duplication above.
 
-**Live schema state, 2026-09-08 (15447 nodes, 19507 edges): zero constraints and
-zero indexes exist.** Everything below is therefore *declared*, and each row says
-whether the data permits enforcing it today. A constraint marked VIOLATED is still
-the model's rule — it is a repair waiting to be scheduled, not an abandoned idea.
+**Live schema state:** read it with `SHOW CONSTRAINTS`. The rows under "Uniqueness —
+DECLARED and enforced" exist in the graph. Every other row is the model's rule and
+states whether the data permits enforcing it.
 
 ### Uniqueness — enforceable today
 
@@ -1655,21 +1661,26 @@ Measured clean (no duplicate values, no nulls):
 | `Document` | `path` | 5 | `CREATE CONSTRAINT document_path_uniq IF NOT EXISTS FOR (n:Document) REQUIRE n.path IS UNIQUE` |
 | `Agent` | `name` | 5 | `CREATE CONSTRAINT agent_name_uniq IF NOT EXISTS FOR (n:Agent) REQUIRE n.name IS UNIQUE` |
 | `Skill` | `name` | 2 | `CREATE CONSTRAINT skill_name_uniq IF NOT EXISTS FOR (n:Skill) REQUIRE n.name IS UNIQUE` |
+| `File` | `path` | — (count with `MATCH (n:File) RETURN count(n)`; check with the duplicate query below) | `CREATE CONSTRAINT file_path_uniq IF NOT EXISTS FOR (n:File) REQUIRE n.path IS UNIQUE` |
 
-### Uniqueness — VIOLATED, cannot be created until repaired
+### Uniqueness — DECLARED and enforced
 
-| Label | Property | Violation (measured 2026-09-08) | Cause |
-|---|---|---|---|
-| `Package` | `path` | **9 values across 256 nodes.** 249 of 369 `Package` nodes are null-`name` stubs; the worst path, `graph/index/hash`, has **115** nodes | pattern-`MERGE` |
-| `Task` | `id` | **5 values across 10 nodes** | pattern-`MERGE`, plus the historical `task_id`/`number` key drift |
-| `Commit` | `hash` | **3 values across 10 nodes** | pattern-`MERGE` |
+The engine enforces these constraints. A write that would duplicate one of these
+identities is rejected, so a pattern-`MERGE` that would rebuild an existing node
+now fails loudly instead of silently creating a stub.
 
-The `Package` split is not cosmetic: 234 edges hang off the stubs (219 `CONTAINS`
-out, 15 `TOUCHES` in). The named `cypher/exec` node holds **1086** `CONTAINS`
-edges while its 64 stubs hold **63**, so *"what does `cypher/exec` contain?"*
-answers 1086 or 1149 depending on which node binds. Filed as rmp **#2802**.
+| Label | Property | Constraint name |
+|---|---|---|
+| `Package` | `path` | `package_path_unique` |
+| `Task` | `id` | `task_id_unique` |
+| `Commit` | `hash` | `commit_hash_unique` |
 
-Detect with:
+They were declared after the rmp **#2802** repair. Before it, null-`name` `Package`
+stubs and duplicate `Task` and `Commit` nodes left by pattern-`MERGE` split
+containment queries. The repair re-homed the stubs' edges onto the named nodes,
+folded the duplicates, and deleted the stubs.
+
+Detect a regression with:
 
 ```
 MATCH (n:Package) WHERE n.name IS NULL RETURN count(n)
@@ -1693,7 +1704,7 @@ propose `IS NOT NULL` for them without deciding the model question first:
 | Label | Property | Nulls | Why it is null |
 |---|---|---:|---|
 | `Defect` | `id` | 32 of 53 | those nodes key on `ref` instead — a second, accepted keying |
-| `Package` | `importPath` | 258 of 369 | mostly the 249 stubs; the real packages carry it |
+| `Package` | `importPath` | count with `MATCH (n:Package) WHERE n.importPath IS NULL RETURN count(n)` | non-Go directories modelled as packages; every Go package carries it |
 | `Test` | `pkg` | 207 | the `internal/sim` divergence: keyed on `package`, not `pkg` |
 | `Function` / `Type` / `Method` | `pkg` | 59 / 47 / 20 | the same `internal/sim` divergence |
 | `Sprint` | `id` | 14 of 87 | legacy nodes predating the canonical shape |

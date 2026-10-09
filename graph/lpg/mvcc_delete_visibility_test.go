@@ -116,7 +116,7 @@ func deleteVisibilityFixture(t *testing.T, round, population int) (
 		ids[i] = id
 	}
 	g.ReclaimNow()
-	return g, g.reg.Intern("Retired"), keys, ids
+	return g, g.reg.intern("Retired"), keys, ids
 }
 
 // runDeleteVisibilityProbe drives `rounds` independent graphs. In each round the
@@ -301,7 +301,9 @@ func TestDeleteVisibility_PresentReaderAgreesWithTheTombstone(t *testing.T) {
 		reportDeleteVisibility(t, "RemoveNode",
 			runDeleteVisibilityProbe(t, rounds, 64, 4, true, nil,
 				func(g *Graph[string, float64], key string, _ graph.NodeID) {
-					g.RemoveNode(key)
+					if err := g.RemoveNode(key); err != nil {
+						t.Fatalf("g.RemoveNode(key): %v", err)
+					}
 				}))
 	})
 
@@ -314,7 +316,7 @@ func TestDeleteVisibility_PresentReaderAgreesWithTheTombstone(t *testing.T) {
 			runDeleteVisibilityProbe(t, rounds, 64, 4, true, nil,
 				func(g *Graph[string, float64], key string, _ graph.NodeID) {
 					if err := g.ApplyVersioned(func(tx WriteTx) error {
-						g.Writer(tx).RemoveNode(key)
+						_, _ = g.Writer(tx).RemoveNode(key)
 						return tx.Err()
 					}); err != nil {
 						t.Errorf("ApplyVersioned(RemoveNode %q): %v", key, err)
@@ -333,7 +335,9 @@ func TestDeleteVisibility_ReviveIsTheMirrorOfRetirement(t *testing.T) {
 		runDeleteVisibilityProbe(t, rounds, 64, 4, false,
 			func(g *Graph[string, float64], keys []string, _ []graph.NodeID) {
 				for _, k := range keys {
-					g.RemoveNode(k)
+					if err := g.RemoveNode(k); err != nil {
+						t.Fatalf("g.RemoveNode(k): %v", err)
+					}
 				}
 				// Sweep, so the entries really have left the bitmap and the
 				// revival has something to restore. Without this the probe would
@@ -375,7 +379,9 @@ func TestDeleteVisibility_RestoreTombstonesRetiresTheEntries(t *testing.T) {
 		t.Fatal("setup: the live node is not reported, so the assertions below could " +
 			"pass without the retirement having done anything")
 	}
-	g.RestoreTombstones([]graph.NodeID{id})
+	if err := g.RestoreTombstones([]graph.NodeID{id}); err != nil {
+		t.Fatalf("g.RestoreTombstones([]graph.NodeID{id}): %v", err)
+	}
 	if !g.IsTombstoned(id) {
 		t.Fatal("setup: RestoreTombstones did not tombstone the node")
 	}
@@ -421,11 +427,13 @@ func TestDeleteVisibility_LabellingADeadNodeDoesNotIndexIt(t *testing.T) {
 	if !ok {
 		t.Fatal("Lookup missed after AddNode")
 	}
-	g.RestoreTombstones([]graph.NodeID{id})
+	if err := g.RestoreTombstones([]graph.NodeID{id}); err != nil {
+		t.Fatalf("g.RestoreTombstones([]graph.NodeID{id}): %v", err)
+	}
 	if err := g.SetNodeLabel("a", "Retired"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	lid := g.reg.Intern("Retired")
+	lid := g.reg.intern("Retired")
 
 	if g.nodeIdx.Has(uint32(lid), id) {
 		t.Fatal("labelling a tombstoned node put it into the raw label bitmap. The bag " +
@@ -519,7 +527,7 @@ func TestDeleteVisibility_UndoReplayRetirementLeavesNoIndexedDeadNode(t *testing
 		// The physical undo of that CREATE, exactly as cypher's undo log replays
 		// it: bracketed by EnterUndo/ExitUndo, so the index removal is immediate.
 		tx.EnterUndo()
-		wv.RemoveNode("created")
+		_, _ = wv.RemoveNode("created")
 		tx.ExitUndo()
 		return nil
 	}); err != nil {
@@ -587,14 +595,16 @@ func TestDeleteVisibility_TombstoneCounterNeverUnderCountsTheBitmap(t *testing.T
 				// The published bitmap has retired the node. The accelerator the
 				// whole engine reads existence through must agree, now.
 				checks.Add(1)
-				if !g.IsTombstoned(id) {
+				if !g.IsTombstonedStored(id) {
 					lies.Add(1)
 				}
 				return
 			}
 		}()
 		runtime.Gosched()
-		g.RemoveNode("a")
+		if err := g.RemoveNode("a"); err != nil {
+			t.Fatalf("g.RemoveNode(\"a\"): %v", err)
+		}
 		stop.Store(true)
 		wg.Wait()
 		if err := g.Close(); err != nil {
@@ -602,7 +612,7 @@ func TestDeleteVisibility_TombstoneCounterNeverUnderCountsTheBitmap(t *testing.T
 		}
 	}
 	t.Logf("tombstone publication order: %d samples caught the published bitmap "+
-		"carrying the id, %d of them disagreed with IsTombstoned",
+		"carrying the id, %d of them disagreed with IsTombstonedStored",
 		checks.Load(), lies.Load())
 	if checks.Load() == 0 {
 		t.Fatal("no sample ever observed the published bitmap carrying the id, so " +
@@ -610,8 +620,8 @@ func TestDeleteVisibility_TombstoneCounterNeverUnderCountsTheBitmap(t *testing.T
 	}
 	if n := lies.Load(); n != 0 {
 		t.Errorf("%d times the published tombstone bitmap had already retired the "+
-			"node while IsTombstoned reported it alive. IsTombstoned is "+
-			"NodeExistsAsOf(id, nil), so in that window the present-time authority "+
+			"node while IsTombstonedStored reported it alive. NodeExistsAsOf(id, nil) is "+
+			"!IsTombstonedStored(id), so in that window the present-time authority "+
 			"on existence contradicts the set it is derived from (rmp #2687).", n)
 	}
 }

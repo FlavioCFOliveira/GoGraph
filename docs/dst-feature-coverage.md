@@ -959,30 +959,22 @@ its exact weights, a sentinel-bearing `csr.bin` is refused by both legacy guards
 graph from a directory whose WAL had shrunk to zero bytes with zero replayed WAL
 ops. What changed is that all of that is now falsifiable.
 
-### Bulk-import publication is covered for PARITY, not for faults (rmp #2466)
+### Bulk-import publication: parity, byte-reproducibility and faults (rmp #2466, #2518, #2519)
 
-The `bulkimport-parity` row above is deliberately narrower than every other row
-in the table, and the gap is structural rather than an omission.
-
-Every other durability scenario injects its faults through `SimDisk`, which
-reaches the persistence packages via their filesystem seams (`wal.OpenFS`,
-`recovery.OpenFS`, `snapshot.WriteSnapshotFullWithMapperCodecAndConstraintsFS`
-and siblings). `bulkimport.Publish` has **no such seam**: it calls `os.MkdirAll`
-and `os.ReadDir` directly and writes through the **non-seamed**
-`snapshot.WriteSnapshotFullCtx`, while `ImportInto` takes a `storeDir string`
-plus an `Options` that carries no filesystem. A `SimDisk` therefore cannot be
-placed underneath a bulk-import publish without changing the production API —
-**filed for a user decision as rmp #2518**, and deliberately not done under
-#2466.
-
-So for bulk-import publication the following remain **uncovered**: `ENOSPC`
-mid-write; a failing `fsync` on a component, on the staging directory, or on the
-parent directory; a failing or crash-interrupted `snapshot.tmp` → `snapshot`
-rename; and a crash landing inside the publish window. The scenario's
-crashed-import arm reconstructs the *outcome* state of such a crash — a complete
-snapshot moved to the assembly name, which recovery must ignore and clean up —
-which measures recovery's treatment of that state, **not** the writer's
-behaviour while reaching it.
+Until rmp #2518 the `bulkimport-parity` row was narrower than every other
+durability row, because `bulkimport.Publish` had no filesystem seam. It now has
+one: `bulkimport.PublishFS` and `bulkimport.ImportIntoFS` route the
+empty-directory check, the store-directory creation and the whole snapshot write
+through a caller-supplied filesystem, and the scenario's fifth arm backs it with
+a `SimDisk` and publishes into a nested store directory, so the durability of the
+directory entry the publish creates is measured too (rmp #2970). ENOSPC (eager and at sync), an fsync fault on the first and on the
+last component, a rename fault on `snapshot.tmp` → `snapshot`, a process crash
+at each of the publish's 40 filesystem operations, and a crash after a
+written-back publish rename are each injected, proven to have fired, and
+followed by a host crash and a real recovery whose outcome must be all or
+nothing. The publish is also asserted byte-reproducible across identical
+republishes (rmp #2519). See `docs/dst.md`, "Fault regimes, through the
+filesystem seam".
 
 A second finding from the same task, measured rather than assumed: a bulk-import
 publish is **not byte-reproducible** once items carry two or more properties.
@@ -1612,11 +1604,14 @@ caller:
   offset 1456.
 
 The relative form deliberately asserts **no absolute size**. rmp #2521 measured
-that the durable image varies with process wall-clock time, because a commit marker
-encodes the instant it was written; an oracle pinning a byte count would be pinning
-the clock. The frame-boundary relation is derived from the frames actually on disk,
-so it is invariant under that variation and is still exactly the invariant
-`DurableOffset` documents.
+that the durable image is not byte-stable across runs in one process. The cause is
+the hidden node key `"__cx_" + hex(n)` minted from a process-global counter
+(`cypher/exec/create_node.go:445-446`), not the wall clock and not the commit
+marker, whose commit instant is a fixed-width logical counter; an oracle pinning a
+byte count would be pinning how many nodes the process minted before. See
+`docs/test-layers.md`, "Golden images". The frame-boundary relation is derived
+from the frames actually on disk, so it is invariant under that variation and is
+still exactly the invariant `DurableOffset` documents.
 
 **Per-transaction frame contiguity** is the claim `AppendRun` makes *by
 construction* — it holds `w.mu` across a whole transaction's frames — and that

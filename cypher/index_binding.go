@@ -53,7 +53,7 @@ import (
 // would let a pathological string literal seek match a node the scan+filter
 // path would reject.
 func projectStringPropValue(v any) (string, bool) {
-	pv, ok := v.(lpg.PropertyValue)
+	pv, ok := propValueOf(v)
 	if !ok || pv.Kind() != lpg.PropString {
 		return "", false
 	}
@@ -65,6 +65,24 @@ func projectStringPropValue(v any) (string, bool) {
 		return "", false
 	}
 	return s, true
+}
+
+// propValueOf unwraps an index value payload: an lpg.PropertyValue, or a pointer
+// to one. The commit-time fan-out hands the projections a pointer to a scratch
+// value so that resolving a node's current value boxes nothing (rmp #2931); the
+// change payloads and the build-log recordings carry the value itself.
+func propValueOf(v any) (lpg.PropertyValue, bool) {
+	switch x := v.(type) {
+	case lpg.PropertyValue:
+		return x, true
+	case *lpg.PropertyValue:
+		if x == nil {
+			return lpg.PropertyValue{}, false
+		}
+		return *x, true
+	default:
+		return lpg.PropertyValue{}, false
+	}
 }
 
 // nodeIndexEligible returns the [hash.Binding.Eligible] / [btree.Binding.Eligible]
@@ -124,11 +142,13 @@ func nodeIndexRawValue(
 // string index and its numeric companion project it differently; that boxing is
 // one allocation per RELEVANT change recorded during a build, bounded by
 // [index.MaxBuildLogChanges].
+//
+// labelID and propID are the registry ids of label and prop, resolved by the
+// caller through [indexTokenIDs] so a token refusal is reported where it can be
+// returned.
 func nodeIndexBuildResolver(
-	g *lpg.ReadView[string, float64], label, prop string,
+	g *lpg.ReadView[string, float64], prop string, labelID, propID uint32,
 ) index.BuildResolver {
-	labelID := uint32(g.Registry().Intern(label))
-	propID := uint32(g.PropertyKeys().Intern(prop))
 	eligible := nodeIndexEligible(g, labelID)
 	rawValue := nodeIndexRawValue(g, prop)
 	return func(c index.Change) (any, bool) {
@@ -152,6 +172,22 @@ func nodeIndexBuildResolver(
 	}
 }
 
+// indexTokenIDs resolves the registry ids of an index's label and property,
+// refusing either one if it is longer than [lpg.MaxTokenLen] bytes (rmp #2748).
+// The DDL boundary caps both far below that, so the refusal is reachable only
+// through a definition that did not pass that boundary.
+func indexTokenIDs(g *lpg.ReadView[string, float64], label, prop string) (labelID, propID uint32, err error) {
+	lid, err := g.Registry().Intern(label)
+	if err != nil {
+		return 0, 0, err
+	}
+	pid, err := g.PropertyKeys().Intern(prop)
+	if err != nil {
+		return 0, 0, err
+	}
+	return uint32(lid), uint32(pid), nil
+}
+
 // newBoundNodeHashIndex builds a hash.Index[string] bound to (label, prop) on
 // g. The binding closures read g's FINAL state — Apply runs at commit time,
 // after the transaction's eager mutations — which is the state the index must
@@ -159,8 +195,10 @@ func nodeIndexBuildResolver(
 func newBoundNodeHashIndex(
 	g *lpg.ReadView[string, float64], label, prop string,
 ) (*indexhash.Index[string], error) {
-	labelID := uint32(g.Registry().Intern(label))
-	propID := uint32(g.PropertyKeys().Intern(prop))
+	labelID, propID, err := indexTokenIDs(g, label, prop)
+	if err != nil {
+		return nil, err
+	}
 	rawValue := nodeIndexRawValue(g, prop)
 	return indexhash.NewBound(indexhash.Binding[string]{
 		PropertyID: propID,
@@ -341,14 +379,47 @@ func shouldPollWorkerRelative(i, lo int) bool {
 // #2793's fabrication. The resolution has to happen when the change is RECORDED,
 // which is what [nodeIndexBuildResolver] does and what makes the replay produce
 // precisely the effects the live fan-out would have produced.
-func (e *Engine) beginIndexBuild(idxMgr *index.Manager, label, prop string) (
-	log *index.BuildLog, scanView *lpg.ReadView[string, float64], releaseScanView func(),
+//
+// # Why the snapshot waits for the commits already deciding (rmp #2936)
+//
+// Recording first is necessary and not sufficient. An explicit transaction
+// decides what its index buffer owes the indexes inside its finalisation and
+// publishes later, without the schema gate this DDL holds, so a commit could
+// decide before the recording started — dropping its changes, or delivering them
+// only to the indexes that already existed — and publish after the snapshot.
+// Neither the scan nor the recording then carried its node, and the index was
+// registered without it for good. So between the two steps the build waits out
+// every commit inside the decision bracket ([index.Manager.AwaitCommitDecisions])
+// and then waits for the frontier to cover every commit allocated so far
+// ([lpg.Graph.AwaitAllocatedCommits]); a commit that enters the bracket later
+// finds the recording. Both waits honour ctx, and on its error nothing is left
+// recording.
+func (e *Engine) beginIndexBuild(ctx context.Context, idxMgr *index.Manager, label, prop string) (
+	log *index.BuildLog, scanView *lpg.ReadView[string, float64], releaseScanView func(), err error,
 ) {
 	// Recording FIRST, snapshot SECOND. Do not reorder — see above. The resolver
 	// reads the LIVE view deliberately: it runs at fan-out time, where the live
 	// state is the committing transaction's final state, which is the same
 	// instant and the same view the live fan-out resolves at.
-	log = idxMgr.BeginBuild(nodeIndexBuildResolver(e.g.ReadAt(nil), label, prop))
+	//
+	// The engine's commit path delivers through index.Manager.ApplyBatchInState,
+	// and a BOUND build log resolves those deliveries from the committed state
+	// the delivery carries, not through this resolver (rmp #2931); the resolver
+	// remains for the deliveries that carry none.
+	labelID, propID, err := indexTokenIDs(e.g.ReadAt(nil), label, prop)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	log = idxMgr.BeginBoundBuild(nodeIndexBuildResolver(e.g.ReadAt(nil), prop, labelID, propID),
+		labelID, propID)
+	if werr := idxMgr.AwaitCommitDecisions(ctx); werr != nil {
+		idxMgr.AbandonBuild(log)
+		return nil, nil, nil, werr
+	}
+	if werr := e.g.AwaitAllocatedCommits(ctx); werr != nil {
+		idxMgr.AbandonBuild(log)
+		return nil, nil, nil, werr
+	}
 	snap := e.g.BeginRead()
 	released := false
 	return log, e.g.ReadAt(snap), func() {
@@ -357,7 +428,7 @@ func (e *Engine) beginIndexBuild(idxMgr *index.Manager, label, prop string) (
 		}
 		released = true
 		e.g.EndRead(snap)
-	}
+	}, nil
 }
 
 // uniqueValueSeed is the property values a UNIQUE constraint's value-set must be
@@ -618,7 +689,7 @@ func numericBTreeName(label, prop string) string {
 // int64 whose float64 widening loses precision is still indexed — the residual
 // Filter removes any boundary false positive (cypher-expert-consultant).
 func projectNumericPropValue(v any) (float64, bool) {
-	pv, ok := v.(lpg.PropertyValue)
+	pv, ok := propValueOf(v)
 	if !ok {
 		return 0, false
 	}
@@ -650,8 +721,10 @@ func projectNumericPropValue(v any) (float64, bool) {
 func newBoundNodeBTreeIndexNumeric(
 	g *lpg.ReadView[string, float64], label, prop string,
 ) (*indexbtree.Index[float64], error) {
-	labelID := uint32(g.Registry().Intern(label))
-	propID := uint32(g.PropertyKeys().Intern(prop))
+	labelID, propID, err := indexTokenIDs(g, label, prop)
+	if err != nil {
+		return nil, err
+	}
 	rawValue := nodeIndexRawValue(g, prop)
 	return indexbtree.NewBound(indexbtree.Binding[float64]{
 		PropertyID: propID,
@@ -744,8 +817,10 @@ func (e *Engine) backfillNodeBTreeIndexNumeric(
 func newBoundNodeBTreeIndex(
 	g *lpg.ReadView[string, float64], label, prop string,
 ) (*indexbtree.Index[string], error) {
-	labelID := uint32(g.Registry().Intern(label))
-	propID := uint32(g.PropertyKeys().Intern(prop))
+	labelID, propID, err := indexTokenIDs(g, label, prop)
+	if err != nil {
+		return nil, err
+	}
 	rawValue := nodeIndexRawValue(g, prop)
 	return indexbtree.NewBound(indexbtree.Binding[string]{
 		PropertyID: propID,
@@ -852,19 +927,19 @@ func indexFanoutActive(g *lpg.Graph[string, float64], buf *exec.IndexBuffer) boo
 // removals that follow are no-ops for it (the node is tombstoned by the time
 // the batch applies) but keep any label-scoped subscriber consistent.
 func enqueueNodeRemovalChanges(g *lpg.Graph[string, float64], buf *exec.IndexBuffer, n string, id graph.NodeID) {
-	for key, pv := range g.NodeProperties(n) {
+	for key, pv := range g.NodePropertiesAsOf(n, nil) {
 		buf.Enqueue(index.Change{
 			Op:       index.OpDelNodeProperty,
 			Node:     id,
-			Property: uint32(g.PropertyKeys().Intern(key)),
+			Property: checkedKeyID(g, key), // read back from the graph, so already interned
 			OldValue: pv,
 		})
 	}
-	for _, lb := range g.NodeLabels(n) {
+	for _, lb := range g.NodeLabelsAsOf(n, nil) {
 		buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
 			Node:  id,
-			Label: uint32(g.Registry().Intern(lb)),
+			Label: checkedLabelID(g, lb), // read back from the graph, so already interned
 		})
 	}
 }
@@ -1151,7 +1226,9 @@ func (e *Engine) runCreateHashIndex(ctx context.Context, p *ir.CreateIndex, idxM
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	e.schemaGate.StrongLock()
+	if err := e.lockSchemaForDDL(ctx); err != nil {
+		return nil, err
+	}
 	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.createHashIndexLocked(ctx, p, idxMgr, nil)
@@ -1203,7 +1280,10 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	// the recording starts — the ordering, and why the scan must not read the
 	// live property bag at all, are in [Engine.beginIndexBuild] (rmp #2738,
 	// rmp #2778).
-	buildLog, scanView, releaseScanView := e.beginIndexBuild(idxMgr, p.Label, p.Property)
+	buildLog, scanView, releaseScanView, err := e.beginIndexBuild(ctx, idxMgr, p.Label, p.Property)
+	if err != nil {
+		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, err)
+	}
 	defer idxMgr.AbandonBuild(buildLog)
 	defer releaseScanView()
 
@@ -1238,12 +1318,17 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	// storage-format change: only the hash def is persisted, and
 	// registerRecoveredIndexes re-derives the companion from it.
 	//
-	// The two registrations are NOT wrapped in one visibility barrier, and do not
-	// need to be: the companion is internal and purely an optimisation, so a
-	// reader that observes only one of the pair is still correct. Seeing only the
-	// hash index makes a numeric seek decline and fall back to scan+filter; seeing
-	// only the backfilled companion makes the seek return the right rows. Neither
-	// order can produce a wrong answer.
+	// The two registrations are NOT wrapped in the visibility barrier the btree
+	// path takes (rmp #2703), and need not be. The hazard that barrier answers is
+	// a WRITER's commit-time fan-out landing between the backfill scan and the
+	// registration, or between the two registrations, and being missed for good
+	// by an index whose scan predates it (rmp #2739). Here the build log closes
+	// both windows instead: [index.Manager.ApplyBatchInState] records every
+	// delivery into the builds in flight under the same shared hold of the
+	// manager's lock as the delivery itself, and [index.Manager.FinishBuild]
+	// replays that recording into each index and registers the pair under one
+	// exclusive hold, below. Gated by
+	// TestHashIndexBuild_ExplicitCommitBetweenBackfillAndRegistration_2739.
 	numName := numericBTreeName(p.Label, p.Property)
 	numIdx, _ := newBoundNodeBTreeIndexNumeric(e.g.ReadAt(nil), p.Label, p.Property)
 	if numIdx != nil {

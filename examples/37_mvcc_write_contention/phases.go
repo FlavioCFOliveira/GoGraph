@@ -38,6 +38,7 @@ func phaseWriterScaling(ctx context.Context, w io.Writer, cfg *config) error {
 	total := cfg.producers * cfg.opsPerProd
 
 	var baseline float64
+	var unrecovered int64
 	for _, writers := range scalingLevels {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -54,6 +55,7 @@ func phaseWriterScaling(ctx context.Context, w io.Writer, cfg *config) error {
 
 		var wg sync.WaitGroup
 		var committed, conflicts atomic.Int64
+		levelCtx, cancel := context.WithTimeout(ctx, hangBudget)
 		start := time.Now()
 		for i := 0; i < writers; i++ {
 			wg.Add(1)
@@ -69,7 +71,10 @@ func phaseWriterScaling(ctx context.Context, w io.Writer, cfg *config) error {
 					if cfg.hotPct > 0 && r.IntN(100) < cfg.hotPct {
 						inv = inventoryKey(r.IntN(cfg.inventory))
 					}
-					if _, err := commitOrder(g, sess, cust, inv, n); err != nil {
+					if levelCtx.Err() != nil {
+						return
+					}
+					if _, err := commitOrder(levelCtx, g, sess, cust, inv, n); err != nil {
 						conflicts.Add(1)
 						continue
 					}
@@ -79,7 +84,11 @@ func phaseWriterScaling(ctx context.Context, w io.Writer, cfg *config) error {
 		}
 		wg.Wait()
 		elapsed := time.Since(start)
+		cancel()
 		_ = g.Close()
+		// Every order the level owed and did not commit — refused past its retry
+		// budget, or never attempted because the hang budget expired.
+		unrecovered += int64(per*writers) - committed.Load()
 
 		rate := float64(committed.Load()) / elapsed.Seconds()
 		if writers == 1 {
@@ -92,10 +101,14 @@ func phaseWriterScaling(ctx context.Context, w io.Writer, cfg *config) error {
 		fmt.Fprintf(w, "# scaling writers=%-2d commits=%-6d elapsed=%-12s commits_per_sec=%-10.0f ratio_vs_1=%.2fx unrecovered_conflicts=%d\n",
 			writers, committed.Load(), elapsed.Round(time.Millisecond), rate, ratio, conflicts.Load())
 	}
-	// DETERMINISTIC: every level must complete its work. The RATIO is volatile and
-	// deliberately not asserted here — it is what the operator reads, and pinning it
+	// DETERMINISTIC: every order of every level commits. This replaced
+	// scaling.levels, which printed the length of a constant slice and could not
+	// fail. An order is unrecovered when its retry budget expires on conflicts or
+	// the level's hang budget expires before it runs, so a livelocked or stuck
+	// writer shows here as a non-zero count, in bounded time. The RATIO is volatile
+	// and deliberately not asserted — it is what the operator reads, and pinning it
 	// would make this example fail on a busy machine for a reason unrelated to MVCC.
-	fmt.Fprintf(w, "scaling.levels=%d\n", len(scalingLevels))
+	fmt.Fprintf(w, "scaling.unrecovered_conflicts=%d\n", unrecovered)
 	return nil
 }
 
@@ -213,6 +226,8 @@ func phaseContention(ctx context.Context, w io.Writer, cfg *config) error {
 	// any path that neither commits nor fails (a self-transfer, a skipped order)
 	// leaves the count short forever. A WaitGroup cannot miscount.
 	var writers sync.WaitGroup
+	writeCtx, cancelWrites := context.WithTimeout(ctx, hangBudget)
+	defer cancelWrites()
 	start := time.Now()
 	// The opening bracket, taken on this goroutine so it is ordered BEFORE the
 	// writers rather than merely scheduled before them.
@@ -225,7 +240,7 @@ func phaseContention(ctx context.Context, w io.Writer, cfg *config) error {
 			// #nosec G115 -- producer index, a small validated loop bound.
 			r := newRand(cfg.seed, uint64(id))
 			for n := 0; n < cfg.opsPerProd; n++ {
-				if err := ctx.Err(); err != nil {
+				if err := writeCtx.Err(); err != nil {
 					return
 				}
 				cust := customerKey(r.IntN(cfg.customers))
@@ -240,7 +255,7 @@ func phaseContention(ctx context.Context, w io.Writer, cfg *config) error {
 				// this bracket therefore records the true peak rather than a sample
 				// of it.
 				atomicMax(&peakWriters, inFlight.Add(1))
-				tries, err := commitOrder(g, sess, cust, inv, n)
+				tries, err := commitOrder(writeCtx, g, sess, cust, inv, n)
 				inFlight.Add(-1)
 				if tries > 0 {
 					retried.Add(1)
@@ -288,10 +303,14 @@ func phaseContention(ctx context.Context, w io.Writer, cfg *config) error {
 	fmt.Fprintf(w, "# reader.samples=%d reader.p50=%s reader.p95=%s reader.p99=%s\n",
 		len(all), p50, p95, p99)
 
-	// DETERMINISTIC. Every order either commits or is reported unrecovered; none may
-	// vanish. And a retry that never succeeds would mean the retry loop is decoration.
-	fmt.Fprintf(w, "contention.accounted=%v\n",
-		committed.Load()+unrecovered.Load() == int64(cfg.producers*cfg.opsPerProd))
+	// DETERMINISTIC. Every order commits. This replaced contention.accounted,
+	// which compared committed + unrecovered against the order total — a sum the
+	// loop above makes true by construction whenever every order is attempted, so
+	// it could not fail on a refused order. The count is derived from the target,
+	// not from the failure counter, so an order that was never attempted because
+	// the hang budget expired is counted too.
+	fmt.Fprintf(w, "contention.unrecovered_conflicts=%d\n",
+		int64(cfg.producers*cfg.opsPerProd)-committed.Load())
 	fmt.Fprintf(w, "contention.readers_sampled=%v\n", len(all) > 0)
 	// The version sampler gets the same treatment the reader sampler already had.
 	// Without this line a sampler that observed nothing published max_retained=0,

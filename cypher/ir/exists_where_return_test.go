@@ -255,7 +255,9 @@ func TestWhereExists_ReturnlessBodyIsUnchanged(t *testing.T) {
 					t.Fatalf("Parse(%q) produced no *ast.ExistsSubquery to inspect", src)
 				} else if es.Query == nil {
 					t.Fatalf("Parse(%q) produced the PATTERN form; this control needs the block form", src)
-				} else if es.Query.Return != nil {
+				} else if body, isSingle := es.Query.(*ast.SingleQuery); !isSingle {
+					t.Fatalf("Parse(%q) produced a %T body, not a one-branch body", src, es.Query)
+				} else if body.Return != nil {
 					t.Fatalf("Parse(%q) set SingleQuery.Return on a RETURN-less body, so this "+
 						"control is not testing what it claims", src)
 				}

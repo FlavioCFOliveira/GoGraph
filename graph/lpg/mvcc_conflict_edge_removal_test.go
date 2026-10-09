@@ -65,7 +65,7 @@ func TestConflict_EdgeRemovalReportsItsRefusal(t *testing.T) {
 	if !g.AdjList().HasEdge("a", "b") {
 		t.Fatal("the refused per-edge removal dropped the COMMITTED arc a→b")
 	}
-	if !g.AdjList().HasEdge("a", "c") {
+	if !g.WriterViewOf(WriteTx{w: txA.ctx}).HasEdge("a", "c") /* A's own view: the arc is uncommitted */ {
 		t.Fatal("the refused per-edge removal dropped the peer's in-flight arc a→c")
 	}
 	if got := g.AdjList().Size(); got != 2 {
@@ -163,7 +163,7 @@ func TestConflict_HandleZeroRemovalReportsItsRefusal(t *testing.T) {
 			"transaction held an in-flight append on the same source; its caller " +
 			"journals an inverse on that answer (rmp #2725)")
 	}
-	if !g.AdjList().HasEdge("a", "b") || !g.AdjList().HasEdge("a", "c") {
+	if !g.AdjList().HasEdge("a", "b") || !g.WriterViewOf(WriteTx{w: txA.ctx}).HasEdge("a", "c") /* A's own view: the arc is uncommitted */ {
 		t.Fatal("the refused handle-0 removal mutated the adjacency")
 	}
 	wantConflictAt(t, txB, "adjacency")

@@ -1,0 +1,69 @@
+spec fp01-later-commits-ack-behind-held-straggler: 2 sessions, 2 permutations
+# FP01. s0 writes s and reserves its commit instant without publishing it (the commit
+# hold). s1 then commits 2048 single-node transactions from 8 goroutines through autocommit Cypher: every one
+# returns while s0 is held (no step <waiting ...>), and none is visible to a sessionless
+# reader, because a commit above an in-flight one is invisible until it publishes (F11).
+# When s0 publishes, the frontier catches up in one step: all of them become visible
+# together. The control interleaving runs the fan before the hold.
+
+starting permutation: s0w s0a s1fan s1lag s1fr s0p s1seen
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1fan: <8 goroutines x 256 autocommit CREATE (:W)>
+step s1lag: <sessionless> MATCH (n:W) RETURN count(n) AS visible
+visible
+-------
+0      
+(1 row)
+step s1fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+2049             |0               
+(1 row)
+step s0p: lpg: Session.EndVersionedTx
+step s1seen: <sessionless> MATCH (n:W) RETURN count(n) AS visible
+visible
+-------
+2048   
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: MATCH (n:S {name:'s'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+
+starting permutation: s1fan s1lag s1fr s0w s0a s0p s1seen
+step s1fan: <8 goroutines x 256 autocommit CREATE (:W)>
+step s1lag: <sessionless> MATCH (n:W) RETURN count(n) AS visible
+visible
+-------
+2048   
+(1 row)
+step s1fr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0p: lpg: Session.EndVersionedTx
+step s1seen: <sessionless> MATCH (n:W) RETURN count(n) AS visible
+visible
+-------
+2048   
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: MATCH (n:S {name:'s'}) RETURN n.v AS v
+v
+-
+1
+(1 row)

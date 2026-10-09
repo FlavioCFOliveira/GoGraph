@@ -5,7 +5,8 @@ package mvcc
 //
 // # Why this exists before the fast path, not after
 //
-// rmp #2362 adds a lock-free fast path in front of pubMu: when the frontier is already
+// rmp #2362 added a lock-free fast path in front of the then publish lock (removed
+// entirely by rmp #2932, whose ring is described in commitlog.go): when the frontier is already
 // at ts-1, CAS it to ts and skip the lock. Its technical requirements demand a test
 // that "mixes in-order and out-of-order publication and asserts the frontier reaches
 // the final timestamp in every interleaving" BEFORE the optimisation, because getting
@@ -13,7 +14,7 @@ package mvcc
 // and readers stop seeing them, which is the rmp #2309 failure mode.
 //
 // The analysis in docs/mvcc-publish-fast-path.md found that the ONE-condition guard
-// the task proposed does exactly that. commitLog.finish with ts == oldest calls
+// the task proposed does exactly that. The commit log's finish with ts == oldest called
 // advance(), which walks over every contiguous set bit and can jump the frontier by
 // many; a fast path that advances by one leaves the rest behind:
 //

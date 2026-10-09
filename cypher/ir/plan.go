@@ -1390,7 +1390,10 @@ func (s *SubqueryCount) Vars() []string { return nil }
 // RollUpApply evaluates Inner for each outer row and collects all Inner result
 // rows into a list, which is bound to CollectVar in the output row.
 type RollUpApply struct {
-	// Outer is the driving subplan.
+	// Outer is the driving subplan. It is nil when the comprehension sits in
+	// the leading clause of a query (`RETURN [(a)-->(b) | b]`): there is no
+	// preceding pipeline, and the physical builder drives the comprehension
+	// from a single empty row.
 	Outer LogicalPlan
 	// Inner is the correlated subplan whose results are collected.
 	Inner LogicalPlan
@@ -1413,8 +1416,13 @@ func NewRollUpApply(outer, inner LogicalPlan, collectVar string) *RollUpApply {
 // Children implements LogicalPlan. Returns [Outer, Inner].
 func (r *RollUpApply) Children() []LogicalPlan { return []LogicalPlan{r.Outer, r.Inner} }
 
-// Vars implements LogicalPlan.
+// Vars implements LogicalPlan. It returns the outer variables followed by
+// CollectVar; with a nil Outer (a leading-clause comprehension) it returns
+// CollectVar alone.
 func (r *RollUpApply) Vars() []string {
+	if r.Outer == nil {
+		return []string{r.CollectVar}
+	}
 	seen := make(map[string]struct{})
 	var out []string
 	for _, v := range r.Outer.Vars() {
@@ -2002,6 +2010,11 @@ type MergeSetAll struct {
 	Value     ast.Expression
 	TargetVar string
 	IsReplace bool
+	// Ord is the item's position in its ON CREATE / ON MATCH list. The exec
+	// operators apply the items in that order, interleaving this list with the
+	// per-property actions, so each item sees every earlier item's write (rmp
+	// #2953).
+	Ord int
 }
 
 // MergeSetExpr carries the parsed value-expression AST for a MERGE
@@ -2017,6 +2030,10 @@ type MergeSetExpr struct {
 	Value     ast.Expression
 	TargetVar string
 	Key       string
+	// Ord is the item's position in its ON CREATE / ON MATCH list. It keys the
+	// item's evaluator, so two items writing the same property each run their
+	// own right-hand side (rmp #2953).
+	Ord int
 }
 
 // MergeRelationship is the relationship-pattern variant of [Merge]. It
@@ -2106,6 +2123,9 @@ type KVAction struct {
 	// actions. Always false for the additive `+=` form and for
 	// single-property `SET <relVar>.<key> = <value>` items.
 	Replace bool
+	// Ord is the position, in its ON CREATE / ON MATCH list, of the SET item
+	// this action was extracted from. It keys the item's evaluator (rmp #2953).
+	Ord int
 }
 
 // NewMergeRelationship creates a MergeRelationship operator without

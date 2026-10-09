@@ -11,6 +11,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -74,8 +75,11 @@ func writeCheckpointedImage(ctx context.Context, dir string, nNodes int) (checkp
 		facts.edges++
 	}
 
-	if fi, serr := os.Stat(walPath); serr == nil {
-		facts.walBytesBefore = fi.Size()
+	// WAL bytes are the frame bytes a recovery would replay: before the
+	// checkpoint every frame, after it the frames at or above the redo position
+	// the control file records.
+	if b, ferr := waltest.FrameBytes(walPath); ferr == nil {
+		facts.walBytesBefore = int64(len(b))
 	}
 
 	// Publish the checkpoint exactly as cmd/sim-xrelease-helper/checkpoint.go
@@ -88,8 +92,9 @@ func writeCheckpointedImage(ctx context.Context, dir string, nNodes int) (checkp
 		return facts, cerr
 	}
 
-	if fi, serr := os.Stat(walPath); serr == nil {
-		facts.walBytesAfter = fi.Size()
+	facts.walBytesAfter = facts.walBytesBefore
+	if redo, ok, rerr := waltest.CheckpointRecorded(dir); rerr == nil && ok {
+		facts.walBytesAfter = facts.walBytesBefore - int64(redo)
 	}
 	if ents, derr := os.ReadDir(filepath.Join(dir, "snapshot")); derr == nil {
 		facts.snapshotEntries = len(ents)

@@ -797,7 +797,9 @@ func typedSchemaInstall(
 	}
 	sort.Strings(labels)
 	for _, label := range labels {
-		sc.RegisterLabel(label)
+		if _, err := sc.RegisterLabel(label); err != nil {
+			return nil, nil, fmt.Errorf("sim: typed-schema RegisterLabel %q: %w", label, err)
+		}
 		props := make([]string, len(required[label]))
 		copy(props, required[label])
 		sort.Strings(props)
@@ -1548,7 +1550,7 @@ func (p *TypedSchemaProbes) checkNoMutation(
 	case tsPerturbInternGhostKey:
 		// Reproduces a hook that ran AFTER the intern. It permanently taints the
 		// fixture's registry, which is why it is only ever passed by a test.
-		side.g.PropertyKeys().Intern(spec.key)
+		_, _ = side.g.PropertyKeys().Intern(spec.key) // the perturbation is the intern itself
 	default:
 	}
 
@@ -1772,7 +1774,7 @@ func newTypedSchemaSubstrate(g *lpg.Graph[string, float64]) *typedSchemaSubstrat
 		propsOf: make(map[string]map[string]lpg.PropertyValue, len(entries)),
 	}
 	for _, e := range entries {
-		if g.IsTombstoned(e.id) {
+		if g.IsTombstonedStored(e.id) {
 			continue
 		}
 		props := g.NodePropertiesByID(e.id)
@@ -2352,7 +2354,7 @@ func typedSchemaPureStoreArm(seed *Seed) (tsPureStoreObservation, error) {
 	// rejected one OP, not the batch. Committing it is what gives the recovery
 	// half of this arm something to replay.
 	commitErr := rejectTx.Commit()
-	obs.notApplied = errors.Is(commitErr, txn.ErrCommittedNotApplied)
+	obs.notApplied = errors.Is(commitErr, txn.ErrCommittedNotApplied) //nolint:staticcheck // SA1019: asserts the deprecated sentinel is never returned
 	if commitErr != nil && !obs.notApplied {
 		obs.rejectErr += " | commit: " + fmt.Sprint(commitErr)
 	}

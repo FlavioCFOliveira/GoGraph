@@ -50,6 +50,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -58,7 +59,7 @@ import (
 // store, which is the composition whose concurrency this file is about.
 func mergeRaceEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	w, err := wal.Open(filepath.Join(t.TempDir(), "wal"))
+	w, err := wal.OpenWithSyncLatency(filepath.Join(t.TempDir(), "wal"), synclatency.ForTest(t))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}

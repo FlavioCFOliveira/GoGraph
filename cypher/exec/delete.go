@@ -40,6 +40,60 @@ import (
 // remove the node together with its relationships.
 var ErrDeleteNodeHasRelationships = errors.New("exec: cannot delete node with existing relationships; use DETACH DELETE")
 
+// txVisibleAdjacencyReader is the optional part of a [GraphMutator] that
+// answers the delete path's adjacency questions from THIS transaction's view:
+// its snapshot plus its own writes, never another in-flight transaction's work
+// (rmp #2884).
+//
+// # Why the delete path must not read the present
+//
+// The DELETE guard ("does this node still have relationships") and DETACH
+// DELETE's enumeration of the incoming relationships it must remove are
+// decisions, and a decision taken from the newest stored state is taken from
+// other transactions' uncommitted work. Measured before this reader existed,
+// with T2 open and T1 deleting d:
+//
+//	T2 removes x->d, T1 runs DELETE d: T1 saw no in-edge and committed, T2
+//	rolled back, and the committed graph held x->d into a deleted d;
+//	T2 adds x->d, T1 runs DELETE d: T1 was refused for a relationship its
+//	snapshot does not hold.
+//
+// Eight of the twelve interleavings in
+// cypher.TestDeleteInEdgeIndex_DecidesFromTheTransactionSnapshot violated
+// snapshot isolation this way.
+type txVisibleAdjacencyReader interface {
+	// InNeighboursInTx returns one source key per incoming arc of n in this
+	// transaction's view, self-loops excluded: a source holding k parallel arcs
+	// into n appears k times, because DETACH DELETE removes one slot per
+	// [GraphMutator.RemoveEdge] call (rmp #2988).
+	InNeighboursInTx(n string) []string
+	// HasInNeighbourInTx reports whether InNeighboursInTx would return anything.
+	HasInNeighbourInTx(n string) bool
+	// OutDegreeInTx is [GraphMutator.OutDegree] in this transaction's view.
+	OutDegreeInTx(n string) int
+}
+
+// inNeighboursInTx returns n's incoming neighbours as THIS transaction sees
+// them. The fallback is not a degradation: a mutator without the reader carries
+// no transaction — the read-only and test stubs — and for such a caller the
+// present IS its view (the reading [labelsInTx] gives the same fallback).
+func inNeighboursInTx(mut GraphMutator, n string) []string {
+	if tv, ok := mut.(txVisibleAdjacencyReader); ok {
+		return tv.InNeighboursInTx(n)
+	}
+	return mut.InNeighbours(n)
+}
+
+// hasRelationshipsInTx reports whether n has any outgoing or incoming
+// relationship in THIS transaction's view — the DELETE guard. See
+// [inNeighboursInTx] for the fallback.
+func hasRelationshipsInTx(mut GraphMutator, n string) bool {
+	if tv, ok := mut.(txVisibleAdjacencyReader); ok {
+		return tv.OutDegreeInTx(n) > 0 || tv.HasInNeighbourInTx(n)
+	}
+	return mut.OutDegree(n) > 0 || len(mut.InNeighbours(n)) > 0
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DeleteNode
 // ─────────────────────────────────────────────────────────────────────────────
@@ -71,6 +125,107 @@ type DeleteNode struct {
 	relEndpointsFn RelEndpointFn
 	reg            *ConstraintRegistry // nil means no registry maintenance
 	nodeVar        string
+
+	// deferredNodes are nodes whose deletion waits because a relationship
+	// still held them when their row was processed: a path node held by a
+	// relationship outside its path ([DeleteNode.deletePath], rmp #2950), or a
+	// bare node target whose relationship a later item of the same DELETE
+	// clause may still remove (rmp #2952). [DeleteNode.flushDeferredNodes]
+	// decides each one once every row has been processed.
+	deferredNodes []graph.NodeID
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
+}
+
+// deletePath deletes a path: exactly the path's own relationships, each by its
+// stable handle in its stored order, and then the path's nodes with DELETE
+// semantics — a node that still has a relationship is not detached (rmp #2950).
+// It used to remove EVERY relationship attached to every path node, deleting
+// relationships the path does not contain.
+//
+// A node still held by another relationship is not refused on the spot. The
+// same statement can delete that relationship later — a second path in the
+// same DELETE clause (Delete5 [7]) or a later row — so the node is deferred and
+// [DeleteNode.flushDeferredNodes] decides once every row has been
+// processed: deleted if the relationship has gone by then, refused with
+// [ErrDeleteNodeHasRelationships] otherwise, which rolls the statement back.
+func (op *DeleteNode) deletePath(p expr.PathValue) error {
+	for _, r := range p.Relationships {
+		if r.Deleted {
+			continue
+		}
+		srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(r.StartID))
+		dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(r.EndID))
+		if srcOK && dstOK {
+			removeBoundRelationship(op.mutator, srcKey, dstKey, r.ID, false)
+		}
+	}
+	for _, n := range p.Nodes {
+		id := graph.NodeID(n.ID)
+		nodeKey, ok := op.mutator.ResolveNodeLabel(id)
+		if !ok || op.mutator.IsTombstoned(id) {
+			continue
+		}
+		if hasRelationshipsInTx(op.mutator, nodeKey) {
+			op.deferredNodes = append(op.deferredNodes, id)
+			continue
+		}
+		if err := op.removeDetachedNode(nodeKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// flushDeferredNodes deletes every deferred node that no longer has a
+// relationship and refuses the statement with [ErrDeleteNodeHasRelationships]
+// when one still has. A node another row or operator already deleted is
+// skipped.
+func (op *DeleteNode) flushDeferredNodes() error {
+	pending := op.deferredNodes
+	op.deferredNodes = nil
+	for _, id := range pending {
+		nodeKey, ok := op.mutator.ResolveNodeLabel(id)
+		if !ok || op.mutator.IsTombstoned(id) {
+			continue
+		}
+		if hasRelationshipsInTx(op.mutator, nodeKey) {
+			return ErrDeleteNodeHasRelationships
+		}
+		if err := op.removeDetachedNode(nodeKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeDetachedNode strips a node that has no relationship left and
+// tombstones it. Stripping the labels and properties is internal teardown, not
+// a user-visible side effect: openCypher declares DELETE as -nodes only
+// (#2212), so effect counting is suppressed for the span. RemoveNodeLabel
+// releases the node's constrained values (rmp #2358).
+func (op *DeleteNode) removeDetachedNode(nodeKey string) error {
+	resumeCounting := suppressEffectCounting(op.mutator)
+	// The labels and keys are read back from the node, so the mutator's token
+	// gate cannot refuse them; the errors are propagated all the same (rmp
+	// #2956), and counting is resumed on every path.
+	for _, lbl := range labelsInTx(op.mutator, nodeKey) {
+		if err := op.mutator.RemoveNodeLabel(nodeKey, lbl); err != nil {
+			resumeCounting()
+			return err
+		}
+	}
+	for k := range op.mutator.NodeProperties(nodeKey) {
+		if err := op.mutator.DelNodeProperty(nodeKey, k); err != nil {
+			resumeCounting()
+			return err
+		}
+	}
+	resumeCounting()
+	op.mutator.RemoveNode(nodeKey)
+	return nil
 }
 
 // NewDeleteNode creates a DeleteNode operator.
@@ -128,13 +283,14 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}
 	if !ok {
-		return false, nil
+		// Every row has been processed: a node deferred because a relationship
+		// still held it must be free now (rmp #2950, rmp #2952).
+		return false, op.flushDeferredNodes()
 	}
 
 	var nodeID graph.NodeID
@@ -156,56 +312,20 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 			// DELETE on a relationship: dispatch to the mutator's edge
 			// removal path. The startup/endpoint IDs already identify the
 			// edge; bypass the node-deletion guard.
+			// The value's ID is the relationship's stable handle (rmp #2317), so
+			// the removal and the snapshot address exactly that instance rather
+			// than the pair's first slot (rmp #2940).
 			srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.StartID))
 			dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.EndID))
 			var snapProps expr.MapValue
 			if srcOK && dstOK {
-				if raw := op.mutator.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
-					snapProps = make(expr.MapValue, len(raw))
-					for k, pv := range raw {
-						if v, ok := lpgPropToExprBinding(pv); ok {
-							snapProps[k] = v
-						}
-					}
-				}
-				removeEdgeEitherDirection(op.mutator, srcKey, dstKey)
+				_, snapProps = removeBoundRelationship(op.mutator, srcKey, dstKey, tv.ID, false)
 			}
 			*out = op.markRowDeletedRel(childRow, tv, snapProps)
 			return true, nil
 		case expr.PathValue:
-			// DELETE on a path: openCypher specifies this as a shortcut
-			// for deleting every relationship and node in the path. The
-			// rel-before-node ordering means after all path rels are
-			// removed the nodes are detachable; mirror DetachDelete's
-			// path sweep here so the test surface ("DELETE pathColls.
-			// key[0], pathColls.key[1]" in Delete5 [7]) registers both
-			// the rel and node deletions without requiring the user to
-			// write DETACH DELETE.
-			for _, n := range tv.Nodes {
-				nodeKey, ok := op.mutator.ResolveNodeLabel(graph.NodeID(n.ID))
-				if !ok {
-					continue
-				}
-				for _, dst := range op.mutator.OutNeighbours(nodeKey) {
-					op.mutator.RemoveEdge(nodeKey, dst)
-				}
-				for _, src := range op.mutator.InNeighbours(nodeKey) {
-					op.mutator.RemoveEdge(src, nodeKey)
-				}
-				// Stripping the node's labels and properties is internal teardown, not a
-				// user-visible side effect: openCypher declares DELETE as -nodes only
-				// (#2212). Suppress effect counting for the span.
-				resumeCounting := suppressEffectCounting(op.mutator)
-				// RemoveNodeLabel releases; see the twin below (rmp #2358).
-				pathNodeLabels := labelsInTx(op.mutator, nodeKey)
-				for _, lbl := range pathNodeLabels {
-					op.mutator.RemoveNodeLabel(nodeKey, lbl)
-				}
-				for k := range op.mutator.NodeProperties(nodeKey) {
-					op.mutator.DelNodeProperty(nodeKey, k)
-				}
-				resumeCounting()
-				op.mutator.RemoveNode(nodeKey)
+			if err := op.deletePath(tv); err != nil {
+				return false, err
 			}
 			*out = childRow
 			return true, nil
@@ -220,28 +340,26 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 		// to resolveNodeIDFromRow, so a RelationshipValue can dispatch
 		// to the edge-removal path instead of failing the type check.
 		if colIdx, ok := op.schema[op.nodeVar]; ok && colIdx < len(childRow) {
+			if pv, isPath := childRow[colIdx].(expr.PathValue); isPath {
+				// A bare path variable (`DELETE p`) takes the same path branch
+				// as an expression target; resolveNodeIDFromRow would read the
+				// path as its first node and refuse it for the path's own
+				// relationship (rmp #2950).
+				if err := op.deletePath(pv); err != nil {
+					return false, err
+				}
+				*out = childRow
+				return true, nil
+			}
 			if relVal, isRel := childRow[colIdx].(expr.RelationshipValue); isRel {
+				// Instance-precise by the value's handle; an undirected match's
+				// reverse row carries traversal-order endpoints, which
+				// removeBoundRelationship normalises to the stored order.
 				srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.StartID))
 				dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(relVal.EndID))
 				var snapProps expr.MapValue
 				if srcOK && dstOK {
-					if raw := op.mutator.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
-						snapProps = make(expr.MapValue, len(raw))
-						for k, pv := range raw {
-							if v, ok := lpgPropToExprBinding(pv); ok {
-								snapProps[k] = v
-							}
-						}
-					}
-					// Undirected MATCH emits both forward and reverse rows
-					// for the same edge; the reverse row carries
-					// (StartID=traversalSrc, EndID=traversalDst) which may
-					// not match the edge's STORAGE direction. RemoveEdge
-					// is direction-sensitive (it ignores requests against
-					// the wrong direction), so probe both orientations
-					// when the requested one is not the storage direction.
-					// Closes Delete4 [1] flake.
-					removeEdgeEitherDirection(op.mutator, srcKey, dstKey)
+					_, snapProps = removeBoundRelationship(op.mutator, srcKey, dstKey, relVal.ID, false)
 				}
 				*out = op.markRowDeletedRel(childRow, relVal, snapProps)
 				return true, nil
@@ -275,20 +393,11 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 						if intVal >= 0 {
 							handle = uint64(intVal)
 						}
-						if handle != 0 {
-							if labels := op.mutator.EdgeLabelsByHandle(srcKey, dstKey, handle); len(labels) > 0 {
-								snapRel.Type = labels[0]
-							}
-							snapRel.Properties = exprMapFromLPGProps(op.mutator.EdgePropertiesByHandle(srcKey, dstKey, handle))
-							op.mutator.RemoveEdgeByHandle(srcKey, dstKey, handle)
-							op.mutator.DecEdgeCreateCount(srcKey, dstKey)
-						} else {
-							if labels := op.mutator.EdgeLabels(srcKey, dstKey); len(labels) > 0 {
-								snapRel.Type = labels[0]
-							}
-							snapRel.Properties = exprMapFromLPGProps(op.mutator.EdgeProperties(srcKey, dstKey))
-							removeEdgeEitherDirection(op.mutator, srcKey, dstKey)
+						relType, props := removeBoundRelationship(op.mutator, srcKey, dstKey, handle, true)
+						if relType != "" {
+							snapRel.Type = relType
 						}
+						snapRel.Properties = props
 					}
 				}
 				*out = op.markRowDeletedRel(childRow, snapRel, snapRel.Properties)
@@ -314,14 +423,6 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 		return true, nil
 	}
 
-	// Guard: the node must not have any outgoing or incoming edges.
-	if op.mutator.OutDegree(nodeKey) > 0 {
-		return false, ErrDeleteNodeHasRelationships
-	}
-	if len(op.mutator.InNeighbours(nodeKey)) > 0 {
-		return false, ErrDeleteNodeHasRelationships
-	}
-
 	// Snapshot labels and properties BEFORE removing them — these become
 	// the frozen view carried on the row's NodeValue after the entity is
 	// tombstoned, so `RETURN id(n)` still works but `RETURN n.foo` /
@@ -337,6 +438,30 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 			}
 		}
 	}
+
+	// Guard: the node must not have any outgoing or incoming edges IN THIS
+	// TRANSACTION'S VIEW (rmp #2884). A relationship another transaction added
+	// and has not committed does not refuse the delete; that transaction's
+	// adjacency claim on this node refuses it instead, as a serialization
+	// conflict, when the node is retired below.
+	//
+	// The guard is decided at the end of the clause, not on the spot (rmp
+	// #2952). The items of one DELETE clause are applied one operator after
+	// another, so in `DELETE a, r` the node is reached before the relationship
+	// that holds it is removed, and refusing here made the statement fail
+	// while `DELETE r, a` succeeded. openCypher decides the guard for the
+	// clause as a whole — TCK Delete5 [7] deletes two paths whose nodes each
+	// path's own relationship holds, and that is the deferral #2950 built for
+	// paths — so the node is deferred like a held path node and
+	// [DeleteNode.flushDeferredNodes] deletes it, or refuses the statement,
+	// once every row has been processed. The row carries the Deleted snapshot
+	// now, exactly as an immediate delete would.
+	if hasRelationshipsInTx(op.mutator, nodeKey) {
+		op.deferredNodes = append(op.deferredNodes, nodeID)
+		*out = op.markRowDeleted(childRow, nodeID, deletedLabels, deletedProps)
+		return true, nil
+	}
+
 	// The constrained values this node holds are given back by RemoveNodeLabel
 	// below, at the mutator choke point (rmp #2358). The bulk release that used to
 	// stand here would now be a SECOND release of the same reservations, and a
@@ -348,11 +473,17 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 	resumeCounting := suppressEffectCounting(op.mutator)
 	// Remove all labels.
 	for _, lbl := range labelsInTx(op.mutator, nodeKey) {
-		op.mutator.RemoveNodeLabel(nodeKey, lbl)
+		if err := op.mutator.RemoveNodeLabel(nodeKey, lbl); err != nil {
+			resumeCounting()
+			return false, err
+		}
 	}
 	// Remove all properties.
 	for k := range op.mutator.NodeProperties(nodeKey) {
-		op.mutator.DelNodeProperty(nodeKey, k)
+		if err := op.mutator.DelNodeProperty(nodeKey, k); err != nil {
+			resumeCounting()
+			return false, err
+		}
 	}
 	resumeCounting()
 	// Tombstone the node entity so AllNodesScan, count(*), and the
@@ -447,6 +578,10 @@ type DeleteRelationship struct {
 	schema  map[string]int
 	relCols *RelCols // non-nil enables instance-precise by-handle removal
 	relVar  string
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewDeleteRelationship creates a DeleteRelationship operator.
@@ -487,8 +622,7 @@ func (op *DeleteRelationship) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}
@@ -524,7 +658,9 @@ func (op *DeleteRelationship) Next(out *Row) (bool, error) {
 	// handle (no RelCols, simple graph, or a post-projection binding whose edge
 	// position is gone) falls back to the first-match endpoint removal —
 	// unchanged behaviour (rmp #2018).
-	var handle uint64
+	// With no relationship columns wired the value's own ID is the handle
+	// (rmp #2317); it is never ignored in favour of the pair's first slot.
+	handle := rel.ID
 	if op.relCols != nil {
 		handle = resolveRelHandle(op.relCols, childRow, srcKey, dstKey, op.mutator)
 	}
@@ -533,18 +669,7 @@ func (op *DeleteRelationship) Next(out *Row) (bool, error) {
 	// deleted-rel marker carries the pre-removal view, letting
 	// `RETURN type(r)` keep returning the type while `RETURN r.foo`
 	// raises EntityNotFound on the Deleted flag (Return2 [17]).
-	var deletedProps expr.MapValue
-	if handle != 0 {
-		deletedProps = exprMapFromLPGProps(op.mutator.EdgePropertiesByHandle(srcKey, dstKey, handle))
-		op.mutator.RemoveEdgeByHandle(srcKey, dstKey, handle)
-	} else {
-		deletedProps = exprMapFromLPGProps(op.mutator.EdgeProperties(srcKey, dstKey))
-		// Remove edge labels and properties before removing the edge itself.
-		// (lpg.Graph's RemoveEdge removes the adjacency entry; label/property
-		// cleanup prevents orphaned metadata.)
-		op.mutator.RemoveEdge(srcKey, dstKey)
-	}
-	op.mutator.DecEdgeCreateCount(srcKey, dstKey)
+	_, deletedProps := removeBoundRelationship(op.mutator, srcKey, dstKey, handle, false)
 
 	*out = op.markRowDeleted(childRow, rel, deletedProps)
 	return true, nil

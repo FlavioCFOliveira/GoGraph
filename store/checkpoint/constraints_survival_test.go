@@ -27,6 +27,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
@@ -109,8 +110,8 @@ func TestCheckpointer_ConstraintsSurviveCheckpointRestart(t *testing.T) {
 	// The WAL prefix holding the CREATE CONSTRAINT op must actually be gone;
 	// otherwise constraint survival could come from WAL replay and the test
 	// would pass vacuously without exercising the snapshot path.
-	if got := cp.Stats().WALTruncBytes; got == 0 {
-		t.Fatalf("checkpoint did not truncate the WAL (WALTruncBytes = 0); the test cannot exercise the snapshot-only constraint path")
+	if _, ok, err := waltest.CheckpointRecorded(dir); err != nil || !ok {
+		t.Fatalf("the checkpoint did not record its snapshot as the start of recovery; the test cannot exercise the snapshot-only constraint path"+" (control record: err %v)", err)
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal.Close: %v", err)

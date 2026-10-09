@@ -90,7 +90,9 @@ func seedDegreeCliffGraph(tb testing.TB, tombstone bool) *lpg.Graph[string, floa
 		tb.Fatalf("SetNodeLabel(z): %v", err)
 	}
 	if tombstone {
-		g.RemoveNode("z")
+		if err := g.RemoveNode("z"); err != nil {
+			tb.Fatalf("g.RemoveNode(\"z\"): %v", err)
+		}
 	}
 	return g
 }

@@ -154,6 +154,10 @@ type ExpandIntersect struct {
 
 	emitCount int
 	done      bool
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewExpandIntersect creates a fused cyclic expand over the forward and reverse
@@ -296,8 +300,7 @@ func (op *ExpandIntersect) Next(out *Row) (bool, error) {
 // Expand would still scan b's whole run before the seek rejected everything.
 func (op *ExpandIntersect) loadInput() (bool, error) {
 	for {
-		var row Row
-		ok, err := op.input.Next(&row)
+		row, ok, err := nextRow(op.input, &op.pull)
 		if err != nil {
 			return false, err
 		}
@@ -468,7 +471,7 @@ func (op *ExpandIntersect) passesRelMorphism(edgeID int64) bool {
 		if col < 0 || col >= len(op.inputRow) {
 			continue
 		}
-		if iv, ok := op.inputRow[col].(expr.IntegerValue); ok && int64(iv) == edgeID {
+		if relColHolds(op.inputRow[col], edgeID) {
 			return false
 		}
 	}

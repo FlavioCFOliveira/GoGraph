@@ -1,83 +1,143 @@
 # GoGraph Write-Ahead Log Format
 
-This document specifies the on-disk binary format of a GoGraph
-Write-Ahead Log (WAL) file. The format is **versioned**: each frame
-declares its version, and readers refuse versions newer than they
-know how to parse.
+This document specifies the on-disk format of a GoGraph write-ahead log (WAL).
+All integers are little-endian. The design and its rationale are in
+`docs/design-wal-v2.md`.
 
-## File-level layout
+## Store layout
 
-A WAL file is a sequence of frames written back-to-back. There is no
-file-level header beyond the first frame's header (every frame is
-self-describing).
+A store's log lives next to its base path `walPath` (`dir/wal` in a store
+directory):
 
-## Frame layout
+| Path | Content |
+|---|---|
+| `walPath.control` | The control file (64 bytes). |
+| `walPath.d/<016x segNo>.wal` | The segments, numbered consecutively from 1. |
+| `walPath` | The legacy single-file log of a store written before segments, ending with its seal; or a one-frame seal stub. |
+| `walPath.lock` | The writer's exclusive lock file. |
 
-Each frame has the following byte layout:
+A directory with segments and no control file is refused (`ErrMissingControl`).
+A directory with neither is a legacy store: `walPath` is read as one file of
+frames, and the first writable open migrates it.
 
-| Field   | Size  | Description                                                |
-|---------|-------|------------------------------------------------------------|
-| magic   |  4 B  | ASCII `GGWA` (`0x47 0x47 0x57 0x41`)                       |
-| version |  2 B  | uint16, little-endian. The current format version is `1`.  |
-| length  |  4 B  | uint32, little-endian. Length of the payload in bytes.     |
-| crc32c  |  4 B  | uint32, little-endian. CRC32C of magic+version+length+payload using the Castagnoli polynomial (`0x1EDC6F41`). |
-| payload | N B   | `length` bytes of opaque payload supplied by the caller.   |
+## Frames
 
-Total frame size: `14 + length` bytes.
+Each frame is a header followed by `length` payload bytes. Two versions exist.
 
-## Versioning
+### Version 2 (written)
 
-Version `1` carries the format described above. Future versions must
-either reuse this header (preserving magic+version+length+crc32c) or
-introduce a new magic. Readers that encounter a version higher than
-their highest supported version return `ErrUnsupportedVersion`.
+| Offset | Field | Size | Meaning |
+|---|---|---|---|
+| 0 | magic | 4 | ASCII `GGWA`. |
+| 4 | version | 2 | `2`. |
+| 6 | flags | 2 | Reserved, `0`. |
+| 8 | length | 4 | Payload length; at most 1 GiB. |
+| 12 | pos | 8 | Logical position: the number of frame bytes the log held before this frame. Never reset, independent of segments. |
+| 20 | prevLen | 4 | `pos` minus the predecessor's `pos`; `0` only for the store's first frame. |
+| 24 | storeID | 8 | The store id from the control file. |
+| 32 | crc32c | 4 | CRC32C (Castagnoli) of the payload, continued over header bytes `[0,32)`. |
 
-## Integrity
+Frame size: `36 + length` bytes. A frame never spans two segments.
 
-The CRC32C field covers the magic bytes, the version, the length,
-and the payload. Any single-bit flip in any of these fields is
-detected with the probability guaranteed by CRC32C (effectively
-2⁻³² for unrelated bit flips).
+### Version 1 (read only)
 
-Torn writes — partial last frames — are detected by the length /
-CRC mismatch and reported as `ErrTornFrame`. Readers stop cleanly
-at the last fully-readable frame; recovery resumes from there.
+The legacy frame: magic (4), version `1` (2), length (4), and a CRC32C (4) of
+magic, version, length and payload. Frame size: `14 + length`. It carries no
+position and no store identity.
 
-A corrupt `length` field that *over-declares* past the end of the
-file produces the same end-of-input that a genuine torn tail does,
-because the decoder reaches EOF while reading the (impossibly long)
-payload before it can verify the CRC that covers the length field.
-To stop such corruption from masquerading as a benign tail — which
-would silently discard every durable frame physically located after
-the corrupt one — the decoder inspects the bytes the over-long read
-actually consumed. If a structurally complete, CRC-valid frame begins
-anywhere inside those bytes, the consumed region was not opaque
-payload but the durable frames that follow, so the decoder returns
-`ErrTornFrameMasksData` (a hard error) instead of `ErrTornFrame`.
-A real torn tail's opaque payload bytes match a CRC-valid frame only
-with the ~2⁻³² per-offset probability of a CRC collision, so a
-legitimate crash tail is not misclassified.
+### Decoding
 
-As a defence-in-depth measure, the decoder rejects any frame whose
-declared `length` exceeds 1 GiB (`maxFrameSize`) with `ErrFrameTooLarge`
-*before* allocating the payload buffer. The `length` field is a uint32,
-so the format already bounds a payload to ~4 GiB; the 1 GiB ceiling
-caps the pathological case where a corrupted or crafted length would
-otherwise force a large one-shot allocation ahead of the CRC check. The
-ceiling sits far above any legitimate WAL frame, which carries a single
-transaction rather than bulk data.
+Fewer bytes than a version-1 header, or a payload shorter than its declared
+length, is a torn tail (`ErrTornFrame`), unless a CRC-valid frame begins inside
+the bytes an over-declared length consumed (`ErrTornFrameMasksData`). A wrong
+magic is `ErrBadMagic`, an unknown version `ErrUnsupportedVersion`, a length
+above 1 GiB `ErrFrameTooLarge` (rejected before allocation), and a checksum
+mismatch `ErrCRCMismatch`.
+
+## Control file
+
+Written by temp file, fsync, rename and parent-directory fsync, so a crash leaves
+the old or the new file.
+
+| Offset | Field | Size | Meaning |
+|---|---|---|---|
+| 0 | magic | 4 | ASCII `GGCT`. |
+| 4 | version | 2 | `1`. |
+| 6 | length | 2 | `64`. |
+| 8 | storeID | 8 | Random, non-zero, created once. |
+| 16 | flags | 4 | bit 0 `PrefixTruncated` (history requires a snapshot); bit 1 `LegacyV1Pending` (the legacy file still holds history). |
+| 20 | reserved | 4 | `0`. |
+| 24 | oldestRetainedPos (OR) | 8 | First position of the oldest retained segment, or the end of the log when no retained segment holds a frame. |
+| 32 | prevFramePosAtOR | 8 | Position of the frame preceding OR; `2^64-1` for none. |
+| 40 | checkpointRedoPos | 8 | Redo position of the last checkpoint that recorded itself. |
+| 48 | createdUnixNano | 8 | Diagnostic. |
+| 56 | crc32c | 4 | CRC32C of bytes `[0,56)`. |
+| 60 | padding | 4 | `0`. |
+
+A bad magic, version, length or checksum, or a zero store id, is
+`ErrControlCorrupt`.
+
+## Segments
+
+Each segment starts with a 32-byte header:
+
+| Offset | Field | Size |
+|---|---|---|
+| 0 | magic `GGWS` | 4 |
+| 4 | version `2` | 2 |
+| 6 | header length `32` | 2 |
+| 8 | storeID | 8 |
+| 16 | segNo | 8 |
+| 24 | reserved | 4 |
+| 28 | crc32c of `[0,28)` | 4 |
+
+Frames follow back to back. The header holds no position: a segment's first
+position is its first frame's `pos`.
+
+- A segment is created whole (exclusive create, header, fsync, directory fsync)
+  before it receives a frame. A trailing segment with a short or invalid header
+  and no frame is an interrupted creation: readers ignore it and the writer
+  deletes it.
+- The writer rolls the active segment over at a run boundary once it reaches
+  its target size (16 MiB by default): it makes the segment durable first, so
+  every non-tail segment is fully durable.
+- Segment numbers are consecutive (`ErrSegmentGap` otherwise); an empty segment
+  may exist only at the tail.
+- A checkpoint unlinks the segments whose frames all lie below OR. Segments
+  below the one holding OR that survive an interrupted unlink are ignored by
+  readers and deleted by the writer.
+
+## Reading a segmented log
+
+Reading starts at the first frame of the segment that holds OR. For every frame:
+
+- its store id must equal the control file's (`ErrForeignStore`; a segment
+  header with another store id is refused the same way);
+- its `pos` must be the end of its predecessor, and a frame must start exactly at
+  OR (`ErrFramePosition`);
+- `pos - prevLen` must be the predecessor's position, and the first retained
+  frame's must be `prevFramePosAtOR` (`ErrPrevLink`).
+
+A torn frame is benign only at the end of the last segment holding frames;
+elsewhere it is `ErrTornSegment`.
+
+## Control records
+
+A payload whose first byte is `0xFC` is a control record, not a transaction op.
+This build writes and reads three kinds:
+
+| Kind | Name | Body |
+|---|---|---|
+| 1 | ReserveIDs | `0xFC 0x01`, shard (1), limit (8): every node id below `limit` in `shard` may have been issued. |
+| 2 | NextIDsExact | `0xFC 0x02`, 256 × uvarint: the exact per-shard high-water marks, written at a clean close (`txn.Store.Close`). |
+| 3 | LegacySeal | `0xFC 0x03`, storeID (8), v2StartPos (8) |
+
+The seal is written, as a version-2 frame with position 0, at the end of a
+migrated legacy file, and is the single frame of the seal stub. Because its
+version is 2, a build that predates segments refuses the directory instead of
+ignoring the segments.
 
 ## Concurrency
 
-The format itself imposes no concurrency model. The `wal.Writer`
-implementation is single-writer; multiple goroutines must serialise
-their writes externally. The `wal.Reader` is read-only and may be
-shared by multiple goroutines provided each holds its own offset.
-
-## Forward compatibility
-
-- New top-level fields may be added by bumping the version.
-- The payload structure is opaque to the WAL; higher-level callers
-  (transaction codec, snapshot consolidator) may freely evolve the
-  payload encoding without bumping the frame version, provided the
-  payload remains a self-describing byte sequence.
+The format imposes no concurrency model. `wal.Writer` is safe for concurrent use;
+`wal.Reader` and `wal.Log` are read by one goroutine each.

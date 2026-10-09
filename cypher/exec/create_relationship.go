@@ -44,6 +44,10 @@ type CreateRelationship struct {
 	relType     string
 	propsRaw    string
 	props       []propLiteral
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewCreateRelationship creates a CreateRelationship operator.
@@ -109,8 +113,7 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}
@@ -173,7 +176,9 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 		return false, fmt.Errorf("exec: CreateRelationship AddEdge: %w", err)
 	}
 	if op.relType != "" {
-		op.mutator.SetEdgeLabel(srcLabel, dstLabel, op.relType)
+		if err := op.mutator.SetEdgeLabel(srcLabel, dstLabel, op.relType); err != nil {
+			return false, err
+		}
 	}
 	// Bump the Cypher CREATE-multiplicity counter even when AddEdge
 	// silently no-ops a duplicate (a→b) in simple-graph storage —
@@ -182,8 +187,12 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 	// entry (Merge5 [3]).
 	instanceIdx := op.mutator.IncEdgeCreateCount(srcLabel, dstLabel)
 	if op.relType != "" {
-		op.mutator.SetEdgeLabelAt(srcLabel, dstLabel, instanceIdx, op.relType)
-		op.mutator.SetEdgeLabelByHandle(srcLabel, dstLabel, handle, op.relType)
+		if err := op.mutator.SetEdgeLabelAt(srcLabel, dstLabel, instanceIdx, op.relType); err != nil {
+			return false, err
+		}
+		if err := op.mutator.SetEdgeLabelByHandle(srcLabel, dstLabel, handle, op.relType); err != nil {
+			return false, err
+		}
 	}
 
 	props, mErr := mergeProps(op.props, op.propsExprFn, childRow)

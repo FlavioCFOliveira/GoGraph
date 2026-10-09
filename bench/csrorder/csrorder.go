@@ -603,5 +603,5 @@ func RMATFixture(profileThreshold int) (*Fixture, error) {
 // OrderedCSR builds the ordered forward CSR of f exactly as the Cypher engine
 // does (live-filtered, so the arc set matches what a query would traverse).
 func OrderedCSR(g *lpg.Graph[string, float64]) *csr.CSR[float64] {
-	return csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
+	return csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilterStored())
 }

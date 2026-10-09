@@ -69,10 +69,9 @@
 //     stale or early NodeID is rejected there, exactly as an
 //     out-of-interval one already is.
 //   - [Index.Serialize]'s only production caller is the checkpointer,
-//     which drains writers to zero before capture and refuses a capture
-//     instant taken while a write transaction is open
-//     (store/snapshot/capture.go, ErrCaptureNotQuiesced). Serializing a
-//     concurrently mutating index is outside that contract.
+//     which drains store writers to zero before opening its capture
+//     instant (store/checkpoint). Serializing a concurrently mutating
+//     index is outside that contract.
 //
 // The index provides index-internal isolation only; transaction
 // isolation across multiple calls is the engine's responsibility.

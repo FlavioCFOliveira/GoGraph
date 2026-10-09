@@ -41,7 +41,10 @@ package lpg
 // AddEdgeHIfAbsent and WalkEdgeHandles are not (they read-then-write or
 // walk the whole adjacency without a global barrier).
 
-import "github.com/FlavioCFOliveira/GoGraph/graph"
+import (
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
+)
 
 // HasEdgeHandle reports whether the directed (src, dst) pair carries a
 // stored edge whose stable handle equals `handle`. It scans the pair's
@@ -56,7 +59,21 @@ import "github.com/FlavioCFOliveira/GoGraph/graph"
 // does not double the edge.
 //
 // HasEdgeHandle is safe for concurrent use.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) HasEdgeHandle(src, dst N, handle uint64) bool {
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.HasEdgeHandleAsOf(src, dst, handle, g.latestCommitted(&cs))
+}
+
+// HasEdgeHandleAsOf is [Graph.HasEdgeHandle] resolved at s: whether the edge
+// carrying handle on (src, dst) exists as of that snapshot. A nil s reads the
+// stored entry, including uncommitted writes.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) HasEdgeHandleAsOf(src, dst N, handle uint64, s *Snapshot) bool {
 	if handle == 0 {
 		return false
 	}
@@ -68,12 +85,9 @@ func (g *Graph[N, W]) HasEdgeHandle(src, dst N, handle uint64) bool {
 	if !ok {
 		return false
 	}
-	neighbours, _, handles := g.adj.LoadEntryH(srcID)
-	if handles == nil {
-		return false
-	}
-	for i, nb := range neighbours {
-		if nb == dstID && i < len(handles) && handles[i] == handle {
+	v := g.EntryViewAsOf(srcID, s)
+	for i, nb := range v.Neighbours {
+		if nb == dstID && i < len(v.Handles) && v.Handles[i] == handle {
 			return true
 		}
 	}
@@ -98,13 +112,31 @@ func (g *Graph[N, W]) HasEdgeHandle(src, dst N, handle uint64) bool {
 // A handle of 0 is treated as "no durable identity" and falls back to a
 // plain [Graph.AddEdge] so a pre-Stage-2 WAL frame (which carried no
 // handle) still replays. AddEdgeHIfAbsent is NOT safe for concurrent use.
+//
+// It runs as a single-operation transaction (rmp #2947) and claims both
+// existing endpoints as [Graph.AddEdge] does: it refuses with an error wrapping
+// [ErrDirectWriteConflict], and changes nothing, while another transaction holds
+// an uncommitted write on either endpoint's adjacency. The refusal is retryable.
+// See [ErrDirectWriteConflict]. Inside a transaction
+// ([WriteView.AddEdgeHIfAbsent], the path a durable store commit takes) the same
+// claims, and the adjacency's refusal of any write over another transaction's
+// uncommitted entry, refuse it with a [*mvcc.Conflict] that dooms that
+// transaction instead.
 func (g *Graph[N, W]) AddEdgeHIfAbsent(src, dst N, w W, handle uint64) (inserted bool, err error) {
-	return g.addEdgeHIfAbsentInfo(src, dst, w, handle, nil)
+	err = g.direct(func(tx *writeCtx) error {
+		var e error
+		inserted, e = g.addEdgeHIfAbsentInfo(src, dst, w, handle, tx)
+		return e
+	})
+	if err != nil {
+		return false, err
+	}
+	return inserted, nil
 }
 
-// addEdgeHIfAbsentInfo is [Graph.AddEdgeHIfAbsent] with an explicit write
-// transaction; tx is nil for a replay or a direct Go-API mutation, which is
-// committed the instant it is made. See [writeCtx].
+// addEdgeHIfAbsentInfo is [Graph.AddEdgeHIfAbsent] inside write transaction tx;
+// tx is nil only on a graph whose versioning substrate is disarmed. See
+// [writeCtx].
 //
 // It needs the transaction-carrying form for TWO callers that both run inside a
 // write bracket, which is what makes it different from the other replay
@@ -120,11 +152,77 @@ func (g *Graph[N, W]) AddEdgeHIfAbsent(src, dst N, w W, handle uint64) (inserted
 // would publish part of its transaction at another transaction's instant once two
 // brackets overlap (rmp #2320).
 //
+// It CLAIMS both existing endpoints before the adjacency mutation, in one
+// test-then-stamp step ([adjVersions.claimAppendPair]), exactly as
+// [Graph.appendEdgeInfo] does, and stamps an endpoint the append creates after
+// the insert. Until the ACID audit of rmp #2965 it claimed nothing, so a store
+// commit's apply built its entry on another transaction's uncommitted one: the
+// commit published that transaction's arc, and the transaction's abort then
+// restored the stacked entry with the arc still in it. The adjacency itself now
+// refuses that write structurally ([adjlist.AdjList] direct_conflict.go); the
+// claim is what also orders it against a node removal or another append that
+// the stamps record.
+//
+// A handle already present is a no-op that writes nothing and takes no claim:
+// replaying a snapshot-loaded edge costs no stamp. The verdict is taken only
+// once both endpoints' adjacency heads admit tx ([adjVersions.admits]) and the
+// handle is present in what tx can SEE, because the stored entry also carries
+// other transactions' uncommitted ones (ACID audit round 6, finding C1): a
+// durable store commit that found a peer's pending identical handle there used
+// to be acknowledged with no claim and no WAL record, and its edge was gone
+// once the peer aborted.
+//
 // The read-then-write it performs is NOT made atomic by the transaction: the
 // method's contract already says it is not safe for concurrent use, and its
 // idempotence is against a snapshot that has already been loaded, not against a
 // concurrent writer.
 func (g *Graph[N, W]) addEdgeHIfAbsentInfo(src, dst N, w W, handle uint64, tx *writeCtx) (inserted bool, err error) {
+	// The STORED entry (nil snapshot) first: it is the cheap filter, and an edge
+	// absent from it is absent from every view.
+	if handle != 0 && g.HasEdgeHandleAsOf(src, dst, handle, nil) {
+		if tx == nil {
+			return false, nil
+		}
+		var ids [2]graph.NodeID
+		n := 0
+		if srcID, ok := g.adj.Mapper().Lookup(src); ok {
+			ids[n], n = srcID, n+1
+		}
+		if src != dst {
+			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
+				ids[n], n = dstID, n+1
+			}
+		}
+		if err := g.adjVer.admits(ids, n, tx); err != nil {
+			return false, err
+		}
+		// An edge this transaction, or a replay, already inserted is visible to
+		// it whether or not it has committed. Read after the admit, through a
+		// view no earlier read of tx has pinned ([Graph.admittedRead], rmp #3032).
+		var cs Snapshot
+		if g.HasEdgeHandleAsOf(src, dst, handle, g.admittedRead(&cs, tx)) {
+			return false, nil
+		}
+	}
+	// The existing endpoints, claimed together so a refusal on either stamps
+	// neither and allocates no commit record; see [Graph.appendEdgeInfo] for why
+	// the destination is claimed on a directed graph too.
+	var srcClaimed, dstClaimed bool
+	if tx != nil {
+		var ids [2]graph.NodeID
+		n := 0
+		if srcID, ok := g.adj.Mapper().Lookup(src); ok {
+			ids[n], n, srcClaimed = srcID, n+1, true
+		}
+		if src != dst {
+			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
+				ids[n], n, dstClaimed = dstID, n+1, true
+			}
+		}
+		if err := g.adjVer.claimAppendPair(ids, n, tx); err != nil {
+			return false, err
+		}
+	}
 	// Endpoints interned through the hooked path BEFORE either insert, so a node this
 	// append CREATES is born at the transaction's instant rather than at the beginning
 	// of time; see [Graph.internEndpoint] (rmp #2331).
@@ -138,19 +236,30 @@ func (g *Graph[N, W]) addEdgeHIfAbsentInfo(src, dst N, w W, handle uint64, tx *w
 	if src != dst {
 		g.internEndpoint(dst, tx)
 	}
+	if tx.doomed() {
+		return false, tx.err()
+	}
 	if handle == 0 {
-		if err := g.adj.Writer(tx.adjTx()).AddEdge(src, dst, w); err != nil {
-			return false, err
+		err = g.adj.Writer(tx.adjTx()).AddEdge(src, dst, w)
+	} else {
+		err = g.adj.Writer(tx.adjTx()).AddEdgeH(src, dst, w, handle)
+	}
+	if err != nil {
+		return false, adjErr(tx, err)
+	}
+	// An endpoint this append CREATED is stamped after the insert, because its id
+	// did not exist before it; see [adjVersions.claimAppend].
+	if tx != nil {
+		if !srcClaimed {
+			if srcID, ok := g.adj.Mapper().Lookup(src); ok {
+				g.adjVer.stampAppend(srcID, tx)
+			}
 		}
-		// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
-		g.topoGeneration.Add(1)
-		return true, nil
-	}
-	if g.HasEdgeHandle(src, dst, handle) {
-		return false, nil
-	}
-	if err := g.adj.Writer(tx.adjTx()).AddEdgeH(src, dst, w, handle); err != nil {
-		return false, err
+		if src != dst && !dstClaimed {
+			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
+				g.adjVer.stampAppend(dstID, tx)
+			}
+		}
 	}
 	// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
 	g.topoGeneration.Add(1)
@@ -202,7 +311,19 @@ type EdgeHandleTriple struct {
 // the cross-process byte-equality contract the snapshot relies on.
 //
 // WalkEdgeHandles is NOT safe for concurrent use with mutations on g.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) WalkEdgeHandles(fn func(EdgeHandleTriple) bool) {
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	g.WalkEdgeHandlesAsOf(g.latestCommitted(&cs), fn)
+}
+
+// walkEdgeHandlesRaw is the present-state body of [Graph.WalkEdgeHandles], reading the newest
+// stored entry including uncommitted writes; [Graph.WalkEdgeHandlesAsOf] uses it
+// for a nil snapshot.
+func (g *Graph[N, W]) walkEdgeHandlesRaw(fn func(EdgeHandleTriple) bool) {
 	adj := g.adj
 	adj.Mapper().Walk(func(srcID graph.NodeID, _ N) bool {
 		neighbours, _, handles := adj.LoadEntryH(srcID)
@@ -234,8 +355,13 @@ func (g *Graph[N, W]) WalkEdgeHandles(fn func(EdgeHandleTriple) bool) {
 // labelled, or no handle store exists for the pair.
 //
 // EdgeLabelsByHandleID is safe for concurrent use.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) EdgeLabelsByHandleID(srcID, dstID graph.NodeID, handle uint64) []string {
-	return g.EdgeLabelsByHandleIDAsOf(srcID, dstID, handle, nil)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.EdgeLabelsByHandleIDAsOf(srcID, dstID, handle, g.latestCommitted(&cs))
 }
 
 // EdgeLabelsByHandleIDAsOf is [Graph.EdgeLabelsByHandleID] as the instance
@@ -279,8 +405,13 @@ func (g *Graph[N, W]) EdgeLabelsByHandleIDAsOf(srcID, dstID graph.NodeID, handle
 // written, or no handle store exists for the pair.
 //
 // EdgePropertiesByHandleID is safe for concurrent use.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) EdgePropertiesByHandleID(srcID, dstID graph.NodeID, handle uint64) map[string]PropertyValue {
-	return g.EdgePropertiesByHandleIDAsOf(srcID, dstID, handle, nil)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.EdgePropertiesByHandleIDAsOf(srcID, dstID, handle, g.latestCommitted(&cs))
 }
 
 // EdgePropertiesByHandleIDAsOf is [Graph.EdgePropertiesByHandleID] as the
@@ -364,18 +495,34 @@ func (g *Graph[N, W]) EdgePropertyByHandleIDAsOf(srcID, dstID graph.NodeID, hand
 // Resolve→Lookup round trip. No-op when handle is 0.
 //
 // SetEdgeLabelByHandleID is safe for concurrent use.
-func (g *Graph[N, W]) SetEdgeLabelByHandleID(srcID, dstID graph.NodeID, handle uint64, name string) {
-	g.setEdgeLabelByHandleIDInfo(srcID, dstID, handle, name, nil)
+//
+// It refuses a relationship type longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748). The error return is a
+// breaking change: SetEdgeLabelByHandleID used to return nothing.
+//
+// It runs as a single-operation transaction (rmp #2947): it refuses with an
+// error wrapping [ErrDirectWriteConflict], and changes nothing, while another
+// transaction holds an uncommitted write on the instance's per-handle types. The refusal is retryable. See
+// [ErrDirectWriteConflict].
+func (g *Graph[N, W]) SetEdgeLabelByHandleID(srcID, dstID graph.NodeID, handle uint64, name string) error {
+	if err := CheckToken("relationship type", name); err != nil {
+		return err
+	}
+	return g.direct(func(tx *writeCtx) error {
+		return g.setEdgeLabelByHandleIDInfo(srcID, dstID, handle, name, tx)
+	})
 }
 
-// setEdgeLabelByHandleIDInfo is [Graph.SetEdgeLabelByHandleID] with an explicit write transaction; tx is
-// nil for a direct Go-API mutation, which is committed the instant it is made
-// and takes no conflict check. See [writeCtx].
-func (g *Graph[N, W]) setEdgeLabelByHandleIDInfo(srcID, dstID graph.NodeID, handle uint64, name string, tx *writeCtx) {
-	if handle == 0 {
-		return
+// setEdgeLabelByHandleIDInfo is [Graph.SetEdgeLabelByHandleID] inside write transaction tx; tx is
+// nil only on a graph whose versioning substrate is disarmed. See [writeCtx].
+func (g *Graph[N, W]) setEdgeLabelByHandleIDInfo(srcID, dstID graph.NodeID, handle uint64, name string, tx *writeCtx) error {
+	if err := CheckToken("relationship type", name); err != nil {
+		return err
 	}
-	lid := g.reg.Intern(name)
+	if handle == 0 {
+		return nil
+	}
+	lid := g.reg.intern(name)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeHandleLabelShardFor(k)
 	sh.mu.Lock()
@@ -383,19 +530,28 @@ func (g *Graph[N, W]) setEdgeLabelByHandleIDInfo(srcID, dstID graph.NodeID, hand
 	if sh.m == nil {
 		sh.m = make(map[edgeKey]instMap[uint64, labelBag])
 	}
+	// EVERY write tests the record's head before the presence guard, for the
+	// reason given on [Graph.setEdgeLabelByHandleInfo] (rmp #2947).
+	if tx != nil {
+		if head := sh.v.headStamp(edgeHandleKey{pair: k, handle: handle}); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreEdgeTypesHandle, head)
+			return nil
+		}
+	}
 	// Both tiers are held BY VALUE; each write-back is load-bearing.
 	im := sh.m[k]
 	bag, _ := im.get(handle)
 	if bag.has(lid) {
-		return
+		return nil
 	}
 	if !g.pushHandleLabelVersion(sh, k, handle, tx) {
 		// Refused: the conflict is recorded on tx and this write must not land.
-		return
+		return nil
 	}
 	bag.add(lid)
 	im.set(handle, bag)
 	sh.m[k] = im
+	return nil
 }
 
 // SetEdgePropertyByHandleID records key=value on the edge identified by
@@ -409,18 +565,34 @@ func (g *Graph[N, W]) setEdgeLabelByHandleIDInfo(srcID, dstID graph.NodeID, hand
 // recovery.
 //
 // SetEdgePropertyByHandleID is safe for concurrent use.
-func (g *Graph[N, W]) SetEdgePropertyByHandleID(srcID, dstID graph.NodeID, handle uint64, key string, value PropertyValue) {
-	g.setEdgePropertyByHandleIDInfo(srcID, dstID, handle, key, value, nil)
+//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748). The error return is a
+// breaking change: SetEdgePropertyByHandleID used to return nothing.
+//
+// It runs as a single-operation transaction (rmp #2947): it refuses with an
+// error wrapping [ErrDirectWriteConflict], and changes nothing, while another
+// transaction holds an uncommitted write on the instance's per-handle properties. The refusal is retryable. See
+// [ErrDirectWriteConflict].
+func (g *Graph[N, W]) SetEdgePropertyByHandleID(srcID, dstID graph.NodeID, handle uint64, key string, value PropertyValue) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
+	return g.direct(func(tx *writeCtx) error {
+		return g.setEdgePropertyByHandleIDInfo(srcID, dstID, handle, key, value, tx)
+	})
 }
 
-// setEdgePropertyByHandleIDInfo is [Graph.SetEdgePropertyByHandleID] with an explicit write transaction; tx is
-// nil for a direct Go-API mutation, which is committed the instant it is made
-// and takes no conflict check. See [writeCtx].
-func (g *Graph[N, W]) setEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, handle uint64, key string, value PropertyValue, tx *writeCtx) {
-	if handle == 0 {
-		return
+// setEdgePropertyByHandleIDInfo is [Graph.SetEdgePropertyByHandleID] inside write transaction tx; tx is
+// nil only on a graph whose versioning substrate is disarmed. See [writeCtx].
+func (g *Graph[N, W]) setEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, handle uint64, key string, value PropertyValue, tx *writeCtx) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
 	}
-	pid := g.pkeys.Intern(key)
+	if handle == 0 {
+		return nil
+	}
+	pid := g.pkeys.intern(key)
 	k := edgeKey{src: srcID, dst: dstID}
 	// Latch BEFORE the lock; see [Graph.anyHandleProp] and the sibling comment
 	// in setEdgePropertyByHandleInfo. This is the recovery/snapshot-replay
@@ -437,11 +609,12 @@ func (g *Graph[N, W]) setEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, h
 	im := sh.m[k]
 	bag, _ := im.get(handle)
 	if !g.pushHandlePropVersion(sh, k, handle, tx) {
-		return
+		return nil
 	}
 	bag.set(pid, value)
 	im.set(handle, bag)
 	sh.m[k] = im
+	return nil
 }
 
 // DelEdgePropertyByHandleID removes exactly key from the property bag of the
@@ -455,13 +628,28 @@ func (g *Graph[N, W]) setEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, h
 // [Graph.DelEdgePropertyByHandle] prunes them.
 //
 // DelEdgePropertyByHandleID is safe for concurrent use.
-func (g *Graph[N, W]) DelEdgePropertyByHandleID(srcID, dstID graph.NodeID, handle uint64, key string) {
-	g.delEdgePropertyByHandleIDInfo(srcID, dstID, handle, key, nil)
+//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong] and changes nothing (rmp #2748): no such token can exist,
+// and the WAL-backed store refuses the same call. The error return is a
+// breaking change: DelEdgePropertyByHandleID used to return nothing.
+//
+// It runs as a single-operation transaction (rmp #2947): it refuses with an
+// error wrapping [ErrDirectWriteConflict], and changes nothing, while another
+// transaction holds an uncommitted write on the instance's per-handle properties. The refusal is retryable. See
+// [ErrDirectWriteConflict].
+func (g *Graph[N, W]) DelEdgePropertyByHandleID(srcID, dstID graph.NodeID, handle uint64, key string) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
+	return g.direct(func(tx *writeCtx) error {
+		g.delEdgePropertyByHandleIDInfo(srcID, dstID, handle, key, tx)
+		return nil
+	})
 }
 
-// delEdgePropertyByHandleIDInfo is [Graph.DelEdgePropertyByHandleID] with an explicit write transaction; tx is
-// nil for a direct Go-API mutation, which is committed the instant it is made
-// and takes no conflict check. See [writeCtx].
+// delEdgePropertyByHandleIDInfo is [Graph.DelEdgePropertyByHandleID] inside write transaction tx; tx is
+// nil only on a graph whose versioning substrate is disarmed. See [writeCtx].
 func (g *Graph[N, W]) delEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, handle uint64, key string, tx *writeCtx) {
 	if handle == 0 {
 		return
@@ -474,12 +662,12 @@ func (g *Graph[N, W]) delEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, h
 	sh := g.edgeHandlePropShardFor(k)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	im, ok := sh.m[k]
-	if !ok {
-		return
-	}
+	// A missing map entry reads as the zero instMap, whose get reports no record.
+	im := sh.m[k]
 	bag, ok := im.get(handle)
 	if !ok {
+		// No bag to change is still a write to conflict-test (rmp #2943).
+		g.checkHandlePropConflict(sh, k, handle, tx)
 		return
 	}
 	if !g.pushHandlePropVersion(sh, k, handle, tx) {
@@ -517,7 +705,7 @@ func (g *Graph[N, W]) delEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, h
 // Safe for concurrent use.
 func (g *Graph[N, W]) WalkEdgeHandlesAsOf(s *Snapshot, fn func(EdgeHandleTriple) bool) {
 	if s == nil {
-		g.WalkEdgeHandles(fn)
+		g.walkEdgeHandlesRaw(fn)
 		return
 	}
 	adj := g.adj

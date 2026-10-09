@@ -324,3 +324,113 @@ func TestLabelCountAsOf_UnknownLabelIsZero(t *testing.T) {
 		t.Errorf("LabelCountAsOf on an id no node carries = %d, want 0", got)
 	}
 }
+
+// TestLabelCountAsOf_CountedCorrectionReadsOneInstant is the gate on rmp #2776:
+// with churn live on the COUNTED label, [Graph.LabelCountAsOf] counts its
+// correction against one immutable image of the label instead of cloning and
+// editing it, and the image's cardinality and its memberships must describe the
+// SAME instant — the one [Graph.labelAsOfSample] brackets between its two suspect
+// samples.
+//
+// The seam [Graph.labelCountCorrectWindowProbe] lands a committed label write
+// after the pre-acquire sample and before the image is taken. The image then holds
+// the new member and only the post-acquire sample names it. Measured by mutation
+// (rmp #2776) on the two inversions this test exists to catch:
+//
+//	all suspects sampled before the acquire   -> seeded+1 (the write uncorrected)
+//	cardinality read from the live index, not
+//	the image, before the acquire             -> seeded-1 (counted on one side,
+//	                                              corrected on the other)
+//
+// The sound order returns seeded, the snapshot's answer.
+func TestLabelCountAsOf_CountedCorrectionReadsOneInstant(t *testing.T) {
+	const seeded = 2 * labelCountProbeBatch
+	g, lid := labelCountAsOfGraph(t, seeded, 8)
+
+	snap := g.BeginRead()
+	defer g.EndRead(snap)
+	// Churn ON the counted label, held live by snap: a node gains "P" after the
+	// snapshot, so the correction path is the only route to snap's answer.
+	if err := labelOne(g, seeded); err != nil {
+		t.Fatalf("label n%d: %v", seeded, err)
+	}
+	if !g.labelBitmapNeedsFilter(snap) || !g.churnLive(oneLabel(lid)) {
+		t.Fatal("precondition: no churn is live on the counted label, so the counted " +
+			"correction path is not reached and this test measures nothing")
+	}
+	if got := g.LabelCountAsOf(lid, snap); got != seeded {
+		t.Fatalf("precondition: LabelCountAsOf with churn on the label = %d, want %d", got, seeded)
+	}
+
+	fired := 0
+	g.labelCountCorrectWindowProbe = func() {
+		if fired > 0 {
+			return
+		}
+		fired++
+		if err := labelOne(g, seeded+1); err != nil {
+			t.Errorf("seam write: %v", err)
+		}
+	}
+	got := g.LabelCountAsOf(lid, snap)
+	g.labelCountCorrectWindowProbe = nil
+
+	if fired == 0 {
+		t.Fatal("the seam never fired: the counted correction path was not taken")
+	}
+	if raw := int64(g.nodeIdx.Count(uint32(lid))); raw != seeded+2 {
+		t.Fatalf("the seam write did not reach the index (raw count %d, want %d): the "+
+			"inversions would return the sound answer here and this test cannot fail",
+			raw, seeded+2)
+	}
+	if got != seeded {
+		t.Fatalf("LabelCountAsOf returned %d for a snapshot pinned at %d after a write "+
+			"landed between the pre-acquire suspect sample and the image. %d means the "+
+			"write was in the counted image and no suspect sample corrected it (every "+
+			"suspect sampled before the acquire); %d means the cardinality and the "+
+			"memberships came from two different reads of the index (rmp #2776).",
+			got, seeded, seeded+1, seeded-1)
+	}
+	// The bitmap route is the oracle: the two are the same question.
+	if bm := g.LabelBitmapAsOf(lid, snap); int64(bm.GetCardinality()) != got {
+		t.Fatalf("LabelCountAsOf = %d but the corrected bitmap holds %d", got, bm.GetCardinality())
+	}
+	// A reader at the present sees both writes.
+	now := g.BeginRead()
+	defer g.EndRead(now)
+	if n := g.LabelCountAsOf(lid, now); n != seeded+2 {
+		t.Fatalf("a present reader counted %d, want %d", n, seeded+2)
+	}
+}
+
+// TestLabelCountAsOf_CountedCorrectionClonesNothing pins the allocation half of
+// rmp #2776: with churn live on the counted label, the count must not copy the
+// label. The control is the bitmap route over the same state, which must still
+// pay for its private copy — otherwise the comparison below measures nothing.
+func TestLabelCountAsOf_CountedCorrectionClonesNothing(t *testing.T) {
+	const seeded = 512
+	g, lid := labelCountAsOfGraph(t, seeded, 8)
+	snap := g.BeginRead()
+	defer g.EndRead(snap)
+	if err := labelOne(g, seeded); err != nil {
+		t.Fatalf("label n%d: %v", seeded, err)
+	}
+	if !g.churnLive(oneLabel(lid)) {
+		t.Fatal("precondition: no churn live on the counted label")
+	}
+	_ = g.LabelCountAsOf(lid, snap) // build the shared image once
+	count := testing.AllocsPerRun(200, func() { _ = g.LabelCountAsOf(lid, snap) })
+	bitmap := testing.AllocsPerRun(200, func() { _ = g.LabelBitmapAsOf(lid, snap) })
+	if bitmap <= count {
+		t.Fatalf("the bitmap route allocated %.2f objects and the count %.2f: the control "+
+			"no longer pays for a copy, so this test cannot see one", bitmap, count)
+	}
+	t.Logf("with churn on the label: LabelCountAsOf %.2f allocs/op, LabelBitmapAsOf %.2f", count, bitmap)
+	// Measured 2.00 in the plain and the race build alike (rmp #2776), against
+	// 14.00 for the bitmap route. What remains is the suspect sampling, which
+	// grows with the unreclaimed suspects and not with the label's 512 members.
+	if count > 2 {
+		t.Errorf("LabelCountAsOf with churn on the label allocated %.2f objects, want <= 2; "+
+			"the corrected bitmap route allocated %.2f", count, bitmap)
+	}
+}

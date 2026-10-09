@@ -6,12 +6,13 @@ package sim
 // as a relationship's stable handle. Node id 0 cannot: it is the reserved
 // no-handle sentinel. Whether the decoy draws id 0 is decided entirely OUTSIDE
 // the scenario: a node's id is (intraShardIndex<<8 | shard), the shard comes from
-// the hash of the synthetic key cypher/exec mints for the node, and that key
-// counts up from a PROCESS-GLOBAL counter whose value here depends on how many
-// nodes every earlier test in the process created. On roughly 0.4% of process
-// histories the first decoy landed on id 0, and the bootstrap reported that as a
+// the hash of the synthetic key cypher/exec mints for the node. That key used to
+// count up from a PROCESS-GLOBAL counter, so on roughly 0.4% of process histories
+// the first decoy landed on id 0, and the bootstrap reported that as a
 // GRAPH_INTEGRITY violation of GoGraph — a false positive that failed
-// TestSchemaMutation_Scenario_Passes with no defect present.
+// TestSchemaMutation_Scenario_Passes with no defect present. Keys now come from
+// the graph's own lpg.KeySequence, so these tests place that sequence where the
+// decoy draws id 0.
 //
 // These tests pin the correction: the bootstrap must survive the id-0 draw by
 // falling back to a second decoy candidate, and the collision it hands over must
@@ -23,37 +24,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
-
-// mintOneSyntheticKey creates a single node through the engine and returns the
-// numeric suffix of the synthetic key it received, which is the value of the
-// process-global counter that node consumed.
-func mintOneSyntheticKey(t *testing.T) uint64 {
-	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
-	a := NewEngineAdapter(cypher.NewEngine(g))
-	if _, err := a.RunWrite(context.Background(), tmplMergeHandleCreatePerson,
-		map[string]any{"name": "counter-probe"}); err != nil {
-		t.Fatalf("counter probe CREATE: %v", err)
-	}
-	var n uint64
-	var found bool
-	g.AdjList().Mapper().Walk(func(_ graph.NodeID, key string) bool {
-		v, err := strconv.ParseUint(key[len("__cx_"):], 16, 64)
-		if err == nil {
-			n, found = v, true
-		}
-		return true
-	})
-	if !found {
-		t.Fatal("could not read the process-global node-key counter back from a minted key")
-	}
-	return n
-}
 
 // thirdKeyLandsOnNodeIDZero reports whether interning the three synthetic keys
 // __cx_<n+1>, __cx_<n+2>, __cx_<n+3> into a FRESH graph — the order and the count
@@ -80,19 +54,38 @@ func thirdKeyLandsOnNodeIDZero(t *testing.T, n uint64) bool {
 	return id == 0
 }
 
-// alignCounterOntoDecoyIDZero burns synthetic keys until the next three the
-// engine mints would place the fixture's decoy — the third of them — on node
-// id 0. It is the deterministic stand-in for the unlucky process history that
-// produced the rmp #2524 failure, and it needs neither -race nor a full-package
-// run to reach it.
-func alignCounterOntoDecoyIDZero(t *testing.T) {
+// alignGraphOntoDecoyIDZero advances g's synthetic node-key sequence until the
+// next three keys the engine mints would place the fixture's decoy — the third
+// of them — on node id 0. It is the deterministic stand-in for the history that
+// produced the rmp #2524 failure.
+func alignGraphOntoDecoyIDZero(t *testing.T, g *lpg.Graph[string, float64]) {
 	t.Helper()
+	seq := g.KeySequence()
 	for i := 0; i < 5000; i++ {
-		if thirdKeyLandsOnNodeIDZero(t, mintOneSyntheticKey(t)) {
+		if thirdKeyLandsOnNodeIDZero(t, seq.Load()) {
 			return
 		}
+		seq.Add(1)
 	}
-	t.Fatal("could not align the process-global counter onto a decoy id of 0 within 5000 keys")
+	t.Fatal("could not align the graph's key sequence onto a decoy id of 0 within 5000 keys")
+}
+
+// newAlignedHandleCollisionSim is newHandleCollisionSim over a graph whose key
+// sequence puts the first decoy candidate on node id 0.
+func newAlignedHandleCollisionSim(t *testing.T) (*Simulator, *mergeHandleFixture) {
+	t.Helper()
+	sc := schemaMutationScenario()
+	sm, err := New(sc.DeterministicConfig(sc.DefaultSeed))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = sm.Close() })
+	alignGraphOntoDecoyIDZero(t, sm.graph())
+	f, v := seedMergeHandleCollision(context.Background(), sm)
+	if len(v) > 0 {
+		t.Fatalf("fixture bootstrap reported violations: %v", v)
+	}
+	return sm, f
 }
 
 // TestMergeHandleCollision_DecoyNodeIDZeroIsCorrected drives the bootstrap on the
@@ -100,15 +93,13 @@ func alignCounterOntoDecoyIDZero(t *testing.T) {
 // "fixture decoy \"hc-decoy\" received node id 0"; now it must build the
 // collision on the alternate decoy instead.
 func TestMergeHandleCollision_DecoyNodeIDZeroIsCorrected(t *testing.T) {
-	alignCounterOntoDecoyIDZero(t)
-
-	// newHandleCollisionSim fails the test if the bootstrap reports any violation,
-	// which is precisely the old behaviour this gate forbids.
-	sm, f := newHandleCollisionSim(t)
+	// newAlignedHandleCollisionSim fails the test if the bootstrap reports any
+	// violation, which is precisely the old behaviour this gate forbids.
+	sm, f := newAlignedHandleCollisionSim(t)
 	g := sm.graph()
 
 	if f.decoyName != mergeHandleDecoyAltName {
-		t.Fatalf("decoyName = %q, want the alternate %q: the counter was aligned so the first candidate "+
+		t.Fatalf("decoyName = %q, want the alternate %q: the key sequence was aligned so the first candidate "+
 			"draws node id 0, so the fallback must have been taken", f.decoyName, mergeHandleDecoyAltName)
 	}
 	if f.decoyID == 0 {
@@ -141,8 +132,7 @@ func TestMergeHandleCollision_DecoyNodeIDZeroIsCorrected(t *testing.T) {
 // Without it, TestMergeHandleCollision_DecoyNodeIDZeroIsCorrected would be
 // consistent with a fixture that had been silently skipped.
 func TestMergeHandleCollision_FallbackDetectorStillFires(t *testing.T) {
-	alignCounterOntoDecoyIDZero(t)
-	sm, f := newHandleCollisionSim(t)
+	sm, f := newAlignedHandleCollisionSim(t)
 	if f.decoyName != mergeHandleDecoyAltName {
 		t.Fatalf("precondition: decoyName = %q, want the fallback %q", f.decoyName, mergeHandleDecoyAltName)
 	}
@@ -176,10 +166,17 @@ func TestMergeHandleCollision_FallbackDetectorStillFires(t *testing.T) {
 // scenario TestSchemaMutation_Scenario_Passes runs must come back clean even on
 // the process history that put the first decoy on node id 0.
 func TestSchemaMutation_ScenarioSurvivesDecoyNodeIDZero(t *testing.T) {
-	alignCounterOntoDecoyIDZero(t)
-
 	sc := schemaMutationScenario()
-	report, err := sc.Run(context.Background(), sc.DefaultSeed)
+	cfg := sc.DeterministicConfig(sc.DefaultSeed)
+	aligned := false
+	cfg.beforeFixture = func(sm *Simulator) {
+		alignGraphOntoDecoyIDZero(t, sm.graph())
+		aligned = true
+	}
+	report, _, err := runSchemaMutationCfg(context.Background(), cfg)
+	if !aligned {
+		t.Fatal("premise: the scenario never ran the key-sequence alignment")
+	}
 	if err != nil {
 		t.Fatalf("schema-mutation run: %v", err)
 	}

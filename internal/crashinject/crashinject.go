@@ -50,6 +50,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testbin"
 )
 
 // EnvCrashAt is the environment variable read by [Breakpoint] to
@@ -243,7 +244,7 @@ func isExitError(err error, target **exec.ExitError) bool {
 
 // buildHelperOnce compiles cmd/crashinject-helper exactly once per
 // test process and caches the binary path. The binary is placed in a
-// process-unique temporary directory (created via os.MkdirTemp) so
+// process-unique directory (created via testbin.MkdirTemp) so
 // that concurrent test processes never share a file path and cannot
 // race on the same binary (ETXTBSY on Linux, partial-write on others).
 //
@@ -279,34 +280,38 @@ func buildHelperOnce(t testing.TB) (string, error) {
 		// signature of a genuine durability defect. The leak was therefore not
 		// merely untidy: it manufactured false evidence of data loss
 		// (rmp #2527).
-		dir, err := os.MkdirTemp("", "gograph-crashinject-*")
-		if err != nil {
-			helperBinErr = fmt.Errorf("crashinject helper tmpdir: %w", err)
-			return
-		}
-		helperBinDir = dir
-
-		binPath := filepath.Join(dir, "crashinject-helper"+helperBinSuffix)
-		// helperBuildTags carries -tags gograph_crashinject only when this
-		// package was itself compiled with that tag, so the helper's embedded
-		// crashpoint.Breakpoint matches the parent's expectation (active hook
-		// under the tag, production no-op without it). It is empty otherwise.
-		// Capacity: "build" + the tag flags + "-o" + binPath + the package.
-		args := make([]string, 0, 1+len(helperBuildTags)+3)
-		args = append(args, "build")
-		args = append(args, helperBuildTags...)
-		args = append(args, "-o", binPath, "./cmd/crashinject-helper")
-		// args is a hard-coded build invocation; binPath is inside a
-		// process-local os.MkdirTemp directory. Not user-tainted.
-		cmd := exec.Command("go", args...) //nolint:gosec // G204: hard-coded `go build` against project path
-		cmd.Dir = root
-		if out, err := cmd.CombinedOutput(); err != nil {
-			helperBinErr = fmt.Errorf("go build crashinject-helper: %w\n%s", err, out)
-			return
-		}
-		helperBinPath = binPath
+		helperBinDir, helperBinPath, helperBinErr = buildHelper(root)
 	})
 	return helperBinPath, helperBinErr
+}
+
+// buildHelper compiles cmd/crashinject-helper, from the module at root, into a
+// new process-unique directory and returns that directory and the binary path.
+// The directory is returned even when the build fails, so the caller can remove
+// it.
+//
+// The directory and the `go build` work files are placed on disk through
+// internal/testbin, never under the test process's TMPDIR or GOTMPDIR: those
+// may point at a RAM drive that must hold graph data files only (rmp #3028).
+func buildHelper(root string) (dir, binPath string, err error) {
+	dir, err = testbin.MkdirTemp("gograph-crashinject-*")
+	if err != nil {
+		return "", "", fmt.Errorf("crashinject helper dir: %w", err)
+	}
+	binPath = filepath.Join(dir, "crashinject-helper"+helperBinSuffix)
+	// helperBuildTags carries -tags gograph_crashinject only when this
+	// package was itself compiled with that tag, so the helper's embedded
+	// crashpoint.Breakpoint matches the parent's expectation (active hook
+	// under the tag, production no-op without it). It is empty otherwise.
+	// Capacity: "build" + the tag flags + "-o" + binPath + the package.
+	args := make([]string, 0, 1+len(helperBuildTags)+3)
+	args = append(args, "build")
+	args = append(args, helperBuildTags...)
+	args = append(args, "-o", binPath, "./cmd/crashinject-helper")
+	if _, stderr, err := testbin.Go(context.Background(), root, args...); err != nil {
+		return dir, "", fmt.Errorf("go build crashinject-helper: %w\n%s", err, stderr)
+	}
+	return dir, binPath, nil
 }
 
 // RemoveHelperBinary deletes the temporary directory holding this process's
@@ -365,10 +370,10 @@ func RemoveHelperBinary() {
 // It is a separate function so the removal itself is unit-testable against a
 // real populated directory, independently of the process-exit wiring.
 func removeHelperDir(dir string) error {
-	// dir originates from os.MkdirTemp inside this package; it is never
+	// dir originates from testbin.MkdirTemp inside this package; it is never
 	// caller-supplied, so gosec's G703 warning about os.RemoveAll on a
 	// variable path does not apply.
-	if err := os.RemoveAll(dir); err != nil { // G703: dir is this package's own os.MkdirTemp result, not user input
+	if err := os.RemoveAll(dir); err != nil { // G703: dir is this package's own testbin.MkdirTemp result, not user input
 		return fmt.Errorf("remove crashinject helper dir %q: %w", dir, err)
 	}
 	return nil

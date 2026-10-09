@@ -182,6 +182,16 @@ func rewriteWithProjectionAliases(pred ast.Expression, proj *ast.Projection) ast
 // is a key in subst is replaced with the mapped expression. Non-leaf
 // nodes are reconstructed only along the path that contains a substitution
 // so unrelated subtrees keep their original pointers.
+//
+// The walk descends every expression that holds sub-expressions — a node it
+// skipped kept its alias references, which then resolved to nothing below the
+// projection, so `WITH [1] AS q WHERE q[0] = 1` filtered every row out
+// (rmp #2922). A variable a list comprehension, a quantifier or a reduce binds
+// is local to that expression: it shadows an alias of the same name in its
+// body, and when a replacement itself names that variable, the local variable
+// is renamed ([substScoped]) so the replacement keeps reading the outer one.
+// Pattern and subquery expressions are left as they are: a pattern names a
+// variable as a graph element, and an expression cannot stand in its place.
 func substVarRefs(e ast.Expression, subst map[string]ast.Expression) ast.Expression { // case-per-AST-node dispatch
 	if e == nil {
 		return nil
@@ -193,15 +203,7 @@ func substVarRefs(e ast.Expression, subst map[string]ast.Expression) ast.Express
 		}
 		return n
 	case *ast.BinaryOp:
-		left := substVarRefs(n.Left, subst)
-		right := substVarRefs(n.Right, subst)
-		if left == n.Left && right == n.Right {
-			return n
-		}
-		cp := *n
-		cp.Left = left
-		cp.Right = right
-		return &cp
+		return substBinaryOp(n, subst)
 	case *ast.UnaryOp:
 		op := substVarRefs(n.Operand, subst)
 		if op == n.Operand {
@@ -219,14 +221,7 @@ func substVarRefs(e ast.Expression, subst map[string]ast.Expression) ast.Express
 		cp.Receiver = rec
 		return &cp
 	case *ast.FunctionInvocation:
-		var changed bool
-		newArgs := make([]ast.Expression, len(n.Args))
-		for i, a := range n.Args {
-			newArgs[i] = substVarRefs(a, subst)
-			if newArgs[i] != a {
-				changed = true
-			}
-		}
+		newArgs, changed := substExprList(n.Args, subst)
 		if !changed {
 			return n
 		}
@@ -241,8 +236,238 @@ func substVarRefs(e ast.Expression, subst map[string]ast.Expression) ast.Express
 		cp := *n
 		cp.Receiver = rec
 		return &cp
+	case *ast.SubscriptExpr:
+		return substSubscript(n, subst)
+	case *ast.SliceExpr:
+		return substSlice(n, subst)
+	case *ast.ListLiteral:
+		elems, changed := substExprList(n.Elements, subst)
+		if !changed {
+			return n
+		}
+		cp := *n
+		cp.Elements = elems
+		return &cp
+	case *ast.MapLiteral:
+		vals, changed := substExprList(n.Values, subst)
+		if !changed {
+			return n
+		}
+		cp := *n
+		cp.Values = vals
+		return &cp
+	case *ast.CaseExpression:
+		return substCaseExpression(n, subst)
+	case *ast.MapProjection:
+		return substMapProjection(n, subst)
+	case *ast.ListComprehension:
+		return substListComprehension(n, subst)
+	case *ast.ReduceExpr:
+		return substReduceExpr(n, subst)
 	}
 	return e
+}
+
+// substBinaryOp is the *ast.BinaryOp case of [substVarRefs].
+func substBinaryOp(n *ast.BinaryOp, subst map[string]ast.Expression) ast.Expression {
+	left := substVarRefs(n.Left, subst)
+	right := substVarRefs(n.Right, subst)
+	if left == n.Left && right == n.Right {
+		return n
+	}
+	cp := *n
+	cp.Left = left
+	cp.Right = right
+	return &cp
+}
+
+// substSubscript is the *ast.SubscriptExpr case of [substVarRefs].
+func substSubscript(n *ast.SubscriptExpr, subst map[string]ast.Expression) ast.Expression {
+	ex := substVarRefs(n.Expr, subst)
+	idx := substVarRefs(n.Index, subst)
+	if ex == n.Expr && idx == n.Index {
+		return n
+	}
+	cp := *n
+	cp.Expr = ex
+	cp.Index = idx
+	return &cp
+}
+
+// substSlice is the *ast.SliceExpr case of [substVarRefs].
+func substSlice(n *ast.SliceExpr, subst map[string]ast.Expression) ast.Expression {
+	ex := substVarRefs(n.Expr, subst)
+	from := substVarRefs(n.From, subst)
+	to := substVarRefs(n.To, subst)
+	if ex == n.Expr && from == n.From && to == n.To {
+		return n
+	}
+	cp := *n
+	cp.Expr = ex
+	cp.From = from
+	cp.To = to
+	return &cp
+}
+
+// substCaseExpression is the *ast.CaseExpression case of [substVarRefs].
+func substCaseExpression(n *ast.CaseExpression, subst map[string]ast.Expression) ast.Expression {
+	subj := substVarRefs(n.Subject, subst)
+	els := substVarRefs(n.ElseExpr, subst)
+	changed := subj != n.Subject || els != n.ElseExpr
+	alts := make([]*ast.CaseAlternative, len(n.Alternatives))
+	for i, alt := range n.Alternatives {
+		alts[i] = alt
+		if alt == nil {
+			continue
+		}
+		cond := substVarRefs(alt.Condition, subst)
+		cons := substVarRefs(alt.Consequent, subst)
+		if cond != alt.Condition || cons != alt.Consequent {
+			cpAlt := *alt
+			cpAlt.Condition = cond
+			cpAlt.Consequent = cons
+			alts[i] = &cpAlt
+			changed = true
+		}
+	}
+	if !changed {
+		return n
+	}
+	cp := *n
+	cp.Subject = subj
+	cp.ElseExpr = els
+	cp.Alternatives = alts
+	return &cp
+}
+
+// substMapProjection is the *ast.MapProjection case of [substVarRefs].
+func substMapProjection(n *ast.MapProjection, subst map[string]ast.Expression) ast.Expression {
+	subj := substVarRefs(n.Subject, subst)
+	changed := subj != n.Subject
+	items := make([]*ast.MapProjectionItem, len(n.Items))
+	for i, it := range n.Items {
+		items[i] = it
+		if it == nil || it.Value == nil {
+			continue
+		}
+		val := substVarRefs(it.Value, subst)
+		if val == it.Value {
+			continue
+		}
+		cpIt := *it
+		cpIt.Value = val
+		// A variable selector (`m {q}`) takes its key from the variable's
+		// name, which the replacement no longer carries.
+		if v, isVar := it.Value.(*ast.Variable); isVar && cpIt.Key == "" {
+			cpIt.Key = v.Name
+		}
+		items[i] = &cpIt
+		changed = true
+	}
+	if !changed {
+		return n
+	}
+	cp := *n
+	cp.Subject = subj
+	cp.Items = items
+	return &cp
+}
+
+// substListComprehension is the *ast.ListComprehension case of [substVarRefs].
+func substListComprehension(n *ast.ListComprehension, subst map[string]ast.Expression) ast.Expression {
+	src := substVarRefs(n.Source, subst)
+	inner, renamed := substScoped(subst, n.Variable)
+	pred := substVarRefs(n.Predicate, inner)
+	proj := substVarRefs(n.Projection, inner)
+	if src == n.Source && pred == n.Predicate && proj == n.Projection && renamed == n.Variable {
+		return n
+	}
+	cp := *n
+	cp.Source = src
+	cp.Predicate = pred
+	cp.Projection = proj
+	cp.Variable = renamed
+	return &cp
+}
+
+// substReduceExpr is the *ast.ReduceExpr case of [substVarRefs].
+func substReduceExpr(n *ast.ReduceExpr, subst map[string]ast.Expression) ast.Expression {
+	init := substVarRefs(n.Init, subst)
+	src := substVarRefs(n.Source, subst)
+	inner, acc := substScoped(subst, n.AccVar)
+	inner, elem := substScoped(inner, n.ElemVar)
+	proj := substVarRefs(n.Projection, inner)
+	if init == n.Init && src == n.Source && proj == n.Projection && acc == n.AccVar && elem == n.ElemVar {
+		return n
+	}
+	cp := *n
+	cp.Init = init
+	cp.Source = src
+	cp.Projection = proj
+	cp.AccVar = acc
+	cp.ElemVar = elem
+	return &cp
+}
+
+// substExprList applies [substVarRefs] to every element of es. It returns es
+// itself, and false, when no element changed.
+func substExprList(es []ast.Expression, subst map[string]ast.Expression) ([]ast.Expression, bool) {
+	var out []ast.Expression
+	for i, x := range es {
+		nx := substVarRefs(x, subst)
+		if nx != x && out == nil {
+			out = make([]ast.Expression, len(es))
+			copy(out, es[:i])
+		}
+		if out != nil {
+			out[i] = nx
+		}
+	}
+	if out == nil {
+		return es, false
+	}
+	return out, true
+}
+
+// substScoped returns the substitution to apply inside the body of an
+// expression that binds the local variable local, and the name that variable
+// takes there.
+//
+// The local variable shadows an alias of its own name, so that entry is
+// removed. When a remaining replacement names local — `WITH x.k AS q WHERE
+// [x IN [1] | q] …` puts `x.k` inside a body that binds x — the outer x would
+// be captured, so the local variable is renamed to a synthetic name, which no
+// user variable can take (see [IsSyntheticVar]), and its references in the body
+// are substituted with the new name. An empty local binds nothing and leaves
+// subst unchanged.
+func substScoped(subst map[string]ast.Expression, local string) (map[string]ast.Expression, string) {
+	if local == "" || len(subst) == 0 {
+		return subst, local
+	}
+	_, shadows := subst[local]
+	captures := false
+	localSet := map[string]struct{}{local: {}}
+	for name, repl := range subst {
+		if name != local && referencesOuterVar(repl, localSet) {
+			captures = true
+			break
+		}
+	}
+	if !shadows && !captures {
+		return subst, local
+	}
+	inner := make(map[string]ast.Expression, len(subst))
+	for name, repl := range subst {
+		if name != local {
+			inner[name] = repl
+		}
+	}
+	if !captures {
+		return inner, local
+	}
+	fresh := anonVarPrefix + "with_where_" + local
+	inner[local] = &ast.Variable{Name: fresh}
+	return inner, fresh
 }
 
 // rewriteOrderByForAggregation rewrites every ORDER BY expression on the

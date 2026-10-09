@@ -34,9 +34,10 @@ import (
 // bag rather than the per-pair aggregate — on parallel edges the aggregate
 // probe reports the removal only once per (src, dst) pair. Both engine
 // adapters implement it; the interface stays optional so pairwise-only
-// mutators keep compiling.
+// mutators keep compiling. It returns an error for the reason every
+// token-taking [GraphMutator] method does (rmp #2748).
 type relInstancePropRemover interface {
-	DelEdgePropertyOnInstance(src, dst string, handle uint64, key string)
+	DelEdgePropertyOnInstance(src, dst string, handle uint64, key string) error
 }
 
 // RemoveProperty removes a single named property from an already-bound node
@@ -53,6 +54,10 @@ type RemoveProperty struct {
 	reg         *ConstraintRegistry // nil means no registry maintenance
 	entityVar   string
 	propertyKey string
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewRemoveProperty creates a RemoveProperty operator.
@@ -99,8 +104,7 @@ func (op *RemoveProperty) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}
@@ -130,17 +134,25 @@ func (op *RemoveProperty) Next(out *Row) (bool, error) {
 			// both removals itself so -properties is gated on the TARGETED
 			// instance's own bag, not the per-pair aggregate (#2500).
 			if m, ok := op.mutator.(relInstancePropRemover); ok && ent.relHandle != 0 {
-				m.DelEdgePropertyOnInstance(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey)
+				if err := m.DelEdgePropertyOnInstance(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey); err != nil {
+					return false, err
+				}
 			} else {
-				op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, op.propertyKey)
+				if err := op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, op.propertyKey); err != nil {
+					return false, err
+				}
 				if ent.relHandle != 0 {
-					op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey)
+					if err := op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey); err != nil {
+						return false, err
+					}
 				}
 			}
 		} else {
 			// DelNodeProperty frees the constrained slot, at the mutator choke
 			// point and before the removal it guards (rmp #2358).
-			op.mutator.DelNodeProperty(ent.nodeKey, op.propertyKey)
+			if err := op.mutator.DelNodeProperty(ent.nodeKey, op.propertyKey); err != nil {
+				return false, err
+			}
 		}
 	}
 	// Empty propertyKey is treated as a no-op (whole-entity remove is not a
@@ -179,6 +191,10 @@ type RemoveLabels struct {
 	schema  map[string]int
 	nodeVar string
 	labels  []string
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewRemoveLabels creates a RemoveLabels operator.
@@ -221,8 +237,7 @@ func (op *RemoveLabels) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}
@@ -250,7 +265,9 @@ func (op *RemoveLabels) Next(out *Row) (bool, error) {
 	for _, lbl := range op.labels {
 		// RemoveNodeLabel gives the reservation back, at the mutator choke point and
 		// before the write it guards (rmp #2358).
-		op.mutator.RemoveNodeLabel(nodeKey, lbl)
+		if err := op.mutator.RemoveNodeLabel(nodeKey, lbl); err != nil {
+			return false, err
+		}
 	}
 
 	*out = childRow
@@ -312,12 +329,12 @@ func resolveEntityFromRow(varName string, schema map[string]int, row Row, mut Gr
 		// instance a read resolves. Leaving the handle at 0 here removed the property
 		// from the per-pair store only, which the direct read path never consults —
 		// so the REMOVE appeared to do nothing (rmp #2334).
-		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
-		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(v.EndID))
-		if !srcOK || !dstOK {
+		// The endpoints are normalised to the stored order (rmp #2945).
+		ent, ok := relValueEntity(mut, v)
+		if !ok {
 			return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
-		return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: v.ID}, nil
+		return resolvedEntity{isRel: true, relSrcKey: ent.relSrcKey, relDstKey: ent.relDstKey, relHandle: ent.relHandle}, nil
 	}
 	if expr.IsNull(row[colIdx]) {
 		return resolvedEntity{}, errNullTarget
@@ -352,12 +369,12 @@ func resolveEntityMaybeRel(varName string, schema map[string]int, rc *RelCols, r
 		// instance a read resolves. Leaving the handle at 0 here removed the property
 		// from the per-pair store only, which the direct read path never consults —
 		// so the REMOVE appeared to do nothing (rmp #2334).
-		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
-		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(v.EndID))
-		if !srcOK || !dstOK {
+		// The endpoints are normalised to the stored order (rmp #2945).
+		ent, ok := relValueEntity(mut, v)
+		if !ok {
 			return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
-		return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: v.ID}, nil
+		return resolvedEntity{isRel: true, relSrcKey: ent.relSrcKey, relDstKey: ent.relDstKey, relHandle: ent.relHandle}, nil
 	}
 	if expr.IsNull(row[colIdx]) {
 		return resolvedEntity{}, errNullTarget
@@ -369,8 +386,8 @@ func resolveEntityMaybeRel(varName string, schema map[string]int, rc *RelCols, r
 // DstCol) pair of row columns that hold endpoint NodeIDs as IntegerValue, and
 // resolves the bound parallel instance's stable handle from the forward-CSR
 // edge position at rc.EdgeCol (when present) so REMOVE r.x can maintain the
-// per-instance by-handle store (#1686). Mirrors resolveRelBinding in set.go but
-// returns resolvedEntity.
+// per-instance by-handle store (#1686). Mirrors resolveRelBinding in set.go —
+// including its stored-order normalisation — but returns resolvedEntity.
 func resolveRelBindingFromRow(rc *RelCols, row Row, mut GraphMutator) (resolvedEntity, error) {
 	srcCol, dstCol := rc.SrcCol, rc.DstCol
 	if srcCol >= len(row) || dstCol >= len(row) {
@@ -386,11 +403,19 @@ func resolveRelBindingFromRow(rc *RelCols, row Row, mut GraphMutator) (resolvedE
 	if !srcResolved || !dstResolved {
 		return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoint NodeIDs (%d, %d)", graph.NodeID(srcIV), graph.NodeID(dstIV))
 	}
+	// The endpoint columns carry TRAVERSAL order; the reverse hop of an
+	// undirected pattern, or the mirror slot of an undirected graph, swaps them
+	// relative to how the relationship is stored, and every edge mutator is
+	// keyed by the stored order. Normalised exactly as the SET path's
+	// [resolveRelBinding] does (rmp #2945, the REMOVE twin of #2817) — without
+	// it the removal targeted the empty mirror order and did nothing.
+	handle := resolveRelHandle(rc, row, srcKey, dstKey, mut)
+	stKey, enKey := relStorageDirection(mut, srcKey, dstKey, handle)
 	return resolvedEntity{
 		isRel:     true,
-		relSrcKey: srcKey,
-		relDstKey: dstKey,
-		relHandle: resolveRelHandle(rc, row, srcKey, dstKey, mut),
+		relSrcKey: stKey,
+		relDstKey: enKey,
+		relHandle: handle,
 	}, nil
 }
 

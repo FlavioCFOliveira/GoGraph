@@ -33,9 +33,9 @@
     "task-absent-in-rmp": 0,
     "provenance-no-node": 160,
     "provenance-no-gitcommit": 0,
-    "edge-off-model": 60,
+    "edge-off-model": 59,
     "edge-type-undocumented": 118,
-    "label-undocumented": 18,
+    "label-undocumented": 17,
     "component-path-missing": 25,
     "component-path-absent": 0,
     "package-symbol-gap": 0
@@ -68,11 +68,11 @@
 
     "provenance-no-gitcommit": "0, down from 1. Every node written or repaired under rmp #2719 carries the gitCommit/gitDate pair, including the three that previously lacked it.",
 
-    "edge-off-model": "60, down from 62 - the two that went were attached to deleted symbol nodes. 21 remain IMPLEMENTED_IN in an undocumented endpoint shape: (Feature)->(Commit) x10, (Commit)->(Feature) x5, (DSTScenario)->(Commit) x4, (Scenario)->(File) x1, (Task)->(Package) x1.",
+    "edge-off-model": "59, down from 60 when knowledge-model.md documented (Commit)-[:TOUCHES]->(File); earlier 60, down from 62 - the two that went were attached to deleted symbol nodes. 21 remain IMPLEMENTED_IN in an undocumented endpoint shape: (Feature)->(Commit) x10, (Commit)->(Feature) x5, (DSTScenario)->(Commit) x4, (Scenario)->(File) x1, (Task)->(Package) x1.",
 
     "edge-type-undocumented": "118, down from 119. knowledge-model.md admits this backlog in its own data-quality note. Counted separately from edge-off-model so the 21 IMPLEMENTED_IN edges are not buried under it.",
 
-    "label-undocumented": "18 labels are in the graph and not in the label table: Audit, AuditRound, Bug, Certification, Config, DesignSpike, Doc, ExampleProgram, File, Finding, Fix, Initiative, Metric, Note, Perf, Scenario, SecurityAudit, SecurityFinding. Finding, Perf, AuditRound and SecurityAudit already appear as ENDPOINTS in the edge table, so the model documents edges between labels it does not document.",
+    "label-undocumented": "17 labels are in the graph and not in the label table (File was documented in sprint 364): Audit, AuditRound, Bug, Certification, Config, DesignSpike, Doc, ExampleProgram, Finding, Fix, Initiative, Metric, Note, Perf, Scenario, SecurityAudit, SecurityFinding. Finding, Perf, AuditRound and SecurityAudit already appear as ENDPOINTS in the edge table, so the model documents edges between labels it does not document.",
 
     "component-path-missing": "25 Component nodes have no usable path: 17 carry 'file' with a NULL 'path' and are therefore invisible to the query knowledge-model.md documents for this label, and 8 carry neither. Untouched by rmp #2719, whose scope was the symbol and task tiers.",
 

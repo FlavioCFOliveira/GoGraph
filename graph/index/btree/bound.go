@@ -176,3 +176,49 @@ func (i *Index[V]) currentValue(rec *recordedState[V], id graph.NodeID) (V, bool
 	}
 	return i.binding.CurrentValue(id)
 }
+
+// ApplyInState applies c resolving the node's eligibility and current value from
+// st, the state the committing transaction produces, instead of from the
+// binding's own reads of the graph's present — [index.StateApplier]. It shares
+// [Index.applyBound] with [Index.Apply] and [Index.ApplyResolved], so the three
+// rule sets cannot drift, and it is a no-op for an unbound index or for a change
+// that does not concern the binding (rmp #2931).
+func (i *Index[V]) ApplyInState(c index.Change, st index.NodeState) {
+	if !i.Concerns(c) {
+		return
+	}
+	b := i.binding
+	var rec recordedState[V]
+	switch c.Op {
+	case index.OpSetNodeProperty:
+		rec.eligible = st.NodeEligible(c.Node, b.LabelID)
+	case index.OpAddNodeLabel:
+		rec.eligible = st.NodeEligible(c.Node, b.LabelID)
+		if raw, ok := st.NodeValue(c.Node, b.PropertyID); ok {
+			rec.value, rec.hasValue = b.Project(raw)
+		}
+	case index.OpRemoveNodeLabel:
+		if raw, ok := st.NodeValue(c.Node, b.PropertyID); ok {
+			rec.value, rec.hasValue = b.Project(raw)
+		}
+	}
+	i.applyBound(c, &rec)
+}
+
+// Concerns reports whether applying c could modify this index — [index.ChangeFilter].
+// It is false for an unbound index, whose Apply is a no-op, and for any change
+// whose property or label is not the binding's.
+func (i *Index[V]) Concerns(c index.Change) bool {
+	b := i.binding
+	if b == nil {
+		return false
+	}
+	switch c.Op {
+	case index.OpSetNodeProperty, index.OpDelNodeProperty:
+		return c.Property == b.PropertyID
+	case index.OpAddNodeLabel, index.OpRemoveNodeLabel:
+		return c.Label == b.LabelID
+	default:
+		return false
+	}
+}

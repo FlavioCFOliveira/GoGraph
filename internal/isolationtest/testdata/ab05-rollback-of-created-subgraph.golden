@@ -1,0 +1,235 @@
+spec ab05-rollback-of-created-subgraph: 2 sessions, 6 permutations
+# AB05. UNIQUE on (:K).k. s1 creates 100 (:L)-[:E]->(:M) pairs and k = 'r1' in one
+# transaction, then rolls back; the vacuum is drained (H1). s2 counts in autocommit
+# statements and then creates k = 'r1'. After the rollback nothing s1 created is
+# visible: label counts, the relationship count and the UNIQUE value-set are all
+# restored, and the fast count equals the scan.
+
+starting permutation: s1cr s1rb s1dr s2r s2u
+step s1cr: UNWIND range(1, 100) AS i CREATE (:L {name:'r' + toString(i)})-[:E]->(:M {name:'m' + toString(i)}) WITH count(*) AS c CREATE (k:K {k:'r1'}) RETURN c
+c  
+---
+100
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2r: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2u: CREATE (k:K {k:'r1'}) RETURN k.k AS k
+k   
+----
+"r1"
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fedges: MATCH ()-[r:E]->() WITH count(r) AS seek OPTIONAL MATCH ()-[q]->() WHERE type(q) = 'E' RETURN seek, count(q) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fm: MATCH (n:M) RETURN count(n) AS m
+m
+-
+0
+(1 row)
+final fk: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k   |v   
+----+----
+"k0"|null
+"r1"|null
+(2 rows)
+
+starting permutation: s1cr s2r s1rb s1dr s2u
+step s1cr: UNWIND range(1, 100) AS i CREATE (:L {name:'r' + toString(i)})-[:E]->(:M {name:'m' + toString(i)}) WITH count(*) AS c CREATE (k:K {k:'r1'}) RETURN c
+c  
+---
+100
+(1 row)
+step s2r: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2u: CREATE (k:K {k:'r1'}) RETURN k.k AS k
+k   
+----
+"r1"
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fedges: MATCH ()-[r:E]->() WITH count(r) AS seek OPTIONAL MATCH ()-[q]->() WHERE type(q) = 'E' RETURN seek, count(q) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fm: MATCH (n:M) RETURN count(n) AS m
+m
+-
+0
+(1 row)
+final fk: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k   |v   
+----+----
+"k0"|null
+"r1"|null
+(2 rows)
+
+starting permutation: s1cr s2r s2u s1rb s1dr
+step s1cr: UNWIND range(1, 100) AS i CREATE (:L {name:'r' + toString(i)})-[:E]->(:M {name:'m' + toString(i)}) WITH count(*) AS c CREATE (k:K {k:'r1'}) RETURN c
+c  
+---
+100
+(1 row)
+step s2r: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2u: CREATE (k:K {k:'r1'}) RETURN k.k AS k
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "r1" already exists
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fedges: MATCH ()-[r:E]->() WITH count(r) AS seek OPTIONAL MATCH ()-[q]->() WHERE type(q) = 'E' RETURN seek, count(q) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fm: MATCH (n:M) RETURN count(n) AS m
+m
+-
+0
+(1 row)
+final fk: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k   |v   
+----+----
+"k0"|null
+(1 row)
+
+starting permutation: s2r s1cr s1rb s1dr s2u
+step s2r: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: UNWIND range(1, 100) AS i CREATE (:L {name:'r' + toString(i)})-[:E]->(:M {name:'m' + toString(i)}) WITH count(*) AS c CREATE (k:K {k:'r1'}) RETURN c
+c  
+---
+100
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2u: CREATE (k:K {k:'r1'}) RETURN k.k AS k
+k   
+----
+"r1"
+(1 row)
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fedges: MATCH ()-[r:E]->() WITH count(r) AS seek OPTIONAL MATCH ()-[q]->() WHERE type(q) = 'E' RETURN seek, count(q) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fm: MATCH (n:M) RETURN count(n) AS m
+m
+-
+0
+(1 row)
+final fk: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k   |v   
+----+----
+"k0"|null
+"r1"|null
+(2 rows)
+
+starting permutation: s2r s1cr s2u s1rb s1dr
+step s2r: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: UNWIND range(1, 100) AS i CREATE (:L {name:'r' + toString(i)})-[:E]->(:M {name:'m' + toString(i)}) WITH count(*) AS c CREATE (k:K {k:'r1'}) RETURN c
+c  
+---
+100
+(1 row)
+step s2u: CREATE (k:K {k:'r1'}) RETURN k.k AS k
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "r1" already exists
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fedges: MATCH ()-[r:E]->() WITH count(r) AS seek OPTIONAL MATCH ()-[q]->() WHERE type(q) = 'E' RETURN seek, count(q) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fm: MATCH (n:M) RETURN count(n) AS m
+m
+-
+0
+(1 row)
+final fk: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k   |v   
+----+----
+"k0"|null
+(1 row)
+
+starting permutation: s2r s2u s1cr s1rb s1dr
+step s2r: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2u: CREATE (k:K {k:'r1'}) RETURN k.k AS k
+k   
+----
+"r1"
+(1 row)
+step s1cr: UNWIND range(1, 100) AS i CREATE (:L {name:'r' + toString(i)})-[:E]->(:M {name:'m' + toString(i)}) WITH count(*) AS c CREATE (k:K {k:'r1'}) RETURN c
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "r1" already exists
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fedges: MATCH ()-[r:E]->() WITH count(r) AS seek OPTIONAL MATCH ()-[q]->() WHERE type(q) = 'E' RETURN seek, count(q) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fm: MATCH (n:M) RETURN count(n) AS m
+m
+-
+0
+(1 row)
+final fk: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k   |v   
+----+----
+"k0"|null
+"r1"|null
+(2 rows)

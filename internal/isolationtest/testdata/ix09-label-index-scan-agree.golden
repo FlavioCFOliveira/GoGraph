@@ -1,0 +1,455 @@
+spec ix09-label-index-scan-agree: 2 sessions, 10 permutations
+# IX09. Hash index on (:L).s. s1 removes :L from n3 and adds it to the :X node x1
+# (s = 'xs') in one transaction and commits; s2 moves n5 to s = 'moved' and rolls
+# back, and the vacuum is drained (H1). At every step and after the run the label
+# count, the property index and the scan agree.
+
+starting permutation: s1rm s1add s1c s2mv s2rb s2dr
+step s1rm: MATCH (n:L {name:'n3'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n3"
+(1 row)
+step s1add: MATCH (n:X {name:'x1'}) SET n:L RETURN n.name AS name
+name
+----
+"x1"
+(1 row)
+step s1c: COMMIT
+step s2mv: MATCH (n:L {name:'n5'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final fv3: MATCH (n:L {s:'v3'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v3' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fxs: MATCH (n:L {s:'xs'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'xs' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv5: MATCH (n:L {s:'v5'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1rm s1add s2mv s1c s2rb s2dr
+step s1rm: MATCH (n:L {name:'n3'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n3"
+(1 row)
+step s1add: MATCH (n:X {name:'x1'}) SET n:L RETURN n.name AS name
+name
+----
+"x1"
+(1 row)
+step s2mv: MATCH (n:L {name:'n5'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1c: COMMIT
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final fv3: MATCH (n:L {s:'v3'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v3' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fxs: MATCH (n:L {s:'xs'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'xs' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv5: MATCH (n:L {s:'v5'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1rm s1add s2mv s2rb s2dr s1c
+step s1rm: MATCH (n:L {name:'n3'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n3"
+(1 row)
+step s1add: MATCH (n:X {name:'x1'}) SET n:L RETURN n.name AS name
+name
+----
+"x1"
+(1 row)
+step s2mv: MATCH (n:L {name:'n5'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+step s1c: COMMIT
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final fv3: MATCH (n:L {s:'v3'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v3' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fxs: MATCH (n:L {s:'xs'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'xs' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv5: MATCH (n:L {s:'v5'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1rm s2mv s1add s1c s2rb s2dr
+step s1rm: MATCH (n:L {name:'n3'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n3"
+(1 row)
+step s2mv: MATCH (n:L {name:'n5'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1add: MATCH (n:X {name:'x1'}) SET n:L RETURN n.name AS name
+name
+----
+"x1"
+(1 row)
+step s1c: COMMIT
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final fv3: MATCH (n:L {s:'v3'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v3' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fxs: MATCH (n:L {s:'xs'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'xs' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv5: MATCH (n:L {s:'v5'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1rm s2mv s1add s2rb s2dr s1c
+step s1rm: MATCH (n:L {name:'n3'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n3"
+(1 row)
+step s2mv: MATCH (n:L {name:'n5'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1add: MATCH (n:X {name:'x1'}) SET n:L RETURN n.name AS name
+name
+----
+"x1"
+(1 row)
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+step s1c: COMMIT
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final fv3: MATCH (n:L {s:'v3'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v3' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fxs: MATCH (n:L {s:'xs'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'xs' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv5: MATCH (n:L {s:'v5'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1rm s2mv s2rb s2dr s1add s1c
+step s1rm: MATCH (n:L {name:'n3'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n3"
+(1 row)
+step s2mv: MATCH (n:L {name:'n5'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+step s1add: MATCH (n:X {name:'x1'}) SET n:L RETURN n.name AS name
+name
+----
+"x1"
+(1 row)
+step s1c: COMMIT
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final fv3: MATCH (n:L {s:'v3'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v3' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fxs: MATCH (n:L {s:'xs'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'xs' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv5: MATCH (n:L {s:'v5'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2mv s1rm s1add s1c s2rb s2dr
+step s2mv: MATCH (n:L {name:'n5'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1rm: MATCH (n:L {name:'n3'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n3"
+(1 row)
+step s1add: MATCH (n:X {name:'x1'}) SET n:L RETURN n.name AS name
+name
+----
+"x1"
+(1 row)
+step s1c: COMMIT
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final fv3: MATCH (n:L {s:'v3'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v3' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fxs: MATCH (n:L {s:'xs'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'xs' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv5: MATCH (n:L {s:'v5'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2mv s1rm s1add s2rb s2dr s1c
+step s2mv: MATCH (n:L {name:'n5'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1rm: MATCH (n:L {name:'n3'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n3"
+(1 row)
+step s1add: MATCH (n:X {name:'x1'}) SET n:L RETURN n.name AS name
+name
+----
+"x1"
+(1 row)
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+step s1c: COMMIT
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final fv3: MATCH (n:L {s:'v3'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v3' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fxs: MATCH (n:L {s:'xs'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'xs' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv5: MATCH (n:L {s:'v5'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2mv s1rm s2rb s2dr s1add s1c
+step s2mv: MATCH (n:L {name:'n5'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1rm: MATCH (n:L {name:'n3'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n3"
+(1 row)
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+step s1add: MATCH (n:X {name:'x1'}) SET n:L RETURN n.name AS name
+name
+----
+"x1"
+(1 row)
+step s1c: COMMIT
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final fv3: MATCH (n:L {s:'v3'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v3' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fxs: MATCH (n:L {s:'xs'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'xs' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv5: MATCH (n:L {s:'v5'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2mv s2rb s2dr s1rm s1add s1c
+step s2mv: MATCH (n:L {name:'n5'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+step s1rm: MATCH (n:L {name:'n3'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n3"
+(1 row)
+step s1add: MATCH (n:X {name:'x1'}) SET n:L RETURN n.name AS name
+name
+----
+"x1"
+(1 row)
+step s1c: COMMIT
+final fcount: MATCH (n:L) WITH count(n) AS seek OPTIONAL MATCH (m) WHERE 'L' IN labels(m) RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1100|1100
+(1 row)
+final fv3: MATCH (n:L {s:'v3'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v3' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fxs: MATCH (n:L {s:'xs'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'xs' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv5: MATCH (n:L {s:'v5'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v5' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)

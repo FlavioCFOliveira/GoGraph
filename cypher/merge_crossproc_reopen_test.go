@@ -30,11 +30,9 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
-	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
 	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
-	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -86,21 +84,14 @@ func init() {
 			return 1
 		}
 		if persist == "snap" {
-			cs := csr.BuildFromAdjList(res.Graph.AdjList())
-			if err := snapshot.WriteSnapshotFullWithMapperCodec(filepath.Join(dir, "snapshot"), cs, res.Graph, txn.NewStringCodec()); err != nil {
-				fmt.Fprintf(os.Stderr, "snapshot: %v\n", err)
+			if err := checkpointTestStore(dir, res.Graph, w, nil); err != nil {
+				fmt.Fprintf(os.Stderr, "checkpoint: %v\n", err)
 				return 1
 			}
 		}
 		if err := w.Sync(); err != nil {
 			fmt.Fprintf(os.Stderr, "Sync: %v\n", err)
 			return 1
-		}
-		if persist == "snap" {
-			if _, err := w.Truncate(); err != nil {
-				fmt.Fprintf(os.Stderr, "Truncate: %v\n", err)
-				return 1
-			}
 		}
 		if err := w.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "wal.Close: %v\n", err)

@@ -126,6 +126,13 @@ func (v *ReadView[N, W]) NodePropertyByID(id graph.NodeID, key string) (Property
 	return v.g.NodePropertyByIDAsOf(id, key, v.snap)
 }
 
+// NodePropertyStringIDByID is [Graph.NodePropertyStringIDAsOf] at this view's
+// instant: the string value id carries under the interned key pid, without
+// allocating.
+func (v *ReadView[N, W]) NodePropertyStringIDByID(id graph.NodeID, pid PropertyKeyID) (s string, isString, ok bool) {
+	return v.g.NodePropertyStringIDAsOf(id, pid, v.snap)
+}
+
 // NodePropertiesByIDFunc streams id's properties at this view's instant.
 func (v *ReadView[N, W]) NodePropertiesByIDFunc(id graph.NodeID, visit func(name string, pv PropertyValue)) {
 	v.g.NodePropertiesByIDFuncAsOf(id, v.snap, visit)
@@ -254,6 +261,48 @@ func (v *ReadView[N, W]) EntryView(id graph.NodeID) adjlist.EntryView[W] {
 	return v.g.EntryViewAsOf(id, v.snap)
 }
 
+// InNeighbours returns the keys of the distinct nodes holding an edge into n at
+// this view's instant, excluding n itself, in [graph.Mapper.Walk] order. Keys
+// the Mapper can no longer resolve are skipped. See [Graph.InNeighbourIDsAsOf].
+func (v *ReadView[N, W]) InNeighbours(n N) []N {
+	m := v.g.adj.Mapper()
+	id, ok := m.Lookup(n)
+	if !ok {
+		return nil
+	}
+	ids := v.g.InNeighbourIDsAsOf(id, v.snap)
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]N, 0, len(ids))
+	for _, src := range ids {
+		if key, ok := m.Resolve(src); ok {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+// HasInNeighbour reports whether any node held an edge into n at this view's
+// instant, n itself excluded. See [Graph.HasInNeighbourAsOf].
+func (v *ReadView[N, W]) HasInNeighbour(n N) bool {
+	id, ok := v.g.adj.Mapper().Lookup(n)
+	if !ok {
+		return false
+	}
+	return v.g.HasInNeighbourAsOf(id, v.snap)
+}
+
+// OutDegree returns how many outgoing edge slots n had at this view's instant,
+// counting parallel edges and self-loops, or zero when n is unknown.
+func (v *ReadView[N, W]) OutDegree(n N) int {
+	id, ok := v.g.adj.Mapper().Lookup(n)
+	if !ok {
+		return 0
+	}
+	return len(v.g.EntryViewAsOf(id, v.snap).Neighbours)
+}
+
 // HasEdge reports whether a directed edge existed at this view's instant.
 func (v *ReadView[N, W]) HasEdge(src, dst N) bool { return v.g.HasEdgeAsOf(src, dst, v.snap) }
 
@@ -337,7 +386,7 @@ func (v *ReadView[N, W]) Exists(id graph.NodeID) bool { return v.g.NodeExistsAsO
 // LiveNodeFilter returns the liveness predicate at this view's instant.
 func (v *ReadView[N, W]) LiveNodeFilter() func(graph.NodeID) bool {
 	if v.snap == nil {
-		return v.g.LiveNodeFilter()
+		return v.g.LiveNodeFilterStored()
 	}
 	snap := v.snap
 	g := v.g
@@ -350,7 +399,7 @@ func (v *ReadView[N, W]) LiveNodeFilter() func(graph.NodeID) bool {
 // re-checked: it is a COUNT, so there is no object to verify it against. Its
 // only uses are cardinality estimation, where an estimate is what is wanted,
 // and the O(1) count pushdown — which [ReadView.LiveNodeCountExact] gates.
-func (v *ReadView[N, W]) LiveOrder() uint64 { return v.g.LiveOrder() }
+func (v *ReadView[N, W]) LiveOrder() uint64 { return v.g.LiveOrderStored() }
 
 // LiveNodeCountExact returns the live node count and whether it is EXACT for
 // this view's instant.
@@ -368,7 +417,7 @@ func (v *ReadView[N, W]) LiveNodeCountExact() (uint64, bool) {
 	if !v.g.LiveCountExactAsOf(v.snap) {
 		return 0, false
 	}
-	return v.g.LiveOrder(), true
+	return v.g.LiveOrderStored(), true
 }
 
 // EdgeCreateCount returns the CURRENT per-pair CREATE multiplicity.

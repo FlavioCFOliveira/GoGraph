@@ -34,7 +34,9 @@ func buildScanGraph(tb testing.TB, deleteEvery int) (*Graph[string, float64], []
 	}
 	if deleteEvery > 0 {
 		for i := 0; i < scanBenchN; i += deleteEvery {
-			g.RemoveNode(fmt.Sprintf("n%d", i))
+			if err := g.RemoveNode(fmt.Sprintf("n%d", i)); err != nil {
+				tb.Fatalf("g.RemoveNode(fmt.Sprintf(\"n%%d\", i)): %v", err)
+			}
 		}
 	}
 	return g, ids

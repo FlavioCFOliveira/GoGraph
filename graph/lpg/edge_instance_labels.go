@@ -26,6 +26,8 @@ package lpg
 
 import (
 	"sync"
+
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 // edgeInstanceLabelShard holds the per-(src, dst, idx) label sets. Both levels
@@ -50,27 +52,40 @@ type edgeInstanceLabelShard struct {
 // (src, dst) at the supplied 1-based CREATE index. No-op when either
 // endpoint is unknown to the underlying mapper.
 //
-// SetEdgeLabelAt is safe for concurrent use.
-func (g *Graph[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) {
-	g.setEdgeLabelAtInfo(src, dst, idx, name, nil)
+// SetEdgeLabelAt is safe for concurrent use.//
+// It refuses a relationship type longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748). The error return is a
+// breaking change: SetEdgeLabelAt used to return nothing.
+//
+// It runs as a single-operation transaction (rmp #2947): it refuses with an
+// error wrapping [ErrDirectWriteConflict], and changes nothing, while another
+// transaction holds an uncommitted write on the instance's per-ordinal types. The refusal is retryable. See
+// [ErrDirectWriteConflict].
+func (g *Graph[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) error {
+	if err := CheckToken("relationship type", name); err != nil {
+		return err
+	}
+	return g.direct(func(tx *writeCtx) error { return g.setEdgeLabelAtInfo(src, dst, idx, name, tx) })
 }
 
-// setEdgeLabelAtInfo is [Graph.SetEdgeLabelAt] with an explicit write transaction; tx is
-// nil for a direct Go-API mutation, which is committed the instant it is made
-// and takes no conflict check. See [writeCtx].
-func (g *Graph[N, W]) setEdgeLabelAtInfo(src, dst N, idx int64, name string, tx *writeCtx) {
+// setEdgeLabelAtInfo is [Graph.SetEdgeLabelAt] inside write transaction tx; tx is
+// nil only on a graph whose versioning substrate is disarmed. See [writeCtx].
+func (g *Graph[N, W]) setEdgeLabelAtInfo(src, dst N, idx int64, name string, tx *writeCtx) error {
+	if err := CheckToken("relationship type", name); err != nil {
+		return err
+	}
 	if idx <= 0 {
-		return
+		return nil
 	}
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
-		return
+		return nil
 	}
 	dstID, ok := g.adj.Mapper().Lookup(dst)
 	if !ok {
-		return
+		return nil
 	}
-	lid := g.reg.Intern(name)
+	lid := g.reg.intern(name)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeInstanceLabelShardFor(k)
 	sh.mu.Lock()
@@ -82,17 +97,27 @@ func (g *Graph[N, W]) setEdgeLabelAtInfo(src, dst N, idx int64, name string, tx 
 	// local copies and write both back under the shard lock. Each write-back is
 	// load-bearing — add may grow or promote the bag, and set may grow or
 	// promote the instMap.
+	// EVERY write tests the record's head before the presence guard: a peer's
+	// uncommitted add makes the type look present (rmp #2947; for every
+	// transaction since ACID audit round 6, finding C1).
+	if tx != nil {
+		if head := sh.v.headStamp(edgeInstanceKey{pair: k, idx: idx}); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreEdgeTypesOrd, head)
+			return nil
+		}
+	}
 	im := sh.m[k]
 	bag, _ := im.get(idx)
 	if bag.has(lid) {
-		return
+		return nil
 	}
 	if !g.pushInstanceLabelVersion(sh, k, idx, tx) {
-		return
+		return nil
 	}
 	bag.add(lid)
 	im.set(idx, bag)
 	sh.m[k] = im
+	return nil
 }
 
 // EdgeLabelsAt returns the labels recorded at instance `idx` of the
@@ -115,8 +140,13 @@ func (g *Graph[N, W]) setEdgeLabelAtInfo(src, dst N, idx int64, name string, tx 
 // docs/isolation-design.md.
 //
 // EdgeLabelsAt is safe for concurrent use.
+//
+// It reads the newest COMMITTED state: a version no transaction has published
+// is stepped back over (rmp #2965, round 5). A transaction reads its own
+// writes through [Graph.WriterViewOf].
 func (g *Graph[N, W]) EdgeLabelsAt(src, dst N, idx int64) []string {
-	return g.EdgeLabelsAtAsOf(src, dst, idx, nil)
+	var cs Snapshot // the read position: newest committed (rmp #2965)
+	return g.EdgeLabelsAtAsOf(src, dst, idx, g.latestCommitted(&cs))
 }
 
 // EdgeLabelsAtAsOf is [Graph.EdgeLabelsAt] as the instance stood at snap. A nil
@@ -164,13 +194,23 @@ func (g *Graph[N, W]) EdgeLabelsAtAsOf(src, dst N, idx int64, snap *Snapshot) []
 // untouched.
 //
 // RemoveEdgeInstance is safe for concurrent use.
-func (g *Graph[N, W]) RemoveEdgeInstance(src, dst N, idx int64) {
-	g.removeEdgeInstanceInfo(src, dst, idx, nil)
+//
+// It runs as a single-operation transaction (rmp #2947): it refuses with an
+// error wrapping [ErrDirectWriteConflict], and changes nothing, while another
+// transaction holds an uncommitted write on the instance's per-ordinal records. The refusal is retryable. See
+// [ErrDirectWriteConflict].
+//
+// The error return is a breaking change: RemoveEdgeInstance used to return
+// nothing.
+func (g *Graph[N, W]) RemoveEdgeInstance(src, dst N, idx int64) error {
+	return g.direct(func(tx *writeCtx) error {
+		g.removeEdgeInstanceInfo(src, dst, idx, tx)
+		return nil
+	})
 }
 
-// removeEdgeInstanceInfo is [Graph.RemoveEdgeInstance] with an explicit write transaction; tx is
-// nil for a direct Go-API mutation, which is committed the instant it is made
-// and takes no conflict check. See [writeCtx].
+// removeEdgeInstanceInfo is [Graph.RemoveEdgeInstance] inside write transaction tx; tx is
+// nil only on a graph whose versioning substrate is disarmed. See [writeCtx].
 func (g *Graph[N, W]) removeEdgeInstanceInfo(src, dst N, idx int64, tx *writeCtx) {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
@@ -181,9 +221,18 @@ func (g *Graph[N, W]) removeEdgeInstanceInfo(src, dst N, idx int64, tx *writeCtx
 		return
 	}
 	k := edgeKey{src: srcID, dst: dstID}
+	key := edgeInstanceKey{pair: k, idx: idx}
 	{
 		sh := g.edgeInstanceLabelShardFor(k)
 		sh.mu.Lock()
+		// EVERY removal tests the record's head before deciding from the present
+		// map that there is nothing to drop (rmp #2947); see
+		// [Graph.dropHandleRecords].
+		if head := sh.v.headStamp(key); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreEdgeTypesOrd, head)
+			sh.mu.Unlock()
+			return
+		}
 		if im, ok := sh.m[k]; ok && g.pushInstanceLabelVersion(sh, k, idx, tx) {
 			im.del(idx)
 			if im.len() == 0 {
@@ -197,6 +246,11 @@ func (g *Graph[N, W]) removeEdgeInstanceInfo(src, dst N, idx int64, tx *writeCtx
 	{
 		sh := g.edgeInstancePropShardFor(k)
 		sh.mu.Lock()
+		if head := sh.v.headStamp(key); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreEdgePropsOrd, head)
+			sh.mu.Unlock()
+			return
+		}
 		if im, ok := sh.m[k]; ok && g.pushInstancePropVersion(sh, k, idx, tx) {
 			im.del(idx)
 			if im.len() == 0 {

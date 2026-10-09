@@ -22,7 +22,7 @@ func TestAdjList_RemoveEdgeByHandle_DirectedMultigraph(t *testing.T) {
 	}
 
 	// Remove the second parallel slot (handle 20); the first (handle 10) survives.
-	if !a.RemoveEdgeByHandle("a", "b", 20) {
+	if !must(t).B(a.RemoveEdgeByHandle("a", "b", 20)) {
 		t.Fatal("RemoveEdgeByHandle(20) returned false, want true")
 	}
 	if got := a.Size(); got != 1 {
@@ -51,13 +51,13 @@ func TestAdjList_RemoveEdgeByHandle_NoMatch(t *testing.T) {
 	if err := a.AddEdgeH("a", "b", 1, 10); err != nil {
 		t.Fatalf("AddEdgeH: %v", err)
 	}
-	if a.RemoveEdgeByHandle("a", "b", 999) {
+	if must(t).B(a.RemoveEdgeByHandle("a", "b", 999)) {
 		t.Fatal("RemoveEdgeByHandle(999) returned true, want false (no matching handle)")
 	}
-	if a.RemoveEdgeByHandle("a", "z", 10) { // unknown dst
+	if must(t).B(a.RemoveEdgeByHandle("a", "z", 10)) { // unknown dst
 		t.Fatal("RemoveEdgeByHandle on unknown dst returned true, want false")
 	}
-	if a.RemoveEdgeByHandle("z", "a", 10) { // unknown src
+	if must(t).B(a.RemoveEdgeByHandle("z", "a", 10)) { // unknown src
 		t.Fatal("RemoveEdgeByHandle on unknown src returned true, want false")
 	}
 	if got := a.Size(); got != 1 {
@@ -76,7 +76,7 @@ func TestAdjList_RemoveEdgeByHandle_UndirectedMirror(t *testing.T) {
 	if err := a.AddEdgeH("a", "b", 2, 20); err != nil {
 		t.Fatalf("AddEdgeH h20: %v", err)
 	}
-	if !a.RemoveEdgeByHandle("a", "b", 20) {
+	if !must(t).B(a.RemoveEdgeByHandle("a", "b", 20)) {
 		t.Fatal("RemoveEdgeByHandle(20) returned false, want true")
 	}
 	// One logical undirected edge removed: size decremented once.

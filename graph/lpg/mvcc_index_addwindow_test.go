@@ -97,7 +97,7 @@ func TestLabelIndexAddWindow_BitmapReaderNeverLosesARow(t *testing.T) {
 			ids := seedAddWindowGraph(t, g)
 			lids := make([]LabelID, addWindowRounds)
 			for r := range addWindowRounds {
-				lids[r] = g.reg.Intern(addWindowLabel(r))
+				lids[r] = g.reg.intern(addWindowLabel(r))
 			}
 
 			const (
@@ -280,7 +280,7 @@ func TestLabelIndexAddWindow_PresentTimeCountDeclinesWhileAnAddIsInFlight(t *tes
 	if err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	lid := g.reg.Intern("Hot")
+	lid := g.reg.intern("Hot")
 
 	// Precondition: with nothing in flight a present-time count is exact, so the
 	// assertion below is a change of behaviour and not the standing answer.

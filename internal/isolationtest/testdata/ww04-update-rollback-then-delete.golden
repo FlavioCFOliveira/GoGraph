@@ -1,0 +1,61 @@
+spec ww04-update-rollback-then-delete: 2 sessions, 3 permutations
+# WW04, rollback arm (update rolls back). s1 updates n and ROLLS BACK; the vacuum is
+# drained immediately after (H1); s2 deletes n. A delete issued while s1 is open is
+# refused; one issued after the rollback and drain succeeds; one committed before s1's
+# write makes s1's write refused. Only interleavings with the drain adjacent to the
+# rollback run.
+# The second writer is an autocommit statement, so its snapshot is
+# taken when it runs. The -explicit arm runs the same row with an explicit
+# transaction whose snapshot predates the ROLLBACK.
+
+starting permutation: s1u s1rb s1dr s2d
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x ORDER BY name
+name|x
+----+-
+"m" |0
+(1 row)
+
+starting permutation: s1u s2d s1rb s1dr
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s2d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x ORDER BY name
+name|x
+----+-
+"m" |0
+"n" |0
+(2 rows)
+
+starting permutation: s2d s1u s1rb s1dr
+step s2d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x ORDER BY name
+name|x
+----+-
+"m" |0
+(1 row)

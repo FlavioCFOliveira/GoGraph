@@ -58,6 +58,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synclatency"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -355,7 +356,7 @@ func runOneWrite(ctx context.Context, e *Engine, arm string) error {
 func TestSchemaGate_DDLDoesNotHoldTheGateAcrossWriterAdmission(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	wr, err := wal.Open(filepath.Join(dir, "wal"))
+	wr, err := wal.OpenWithSyncLatency(filepath.Join(dir, "wal"), synclatency.ForTest(t))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
@@ -445,21 +446,28 @@ func TestSchemaGate_DDLDoesNotHoldTheGateAcrossWriterAdmission(t *testing.T) {
 // shape of the window: a transaction whose statement ran BEFORE the DDL started
 // but whose COMMIT — and therefore whose index fan-out — lands inside it.
 //
-// Two independent mechanisms make that write survive, and this test passes if
-// EITHER holds, which is deliberate:
+// The backfill scan reads a snapshot taken when the build opens (rmp #2778), so a
+// node the transaction commits after that instant is invisible to the scan. The
+// only route by which it reaches the new index is the catch-up log that
+// [index.Manager.BeginBuild] opens and [index.Manager.FinishBuild] replays (rmp
+// #2738). This test pins that route and no other.
 //
-//   - the catch-up log records the fan-out and replays it at registration
-//     ([index.Manager.BeginBuild]); and
-//   - the backfill scan reads the PHYSICAL LATEST state
-//     ([lpg.Graph.HasNodeLabel] and [lpg.Graph.GetNodeProperty] read the live bag,
-//     not a snapshot) and this transaction's mutations are applied EAGERLY at
-//     Exec, so the still-uncommitted node is already there for the backfill to
-//     find.
+// # How the window is held open
 //
-// The second mechanism is the one that made this case survive BEFORE rmp #2738,
-// and it is not a property to rely on: reading uncommitted state is also how the
-// backfill can index a value a transaction later ROLLS BACK. The first mechanism
-// is the one the fix adds, and it is exact.
+// The commit is placed inside the build deterministically, not by timing (rmp
+// #2879). The DDL runs under a [backfillStallCtx], whose Err parks the first call
+// made while the manager reports a build in flight. The backfill polls its
+// context before it reads its first node, so that call arrives after the catch-up
+// recording has started and after the scan snapshot was taken, and before the
+// index is registered. The test commits while the DDL is parked there, then
+// releases it. A 500 µs sleep used to stand in for this, and under host load the
+// DDL could finish before the commit began, so the test failed without having
+// exercised anything.
+//
+// If the stall never engages — the DDL completes without the build ever polling
+// the context — the harness no longer reaches the window and the test fails
+// saying so, rather than passing on a commit that may have landed before the
+// build.
 func TestExplicitTx_StraddlingTransactionIsCaughtByTheBackfill(t *testing.T) {
 	t.Parallel()
 	const seed = 20_000
@@ -467,6 +475,11 @@ func TestExplicitTx_StraddlingTransactionIsCaughtByTheBackfill(t *testing.T) {
 	e := NewEngine(schemaGateSeed(t, seed))
 	e.parallelBackfillEnabled = false
 	ctx := context.Background()
+	mgr := e.g.IndexManager()
+	if mgr.Active() {
+		t.Fatal("precondition: the seed graph must have no index registered or building, " +
+			"or the stall below cannot tell the DDL's build apart")
+	}
 
 	// The statement runs BEFORE the DDL starts; only the commit straddles.
 	tx, err := e.BeginTx(ctx)
@@ -481,37 +494,56 @@ func TestExplicitTx_StraddlingTransactionIsCaughtByTheBackfill(t *testing.T) {
 	}
 	_ = res.Close()
 
-	var (
-		wg     sync.WaitGroup
-		ddlEnd time.Time
-	)
-	wg.Add(1)
+	stall := newBackfillStallCtx(ctx, mgr)
+	ddlDone := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		dres, derr := e.Run(ctx, `CREATE INDEX person_name FOR (n:Person) ON (n.name)`, nil)
+		dres, derr := e.Run(stall, `CREATE INDEX person_name FOR (n:Person) ON (n.name)`, nil)
 		if derr != nil {
-			t.Errorf("CREATE INDEX: %v", derr)
+			ddlDone <- derr
 			return
 		}
 		for dres.Next() {
 		}
-		_ = dres.Close()
-		ddlEnd = time.Now()
+		ddlDone <- dres.Close()
 	}()
 
-	time.Sleep(500 * time.Microsecond) // the DDL is now inside its backfill
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
+	const bound = 20 * time.Second
+	select {
+	case <-stall.entered:
+	case derr := <-ddlDone:
+		t.Fatalf("the DDL finished (err=%v) without its backfill ever polling the context while the "+
+			"build was open, so the commit cannot be placed inside the window; the stall no longer "+
+			"reaches the build", derr)
+	case <-time.After(bound):
+		stall.releaseOnce()
+		t.Fatalf("the DDL did not reach its backfill within %v", bound)
 	}
-	commitEnd := time.Now()
-	wg.Wait()
 
-	// The commit — and with it the whole index fan-out — must have COMPLETED before
-	// the DDL did, or the fan-out could have reached an already-registered index and
-	// the backfill would not be the thing under test.
-	if !commitEnd.Before(ddlEnd) {
-		t.Fatalf("the commit did not complete inside the DDL's window, so this test proves nothing")
+	// The DDL is parked inside its build: recording on, snapshot taken, index not
+	// yet registered. Commit now, with a bound so a commit that waits on the
+	// parked DDL reports a deadlock instead of hanging the package.
+	committed := make(chan error, 1)
+	go func() { committed <- tx.Commit() }()
+	select {
+	case cerr := <-committed:
+		if cerr != nil {
+			stall.releaseOnce()
+			t.Fatalf("Commit: %v", cerr)
+		}
+	case <-time.After(bound):
+		stall.releaseOnce()
+		t.Fatalf("deadlock: the commit did not complete within %v while the DDL was inside its build", bound)
 	}
+	if mgr.Count() != 0 {
+		stall.releaseOnce()
+		t.Fatalf("the index was registered before the DDL was released (%d indexes), so the commit "+
+			"did not land inside the build window", mgr.Count())
+	}
+	stall.releaseOnce()
+	if derr := <-ddlDone; derr != nil {
+		t.Fatalf("CREATE INDEX: %v", derr)
+	}
+
 	plan, err := e.Explain(`MATCH (n:Person) WHERE n.name = $n RETURN n.name`,
 		map[string]expr.Value{"n": expr.StringValue("straddle")})
 	if err != nil {
@@ -525,6 +557,47 @@ func TestExplicitTx_StraddlingTransactionIsCaughtByTheBackfill(t *testing.T) {
 			"the index: the indexed predicate returned %d rows, want 1", got)
 	}
 }
+
+// backfillStallCtx is a context whose Err parks the FIRST call made while mgr
+// reports an index registered or being built, until released. On a graph with no
+// index, that first call is the backfill's own cancellation poll inside a CREATE
+// INDEX build, which is where
+// [TestExplicitTx_StraddlingTransactionIsCaughtByTheBackfill] needs the DDL held.
+// Every other call, before or after, passes straight through to the parent.
+//
+// Safe for concurrent use: a concurrent Err call made while the first one is
+// parked waits for the same release.
+type backfillStallCtx struct {
+	context.Context //nolint:containedctx // this type IS a context: it wraps its parent to intercept Err, and must embed it to delegate every other method
+	mgr             *index.Manager
+	entered         chan struct{}
+	release         chan struct{}
+	stall           sync.Once
+	rel             sync.Once
+}
+
+func newBackfillStallCtx(parent context.Context, mgr *index.Manager) *backfillStallCtx {
+	return &backfillStallCtx{
+		Context: parent,
+		mgr:     mgr,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+// Err implements [context.Context].
+func (c *backfillStallCtx) Err() error {
+	if c.mgr.Active() {
+		c.stall.Do(func() {
+			close(c.entered)
+			<-c.release
+		})
+	}
+	return c.Context.Err()
+}
+
+// releaseOnce unparks the stalled call; it is idempotent.
+func (c *backfillStallCtx) releaseOnce() { c.rel.Do(func() { close(c.release) }) }
 
 // schemaGateSeedTyped builds n :Person nodes carrying a string "name" and an
 // integer "age", so one graph can exercise the equality-seek, key-set-seek and

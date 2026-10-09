@@ -166,7 +166,7 @@ func TestPatternPredicate_EdgeRemovedAfterSnapshotStaysVisible(t *testing.T) {
 	}
 	defer g.EndRead(old)
 
-	g.RemoveEdge("a", "b")
+	must(t).E(g.RemoveEdge("a", "b"))
 
 	if got := evalPredicateAt(t, g, nil); got {
 		t.Fatalf("predicate at the CURRENT instant = true, want false: the fixture is wrong")
@@ -220,7 +220,7 @@ func TestPatternComprehension_EdgeRemovedAfterSnapshotStaysVisible(t *testing.T)
 	}
 	defer g.EndRead(old)
 
-	g.RemoveEdge("a", "b")
+	must(t).E(g.RemoveEdge("a", "b"))
 
 	if got := evalComprehensionAt(t, g, nil); got != 0 {
 		t.Fatalf("comprehension at the CURRENT instant produced %d matches, want 0: "+

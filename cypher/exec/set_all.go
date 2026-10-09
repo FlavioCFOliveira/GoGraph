@@ -90,6 +90,10 @@ type SetAllProperties struct {
 	nullKeys []string
 
 	isReplace bool // true for `SET n = …`, false for `SET n += …`
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // ExprValueEvalFn is a per-row evaluator for a whole map-valued RHS expression
@@ -313,9 +317,8 @@ func (op *SetAllProperties) parseParamMap() error {
 // entries and null-valued keys used by the whole-entity SET forms. A null value
 // is reported in nullKeys (SET-map semantics REMOVE such keys). A map- or
 // nested-map-valued entry is rejected with InvalidPropertyType (property values
-// are primitives or homogeneous lists of primitives). A list of primitives is
-// routed through the list encoder; any other unconvertible kind is a defensive
-// skip. Shared by the parameter-map ([SetAllProperties.parseParamMap]) and the
+// are primitives, temporal values, or lists of those). Every other entry is
+// converted by [exprValueToProperty], whose refusals fail the statement. Shared by the parameter-map ([SetAllProperties.parseParamMap]) and the
 // per-row map-value ([SetAllProperties.applyMapValue]) ingestion paths.
 func exprMapValueToEntries(entityVar string, mv expr.MapValue) (props []propLiteral, nullKeys []string, err error) {
 	for k, vv := range mv {
@@ -324,24 +327,24 @@ func exprMapValueToEntries(entityVar string, mv expr.MapValue) (props []propLite
 			continue
 		}
 		if !exprValueIsStorable(vv) {
-			return nil, nil, fmt.Errorf("InvalidPropertyType: SET %s: value for key %q is a map or a list of maps, which cannot be stored as a property", entityVar, k)
+			return nil, nil, fmt.Errorf("SET %s: value for key %q is a map or a list of maps, which cannot be stored as a property: %w", entityVar, k, ErrNestedPropertyValue)
 		}
 		// A graph entity is equally unstorable. It used to fall through to the
 		// defensive `continue` below, which made `SET n = {k: <node>}` report
 		// success while writing nothing — and, on the REPLACE form, still clear
 		// every key the entity already carried (rmp #2816).
 		if exprValueIsEntity(vv) {
-			return nil, nil, fmt.Errorf("InvalidPropertyType: SET %s: value for key %q is a node, relationship or path, which cannot be stored as a property", entityVar, k)
+			return nil, nil, fmt.Errorf("SET %s: value for key %q is a node, relationship or path, which cannot be stored as a property: %w", entityVar, k, ErrEntityPropertyValue)
 		}
-		var pv lpg.PropertyValue
-		var perr error
-		if lst, isList := vv.(expr.ListValue); isList {
-			pv, perr = exprListToLPGList(lst)
-		} else {
-			pv, perr = valueToPropertyValue(vv)
-		}
+		pv, perr := exprValueToProperty(vv)
 		if perr != nil {
-			continue
+			// Every conversion failure is an InvalidPropertyType refusal, never
+			// a skip. A list with a null element used to be the only one; any
+			// other unconvertible entry — a temporal value among them — was
+			// dropped with a defensive `continue`, so `SET n += $m` reported
+			// success and wrote nothing, and `SET n = $m` still cleared every
+			// key n carried (rmp #2941, rmp #2958).
+			return nil, nil, fmt.Errorf("SET %s: value for key %q: %w", entityVar, k, perr)
 		}
 		props = append(props, propLiteral{key: k, value: pv})
 	}
@@ -371,14 +374,14 @@ func exprValueIsStorable(v expr.Value) bool {
 //
 // openCypher 9 restricts a property value to a primitive or a homogeneous list
 // of primitives, so an entity is InvalidPropertyType and must be REFUSED. It
-// used to be dropped instead: [valueToPropertyValue] reports an entity as an
-// error, which [exprMapValueToEntries]'s defensive `continue` turned into a
-// silent omission, so the statement reported success and stored nothing (rmp
+// used to be dropped instead: the converter reported an entity as an error,
+// which [exprMapValueToEntries]'s defensive `continue` turned into a silent
+// omission, so the statement reported success and stored nothing (rmp
 // #2816). This is the exec-side mirror of isEntityPropertyValue in package
 // cypher, alongside [exprValueIsStorable]'s mirror of isStorableProperty.
 func exprValueIsEntity(v expr.Value) bool {
 	switch x := v.(type) {
-	case expr.NodeValue, expr.RelationshipValue, expr.PathValue:
+	case expr.NodeValue, *expr.LazyNodeValue, expr.RelationshipValue, *expr.LazyRelationshipValue, expr.PathValue:
 		return true
 	case expr.ListValue:
 		for _, el := range x {
@@ -404,8 +407,7 @@ func (op *SetAllProperties) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}
@@ -513,7 +515,9 @@ func lpgPropsToMapValue(props map[string]lpg.PropertyValue) expr.MapValue {
 func (op *SetAllProperties) applyExprValue(target entityBinding, v expr.Value) error {
 	if v == nil || expr.IsNull(v) {
 		if op.isReplace {
-			op.clearTarget(target)
+			if err := op.clearTarget(target); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -552,10 +556,14 @@ func (op *SetAllProperties) applyMapValue(target entityBinding, mv expr.MapValue
 		return err
 	}
 	if op.isReplace {
-		op.clearTarget(target)
+		if err := op.clearTarget(target); err != nil {
+			return err
+		}
 	}
 	for _, k := range nullKeys {
-		op.deleteOne(target, k)
+		if err := op.deleteOne(target, k); err != nil {
+			return err
+		}
 	}
 	for _, p := range props {
 		if err := op.writeOne(target, p.key, p.value); err != nil {
@@ -655,7 +663,9 @@ func (op *SetAllProperties) copyFromSource(target, src entityBinding) error {
 	}
 
 	if op.isReplace {
-		op.clearTarget(target)
+		if err := op.clearTarget(target); err != nil {
+			return err
+		}
 	}
 
 	for k, v := range sourceProps {
@@ -677,10 +687,14 @@ func (op *SetAllProperties) applyMap(target entityBinding, row Row) error {
 		return err
 	}
 	if op.isReplace {
-		op.clearTarget(target)
+		if err := op.clearTarget(target); err != nil {
+			return err
+		}
 	}
 	for _, k := range nullKeys {
-		op.deleteOne(target, k)
+		if err := op.deleteOne(target, k); err != nil {
+			return err
+		}
 	}
 	for _, p := range parsedMap {
 		if err := op.writeOne(target, p.key, p.value); err != nil {
@@ -697,18 +711,64 @@ func (op *SetAllProperties) applyMap(target entityBinding, row Row) error {
 // reservation is released so the registry stays in sync with the graph (a
 // value freed by a replace must become available again) — mirroring
 // delNodePropConstrained in merge_setall.go.
-func (op *SetAllProperties) clearTarget(target entityBinding) {
+func (op *SetAllProperties) clearTarget(target entityBinding) error {
 	if target.isRel {
 		for k := range relClearKeys(op.mutator, target.relSrcKey, target.relDstKey, target.relHandle) {
-			op.deleteOne(target, k)
+			if err := op.deleteOne(target, k); err != nil {
+				return err
+			}
 		}
-		return
+		return nil
 	}
-	props := op.mutator.NodeProperties(target.nodeKey)
-	for k := range props {
+	for k := range nodeClearKeys(op.mutator, target.nodeKey) {
 		// DelNodeProperty releases, at the mutator choke point (rmp #2358).
-		op.mutator.DelNodeProperty(target.nodeKey, k)
+		if err := op.mutator.DelNodeProperty(target.nodeKey, k); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+// txVisiblePropertyEnumerator is the optional reader that enumerates an
+// entity's properties as THIS transaction sees them: its own eager writes
+// included, no other transaction's unpublished work. It is asserted at the call
+// site, following [txVisibleNodeReader]; a mutator that does not implement it
+// carries no transaction, and for such a caller the present IS its view.
+type txVisiblePropertyEnumerator interface {
+	// NodePropertiesInTx returns n's properties in this transaction's view.
+	NodePropertiesInTx(n string) map[string]lpg.PropertyValue
+	// EdgePropertiesByHandleInTx returns the by-handle bag of one relationship
+	// instance in this transaction's view.
+	EdgePropertiesByHandleInTx(src, dst string, handle uint64) map[string]lpg.PropertyValue
+}
+
+// nodeClearKeys returns the set of property keys a whole-entity replace or clear
+// must remove from n: the keys of the RAW present plus the keys of this
+// transaction's view.
+//
+// The raw present alone is NOT sufficient (rmp #2943). It already carries
+// another in-flight transaction's eager removal, so when a peer had removed n's
+// only property the enumeration came back empty, `SET n = {}` issued no delete,
+// no write-write conflict test ran, and the statement committed having written
+// nothing. The peer's rollback then restored the value the committed replace had
+// removed. The transaction's view still carries that value, so enumerating it
+// makes the replace issue the delete, and the property store's conflict test
+// refuses it. The raw keys stay in the union because they are what the replace
+// physically clears.
+func nodeClearKeys(mut GraphMutator, n string) map[string]struct{} {
+	raw := mut.NodeProperties(n)
+	var view map[string]lpg.PropertyValue
+	if tv, ok := mut.(txVisiblePropertyEnumerator); ok {
+		view = tv.NodePropertiesInTx(n)
+	}
+	keys := make(map[string]struct{}, max(len(raw), len(view)))
+	for k := range raw {
+		keys[k] = struct{}{}
+	}
+	for k := range view {
+		keys[k] = struct{}{}
+	}
+	return keys
 }
 
 // relClearKeys returns the set of property keys a whole-entity replace must
@@ -719,6 +779,11 @@ func (op *SetAllProperties) clearTarget(target entityBinding) {
 // bag still carries the key, and reads are bag-authoritative — enumerating the
 // aggregate let that key survive `SET r = {…}` (#2502). Shared by
 // [SetAllProperties.clearTarget] and [SetProperty.applyToRelationship].
+//
+// With a resolved handle the instance's bag is also read in THIS transaction's
+// view, for the reason [nodeClearKeys] records (rmp #2943): a peer's
+// uncommitted removal of the instance's only property empties the raw bag, and
+// a replace that enumerates nothing writes nothing and conflicts with nothing.
 func relClearKeys(mut GraphMutator, srcKey, dstKey string, handle uint64) map[string]struct{} {
 	pair := mut.EdgeProperties(srcKey, dstKey)
 	keys := make(map[string]struct{}, len(pair))
@@ -728,6 +793,11 @@ func relClearKeys(mut GraphMutator, srcKey, dstKey string, handle uint64) map[st
 	if handle != 0 {
 		for k := range mut.EdgePropertiesByHandle(srcKey, dstKey, handle) {
 			keys[k] = struct{}{}
+		}
+		if tv, ok := mut.(txVisiblePropertyEnumerator); ok {
+			for k := range tv.EdgePropertiesByHandleInTx(srcKey, dstKey, handle) {
+				keys[k] = struct{}{}
+			}
 		}
 	}
 	return keys
@@ -767,7 +837,7 @@ func (op *SetAllProperties) writeOne(target entityBinding, key string, value lpg
 // is mirrored to the per-instance by-handle store (#1686). For node writes
 // with a constraint registry attached, the removed value's UNIQUE reservation
 // is released so the registry stays in sync with the graph.
-func (op *SetAllProperties) deleteOne(target entityBinding, key string) {
+func (op *SetAllProperties) deleteOne(target entityBinding, key string) error {
 	if target.isRel {
 		// When the targeted instance's stable handle is resolved and the
 		// mutator implements [relInstancePropRemover], it performs both
@@ -777,17 +847,26 @@ func (op *SetAllProperties) deleteOne(target entityBinding, key string) {
 		// carried. The handle==0 fallback keeps the pairwise path
 		// byte-identical.
 		if m, ok := op.mutator.(relInstancePropRemover); ok && target.relHandle != 0 {
-			m.DelEdgePropertyOnInstance(target.relSrcKey, target.relDstKey, target.relHandle, key)
-			return
+			if err := m.DelEdgePropertyOnInstance(target.relSrcKey, target.relDstKey, target.relHandle, key); err != nil {
+				return err
+			}
+			return nil
 		}
-		op.mutator.DelEdgeProperty(target.relSrcKey, target.relDstKey, key)
+		if err := op.mutator.DelEdgeProperty(target.relSrcKey, target.relDstKey, key); err != nil {
+			return err
+		}
 		if target.relHandle != 0 {
-			op.mutator.DelEdgePropertyByHandle(target.relSrcKey, target.relDstKey, target.relHandle, key)
+			if err := op.mutator.DelEdgePropertyByHandle(target.relSrcKey, target.relDstKey, target.relHandle, key); err != nil {
+				return err
+			}
 		}
-		return
+		return nil
 	}
 	// DelNodeProperty releases, at the mutator choke point (rmp #2358).
-	op.mutator.DelNodeProperty(target.nodeKey, key)
+	if err := op.mutator.DelNodeProperty(target.nodeKey, key); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Close closes the child operator.
@@ -838,12 +917,12 @@ func resolveEntityBinding(
 		// a WITH boundary to the pairwise path — the per-pair store changed
 		// while the instance's own bag, which reads route through, kept the
 		// pre-SET map (#2502, the SetAllProperties residual of #2334).
-		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
-		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(v.EndID))
-		if !srcOK || !dstOK {
+		// The endpoints are normalised to the stored order (rmp #2945).
+		ent, ok := relValueEntity(mut, v)
+		if !ok {
 			return entityBinding{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
-		return entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: v.ID}, nil
+		return ent, nil
 	default:
 		return entityBinding{}, fmt.Errorf("variable %q is not IntegerValue/NodeValue/RelationshipValue (got %T)", varName, row[colIdx])
 	}
@@ -886,7 +965,7 @@ func parseMapWithNulls(s string, params map[string]expr.Value) (props []propLite
 		// rather than silently dropping the key — matching the single-property
 		// form `SET n.k = {…}` (Set1 [10]).
 		if valueStringIsNonStorable(valStr) {
-			return nil, nil, fmt.Errorf("InvalidPropertyType: value for key %q is a map or a list of maps, which cannot be stored as a property", key)
+			return nil, nil, fmt.Errorf("value for key %q is a map or a list of maps, which cannot be stored as a property: %w", key, ErrNestedPropertyValue)
 		}
 
 		pv, perr := parsePropValueWithParams(valStr, params)
@@ -895,7 +974,7 @@ func parseMapWithNulls(s string, params map[string]expr.Value) (props []propLite
 				nullKeys = append(nullKeys, key)
 				continue
 			}
-			if errors.Is(perr, ErrNestedPropertyValue) {
+			if isInvalidPropertyValueErr(perr) {
 				// A nested collection (e.g. a nested list that valueStringIsNonStorable
 				// does not catch) is a hard InvalidPropertyType error, not a
 				// deferrable non-literal: fail-stop rather than drop the key (F3).
@@ -936,23 +1015,4 @@ func valueStringIsNonStorable(valStr string) bool {
 		}
 	}
 	return false
-}
-
-// valueToPropertyValue converts an expr.Value to an lpg.PropertyValue when a
-// faithful mapping exists. Returns an error for kinds that have no
-// PropertyValue representation. Used by SetAllProperties to ingest the
-// entries of a parameter MapValue.
-func valueToPropertyValue(v expr.Value) (lpg.PropertyValue, error) {
-	switch x := v.(type) {
-	case expr.StringValue:
-		return lpg.StringValue(string(x)), nil
-	case expr.IntegerValue:
-		return lpg.Int64Value(int64(x)), nil
-	case expr.FloatValue:
-		return lpg.Float64Value(float64(x)), nil
-	case expr.BoolValue:
-		return lpg.BoolValue(bool(x)), nil
-	default:
-		return lpg.PropertyValue{}, fmt.Errorf("unsupported parameter value kind %T", v)
-	}
 }

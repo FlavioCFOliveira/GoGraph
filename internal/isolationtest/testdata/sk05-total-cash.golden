@@ -1,0 +1,584 @@
+spec sk05-total-cash: 2 sessions, 20 permutations
+# SK05. Two accounts of 300. Each session reads the total (600), decides a withdrawal
+# of 400 is covered, and debits ITS OWN account. Disjoint writes, so both commit and
+# the total goes negative (-200): snapshot isolation permits it.
+
+starting permutation: s1r s1w s1c s2r s2w s2c
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s1r s1w s2r s1c s2w s2c
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s1r s1w s2r s2w s1c s2c
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s1r s1w s2r s2w s2c s1c
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s1r s2r s1w s1c s2w s2c
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s1r s2r s1w s2w s1c s2c
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s1r s2r s1w s2w s2c s1c
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s1r s2r s2w s1w s1c s2c
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s1r s2r s2w s1w s2c s1c
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s1r s2r s2w s2c s1w s1c
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s2r s1r s1w s1c s2w s2c
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s2r s1r s1w s2w s1c s2c
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s2r s1r s1w s2w s2c s1c
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s2r s1r s2w s1w s1c s2c
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s2r s1r s2w s1w s2c s1c
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s2r s1r s2w s2c s1w s1c
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s2r s2w s1r s1w s1c s2c
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s2r s2w s1r s1w s2c s1c
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s2r s2w s1r s2c s1w s1c
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)
+
+starting permutation: s2r s2w s2c s1r s1w s1c
+step s2r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s2w: MATCH (a:Account {name:'y'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s2c: COMMIT
+step s1r: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+600  
+(1 row)
+step s1w: MATCH (a:Account {name:'x'}) SET a.bal = a.bal - 400 RETURN a.bal AS bal
+bal 
+----
+-100
+(1 row)
+step s1c: COMMIT
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+-200 
+(1 row)

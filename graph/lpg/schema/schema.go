@@ -84,26 +84,34 @@ func New(labels *lpg.LabelRegistry, properties *lpg.PropertyKeyRegistry) *Schema
 
 // RegisterLabel records name as a declared label and returns its
 // stable [lpg.LabelID]. Idempotent.
-func (s *Schema) RegisterLabel(name string) lpg.LabelID {
+//
+// It refuses a name longer than [lpg.MaxTokenLen] bytes with an error wrapping
+// [lpg.ErrTokenTooLong] and records nothing (rmp #2748). The error result is a
+// breaking change: RegisterLabel used to return the id alone.
+func (s *Schema) RegisterLabel(name string) (lpg.LabelID, error) {
 	s.mu.RLock()
 	if id, ok := s.labels[name]; ok {
 		s.mu.RUnlock()
-		return id
+		return id, nil
 	}
 	s.mu.RUnlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if id, ok := s.labels[name]; ok {
-		return id
+		return id, nil
 	}
-	id := s.labelReg.Intern(name)
+	id, err := s.labelReg.Intern(name)
+	if err != nil {
+		return 0, err
+	}
 	s.labels[name] = id
-	return id
+	return id, nil
 }
 
 // RegisterProperty records name as a property key carrying the given
 // kind, returning the stable [lpg.PropertyKeyID]. Registering the same
-// name twice with different kinds is rejected with an error.
+// name twice with different kinds is rejected with an error, and so is a name
+// longer than [lpg.MaxTokenLen] bytes ([lpg.ErrTokenTooLong], rmp #2748).
 func (s *Schema) RegisterProperty(name string, kind lpg.PropertyKind) (lpg.PropertyKeyID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -113,7 +121,10 @@ func (s *Schema) RegisterProperty(name string, kind lpg.PropertyKind) (lpg.Prope
 		}
 		return d.id, nil
 	}
-	id := s.propReg.Intern(name)
+	id, err := s.propReg.Intern(name)
+	if err != nil {
+		return 0, err
+	}
 	s.properties[name] = propertyDecl{id: id, kind: kind}
 	return id, nil
 }

@@ -82,11 +82,11 @@ func TestVacuumSoak_NoUnboundedGrowthUnderSustainedChurn(t *testing.T) {
 		snap := g.BeginRead()
 		for i := 0; i < perGeneration; i++ {
 			k := keys[i%nodes]
-			if err := g.ApplyAtomically(func() error {
-				if err := g.SetNodeProperty(k, "w", Int64Value(int64(gen*perGeneration+i))); err != nil {
+			if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+				if err := g.Writer(tx).SetNodeProperty(k, "w", Int64Value(int64(gen*perGeneration+i))); err != nil {
 					return err
 				}
-				return g.SetNodeLabel(k, "L")
+				return g.Writer(tx).SetNodeLabel(k, "L")
 			}); err != nil {
 				g.EndRead(snap)
 				t.Fatalf("generation %d write %d: %v", gen, i, err)

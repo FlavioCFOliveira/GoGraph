@@ -16,6 +16,19 @@ import (
 // includes a single <graph> with directed or undirected edgedefault
 // inferred from a, a <key for=edge attr.name=weight attr.type=long>
 // declaration, and one <node>/<edge> per node and edge.
+//
+// Concurrency: Write and [WriteCtx] are safe to call while other goroutines
+// add nodes and edges to a. Edges are bounded by the
+// [adjlist.AdjList.MaxNodeID] read before the <node> elements are written: an
+// edge incident to a node created after that read is omitted, while the node
+// itself may still be emitted as a <node>. The <node> elements are written
+// from inside [graph.Mapper.Walk], which holds each Mapper shard's read lock
+// while the shard is walked, so an io.Writer that blocks stalls writers to
+// that shard for as long as it blocks.
+// Each source's adjacency is read once, as an immutable snapshot, when the
+// loop reaches it, so the output is not an atomic snapshot of the graph: a
+// concurrent write may be reflected for some nodes and not for others. For a
+// transactionally consistent export, stop the writers first.
 func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
 	err := WriteCtx(context.Background(), w, a)
 	if err != nil {
@@ -109,6 +122,11 @@ func encodeEdges(enc *xml.Encoder, a *adjlist.AdjList[string, int64], maxID uint
 	names := make([]string, maxID)
 	live := make([]bool, maxID)
 	a.Mapper().Walk(func(id graph.NodeID, v string) bool {
+		// A node interned after maxID was read carries an id at or above
+		// the table length; it is outside this export's node set (rmp #2902).
+		if uint64(id) >= maxID {
+			return true
+		}
 		names[uint64(id)] = v
 		live[uint64(id)] = true
 		return true

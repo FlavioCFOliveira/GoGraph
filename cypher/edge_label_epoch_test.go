@@ -89,7 +89,9 @@ func labelEpochFixture(t *testing.T) (*lpg.Graph[string, float64], *Engine) {
 	if err := g.AddEdge("a", "b", 1.0); err != nil {
 		t.Fatalf("AddEdge(a->b): %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "T1")
+	if err := g.SetEdgeLabel("a", "b", "T1"); err != nil {
+		t.Fatal(err)
+	}
 	return g, NewEngine(g)
 }
 
@@ -107,7 +109,9 @@ func TestEdgeLabelEpoch_SetEdgeLabelVisibleToWarmEngine_2255(t *testing.T) {
 
 	// The mutation the durable apply path performs for OpSetEdgeLabel, and the
 	// one the MERGE MATCH branch performs. No topology changes.
-	g.SetEdgeLabel("a", "b", "T2")
+	if err := g.SetEdgeLabel("a", "b", "T2"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Absolute oracle: the one a->b edge now carries T2, so exactly one row.
 	if got := labelEpochScalar(t, eng, q); got != "1" {
@@ -135,7 +139,9 @@ func TestEdgeLabelEpoch_RemoveEdgeLabelLeavesNoPhantomType_2255(t *testing.T) {
 		t.Fatalf("before removal: count(r:T1) = %s, want 1", got)
 	}
 
-	g.RemoveEdgeLabel("a", "b", "T1")
+	if err := g.RemoveEdgeLabel("a", "b", "T1"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Absolute oracle: no edge carries T1 any more.
 	if got := labelEpochScalar(t, eng, q); got != "0" {
@@ -169,7 +175,9 @@ func TestEdgeLabelEpoch_ByHandleVisibleToWarmEngine_2255(t *testing.T) {
 	if h1 == 0 || h2 == 0 || h1 == h2 {
 		t.Fatalf("expected two distinct non-zero handles, got %d and %d", h1, h2)
 	}
-	g.SetEdgeLabelByHandle("a", "b", h1, "T1")
+	if err := g.SetEdgeLabelByHandle("a", "b", h1, "T1"); err != nil {
+		t.Fatal(err)
+	}
 
 	eng := NewEngine(g)
 	const q = `MATCH ()-[r:T2]->() RETURN count(r)`
@@ -179,7 +187,9 @@ func TestEdgeLabelEpoch_ByHandleVisibleToWarmEngine_2255(t *testing.T) {
 		t.Fatalf("before the label was added: count(r:T2) = %s, want 0", got)
 	}
 
-	g.SetEdgeLabelByHandle("a", "b", h2, "T2")
+	if err := g.SetEdgeLabelByHandle("a", "b", h2, "T2"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Absolute oracle: exactly ONE of the two parallel edges carries T2.
 	if got := labelEpochScalar(t, eng, q); got != "1" {
@@ -199,9 +209,15 @@ func TestEdgeLabelEpoch_NoOpMutationDoesNotBumpEpoch_2255(t *testing.T) {
 	g, _ := labelEpochFixture(t)
 	before := g.TopoGeneration()
 
-	g.SetEdgeLabel("a", "b", "T1")        // already present on the slot
-	g.RemoveEdgeLabel("a", "b", "ABSENT") // never present
-	g.SetEdgeLabel("a", "zz", "T9")       // no such edge — early return
+	if err := g.SetEdgeLabel("a", "b", "T1"); err != nil {
+		t.Fatal(err)
+	} // already present on the slot
+	if err := g.RemoveEdgeLabel("a", "b", "ABSENT"); err != nil {
+		t.Fatal(err)
+	} // never present
+	if err := g.SetEdgeLabel("a", "zz", "T9"); err != nil {
+		t.Fatal(err)
+	} // no such edge — early return
 
 	if after := g.TopoGeneration(); after != before {
 		t.Fatalf("no-op edge-label mutations moved the topology epoch %d -> %d; a "+
@@ -209,14 +225,18 @@ func TestEdgeLabelEpoch_NoOpMutationDoesNotBumpEpoch_2255(t *testing.T) {
 	}
 
 	// A genuine change must move it exactly once.
-	g.SetEdgeLabel("a", "b", "T2")
+	if err := g.SetEdgeLabel("a", "b", "T2"); err != nil {
+		t.Fatal(err)
+	}
 	if after := g.TopoGeneration(); after != before+1 {
 		t.Fatalf("a real edge-label change moved the topology epoch %d -> %d, want exactly one bump to %d",
 			before, after, before+1)
 	}
 
 	// And removing a label that IS present must move it exactly once more.
-	g.RemoveEdgeLabel("a", "b", "T2")
+	if err := g.RemoveEdgeLabel("a", "b", "T2"); err != nil {
+		t.Fatal(err)
+	}
 	if after := g.TopoGeneration(); after != before+2 {
 		t.Fatalf("a real edge-label removal moved the topology epoch to %d, want exactly %d",
 			after, before+2)

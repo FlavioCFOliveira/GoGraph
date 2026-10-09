@@ -53,8 +53,12 @@ func TestLPG_EdgeLabel_ParallelDigon2(t *testing.T) {
 	}
 
 	// Assign two labels to the shared pair bag.
-	g.SetEdgeLabel(0, 1, "A")
-	g.SetEdgeLabel(0, 1, "B")
+	if err := g.SetEdgeLabel(0, 1, "A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel(0, 1, "B"); err != nil {
+		t.Fatal(err)
+	}
 
 	// HasEdgeLabel must be true for both assigned labels.
 	for _, name := range []string{"A", "B"} {
@@ -91,7 +95,9 @@ func TestLPG_EdgeLabel_ParallelDigon2(t *testing.T) {
 	}
 
 	// SetEdgeLabel on a non-existent edge must be a no-op.
-	g.SetEdgeLabel(1, 0, "X")
+	if err := g.SetEdgeLabel(1, 0, "X"); err != nil {
+		t.Fatal(err)
+	}
 	if g.HasEdgeLabel(1, 0, "X") {
 		t.Error("SetEdgeLabel on missing edge must not persist label")
 	}
@@ -114,7 +120,9 @@ func TestLPG_EdgeLabel_ParallelDigon8(t *testing.T) {
 	labels := make([]string, k)
 	for i := 0; i < k; i++ {
 		labels[i] = string(rune('A' + i)) // "A" … "H"
-		g.SetEdgeLabel(0, 1, labels[i])
+		if err := g.SetEdgeLabel(0, 1, labels[i]); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// HasEdgeLabel must report true for every assigned label.
@@ -180,7 +188,9 @@ func TestLPG_EdgeLabel_SharedBag(t *testing.T) {
 	// Assign the same label multiple times — EdgeLabels must not
 	// accumulate duplicates because the bag uses set semantics.
 	for i := 0; i < 5; i++ {
-		g.SetEdgeLabel(0, 1, "REPEAT")
+		if err := g.SetEdgeLabel(0, 1, "REPEAT"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	got := g.EdgeLabels(0, 1)
 	if len(got) != 1 {
@@ -191,8 +201,12 @@ func TestLPG_EdgeLabel_SharedBag(t *testing.T) {
 	}
 
 	// Assign two distinct labels and verify sorted round-trip.
-	g.SetEdgeLabel(0, 1, "X")
-	g.SetEdgeLabel(0, 1, "Y")
+	if err := g.SetEdgeLabel(0, 1, "X"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel(0, 1, "Y"); err != nil {
+		t.Fatal(err)
+	}
 	got2 := g.EdgeLabels(0, 1)
 	sort.Strings(got2)
 	want := []string{"REPEAT", "X", "Y"}

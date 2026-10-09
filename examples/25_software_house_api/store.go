@@ -12,6 +12,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -43,10 +44,10 @@ func dataDirPaths(dir string) (walPath, snapDir string) {
 	return filepath.Join(dir, "wal"), filepath.Join(dir, "snapshot")
 }
 
-// dataDirOptions returns the recovery/txn codec pair for the
+// dataDirOptions returns the store.Open codec pair for the
 // [string, float64] graph shape used throughout the example.
-func dataDirOptions() recovery.Options[string, float64] {
-	return recovery.Options[string, float64]{
+func dataDirOptions() store.Options[string, float64] {
+	return store.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
 	}
@@ -81,7 +82,7 @@ func hasManifest(dir string) bool {
 // granting the hold, so a request that arrives after Close is cleanly
 // rejected rather than admitted onto a WAL that is being released.
 type dataStore struct {
-	wal      *wal.Writer
+	opened   *store.Opened[string, float64]
 	txnStore *txn.Store[string, float64]
 	engine   *cypher.Engine
 	graph    *lpg.Graph[string, float64]
@@ -156,52 +157,39 @@ func openStore(ctx context.Context, dir string) (*dataStore, error) {
 	if err := ensureInit(dir); err != nil {
 		return nil, err
 	}
-	res, err := recovery.OpenCtx[string, float64](ctx, dir, dataDirOptions())
-	if err != nil {
-		return nil, fmt.Errorf("open: recover: %w", err)
-	}
-	// Fail-stop on a corrupt WAL: recovery surfaces genuine corruption (a CRC
+	// store.OpenCtx is the composed reopen. It recovers the snapshot and the
+	// WAL tail, and refuses a directory whose recovery was not clean: a CRC
 	// mismatch, bad magic, or unsupported record version inside an
-	// already-durable frame) via a non-nil error AND res.IsClean() == false.
-	// Opening the WAL for append in that state would permanently embed the
-	// corruption and silently drop every committed op past the bad frame, so
-	// the API refuses to serve from a corrupt data directory. A benign torn
-	// tail (the normal crash case) leaves res.IsClean() == true.
-	if !res.IsClean() {
-		return nil, fmt.Errorf("open: refusing to append to a corrupt WAL: %w", res.TailErr)
-	}
-	walPath, _ := dataDirPaths(dir)
-	w, err := wal.Open(walPath)
+	// already-durable frame, or an undecodable op inside a committed
+	// transaction. Appending there would permanently embed the damage, and
+	// every later recovery would discard what was appended, so the API refuses
+	// to serve from such a directory. A benign torn tail (the normal crash
+	// case) is clean. It then opens the WAL for append and builds the store
+	// from the recovery result, so this long-lived API server RESUMES the
+	// transaction sequence recovery derived rather than restarting at 0 and
+	// re-minting numbers the log already spent (rmp #2522).
+	opened, err := store.OpenCtx(ctx, dir, dataDirOptions())
 	if err != nil {
-		return nil, fmt.Errorf("open: wal: %w", err)
+		return nil, fmt.Errorf("open: %w", err)
 	}
-	// res.NewStore, not txn.NewStoreWithOptions: this is a long-lived API server
-	// reopening a directory whose WAL already holds transactions, so the store
-	// must RESUME the sequence recovery derived rather than restart at 0 and
-	// re-mint numbers the log already spent (rmp #2522). Building it off the
-	// Result is what applies that floor; the plain constructor cannot, because it
-	// never saw the log.
-	ts := res.NewStore(w, txn.Options[string, float64]{
-		Codec:       txn.NewStringCodec(),
-		WeightCodec: txn.NewFloat64WeightCodec(),
-	})
 	// Re-register the durable schema (UNIQUE constraints and secondary index
-	// definitions) recovered from disk. NewEngineWithStoreAndSchema re-seeds
-	// each constraint's value-set and re-backfills each index by scanning the
-	// recovered graph, so a constraint declared before a crash is enforced
-	// again and an index seek serves live rows immediately on restart. The
-	// plain NewEngineWithStore would leave the constraint registry empty
-	// (duplicates silently accepted) and the index manager unpopulated (index
-	// seeks reverting to a full label scan) — a durable-schema loss the engine
-	// only warns about. res.Constraints / res.Indexes are the reconciliation of
-	// the snapshot's constraints.bin / indexdefs.bin with the WAL tail.
+	// definitions) recovered from disk. NewEngineWithOpened re-seeds each
+	// constraint's value-set and restores each index (from its snapshot payload
+	// where recovery certified that safe, otherwise by scanning the recovered
+	// graph), so a constraint declared before a crash is enforced again and an
+	// index seek serves live rows immediately on restart. The plain
+	// NewEngineWithStore would leave the index manager unpopulated (index seeks
+	// reverting to a full label scan) and the constraints without their
+	// original names. The recovered Constraints / Indexes are the
+	// reconciliation of the snapshot's constraints.bin / indexdefs.bin with the
+	// WAL tail.
 	ds := &dataStore{
 		dir:      dir,
-		wal:      w,
-		txnStore: ts,
-		engine:   cypher.NewEngineWithStoreAndSchema(ts, res.Constraints, res.Indexes),
-		graph:    res.Graph,
-		res:      res,
+		opened:   opened,
+		txnStore: opened.Store(),
+		engine:   cypher.NewEngineWithOpened(opened),
+		graph:    opened.Graph(),
+		res:      opened.Recovery(),
 	}
 	// A recovered store that already holds data gets its schema (re-)declared
 	// now, at open, before any request is served. When the schema was persisted
@@ -211,7 +199,7 @@ func openStore(ctx context.Context, dir string) (*dataStore, error) {
 	// graph. A fresh, empty store declares its schema after the first seed
 	// instead (see dataStore.seed), so the index backfill covers the seeded
 	// nodes rather than an empty graph.
-	if ds.graph.LiveOrder() > 0 {
+	if ds.graph.LiveOrderStored() > 0 {
 		if err := ds.ensureSchema(ctx); err != nil {
 			_ = ds.Close()
 			return nil, fmt.Errorf("open: ensure schema: %w", err)
@@ -354,12 +342,12 @@ func (s *dataStore) Close() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.wal == nil {
+	if s.closed || s.opened == nil {
 		s.closed = true
 		return nil
 	}
 	s.closed = true
-	err := s.wal.Close()
-	s.wal = nil
+	err := s.opened.Close()
+	s.opened = nil
 	return err
 }

@@ -19,9 +19,19 @@ import (
 // (txnListCapHint), mirroring recovery.recoveryListCapHint and
 // snapshot.listCapHint. The per-element loop already fails on the first
 // truncated element, so the clamp only changes the eager reservation.
+//
+// The bound is read from [runtime.MemStats.TotalAlloc], which is a PROCESS-WIDE
+// counter: it charges this call with every byte any other goroutine allocates in
+// the same window. The test is therefore deliberately NOT parallel (rmp #2903): a
+// parallel sibling allocating during the window pushed the delta past the ceiling
+// under package load, failing a decode that had allocated nothing. Run
+// sequentially, no other test of this binary executes concurrently (the testing
+// package releases parallel tests only after the sequential ones return). What
+// remains — runtime background work and any goroutine an earlier test left
+// winding down — is absorbed by taking the SMALLEST delta over a few trials: a
+// regressed clamp over-allocates on every trial, so the minimum still exceeds the
+// ceiling, while a transient foreign allocation cannot inflate all of them.
 func TestSec_DecodeTxnListProp_HostileCountBounded(t *testing.T) {
-	t.Parallel()
-
 	// Wire: uint32 LE element-count = 0xFFFFFFFF, then a truncated element
 	// header (1-byte kind + partial length) so the loop bails at index 0.
 	buf := make([]byte, 0, 8)
@@ -32,26 +42,32 @@ func TestSec_DecodeTxnListProp_HostileCountBounded(t *testing.T) {
 	// loop sees len(buf) < 5 at index 0 and returns a truncated-header error.
 	buf = append(buf, byte(lpg.PropInt64), 0x01, 0x02)
 
-	var before, after runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&before)
-
-	_, _, err := decodeTxnListProp(buf)
-
-	runtime.ReadMemStats(&after)
-
-	if err == nil {
-		t.Fatal("expected a bounded corruption error for a hostile element count, got nil")
-	}
-
 	// TotalAlloc is monotonic across the call; the clamp keeps the eager
 	// reservation tiny (a handful of elements at most for this 3-byte body).
 	// A 64 MiB ceiling is orders of magnitude below the ~103 GiB an unclamped
 	// count would have reserved, yet far above this test's real footprint.
-	const allocCeiling = 64 << 20
-	if delta := after.TotalAlloc - before.TotalAlloc; delta > allocCeiling {
-		t.Fatalf("decodeTxnListProp allocated %d bytes for a hostile count; want <= %d (clamp regressed)",
-			delta, allocCeiling)
+	const (
+		allocCeiling = 64 << 20
+		trials       = 3
+	)
+	minDelta := uint64(1<<64 - 1)
+	for range trials {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+
+		_, _, err := decodeTxnListProp(buf)
+
+		runtime.ReadMemStats(&after)
+
+		if err == nil {
+			t.Fatal("expected a bounded corruption error for a hostile element count, got nil")
+		}
+		minDelta = min(minDelta, after.TotalAlloc-before.TotalAlloc)
+	}
+	if minDelta > allocCeiling {
+		t.Fatalf("decodeTxnListProp allocated at least %d bytes on each of %d trials for a hostile count; "+
+			"want <= %d (clamp regressed)", minDelta, trials, allocCeiling)
 	}
 }
 

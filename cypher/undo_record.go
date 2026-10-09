@@ -21,6 +21,7 @@ package cypher
 // always safe to call.
 
 import (
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -60,6 +61,10 @@ type mutationUndo struct {
 	// commit for nothing. The stamp is needed for BOTH kinds, so it carries its own
 	// flag rather than riding on the set.
 	stampCon bool
+	// conReg is the engine's constraint registry, consulted to scope the stamp to
+	// the labels and property keys a constraint names (rmp #3008). Nil only on an
+	// adapter without an engine, where every gated stamp is taken.
+	conReg *exec.ConstraintRegistry
 }
 
 // active reports whether undo recording is enabled. The helpers short-circuit
@@ -98,10 +103,16 @@ func (m mutationUndo) active() bool { return m.undo != nil }
 // the set is nil unless the registry holds a NOT NULL constraint. An unconstrained
 // schema therefore reaches neither the map nor the stamp shard.
 func (m mutationUndo) touch(n string) {
+	m.touchOnly(n)
+	m.noteCon(n)
+}
+
+// touchOnly records n in the touched-node set without stamping; the caller stamps
+// through the scoped [mutationUndo.noteConLabel] or [mutationUndo.noteConProp].
+func (m mutationUndo) touchOnly(n string) {
 	if m.touched != nil {
 		m.touched.touch(n)
 	}
-	m.noteCon(n)
 }
 
 // noteCon stamps n's per-node CONSTRAINT slot, so a transaction writing one half of
@@ -129,6 +140,36 @@ func (m mutationUndo) noteCon(n string) {
 	_ = m.wv.NoteConstraintTouch(n)
 }
 
+// noteConLabel is [mutationUndo.noteCon] for a write of label: it stamps only when
+// some constraint names label (rmp #3008).
+//
+// # Why the stamp is scoped by the WRITTEN label or key
+//
+// A violation of a single-property constraint on (L, p) needs a write of L or of
+// p: a write of anything else leaves every (L, p) pair of the node as it was. So
+// two transactions can only produce one together when each wrote L or p, and
+// stamping exactly those writes is what makes such a pair collide. Stamping every
+// write of a constrained schema instead refused a peer over a label or key no
+// constraint names — measured as `SET n.b` refused with a conflict in node
+// constraint beside a UNIQUE constraint on (:U, u).
+//
+// The scope is the label or KEY, not the node's current labels: a property write
+// on a node that does not yet carry L must still collide with a peer giving it L.
+func (m mutationUndo) noteConLabel(n, label string) {
+	if !m.stampCon || (m.conReg != nil && !m.conReg.ConstrainsLabel(label)) {
+		return
+	}
+	_ = m.wv.NoteConstraintTouch(n)
+}
+
+// noteConProp is [mutationUndo.noteConLabel] for a write of property key key.
+func (m mutationUndo) noteConProp(n, key string) {
+	if !m.stampCon || (m.conReg != nil && !m.conReg.ConstrainsProperty(key)) {
+		return
+	}
+	_ = m.wv.NoteConstraintTouch(n)
+}
+
 // recordAddNode records the inverse of an AddNode that freshly created (or
 // revived a tombstoned) node key n. wasNew is the adapter's determination that
 // the node did not previously exist as a live node. When wasNew is false the
@@ -151,20 +192,34 @@ func (m mutationUndo) recordAddNode(n string, wasNew bool) {
 		return
 	}
 	m.undo.record(func() {
-		m.wv.RemoveNode(n)
+		// An inverse has nowhere to return an error, and this view carries the
+		// statement's transaction, which records any refusal on itself.
+		_, _ = m.wv.RemoveNode(n)
 		m.wv.Graph().DecrNodesAdded()
 	})
 }
 
 // recordAddEdge records the inverse of an AddEdge/AddEdgeH between src and dst.
-// srcNew/dstNew report whether each endpoint was freshly created by the call
-// (so its node-creation is also undone). The inverse removes the edge and
+// handle is the stable handle AddEdgeH stamped on the new slot, or 0 for a plain
+// AddEdge. srcNew/dstNew report whether each endpoint was freshly created by the
+// call (so its node-creation is also undone). The inverse removes the edge and
 // decrements the edges-added counter; for each freshly created endpoint it also
 // tombstones the node and decrements the nodes-added counter. The endpoint
 // removals are recorded as part of THIS entry (not via recordAddNode) because
 // AddEdge interns endpoints itself without routing through the mutator's
 // AddNode.
-func (m mutationUndo) recordAddEdge(src, dst string, srcNew, dstNew bool) {
+//
+// # The inverse removes the CREATED instance, by handle (rmp #2885)
+//
+// On a multigraph the pair may already hold committed parallel edges when the
+// statement appends its own. [lpg.WriteView.RemoveEdge] removes the FIRST slot
+// for the pair — a committed sibling, not the appended one — so a rolled-back
+// `MATCH (a)-->(b) CREATE (a)-[:V]->(b)` deleted every pre-existing edge it was
+// parallel to and kept the rolled-back `:V` edge in its place. Removing by the
+// handle the append minted retires exactly the instance this entry inverts,
+// together with its per-handle metadata. A 0 handle has no identity to address
+// and degrades to the first-slot removal ([lpg.Graph.RemoveEdgeByHandle]).
+func (m mutationUndo) recordAddEdge(src, dst string, handle uint64, srcNew, dstNew bool) {
 	// An endpoint freshly created by AddEdge may carry a constrained label
 	// without the required property, so record each new endpoint for the
 	// commit-time existence check (#1754).
@@ -179,14 +234,14 @@ func (m mutationUndo) recordAddEdge(src, dst string, srcNew, dstNew bool) {
 	}
 	selfLoop := src == dst
 	m.undo.record(func() {
-		m.wv.RemoveEdge(src, dst)
+		m.wv.RemoveEdgeByHandle(src, dst, handle)
 		m.wv.Graph().DecrEdgesAdded()
 		if srcNew {
-			m.wv.RemoveNode(src)
+			_, _ = m.wv.RemoveNode(src) // as above: the refusal is recorded on the transaction
 			m.wv.Graph().DecrNodesAdded()
 		}
 		if dstNew && !selfLoop {
-			m.wv.RemoveNode(dst)
+			_, _ = m.wv.RemoveNode(dst) // as above: the refusal is recorded on the transaction
 			m.wv.Graph().DecrNodesAdded()
 		}
 	})
@@ -204,11 +259,12 @@ func (m mutationUndo) recordSetNodeLabel(n, label string, hadLabel bool) {
 	// Adding a label can bring an existence constraint into play on a node that
 	// lacks the required property, so record the node for the commit-time check
 	// (#1754). Only a label the statement actually added matters (hadLabel=false).
-	m.touch(n)
+	m.touchOnly(n)
+	m.noteConLabel(n, label)
 	if !m.active() {
 		return
 	}
-	m.undo.record(func() { m.wv.RemoveNodeLabel(n, label) })
+	m.undo.record(func() { _ = m.wv.RemoveNodeLabel(n, label) })
 }
 
 // recordRemoveNodeLabel records the inverse of detaching label from n. hadLabel
@@ -222,7 +278,7 @@ func (m mutationUndo) recordRemoveNodeLabel(n, label string, hadLabel bool) {
 	// Losing a label RELEASES any UNIQUE reservation the node held under it, so it
 	// is a write to one half of a declared invariant (rmp #2355). Stamped before the
 	// undo guard, because the stamp is gated on the schema and not on undo activity.
-	m.noteCon(n)
+	m.noteConLabel(n, label)
 	if !m.active() {
 		return
 	}
@@ -250,7 +306,11 @@ func (m mutationUndo) recordRemoveNode(n string, wasLive bool) {
 		// the node's committed birth record, so the reclaim must read the
 		// died-then-born order as "alive before the transaction", never the
 		// chain-level primordial flag).
-		m.wv.Revive(n)
+		//
+		// Revive reports a refusal only over the zero WriteTx (rmp #2947); this
+		// view carries the statement's transaction, which records a conflict on
+		// itself, and an inverse has nowhere to return one.
+		_ = m.wv.Revive(n)
 		m.wv.Graph().DecrNodesRemoved()
 	})
 }
@@ -258,12 +318,17 @@ func (m mutationUndo) recordRemoveNode(n string, wasLive bool) {
 // recordSetNodeProperty records the inverse of SetNodeProperty(n, key, …). It
 // captures the prior value (prev, had) the adapter read BEFORE the write: when
 // the property existed, the inverse restores the old value; otherwise it
-// deletes the key the statement added.
-func (m mutationUndo) recordSetNodeProperty(n, key string, prev lpg.PropertyValue, had bool) {
+// deletes the key the statement added. took is whether the write wrote a
+// version, read before this call.
+func (m mutationUndo) recordSetNodeProperty(n, key string, prev lpg.PropertyValue, had, took bool) {
 	// Setting a property MOVES any UNIQUE reservation the node held for that key, so
 	// it is a write to the other half of a declared invariant (rmp #2355). Stamped
-	// before the undo guard, for the same reason as the label loss above.
-	m.noteCon(n)
+	// before the undo guard, for the same reason as the label loss above — and only
+	// when the write took effect: a SET to the value already there moves nothing
+	// (rmp #3008).
+	if took {
+		m.noteConProp(n, key)
+	}
 	if !m.active() {
 		return
 	}
@@ -271,7 +336,7 @@ func (m mutationUndo) recordSetNodeProperty(n, key string, prev lpg.PropertyValu
 		if had {
 			_ = m.wv.SetNodeProperty(n, key, prev)
 		} else {
-			m.wv.DelNodeProperty(n, key)
+			_ = m.wv.DelNodeProperty(n, key) // replays a name the forward write accepted (rmp #2748)
 		}
 	})
 }
@@ -287,7 +352,8 @@ func (m mutationUndo) recordDelNodeProperty(n, key string, prev lpg.PropertyValu
 	// data model) can violate an existence constraint if the node still carries
 	// the constrained label in its final state, so record it for the commit-time
 	// check (#1754). Only a real removal (had=true) matters.
-	m.touch(n)
+	m.touchOnly(n)
+	m.noteConProp(n, key)
 	if !m.active() {
 		return
 	}
@@ -303,7 +369,7 @@ func (m mutationUndo) recordSetEdgeLabel(src, dst, label string, hadLabel bool) 
 	if !m.active() || hadLabel {
 		return
 	}
-	m.undo.record(func() { m.wv.RemoveEdgeLabel(src, dst, label) })
+	m.undo.record(func() { _ = m.wv.RemoveEdgeLabel(src, dst, label) })
 }
 
 // recordSetEdgeProperty records the inverse of SetEdgeProperty(src, dst, key, …)
@@ -316,7 +382,7 @@ func (m mutationUndo) recordSetEdgeProperty(src, dst, key string, prev lpg.Prope
 		if had {
 			_ = m.wv.SetEdgeProperty(src, dst, key, prev)
 		} else {
-			m.wv.DelEdgeProperty(src, dst, key)
+			_ = m.wv.DelEdgeProperty(src, dst, key) // replays a name the forward write accepted (rmp #2748)
 		}
 	})
 }
@@ -353,7 +419,7 @@ func (m mutationUndo) recordSetEdgePropertyByHandle(src, dst string, handle uint
 		if had {
 			_ = m.wv.SetEdgePropertyByHandle(src, dst, handle, key, prev)
 		} else {
-			m.wv.DelEdgePropertyByHandle(src, dst, handle, key)
+			_ = m.wv.DelEdgePropertyByHandle(src, dst, handle, key) // replays a name the forward write accepted (rmp #2748)
 		}
 	})
 }
@@ -446,7 +512,7 @@ func (m mutationUndo) captureRemovedEdge(src, dst string) removedEdgePreimage {
 	// The FIRST src→dst slot is the one [Graph.RemoveEdge] drops; capture its
 	// handle so the by-handle capture path below records the exact instance.
 	var handle uint64
-	if h, ok := m.wv.Graph().FirstEdgeHandle(src, dst); ok {
+	if h, ok := m.wv.Graph().FirstEdgeHandleAsOf(src, dst, nil); ok {
 		handle = h
 	}
 	return m.captureRemovedEdgeH(src, dst, handle)
@@ -479,26 +545,68 @@ func (m mutationUndo) captureRemovedEdgeByHandle(src, dst string, handle uint64)
 // weight); every Cypher relationship is created with the zero weight, so the
 // re-added instance's weight is exact for the engine's only caller.
 func (m mutationUndo) captureRemovedEdgeH(src, dst string, handle uint64) removedEdgePreimage {
+	src, dst = m.creationOrientation(src, dst, handle)
 	pre := removedEdgePreimage{src: src, dst: dst}
-	if !m.wv.Graph().AdjList().HasEdge(src, dst) {
+	if !m.wv.Graph().HasEdgeAsOf(src, dst, nil) {
 		return pre
 	}
 	pre.hadEdge = true
-	if w, ok := m.wv.Graph().EdgeWeight(src, dst); ok {
+	if w, ok := m.wv.Graph().EdgeWeightAsOf(src, dst, nil); ok {
 		pre.weight = w
 	}
-	pre.labels = m.wv.Graph().EdgeLabels(src, dst)
-	pre.props = m.wv.Graph().EdgeProperties(src, dst)
+	pre.labels = m.wv.Graph().EdgeLabelsAsOf(src, dst, nil)
+	pre.props = m.wv.Graph().EdgePropertiesAsOf(src, dst, nil)
 	pre.createCount = m.wv.Graph().EdgeCreateCount(src, dst)
 	// When the removed instance carries a stable handle, snapshot that handle's
 	// per-instance labels and properties so the inverse re-adds the instance
 	// with its own metadata even if the removal cleared the handle store.
 	if handle != 0 {
 		pre.handle = handle
-		pre.handleLabels = m.wv.Graph().EdgeLabelsByHandle(src, dst, handle)
-		pre.handleProps = m.wv.Graph().EdgePropertiesByHandle(src, dst, handle)
+		pre.handleLabels = m.wv.Graph().EdgeLabelsByHandleAsOf(src, dst, handle, nil)
+		pre.handleProps = m.wv.Graph().EdgePropertiesByHandleAsOf(src, dst, handle, nil)
 	}
 	return pre
+}
+
+// creationOrientation returns the endpoint order under which the relationship
+// identified by handle keeps its metadata, so its removal pre-image is captured
+// — and its inverse re-adds it — in that order (rmp #2886).
+//
+// On an undirected graph one relationship occupies two adjacency slots that
+// share one handle: the slot it was created as (a→b) and its mirror (b→a). Its
+// type, per-pair label set, per-handle labels and properties, property cells
+// and CREATE counter are all stored under the creation order only; the mirror
+// carries the handle and nothing else. Every removal of the relationship's last
+// slot between the pair clears BOTH orders ([lpg.Graph.RemoveAllEdgesFrom],
+// [lpg.Graph.RemoveEdge], [lpg.Graph.RemoveEdgeByHandle]). A removal reached
+// through the mirror — DETACH DELETE of the relationship's END node, whose
+// entry lists the mirror, or a DELETE of a relationship bound through its
+// mirror slot — used to capture the empty mirror order, so the rollback
+// re-added the relationship reversed and without its type or properties: a
+// committed relationship damaged by a rolled-back transaction.
+//
+// The creation order is the one holding the handle's relationship-type record,
+// which Cypher CREATE and MERGE write for every relationship. The order is kept
+// as given when the graph is directed, the relationship is a self-loop (one
+// slot), there is no handle, or the record is not held by the reversed order —
+// in particular for a column-typed slot, which has no record in either order.
+func (m mutationUndo) creationOrientation(src, dst string, handle uint64) (string, string) {
+	g := m.wv.Graph()
+	if handle == 0 || src == dst || g.AdjList().Directed() {
+		return src, dst
+	}
+	srcID, ok := g.AdjList().Mapper().Lookup(src)
+	if !ok {
+		return src, dst
+	}
+	dstID, ok := g.AdjList().Mapper().Lookup(dst)
+	if !ok {
+		return src, dst
+	}
+	if g.HasEdgeHandleLabelRecordByIDAsOf(srcID, dstID, handle, nil) || !g.HasEdgeHandleLabelRecordByIDAsOf(dstID, srcID, handle, nil) {
+		return src, dst
+	}
+	return dst, src
 }
 
 // recordRemoveEdge records the inverse of removing edge (src, dst) from the
@@ -524,7 +632,7 @@ func (m mutationUndo) recordRemoveEdge(pre *removedEdgePreimage, wasPresent bool
 		_, _ = m.wv.AddEdgeHIfAbsent(pre.src, pre.dst, pre.weight, pre.handle)
 		m.wv.Graph().DecrEdgesRemoved()
 		for _, lbl := range pre.labels {
-			m.wv.SetEdgeLabel(pre.src, pre.dst, lbl)
+			_ = m.wv.SetEdgeLabel(pre.src, pre.dst, lbl) // replays a name the forward write accepted (rmp #2748)
 		}
 		for k, v := range pre.props {
 			_ = m.wv.SetEdgeProperty(pre.src, pre.dst, k, v)
@@ -534,7 +642,7 @@ func (m mutationUndo) recordRemoveEdge(pre *removedEdgePreimage, wasPresent bool
 		// case: RemoveEdge keeps it while a sibling survives); authoritative
 		// when it did not. No-op when handle is 0.
 		for _, lbl := range pre.handleLabels {
-			m.wv.SetEdgeLabelByHandle(pre.src, pre.dst, pre.handle, lbl)
+			_ = m.wv.SetEdgeLabelByHandle(pre.src, pre.dst, pre.handle, lbl) // replays a name the forward write accepted (rmp #2748)
 		}
 		for k, v := range pre.handleProps {
 			// Restoring a value that passed validation at the original write; ignore the error.
@@ -576,12 +684,57 @@ func captureAllOutEdgePreimages(
 		return nil
 	}
 	pre := make([]removedEdgePreimage, len(outgoing))
+	if !r.active() {
+		for i, dst := range outgoing {
+			pre[i] = removedEdgePreimage{src: n, dst: dst, hadEdge: g.HasEdgeAsOf(n, dst, nil)}
+		}
+		return pre
+	}
+	// Each entry of outgoing is ONE adjacency slot, so parallel edges to the same
+	// destination appear once per slot. Every slot must be captured under its OWN
+	// stable handle (rmp #2885): capturing each occurrence through
+	// [mutationUndo.captureRemovedEdge] resolved the FIRST slot's handle every
+	// time, so the inverses re-added that one handle repeatedly —
+	// [lpg.Graph.AddEdgeHIfAbsent] no-ops every repeat — and a rolled-back
+	// DETACH DELETE of a node with k parallel out-edges to one neighbour
+	// restored one of them and lost k-1 committed relationships.
+	//
+	// outgoing enumerates the entry in slot order (it is [adjlist.AdjList.Neighbours]
+	// over the same entry, skipping only unresolvable ids), so a single forward
+	// cursor over the entry aligns each occurrence with its slot in O(degree). A
+	// cursor that runs off the end — the entry no longer matches the snapshot —
+	// falls back to the first-slot capture, the pre-#2885 behaviour.
+	var (
+		nbs     []graph.NodeID
+		weights []float64
+		handles []uint64
+	)
+	if srcID, ok := g.AdjList().Mapper().Lookup(n); ok {
+		nbs, weights, handles = g.AdjList().LoadEntryH(srcID)
+	}
+	cur := 0
 	for i, dst := range outgoing {
-		if r.active() {
+		slot := -1
+		if dstID, ok := g.AdjList().Mapper().Lookup(dst); ok && handles != nil {
+			for ; cur < len(nbs); cur++ {
+				if nbs[cur] == dstID {
+					slot = cur
+					cur++
+					break
+				}
+			}
+		}
+		if slot < 0 || slot >= len(handles) {
+			// No per-slot identity to recover (simple graph, or storage without a
+			// handle column): parallel edges cannot carry distinct identities
+			// there, so the first slot stands for the slot.
 			pre[i] = r.captureRemovedEdge(n, dst)
 			continue
 		}
-		pre[i] = removedEdgePreimage{src: n, dst: dst, hadEdge: g.AdjList().HasEdge(n, dst)}
+		pre[i] = r.captureRemovedEdgeH(n, dst, handles[slot])
+		if pre[i].hadEdge && slot < len(weights) {
+			pre[i].weight = weights[slot]
+		}
 	}
 	return pre
 }
@@ -619,8 +772,3 @@ func journalAllOutEdgesRemoved(r mutationUndo, c relDeleteCounter, pre []removed
 		r.recordRemoveEdge(&pre[i], true)
 	}
 }
-
-// _ pins graph.NodeID into this file's imports so a future inverse that needs a
-// NodeID-keyed restore has the type in scope; the helpers above operate on node
-// keys, matching the adapter surface.
-var _ = graph.NodeID(0)

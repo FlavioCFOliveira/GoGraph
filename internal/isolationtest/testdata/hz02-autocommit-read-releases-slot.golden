@@ -1,0 +1,365 @@
+spec hz02-autocommit-read-releases-slot: 2 sessions, 15 permutations
+# HZ02. s1 opens a read-only transaction and reads the number of registered
+# snapshots, then commits and reads it again; s2 runs an autocommit read and then
+# reads the number. An autocommit read holds no slot after it returns; the open read
+# transaction holds exactly one.
+
+starting permutation: s1b s1p s1c s1p2 s2r s2p
+step s1b: BEGIN READ
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s1p s1c s2r s1p2 s2p
+step s1b: BEGIN READ
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s1p s1c s2r s2p s1p2
+step s1b: BEGIN READ
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s1p s2r s1c s1p2 s2p
+step s1b: BEGIN READ
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1c: COMMIT
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s1p s2r s1c s2p s1p2
+step s1b: BEGIN READ
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s1p s2r s2p s1c s1p2
+step s1b: BEGIN READ
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s2r s1p s1c s1p2 s2p
+step s1b: BEGIN READ
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s2r s1p s1c s2p s1p2
+step s1b: BEGIN READ
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s2r s1p s2p s1c s1p2
+step s1b: BEGIN READ
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s2r s2p s1p s1c s1p2
+step s1b: BEGIN READ
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s2r s1b s1p s1c s1p2 s2p
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1b: BEGIN READ
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s2r s1b s1p s1c s2p s1p2
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1b: BEGIN READ
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s2r s1b s1p s2p s1c s1p2
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1b: BEGIN READ
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s2r s1b s2p s1p s1c s1p2
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1b: BEGIN READ
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s2r s2p s1b s1p s1c s1p2
+step s2r: MATCH (n:Item) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s1b: BEGIN READ
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: COMMIT
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)

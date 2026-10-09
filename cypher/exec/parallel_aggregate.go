@@ -48,9 +48,10 @@ package exec
 // caller's goroutine, then sums the per-worker partials into the single result
 // row. The happens-before edge (worker return → wg.Done → wg.Wait) makes the
 // combine race-free with no additional synchronisation. Because the join and
-// combine run on the goroutine that drives Next — which the engine drives
-// inside the graph's visibility-barrier RLock (lpg.Graph.View) — no worker
-// goroutine outlives the barrier.
+// combine run on the goroutine that drives Next, no worker goroutine outlives
+// the statement: wg.Wait joins every one of them before Next returns. (This
+// used to credit the graph's visibility-barrier RLock, lpg.Graph.View; rmp
+// #2344 removed it and a read takes no barrier.)
 //
 // # Bounded resources
 //

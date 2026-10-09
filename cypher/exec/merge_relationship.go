@@ -79,16 +79,25 @@ type MergeRelationship struct {
 	relPropPreds    []propLiteral // parsed predicate values (only literals)
 	onCreateActions []MergeRelAction
 	onMatchActions  []MergeRelAction
-	// Pending state for multi-row emission when an existing edge has
-	// CREATE-multiplicity > 1. The base row is held verbatim and the
-	// remaining count tells Next() how many more times to re-emit before
-	// pulling a fresh row from the child (Merge5 [3]).
-	pendingRow Row
+	// pending holds the rows still to emit for the current driving row when
+	// more than one parallel relationship matched — one row per matched
+	// instance, each bound to its own handle (Merge5 [3], rmp #2939).
+	// pendingIdx is the next one to emit.
+	pending []Row
+	// matches and handleBuf are the reusable per-row buffers the instance
+	// enumeration fills, so a steady-state driving row does not allocate them.
+	// They start on the inline arrays below, which cover the common pair of
+	// at most a few parallel relationships without any allocation.
+	matches   []mergeRelMatch
+	handleBuf []uint64
+	matchArr  [2]mergeRelMatch
+	handleArr [4]uint64
+	pendArr   [2]Row
 
-	srcCol           int // input-row column index holding src NodeID / NodeValue
-	dstCol           int // input-row column index holding dst NodeID / NodeValue
-	relCol           int // output-row column index for the bound relationship; -1 when anonymous
-	pendingRemaining int64
+	srcCol     int // input-row column index holding src NodeID / NodeValue
+	dstCol     int // input-row column index holding dst NodeID / NodeValue
+	relCol     int // output-row column index for the bound relationship; -1 when anonymous
+	pendingIdx int
 
 	relPropPredsParsed bool // tracks one-time parse of relPropsRaw
 	// undirected reports whether the source pattern declared `(a)-[:T]-(b)`
@@ -96,6 +105,10 @@ type MergeRelationship struct {
 	// and (dst, src); the create path still uses the canonical (src, dst)
 	// direction.
 	undirected bool
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // MergeRelAction is a pre-parsed `SET <relVar>.<key> = <value>` item, or a
@@ -115,6 +128,17 @@ type MergeRelAction struct {
 	value      string // opaque literal string, parsed via parsePropValue
 	retainKeys []string
 	replace    bool // whole-entity `=` replace (clear absent keys first)
+	// ord is the position of the source SET item in its ON CREATE / ON MATCH
+	// list; it keys the item's evaluator ([MergeActionEvalKey], rmp #2953).
+	ord int
+}
+
+// At returns a copy of a carrying ord, the position of its source SET item in
+// its ON CREATE / ON MATCH list, which keys the item's per-row evaluator
+// ([MergeActionEvalKey], rmp #2953).
+func (a MergeRelAction) At(ord int) MergeRelAction {
+	a.ord = ord
+	return a
 }
 
 // NewMergeRelationship constructs a MergeRelationship operator.
@@ -270,21 +294,30 @@ func (op *MergeRelationship) Init(ctx context.Context) error {
 	return op.child.Init(ctx)
 }
 
+// mergeRelMatch is one stored relationship instance that satisfies the MERGE
+// pattern: its endpoints in storage order and its stable handle (0 for a slot
+// stamped without one).
+type mergeRelMatch struct {
+	srcKey, dstKey string
+	srcID, dstID   graph.NodeID
+	handle         uint64
+}
+
 // Next emits the next input row, ensuring that the (src)-[:relType]->(dst)
-// edge exists in the graph (either pre-existing or newly created). When
-// an existing edge has CREATE-multiplicity N > 1 the operator emits N
-// rows for the same upstream tuple (Merge5 [3]).
+// relationship exists in the graph (either pre-existing or newly created).
+// When N > 1 stored relationships match, the operator emits N rows for the
+// same upstream tuple, one per matched instance (Merge5 [3], rmp #2939).
 func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	if err := op.ctx.Err(); err != nil {
 		return false, err
 	}
-	if op.pendingRemaining > 0 {
-		*out = op.pendingRow
-		op.pendingRemaining--
+	if op.pendingIdx < len(op.pending) {
+		*out = op.pending[op.pendingIdx]
+		op.pending[op.pendingIdx] = nil
+		op.pendingIdx++
 		return true, nil
 	}
-	var row Row
-	ok, err := op.child.Next(&row)
+	row, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}
@@ -335,61 +368,52 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	if mpErr != nil {
 		return false, mpErr
 	}
-	// Match if an edge already exists with the requested type AND the
-	// inline property predicate (if any) holds against the live edge
-	// property map. The type check is essential on a multigraph: HasEdge
-	// is type-agnostic per (src, dst) pair, so without edgeHasRequestedType
-	// a `MERGE (a)-[:T2]->(b)` issued after a `T1` edge already exists
-	// would bind to the T1 edge and never create the distinct T2 parallel
-	// edge (rmp #1683). This is safe because the operator tree is single-goroutine,
-	// not because writers are serialised (they are not, since rmp #2306).
-	if op.mutator.HasEdge(srcKey, dstKey) && op.edgeHasRequestedType(srcKey, dstKey) && op.matchesRelProps(srcKey, dstKey, effectiveProps) {
-		// Edge labels are per-(src,dst) in the LPG; adding the same
-		// label twice is idempotent. Ensure the requested type is
-		// recorded, then run ON MATCH actions.
-		op.mutator.SetEdgeLabel(srcKey, dstKey, op.relType)
-		// Resolve the matched edge's by-pair handle so ON MATCH property writes
-		// mirror onto its by-handle store (#1684); 0 ⇒ per-pair store only.
-		matchedHandle, _ := op.mutator.FirstEdgeHandle(srcKey, dstKey)
-		if err := op.applyRelActions(row, srcKey, dstKey, matchedHandle, op.onMatchActions, op.onMatchEvals); err != nil {
-			return false, err
-		}
-		emitted := op.emitRow(row, srcID, dstID, srcKey, dstKey, matchedHandle)
-		// Multi-CREATE multiplicity emit (Merge5 [3]). Skip when the
-		// pattern carries an inline property predicate — the
-		// counter records every CREATE call regardless of property,
-		// but with a predicate only a subset can satisfy `r:T
-		// {prop: v}` (Merge5 [5] CREATEs with `name: 'r1'` and
-		// `name: 'r2'`, MERGEs with `name: 'r2'` → only one row).
-		if len(effectiveProps) == 0 {
-			if mult := op.mutator.EdgeCreateCount(srcKey, dstKey); mult > 1 {
-				op.pendingRow = emitted
-				op.pendingRemaining = mult - 1
-			}
-		}
-		*out = emitted
-		return true, nil
+	// Match every stored relationship between the pair whose OWN type and
+	// properties satisfy the pattern — one row per instance, as a MATCH of the
+	// same pattern would bind (rmp #2939). The instances are enumerated by
+	// handle from the adjacency and tested through their by-handle metadata:
+	// the pair's label union and coalesced property map fold every parallel
+	// sibling together, and the CREATE ordinal count is not rebuilt by
+	// recovery, so neither can say which relationship matched. The type test
+	// is also what keeps `MERGE (a)-[:T2]->(b)` from binding a T1 edge on a
+	// multigraph (rmp #1683). An undirected pattern also matches the reverse
+	// order (Merge5 [13]); the create path still uses (src, dst). This is safe
+	// because the operator tree is single-goroutine, not because writers are
+	// serialised (they are not, since rmp #2306).
+	if op.matches == nil {
+		op.matches, op.handleBuf, op.pending = op.matchArr[:0], op.handleArr[:0], op.pendArr[:0]
 	}
-	// Undirected MERGE: also probe the reverse direction. When an edge
-	// exists from dst → src that satisfies the same type-and-property
-	// predicate, bind to that edge rather than creating a new one.
-	// Closes Merge5 [13].
-	if op.undirected && op.mutator.HasEdge(dstKey, srcKey) && op.edgeHasRequestedType(dstKey, srcKey) && op.matchesRelProps(dstKey, srcKey, effectiveProps) {
-		op.mutator.SetEdgeLabel(dstKey, srcKey, op.relType)
-		// Reverse-direction match: the edge is stored (dstKey -> srcKey), so
-		// resolve and mirror against that stored pair (#1684).
-		matchedHandle, _ := op.mutator.FirstEdgeHandle(dstKey, srcKey)
-		if err := op.applyRelActions(row, dstKey, srcKey, matchedHandle, op.onMatchActions, op.onMatchEvals); err != nil {
-			return false, err
-		}
-		emitted := op.emitRow(row, dstID, srcID, dstKey, srcKey, matchedHandle)
-		if len(effectiveProps) == 0 {
-			if mult := op.mutator.EdgeCreateCount(dstKey, srcKey); mult > 1 {
-				op.pendingRow = emitted
-				op.pendingRemaining = mult - 1
+	op.matches = op.matches[:0]
+	op.appendMatches(srcKey, dstKey, srcID, dstID, effectiveProps)
+	if op.undirected && srcKey != dstKey {
+		op.appendMatches(dstKey, srcKey, dstID, srcID, effectiveProps)
+	}
+	if len(op.matches) > 0 {
+		op.pending = op.pending[:0]
+		op.pendingIdx = 0
+		labelled := [2]bool{}
+		for i := range op.matches {
+			m := op.matches[i]
+			// Relationship types are also kept as a per-pair union; re-assert
+			// the matched type there once per stored order (idempotent).
+			ord := 0
+			if m.srcKey != srcKey {
+				ord = 1
 			}
+			if !labelled[ord] {
+				labelled[ord] = true
+				if err := op.mutator.SetEdgeLabel(m.srcKey, m.dstKey, op.relType); err != nil {
+					return false, err
+				}
+			}
+			if err := op.applyRelActions(row, m.srcKey, m.dstKey, m.handle, op.onMatchActions, op.onMatchEvals); err != nil {
+				return false, err
+			}
+			op.pending = append(op.pending, op.emitRow(row, m.srcID, m.dstID, m.srcKey, m.dstKey, m.handle))
 		}
-		*out = emitted
+		*out = op.pending[0]
+		op.pending[0] = nil
+		op.pendingIdx = 1
 		return true, nil
 	}
 	// No matching edge — create one, tag it, write inline rel properties,
@@ -408,8 +432,12 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		return false, fmt.Errorf("exec: MergeRelationship: AddEdge: %w", addErr)
 	}
 	if op.relType != "" {
-		op.mutator.SetEdgeLabel(srcKey, dstKey, op.relType)
-		op.mutator.SetEdgeLabelByHandle(srcKey, dstKey, handle, op.relType)
+		if err := op.mutator.SetEdgeLabel(srcKey, dstKey, op.relType); err != nil {
+			return false, err
+		}
+		if err := op.mutator.SetEdgeLabelByHandle(srcKey, dstKey, handle, op.relType); err != nil {
+			return false, err
+		}
 	}
 	for _, p := range effectiveProps {
 		if setErr := op.mutator.SetEdgeProperty(srcKey, dstKey, p.key, p.value); setErr != nil {
@@ -429,16 +457,47 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	return true, nil
 }
 
-// matchesRelProps reports whether the (src, dst) edge satisfies the inline
-// property predicate preds — the per-row effective property set (parsed
-// literals merged with any relPropsEvalFn dynamic entries). Returns true when
-// no predicate was declared; otherwise every predicate key must be present and
-// Equal to the matching property value on the edge.
-func (op *MergeRelationship) matchesRelProps(srcKey, dstKey string, preds []propLiteral) bool {
+// appendMatches appends to op.matches every relationship stored as
+// (srcKey, dstKey) whose own type and properties satisfy the pattern. An
+// instance already matched through the other order — an undirected graph's
+// mirror slot shares its relationship's handle — is not appended twice.
+func (op *MergeRelationship) appendMatches(srcKey, dstKey string, srcID, dstID graph.NodeID, preds []propLiteral) {
+	op.handleBuf = op.mutator.EdgeHandles(srcKey, dstKey, op.handleBuf[:0])
+	for _, h := range op.handleBuf {
+		if h != 0 && op.matchedHandle(h) {
+			continue
+		}
+		if !relInstanceHasType(op.mutator, srcKey, dstKey, h, op.relType) {
+			continue
+		}
+		if !op.matchesRelProps(srcKey, dstKey, h, preds) {
+			continue
+		}
+		op.matches = append(op.matches, mergeRelMatch{srcKey: srcKey, dstKey: dstKey, srcID: srcID, dstID: dstID, handle: h})
+	}
+}
+
+// matchedHandle reports whether op.matches already holds handle.
+func (op *MergeRelationship) matchedHandle(handle uint64) bool {
+	for i := range op.matches {
+		if op.matches[i].handle == handle {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesRelProps reports whether the relationship instance handle stored as
+// (src, dst) satisfies the inline property predicate preds — the per-row
+// effective property set (parsed literals merged with any relPropsEvalFn
+// dynamic entries). Returns true when no predicate was declared; otherwise
+// every predicate key must be present and Equal to the matching property value
+// on the instance's OWN property map.
+func (op *MergeRelationship) matchesRelProps(srcKey, dstKey string, handle uint64, preds []propLiteral) bool {
 	if len(preds) == 0 {
 		return true
 	}
-	live := op.mutator.EdgeProperties(srcKey, dstKey)
+	live := relInstanceProps(op.mutator, srcKey, dstKey, handle)
 	for _, p := range preds {
 		got, ok := live[p.key]
 		if !ok {
@@ -455,26 +514,6 @@ func (op *MergeRelationship) matchesRelProps(srcKey, dstKey string, preds []prop
 	return true
 }
 
-// edgeHasRequestedType reports whether the directed edge (src, dst)
-// carries op.relType among its labels. MERGE always declares exactly one
-// relationship type (the empty case is rejected upstream), so a match
-// requires that type to be present on the pair; otherwise the pattern
-// must create its own (possibly parallel) edge. On a multigraph the pair
-// label set is the union over every parallel edge, so this answers "does
-// SOME edge of this type already exist between the pair" — the right
-// pair-level question for MERGE's match-or-create decision (rmp #1683).
-func (op *MergeRelationship) edgeHasRequestedType(srcKey, dstKey string) bool {
-	if op.relType == "" {
-		return true
-	}
-	for _, l := range op.mutator.EdgeLabels(srcKey, dstKey) {
-		if l == op.relType {
-			return true
-		}
-	}
-	return false
-}
-
 // emitRow returns the output row for a successfully matched-or-created
 // edge. When the operator has a non-anonymous relationship variable
 // (relCol >= 0) the row is extended with a RelationshipValue carrying
@@ -482,8 +521,8 @@ func (op *MergeRelationship) edgeHasRequestedType(srcKey, dstKey string) bool {
 // is passed through unchanged.
 //
 // handle is the STABLE PER-EDGE HANDLE of the edge this row binds — the
-// just-allocated handle on the create branch, the matched edge's by-pair
-// [GraphMutator.FirstEdgeHandle] on either match branch. It is the SAME
+// just-allocated handle on the create branch, the matched instance's own handle
+// on the match branch. It is the SAME
 // identity applyRelActions writes its ON CREATE / ON MATCH mirrors under, so
 // the row names exactly the instance this operator's own writes landed on.
 //
@@ -500,15 +539,8 @@ func (op *MergeRelationship) emitRow(row Row, srcID, dstID graph.NodeID, srcKey,
 	if op.relCol < 0 {
 		return row
 	}
-	var relProps expr.MapValue
-	if rawProps := op.mutator.EdgeProperties(srcKey, dstKey); len(rawProps) > 0 {
-		relProps = make(expr.MapValue, len(rawProps))
-		for k, pv := range rawProps {
-			if v, ok := lpgPropToExprBinding(pv); ok {
-				relProps[k] = v
-			}
-		}
-	}
+	// The instance's OWN properties, not the pair's coalesced map (rmp #2939).
+	relProps := exprMapFromLPGProps(relInstanceProps(op.mutator, srcKey, dstKey, handle))
 	rel := expr.RelationshipValue{
 		ID:         handle,
 		StartID:    uint64(srcID),
@@ -540,10 +572,8 @@ func (op *MergeRelationship) emitRow(row Row, srcID, dstID graph.NodeID, srcKey,
 // (#1684) under handle, so the by-handle READ path reports the post-action value
 // rather than a stale CREATE-time snapshot (Merge7 [1]-[5]). handle is the stable
 // per-edge handle of the edge the actions target: the just-allocated handle on
-// the ON CREATE path, or the matched edge's by-PAIR first-slot handle (via
-// [GraphMutator.FirstEdgeHandle]) on the ON MATCH path. MERGE binds a single
-// logical (srcKey, dstKey) edge, so the by-pair handle is the right identity —
-// not a positional instance handle. handle == 0 means the edge carries no stable
+// the ON CREATE path, or the matched instance's own handle on the ON MATCH path,
+// which runs once per matched instance (rmp #2939). handle == 0 means the edge carries no stable
 // handle (simple-graph / pre-handle storage): the by-handle mirror is skipped and
 // only the per-pair store is written, byte-identical to the pre-#1684 behaviour.
 //
@@ -563,7 +593,9 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 		// existing edge property absent from retainKeys before the per-key
 		// write actions that follow apply the new values.
 		if act.replace && act.key == "" && act.value == "" {
-			op.clearRelPropsAbsent(srcKey, dstKey, handle, act.retainKeys)
+			if err := op.clearRelPropsAbsent(srcKey, dstKey, handle, act.retainKeys); err != nil {
+				return err
+			}
 			continue
 		}
 		// Entity-copy sentinel: key=="" carries the source variable name in
@@ -603,7 +635,9 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 				for k := range srcProps {
 					retain = append(retain, k)
 				}
-				op.clearRelPropsAbsent(srcKey, dstKey, handle, retain)
+				if err := op.clearRelPropsAbsent(srcKey, dstKey, handle, retain); err != nil {
+					return err
+				}
 			}
 			// Copy, mirrored key-by-key to the by-handle store so both
 			// stores stay in lock-step (by-handle == per-pair for the
@@ -633,17 +667,24 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 				// left unchanged to keep the fix in scope — #1965).
 				continue
 			}
-			fn, has := evals[MergeActionEvalKey(op.relVar, act.key)]
+			if isInvalidPropertyValueErr(err) {
+				// An unstorable literal (a nested collection, or a list with a
+				// null element) is refused, never deferred (rmp #2941).
+				return err
+			}
+			fn, has := evals[MergeActionEvalKey(act.ord, op.relVar, act.key)]
 			if !has {
 				return fmt.Errorf("exec: MergeRelationship: parse value %q: %w", act.value, err)
 			}
-			val, isNull, hasValue, evalErr := fn(op.actionEvalRow(row, srcKey, dstKey))
+			val, isNull, hasValue, evalErr := fn(op.actionEvalRow(row, srcKey, dstKey, handle))
 			if evalErr != nil {
 				return evalErr
 			}
 			if isNull {
 				// RHS evaluated to null → openCypher removes the property.
-				op.delEdgeProp(srcKey, dstKey, handle, act.key)
+				if err := op.delEdgeProp(srcKey, dstKey, handle, act.key); err != nil {
+					return err
+				}
 				continue
 			}
 			if !hasValue {
@@ -675,25 +716,32 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 // on parallel edges the aggregate can carry a key a SIBLING wrote, which the
 // bound instance never had — removing it must count 0. The handle==0 fallback
 // keeps the pairwise path byte-identical.
-func (op *MergeRelationship) delEdgeProp(srcKey, dstKey string, handle uint64, key string) {
+func (op *MergeRelationship) delEdgeProp(srcKey, dstKey string, handle uint64, key string) error {
 	if m, ok := op.mutator.(relInstancePropRemover); ok && handle != 0 {
-		m.DelEdgePropertyOnInstance(srcKey, dstKey, handle, key)
-		return
+		if err := m.DelEdgePropertyOnInstance(srcKey, dstKey, handle, key); err != nil {
+			return err
+		}
+		return nil
 	}
-	op.mutator.DelEdgeProperty(srcKey, dstKey, key)
+	if err := op.mutator.DelEdgeProperty(srcKey, dstKey, key); err != nil {
+		return err
+	}
 	if handle != 0 {
-		op.mutator.DelEdgePropertyByHandle(srcKey, dstKey, handle, key)
+		if err := op.mutator.DelEdgePropertyByHandle(srcKey, dstKey, handle, key); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // actionEvalRow returns a row for a per-row RHS evaluator: a copy of the
 // driving row with the relationship variable bound at its schema column as a
-// RelationshipValue carrying the edge's CURRENT properties, so `r.<key>`
+// RelationshipValue carrying the bound instance's CURRENT properties, so `r.<key>`
 // resolves to the live edge value. The endpoint node columns are preserved so
 // cross-variable references (`SET r.x = a.y`) still resolve. When the operator
 // has no relationship column (anonymous relationship, relCol < 0) the row is
 // returned unchanged — an anonymous relationship cannot be named by a SET item.
-func (op *MergeRelationship) actionEvalRow(row Row, srcKey, dstKey string) Row {
+func (op *MergeRelationship) actionEvalRow(row Row, srcKey, dstKey string, handle uint64) Row {
 	if op.relCol < 0 {
 		return row
 	}
@@ -703,44 +751,35 @@ func (op *MergeRelationship) actionEvalRow(row Row, srcKey, dstKey string) Row {
 	}
 	out := make(Row, width)
 	copy(out, row)
-	out[op.relCol] = op.currentRelValue(srcKey, dstKey)
+	out[op.relCol] = op.currentRelValue(srcKey, dstKey, handle)
 	return out
 }
 
-// currentRelValue builds a RelationshipValue for the (srcKey, dstKey) edge
-// carrying its current property map, converted to expr values. Used to bind
-// the relationship variable in a per-row RHS evaluation row so a self-
-// referential ON MATCH SET (`r.n = r.n + 1`) reads the live edge value.
-func (op *MergeRelationship) currentRelValue(srcKey, dstKey string) expr.RelationshipValue {
-	var props expr.MapValue
-	if raw := op.mutator.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
-		props = make(expr.MapValue, len(raw))
-		for k, pv := range raw {
-			if v, ok := lpgPropToExprBinding(pv); ok {
-				props[k] = v
-			}
-		}
-	}
-	return expr.RelationshipValue{Type: op.relType, Properties: props}
+// currentRelValue builds a RelationshipValue for the instance handle stored as
+// (srcKey, dstKey), carrying its current property map converted to expr
+// values. Used to bind the relationship variable in a per-row RHS evaluation
+// row so a self-referential ON MATCH SET (`r.n = r.n + 1`) reads the bound
+// instance's live value, not a parallel sibling's.
+func (op *MergeRelationship) currentRelValue(srcKey, dstKey string, handle uint64) expr.RelationshipValue {
+	props := exprMapFromLPGProps(relInstanceProps(op.mutator, srcKey, dstKey, handle))
+	return expr.RelationshipValue{ID: handle, Type: op.relType, Properties: props}
 }
 
-// clearRelPropsAbsent removes every property currently set on the directed
-// edge (srcKey, dstKey) whose key is NOT in retain, in lock-step on the
-// per-pair store and (when handle != 0) the by-handle store. It implements the
-// clear half of true openCypher REPLACE for `SET r = {…}` / `SET r = node`
-// (#1687).
+// clearRelPropsAbsent removes every property of the bound instance whose key
+// is NOT in retain, in lock-step on the per-pair store and (when handle != 0)
+// the by-handle store. It implements the clear half of true openCypher REPLACE
+// for `SET r = {…}` / `SET r = node` (#1687).
 //
-// The deletions go through the mutator's DelEdgeProperty /
-// DelEdgePropertyByHandle, each of which records its inverse on the
-// transaction undo log, so a rolled-back statement restores the cleared values
-// exactly (atomicity). The retained set is taken from the per-pair snapshot;
-// because every per-pair write is mirrored by-handle (#1684) the by-handle
-// store holds the same key set, so clearing the same absent keys on both keeps
-// them congruent.
-func (op *MergeRelationship) clearRelPropsAbsent(srcKey, dstKey string, handle uint64, retain []string) {
-	existing := op.mutator.EdgeProperties(srcKey, dstKey)
+// The keys are the union of the per-pair aggregate and the instance's own bag
+// ([relClearKeys], as the SET clause uses), and each removal goes through
+// [MergeRelationship.delEdgeProp], which records its inverse on the transaction
+// undo log — so a rolled-back statement restores the cleared values exactly —
+// and counts -properties on the instance's OWN bag rather than on the pair
+// aggregate a parallel sibling also contributes to (#2501).
+func (op *MergeRelationship) clearRelPropsAbsent(srcKey, dstKey string, handle uint64, retain []string) error {
+	existing := relClearKeys(op.mutator, srcKey, dstKey, handle)
 	if len(existing) == 0 {
-		return
+		return nil
 	}
 	keep := make(map[string]struct{}, len(retain))
 	for _, k := range retain {
@@ -750,11 +789,11 @@ func (op *MergeRelationship) clearRelPropsAbsent(srcKey, dstKey string, handle u
 		if _, ok := keep[k]; ok {
 			continue
 		}
-		op.mutator.DelEdgeProperty(srcKey, dstKey, k)
-		if handle != 0 {
-			op.mutator.DelEdgePropertyByHandle(srcKey, dstKey, handle, k)
+		if err := op.delEdgeProp(srcKey, dstKey, handle, k); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 // Close closes the child operator.

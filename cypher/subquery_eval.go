@@ -142,12 +142,22 @@ func (e *subqueryEvaluator) bind(params map[string]expr.Value, outer *buildOpts)
 // the entry operator, the leaf Argument that receives the per-row seed, and
 // the variable→column schema layout used to materialise that seed.
 type compiledSubquery struct {
+	// op is the pipeline a drive pulls. It is nil for a UNION body that is
+	// driven branch by branch — an EXISTS over any UNION, a COUNT over a
+	// UNION ALL — and is then never read; see [compiledSubquery.branches].
 	op  exec.Operator
 	arg *exec.Argument
 	// outerVars is the ordered list of outer-scope variables that the inner
 	// plan correlates against. Position i in outerVars corresponds to column
 	// i in the seed Row that the inner Argument re-emits.
 	outerVars []string
+
+	// branches holds one compiled pipeline per branch of a UNION body, in
+	// document order, each with its OWN seed Argument (rmp #2627). It is nil
+	// for a one-branch body. When op is non-nil as well (a COUNT over a
+	// de-duplicating UNION), op is the [exec.Union] fold over the branches' ops,
+	// arg is nil, and a drive seeds every branch's Argument before Init.
+	branches []*compiledSubquery
 }
 
 // newSubqueryEvaluator constructs the evaluator for one query run. The caller
@@ -210,11 +220,36 @@ func (e *subqueryEvaluator) EvalExists(ctx context.Context, sub *ast.ExistsSubqu
 	if err != nil {
 		return nil, err
 	}
+	if cs.branches != nil {
+		return e.driveExistsBranches(ctx, cs, row)
+	}
 	hasRow, err := e.driveOne(ctx, cs, row)
 	if err != nil {
 		return nil, err
 	}
 	return expr.BoolValue(hasRow), nil
+}
+
+// driveExistsBranches answers EXISTS over a UNION body: true as soon as one
+// branch yields a row, false when none does (rmp #2627).
+//
+// It SHORT-CIRCUITS: a branch after the first one to yield a row is never
+// initialised and never pulled, so its work — and any error its evaluation
+// would raise — does not happen. UNION and UNION ALL give the same answer here,
+// because de-duplication cannot turn a non-empty result empty or an empty one
+// non-empty; the branches are therefore driven independently and no
+// de-duplication state is built.
+func (e *subqueryEvaluator) driveExistsBranches(ctx context.Context, cs *compiledSubquery, row expr.RowContext) (expr.Value, error) {
+	for _, b := range cs.branches {
+		hasRow, err := e.driveOne(ctx, b, row)
+		if err != nil {
+			return nil, err
+		}
+		if hasRow {
+			return expr.BoolValue(true), nil
+		}
+	}
+	return expr.BoolValue(false), nil
 }
 
 // EvalCount implements [expr.SubqueryEvaluator]. It drives the compiled inner
@@ -245,6 +280,19 @@ func (e *subqueryEvaluator) EvalCount(ctx context.Context, sub *ast.CountSubquer
 	if err != nil {
 		return nil, err
 	}
+	if cs.op == nil {
+		// A UNION ALL body: the count is the sum of the branches' counts, since
+		// UNION ALL keeps every row of every branch (rmp #2627).
+		var total int64
+		for _, b := range cs.branches {
+			n, err := e.driveAll(ctx, b, row)
+			if err != nil {
+				return nil, err
+			}
+			total += n
+		}
+		return expr.IntegerValue(total), nil
+	}
 	count, err := e.driveAll(ctx, cs, row)
 	if err != nil {
 		return nil, err
@@ -260,8 +308,8 @@ func (e *subqueryEvaluator) compileExists(sub *ast.ExistsSubquery, row expr.RowC
 	if cs, ok := e.compiled[sub]; ok {
 		return cs, nil
 	}
-	innerAST := existsToSingleQuery(sub)
-	cs, err := e.compileSubAST(innerAST, row)
+	innerAST := existsToQuery(sub)
+	cs, err := e.compileSubAST(innerAST, row, false)
 	if err != nil {
 		return nil, fmt.Errorf("compile EXISTS subquery: %w", err)
 	}
@@ -278,8 +326,8 @@ func (e *subqueryEvaluator) compileCount(sub *ast.CountSubquery, row expr.RowCon
 	if cs, ok := e.compiled[sub]; ok {
 		return cs, nil
 	}
-	innerAST := countToSingleQuery(sub)
-	cs, err := e.compileSubAST(innerAST, row)
+	innerAST := countToQuery(sub)
+	cs, err := e.compileSubAST(innerAST, row, true)
 	if err != nil {
 		return nil, fmt.Errorf("compile COUNT subquery: %w", err)
 	}
@@ -294,7 +342,11 @@ func (e *subqueryEvaluator) compileCount(sub *ast.CountSubquery, row expr.RowCon
 // translates innerAST to an [ir.LogicalPlan] rooted at a synthetic Argument
 // leaf carrying the outer-scope correlation variables, then physically builds
 // the plan into an [exec.Operator].
-func (e *subqueryEvaluator) compileSubAST(innerAST *ast.SingleQuery, row expr.RowContext) (*compiledSubquery, error) {
+//
+// A UNION body is compiled branch by branch; see [subqueryEvaluator.compileUnion].
+// combine is true for COUNT, which needs a de-duplicating UNION's rows combined
+// across branches; EXISTS passes false because it never needs them combined.
+func (e *subqueryEvaluator) compileSubAST(innerAST ast.Query, row expr.RowContext, combine bool) (*compiledSubquery, error) {
 	// Collect the outer-scope variables in deterministic order. Stable order
 	// matters: column i in the seed Row must map to the same variable on every
 	// drive call.
@@ -308,6 +360,24 @@ func (e *subqueryEvaluator) compileSubAST(innerAST *ast.SingleQuery, row expr.Ro
 	innerPlan, err := ir.TranslateSubquery(innerAST, outerVars, tag)
 	if err != nil {
 		return nil, fmt.Errorf("translate inner: %w", err)
+	}
+	switch innerPlan.(type) {
+	case *ir.Union, *ir.UnionAll:
+		return e.compileUnion(innerPlan, outerVars, tag, combine)
+	}
+	return e.compileBranch(innerPlan, outerVars, tag)
+}
+
+// compileBranch physically builds one translated subquery pipeline rooted at an
+// Argument leaf carrying tag. A [ir.ProduceResults] root — a branch of a UNION
+// body — is built as its child and then projected onto exactly its declared
+// columns, so every branch emits rows of the same shape in the same column
+// order, which is what a de-duplicating UNION compares.
+func (e *subqueryEvaluator) compileBranch(innerPlan ir.LogicalPlan, outerVars []string, tag uint32) (*compiledSubquery, error) {
+	var cols []string
+	if pr, ok := innerPlan.(*ir.ProduceResults); ok {
+		cols = pr.Columns
+		innerPlan = pr.Child
 	}
 
 	// Build the physical pipeline. Pre-register the seed Argument so the
@@ -327,15 +397,80 @@ func (e *subqueryEvaluator) compileSubAST(innerAST *ast.SingleQuery, row expr.Ro
 	// variable hydrate and a nested subquery or pattern predicate find its
 	// evaluator. See [buildOpts.forSubquery] for what the child carries and, more
 	// importantly, for what it must not.
-	op, err := buildOperator(innerPlan, e.walker, e.labels, e.reg, e.params, schema, nil, nil, argByTag, e.outer.forSubquery())
+	opts := e.outer.forSubquery()
+	op, err := buildOperator(innerPlan, e.walker, e.labels, e.reg, e.params, schema, nil, nil, argByTag, opts)
 	if err != nil {
 		return nil, fmt.Errorf("build inner operator: %w", err)
+	}
+	if cols != nil {
+		if op, _, err = wrapWithColumnPassthrough(op, cols, schema, opts); err != nil {
+			return nil, fmt.Errorf("build inner projection: %w", err)
+		}
 	}
 	return &compiledSubquery{
 		op:        op,
 		arg:       seed,
 		outerVars: outerVars,
 	}, nil
+}
+
+// compileUnion compiles the UNION / UNION ALL fold [ir.TranslateSubquery]
+// returns for a multi-branch body (rmp #2627).
+//
+// Every branch is built SEPARATELY, with its own seed [exec.Argument] and its
+// own column-index map. The branches cannot share one Argument instance: an
+// Argument re-emits its seed row once per Init, so a second leaf reading the
+// same instance would see it already consumed. Nor can one column-index map
+// serve two branches, for the reason [buildPlanEngine] gives each branch of a
+// top-level UNION a scope of its own: a branch's variables are not its
+// sibling's.
+//
+// When combine is set and the body de-duplicates, the branches' ops are folded
+// under [exec.NewUnion] exactly as a top-level UNION is (cypher/api.go,
+// buildPlanEngine), so a COUNT over a UNION counts DISTINCT rows by the same
+// row equality and under the same distinct-row cap as a top-level UNION. In
+// every other case the branches are left to be driven one by one.
+func (e *subqueryEvaluator) compileUnion(plan ir.LogicalPlan, outerVars []string, tag uint32, combine bool) (*compiledSubquery, error) {
+	var (
+		branchPlans []ir.LogicalPlan
+		distinct    bool
+	)
+	// Unfold the left-associative fold back into document order.
+	for {
+		switch u := plan.(type) {
+		case *ir.Union:
+			distinct = true
+			branchPlans = append(branchPlans, u.Right)
+			plan = u.Left
+			continue
+		case *ir.UnionAll:
+			branchPlans = append(branchPlans, u.Right)
+			plan = u.Left
+			continue
+		}
+		break
+	}
+	branchPlans = append(branchPlans, plan)
+	for i, j := 0, len(branchPlans)-1; i < j; i, j = i+1, j-1 {
+		branchPlans[i], branchPlans[j] = branchPlans[j], branchPlans[i]
+	}
+
+	out := &compiledSubquery{outerVars: outerVars, branches: make([]*compiledSubquery, 0, len(branchPlans))}
+	for _, bp := range branchPlans {
+		b, err := e.compileBranch(bp, outerVars, tag)
+		if err != nil {
+			return nil, err
+		}
+		out.branches = append(out.branches, b)
+	}
+	if combine && distinct {
+		op := out.branches[0].op
+		for _, b := range out.branches[1:] {
+			op = exec.NewUnion(op, b.op, 0)
+		}
+		out.op = op
+	}
+	return out, nil
 }
 
 // driveOne seeds the inner argument and pulls at most one row, returning
@@ -392,7 +527,14 @@ func (e *subqueryEvaluator) prepareDrive(ctx context.Context, cs *compiledSubque
 		// plan's scan/expand operators see the same NodeID layout they expect.
 		seedRow[i] = downgradeForRow(row[v])
 	}
-	cs.arg.SetOuterRow(seedRow)
+	if cs.arg != nil {
+		cs.arg.SetOuterRow(seedRow)
+	}
+	// A combined UNION pipeline reads every branch's Argument; each is seeded
+	// with the same outer row before the combined Init reaches it.
+	for _, b := range cs.branches {
+		b.arg.SetOuterRow(seedRow)
+	}
 	if err := cs.op.Init(ctx); err != nil {
 		return fmt.Errorf("subquery init: %w", err)
 	}
@@ -436,10 +578,11 @@ func downgradeForRow(v expr.Value) expr.Value {
 	}
 }
 
-// existsToSingleQuery normalises sub to a *ast.SingleQuery suitable for the
-// translator. The pattern form is wrapped in a synthetic MATCH so the same
-// translation path handles both forms uniformly.
-func existsToSingleQuery(sub *ast.ExistsSubquery) *ast.SingleQuery {
+// existsToQuery normalises sub to the body the translator takes: the block
+// form's own query (a *ast.SingleQuery, or a *ast.MultiQuery for a UNION body),
+// or, for the pattern form, a synthetic MATCH so the same translation path
+// handles both forms uniformly.
+func existsToQuery(sub *ast.ExistsSubquery) ast.Query {
 	if sub.Query != nil {
 		return sub.Query
 	}
@@ -457,9 +600,9 @@ func existsToSingleQuery(sub *ast.ExistsSubquery) *ast.SingleQuery {
 	}
 }
 
-// countToSingleQuery is the COUNT counterpart of [existsToSingleQuery], and
-// threads Where for the same load-bearing reason (rmp #2242).
-func countToSingleQuery(sub *ast.CountSubquery) *ast.SingleQuery {
+// countToQuery is the COUNT counterpart of [existsToQuery], and threads Where
+// for the same load-bearing reason (rmp #2242).
+func countToQuery(sub *ast.CountSubquery) ast.Query {
 	if sub.Query != nil {
 		return sub.Query
 	}
@@ -474,7 +617,7 @@ func countToSingleQuery(sub *ast.CountSubquery) *ast.SingleQuery {
 // adjacency-answered recognisers should see for one subquery occurrence,
 // whichever of the two spellings the user wrote (rmp #2648).
 //
-// It is the INVERSE of [existsToSingleQuery] / [countToSingleQuery] above, and
+// It is the INVERSE of [existsToQuery] / [countToQuery] above, and
 // deliberately lives beside them: those two turn a pattern form into the
 // synthetic `MATCH <pattern> [WHERE …]` body the translator compiles, and this
 // turns exactly that body back into the pair the recognisers take. Keeping the
@@ -497,7 +640,7 @@ func subqueryRecogniserBody(sub ast.Expression) (*ast.Pattern, *ast.Where) {
 	var (
 		pat   *ast.Pattern
 		where *ast.Where
-		body  *ast.SingleQuery
+		body  ast.Query
 	)
 	switch s := sub.(type) {
 	case *ast.ExistsSubquery:
@@ -511,8 +654,12 @@ func subqueryRecogniserBody(sub ast.Expression) (*ast.Pattern, *ast.Where) {
 	if pat != nil {
 		return pat, where
 	}
-	if p, w, ok := ir.PatternFormOf(body); ok {
-		return p, w
+	// A UNION body is never one pattern, so only a one-branch body can be
+	// recognised; a *ast.MultiQuery is "not recognisable" (rmp #2627).
+	if single, isSingle := body.(*ast.SingleQuery); isSingle {
+		if p, w, ok := ir.PatternFormOf(single); ok {
+			return p, w
+		}
 	}
 	return nil, nil
 }

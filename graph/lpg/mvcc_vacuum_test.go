@@ -45,8 +45,8 @@ func churn(t *testing.T, g *Graph[string, float64], n int) {
 		t.Fatalf("AddNode: %v", err)
 	}
 	for i := 0; i < n; i++ {
-		if err := g.ApplyAtomically(func() error {
-			return g.SetNodeProperty("a", "w", Int64Value(int64(i)))
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			return g.Writer(tx).SetNodeProperty("a", "w", Int64Value(int64(i)))
 		}); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
@@ -82,8 +82,8 @@ func TestVacuum_CommitPathPerformsNoReclamation(t *testing.T) {
 	const rounds = reclaimThreshold * 4
 	var peak int64
 	for i := 0; i < rounds; i++ {
-		if err := g.ApplyAtomically(func() error {
-			return g.SetNodeProperty("a", "w", Int64Value(int64(i)))
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			return g.Writer(tx).SetNodeProperty("a", "w", Int64Value(int64(i)))
 		}); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
@@ -282,8 +282,8 @@ func TestVacuum_PassRespectsTheRecordBound(t *testing.T) {
 	// Two versions per round (a property delta and its predecessor's chain link),
 	// so this holds comfortably more than one pass may release.
 	for i := 0; i < vacuumRecordsPerPass+reclaimThreshold; i++ {
-		if err := g.ApplyAtomically(func() error {
-			return g.SetNodeProperty("a", "w", Int64Value(int64(i)))
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			return g.Writer(tx).SetNodeProperty("a", "w", Int64Value(int64(i)))
 		}); err != nil {
 			g.EndRead(pin)
 			t.Fatalf("write %d: %v", i, err)
@@ -329,8 +329,8 @@ func TestVacuum_BoundedUnderChurnWithALongLivedReader(t *testing.T) {
 	}
 	pin := g.BeginRead()
 	for i := 0; i < reclaimThreshold*4; i++ {
-		if err := g.ApplyAtomically(func() error {
-			return g.SetNodeProperty("a", "w", Int64Value(int64(i)))
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			return g.Writer(tx).SetNodeProperty("a", "w", Int64Value(int64(i)))
 		}); err != nil {
 			g.EndRead(pin)
 			t.Fatalf("write %d: %v", i, err)
@@ -375,8 +375,8 @@ func TestVacuum_ReclaimNowExcludesTheBackgroundSweeper(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < reclaimThreshold*2; i++ {
-			if err := g.ApplyAtomically(func() error {
-				return g.SetNodeProperty("a", "w", Int64Value(int64(i)))
+			if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+				return g.Writer(tx).SetNodeProperty("a", "w", Int64Value(int64(i)))
 			}); err != nil {
 				t.Errorf("write %d: %v", i, err)
 				return
@@ -429,7 +429,7 @@ func TestDeferredIndexRemoval_ConcurrentReaddIsNotLost(t *testing.T) {
 	if err := g.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	lid := g.reg.Intern("L")
+	lid := g.reg.intern("L")
 	const rounds = 4000
 
 	for r := 0; r < rounds; r++ {
@@ -442,8 +442,10 @@ func TestDeferredIndexRemoval_ConcurrentReaddIsNotLost(t *testing.T) {
 		}
 		// Remove it, which DEFERS the bitmap removal, and let the watermark pass
 		// the removal's instant so the next sweep finds it ready.
-		if err := g.ApplyAtomically(func() error {
-			g.RemoveNodeLabel(k, "L")
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			if err := g.Writer(tx).RemoveNodeLabel(k, "L"); err != nil {
+				t.Fatalf("g.RemoveNodeLabel(k, \"L\"): %v", err)
+			}
 			return nil
 		}); err != nil {
 			t.Fatalf("round %d remove: %v", r, err)

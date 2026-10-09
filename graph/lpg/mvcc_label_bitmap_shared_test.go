@@ -28,14 +28,14 @@ func sharedBitmapRig(t *testing.T, n int) (*Graph[string, float64], LabelID) {
 		if err := g.AddNode(name); err != nil {
 			t.Fatalf("AddNode(%s): %v", name, err)
 		}
-		if err := g.ApplyAtomically(func() error { return g.SetNodeLabel(name, "L") }); err != nil {
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error { return g.Writer(tx).SetNodeLabel(name, "L") }); err != nil {
 			t.Fatalf("SetNodeLabel(%s): %v", name, err)
 		}
 	}
 	// Drain the rig's OWN history: without this the gate is live for L and every
 	// read takes the correcting path, which is the opposite of what is measured.
 	g.ReclaimNow()
-	return g, g.reg.Intern("L")
+	return g, g.reg.intern("L")
 }
 
 // TestLabelBitmapAsOf_QuietLabelReturnsTheIndexImageUncopied is the white-box
@@ -96,7 +96,12 @@ func TestLabelBitmapAsOf_CorrectingPathDoesNotTouchTheIndexImage(t *testing.T) {
 	// the correcting path is forced.
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
-	if err := g.ApplyAtomically(func() error { g.RemoveNodeLabel("aa", "L"); return nil }); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).RemoveNodeLabel("aa", "L"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"aa\", \"L\"): %v", err)
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("RemoveNodeLabel: %v", err)
 	}
 

@@ -1,0 +1,1624 @@
+spec ro02-read-view-before-two-writers-lpg: 3 sessions, 90 permutations
+# RO02 through the lpg API: s1 and s2 open write transactions, then s3 pins
+# Graph.BeginRead; s1 sets x.v = 1 and s2 sets y.v = 2, each ending its transaction;
+# s3 reads both. s3 sees neither.
+
+starting permutation: s1w s1c s2w s2c s3r s3c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s1c s2w s3r s2c s3c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s1c s2w s3r s3c s2c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s1c s3r s2w s2c s3c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s1c s3r s2w s3c s2c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s1c s3r s3c s2w s2c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s2w s1c s2c s3r s3c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s2w s1c s3r s2c s3c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s2w s1c s3r s3c s2c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s2w s2c s1c s3r s3c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s2w s2c s3r s1c s3c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s2w s2c s3r s3c s1c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s2w s3r s1c s2c s3c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s2w s3r s1c s3c s2c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s2w s3r s2c s1c s3c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s2w s3r s2c s3c s1c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s2w s3r s3c s1c s2c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s2w s3r s3c s2c s1c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s3r s1c s2w s2c s3c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s3r s1c s2w s3c s2c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s3r s1c s3c s2w s2c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s3r s2w s1c s2c s3c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s3r s2w s1c s3c s2c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s3r s2w s2c s1c s3c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s3r s2w s2c s3c s1c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s3r s2w s3c s1c s2c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s3r s2w s3c s2c s1c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s3r s3c s1c s2w s2c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s3r s3c s2w s1c s2c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s1w s3r s3c s2w s2c s1c
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s1w s1c s2c s3r s3c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s1w s1c s3r s2c s3c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s1w s1c s3r s3c s2c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s1w s2c s1c s3r s3c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s1w s2c s3r s1c s3c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s1w s2c s3r s3c s1c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s1w s3r s1c s2c s3c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s1w s3r s1c s3c s2c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s1w s3r s2c s1c s3c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s1w s3r s2c s3c s1c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s1w s3r s3c s1c s2c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s1w s3r s3c s2c s1c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s2c s1w s1c s3r s3c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s2c s1w s3r s1c s3c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s2c s1w s3r s3c s1c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s2c s3r s1w s1c s3c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s2c s3r s1w s3c s1c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s2c s3r s3c s1w s1c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s3r s1w s1c s2c s3c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s3r s1w s1c s3c s2c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s3r s1w s2c s1c s3c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s3r s1w s2c s3c s1c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s3r s1w s3c s1c s2c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s3r s1w s3c s2c s1c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s3r s2c s1w s1c s3c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s3r s2c s1w s3c s1c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s3r s2c s3c s1w s1c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s3r s3c s1w s1c s2c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s3r s3c s1w s2c s1c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s2w s3r s3c s2c s1w s1c
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s1w s1c s2w s2c s3c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s1w s1c s2w s3c s2c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s1w s1c s3c s2w s2c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s1w s2w s1c s2c s3c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s1w s2w s1c s3c s2c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s1w s2w s2c s1c s3c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s1w s2w s2c s3c s1c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s1w s2w s3c s1c s2c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s1w s2w s3c s2c s1c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s1w s3c s1c s2w s2c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s1w s3c s2w s1c s2c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3c: lpg: Graph.EndRead
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s1w s3c s2w s2c s1c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3c: lpg: Graph.EndRead
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s2w s1w s1c s2c s3c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s2w s1w s1c s3c s2c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s2w s1w s2c s1c s3c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s2w s1w s2c s3c s1c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s2w s1w s3c s1c s2c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s2w s1w s3c s2c s1c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s2w s2c s1w s1c s3c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s2w s2c s1w s3c s1c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s3c: lpg: Graph.EndRead
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s2w s2c s3c s1w s1c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s3c: lpg: Graph.EndRead
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s2w s3c s1w s1c s2c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3c: lpg: Graph.EndRead
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s2w s3c s1w s2c s1c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3c: lpg: Graph.EndRead
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s2w s3c s2c s1w s1c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s3c: lpg: Graph.EndRead
+step s2c: lpg: Session.EndVersionedTx
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s3c s1w s1c s2w s2c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s3c s1w s2w s1c s2c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s3c s1w s2w s2c s1c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s3c s2w s1w s1c s2c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s3c s2w s1w s2c s1c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)
+
+starting permutation: s3r s3c s2w s2c s1w s1c
+step s3r: lpg: read x.v, y.v
+x.v|y.v
+---+---
+0  |0  
+(1 row)
+step s3c: lpg: Graph.EndRead
+step s2w: lpg: SetNodeProperty(y, v, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"x" |1
+"y" |2
+(2 rows)

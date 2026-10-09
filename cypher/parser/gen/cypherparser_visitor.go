@@ -223,9 +223,6 @@ type CypherParserVisitor interface {
 	// Visit a parse tree produced by CypherParser#filterWith.
 	VisitFilterWith(ctx *FilterWithContext) interface{}
 
-	// Visit a parse tree produced by CypherParser#reduceExpression.
-	VisitReduceExpression(ctx *ReduceExpressionContext) interface{}
-
 	// Visit a parse tree produced by CypherParser#patternComprehension.
 	VisitPatternComprehension(ctx *PatternComprehensionContext) interface{}
 
@@ -288,4 +285,7 @@ type CypherParserVisitor interface {
 
 	// Visit a parse tree produced by CypherParser#foreachSt.
 	VisitForeachSt(ctx *ForeachStContext) interface{}
+
+	// Visit a parse tree produced by CypherParser#reduceExpression.
+	VisitReduceExpression(ctx *ReduceExpressionContext) interface{}
 }

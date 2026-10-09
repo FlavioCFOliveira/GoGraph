@@ -26,7 +26,9 @@ func TestTopoGeneration_RemoveNodeAdvances(t *testing.T) {
 	}
 
 	before := g.TopoGeneration()
-	g.RemoveNode("b")
+	if err := g.RemoveNode("b"); err != nil {
+		t.Fatalf("g.RemoveNode(\"b\"): %v", err)
+	}
 	after := g.TopoGeneration()
 	if after == before {
 		t.Errorf("RemoveNode left TopoGeneration at %d; a tombstone changes the live "+
@@ -36,7 +38,9 @@ func TestTopoGeneration_RemoveNodeAdvances(t *testing.T) {
 	// Idempotent: removing an already-tombstoned node changes nothing, so it must
 	// NOT advance the epoch and needlessly invalidate every cache.
 	again := g.TopoGeneration()
-	g.RemoveNode("b")
+	if err := g.RemoveNode("b"); err != nil {
+		t.Fatalf("g.RemoveNode(\"b\"): %v", err)
+	}
 	if g.TopoGeneration() != again {
 		t.Error("removing an already-tombstoned node advanced TopoGeneration; the " +
 			"no-op must not invalidate caches")
@@ -49,7 +53,9 @@ func TestTopoGeneration_ReviveAdvances(t *testing.T) {
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatal(err)
 	}
-	g.RemoveNode("b")
+	if err := g.RemoveNode("b"); err != nil {
+		t.Fatalf("g.RemoveNode(\"b\"): %v", err)
+	}
 
 	before := g.TopoGeneration()
 	if err := g.AddNode("b"); err != nil { // revives
@@ -77,13 +83,17 @@ func TestTopoGeneration_TombstoneCountIsNotASoundKey(t *testing.T) {
 		}
 	}
 
-	g.RemoveNode("b")
+	if err := g.RemoveNode("b"); err != nil {
+		t.Fatalf("g.RemoveNode(\"b\"): %v", err)
+	}
 	countAfterFirst, genAfterFirst := g.TombstoneCount(), g.TopoGeneration()
 
 	if err := g.AddNode("b"); err != nil { // revive b
 		t.Fatal(err)
 	}
-	g.RemoveNode("c") // tombstone c instead
+	if err := g.RemoveNode("c"); err != nil {
+		t.Fatalf("g.RemoveNode(\"c\"): %v", err)
+	} // tombstone c instead
 
 	if g.TombstoneCount() != countAfterFirst {
 		t.Fatalf("fixture broken: tombstone count %d != %d, so this does not model "+

@@ -67,32 +67,40 @@ type walCommitMarker struct {
 	hasTS bool
 }
 
-// simWALCommitMarkers returns every transaction-commit marker carried by the
-// durable WAL image of a store opened with dir, in file order.
+// simWALCommitMarkers returns every transaction-commit marker a recovery of the
+// store opened with dir would replay, in log order: the markers of the WAL image
+// at or above the redo position the control file records for the published
+// snapshot ([simWALSize]). Markers below it are on disk but folded into the
+// snapshot. Offsets are frame-image offsets ([simWALFrameImage]).
 //
 // A torn tail is not an error: it is the ordinary state of a WAL a crash
 // interrupted, and the markers before it are exactly the ones recovery applied.
 // An absent WAL yields no markers, which is what a checkpoint that reclaimed
 // everything leaves behind.
 func simWALCommitMarkers(disk *SimDisk, dir string) ([]walCommitMarker, error) {
-	image, err := disk.ReadFile(walPathFor(dir))
+	image, err := simWALFrameImage(disk, walPathFor(dir), disk.ReadFile)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
 	}
+	replayable, err := simWALSize(disk, dir)
+	if err != nil {
+		return nil, err
+	}
+	from := int64(len(image)) - replayable
 	var (
 		out []walCommitMarker
 		off int64
 	)
 	for f := range wal.NewReader(bytes.NewReader(image), nil).Frames() {
 		op, derr := recovery.Decode(f.Payload)
-		if derr == nil && op.Kind == txn.OpCommit {
+		if derr == nil && op.Kind == txn.OpCommit && off >= from {
 			ts, hasTS := op.CommitTS()
 			out = append(out, walCommitMarker{off: off, seq: op.TxnSeq, ts: ts, hasTS: hasTS})
 		}
-		off += int64(wal.HeaderSize + len(f.Payload))
+		off += int64(wal.FrameSize(f))
 	}
 	return out, nil
 }
@@ -140,6 +148,9 @@ type mvccRecoveryEvidence struct {
 	// imageMarkers and walLenAtReopen size the image the recovery read.
 	imageMarkers   int
 	walLenAtReopen int64
+	// walReplayableAtReopen is how many of those bytes a recovery would replay
+	// ([simWALSize]); zero is the emptied WAL of a pure-snapshot recovery.
+	walReplayableAtReopen int64
 	// walOpsReplayed is what the reopen replayed out of the WAL. Zero, with an
 	// empty WAL and a published snapshot, is the PURE-SNAPSHOT recovery: the
 	// clock floor can then only have come from the manifest.
@@ -174,7 +185,7 @@ func (e *mvccRecoveryEvidence) durableMaxTS() uint64 {
 // pureSnapshot reports whether this reopen was sourced by the snapshot ALONE:
 // a published manifest, an empty WAL, and nothing replayed out of it.
 func (e *mvccRecoveryEvidence) pureSnapshot() bool {
-	return e.hasSnapshot && e.walOpsReplayed == 0 && e.imageMarkers == 0 && e.walLenAtReopen == 0
+	return e.hasSnapshot && e.walOpsReplayed == 0 && e.imageMarkers == 0 && e.walReplayableAtReopen == 0
 }
 
 // snapshotPlusWALTail reports whether this reopen read a published snapshot AND
@@ -223,8 +234,11 @@ func measureMVCCRecovery(disk *SimDisk, st *SimStore, label string) (mvccRecover
 	}
 	ev.imageMarkers = len(markers)
 
-	if ev.walLenAtReopen, err = simWALSize(disk, dir); err != nil {
+	if ev.walLenAtReopen, err = simWALImageSize(disk, dir); err != nil {
 		return ev, fmt.Errorf("sim: %s: WAL size at reopen: %w", label, err)
+	}
+	if ev.walReplayableAtReopen, err = simWALSize(disk, dir); err != nil {
+		return ev, fmt.Errorf("sim: %s: replayable WAL at reopen: %w", label, err)
 	}
 	if dir != "" {
 		if ev.snapshotInstant, ev.hasSnapshot, err = simSnapshotInstant(disk, dir); err != nil {

@@ -153,9 +153,11 @@ func TestStatsRefreshProc_HonoursCancellation(t *testing.T) {
 // TestStatsRefreshProc_DoesNotNestTheBarrier is the regression gate for a defect that
 // would have DEADLOCKED a production binary (#2196).
 //
-// Engine.RefreshStatistics wraps its scan in Graph.View. A procedure, however, runs inside
-// query execution, which is already inside Graph.View — and visMu is a non-re-entrant
-// sync.RWMutex, so acquiring it again from the same goroutine hangs. The engine's
+// When this was written, Engine.RefreshStatistics wrapped its scan in Graph.View, and a
+// procedure ran inside query execution, which was already inside Graph.View — and visMu
+// was a non-re-entrant sync.RWMutex, so acquiring it again from the same goroutine hung.
+// rmp #2344 removed Graph.View and neither refresh entry point takes a barrier now; the
+// test still pins that db.stats.refresh() completes inside query execution. The engine's
 // re-entrancy guard converts that into a panic, but the guard is compiled out of ordinary
 // builds (#2168 removed it from the production read path), so a plain binary would simply
 // stop. The first version of this procedure had exactly that bug, and only the race-enabled

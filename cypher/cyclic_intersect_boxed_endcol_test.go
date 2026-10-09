@@ -190,7 +190,9 @@ func TestCyclicIntersect_AbsoluteOracleWithTombstone(t *testing.T) {
 
 	t.Run("one_node_tombstoned", func(t *testing.T) {
 		g := cyclicGraph(t, 6, edges)
-		g.RemoveNode("n5")
+		if err := g.RemoveNode("n5"); err != nil {
+			t.Fatalf("g.RemoveNode(\"n5\"): %v", err)
+		}
 		assertFusedAndAgrees(t, g, q, wantTombstoned)
 		// Anti-degeneracy: if the tombstone changed nothing, the case would prove
 		// nothing about visibility.

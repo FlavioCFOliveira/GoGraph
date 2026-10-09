@@ -1,0 +1,1334 @@
+spec ww15-long-chain-large-values: 2 sessions, 35 permutations
+# WW15. s0 pins a read snapshot over a 64 KiB string; s1 commits four successive
+# 64 KiB rewrites of it, building a chain of five versions. s0 must read the value
+# current at its BEGIN, byte-identical (original=true), in every interleaving (F1).
+
+starting permutation: s0r1 s0r2 s0c s1w1 s1w2 s1w3 s1w4
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s0r2 s1w1 s0c s1w2 s1w3 s1w4
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s0r2 s1w1 s1w2 s0c s1w3 s1w4
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s0r2 s1w1 s1w2 s1w3 s0c s1w4
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s0r2 s1w1 s1w2 s1w3 s1w4 s0c
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s1w1 s0r2 s0c s1w2 s1w3 s1w4
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s1w1 s0r2 s1w2 s0c s1w3 s1w4
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s1w1 s0r2 s1w2 s1w3 s0c s1w4
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s1w1 s0r2 s1w2 s1w3 s1w4 s0c
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s1w1 s1w2 s0r2 s0c s1w3 s1w4
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s1w1 s1w2 s0r2 s1w3 s0c s1w4
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s1w1 s1w2 s0r2 s1w3 s1w4 s0c
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s1w1 s1w2 s1w3 s0r2 s0c s1w4
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s1w1 s1w2 s1w3 s0r2 s1w4 s0c
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s0r1 s1w1 s1w2 s1w3 s1w4 s0r2 s0c
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s0r1 s0r2 s0c s1w2 s1w3 s1w4
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s0r1 s0r2 s1w2 s0c s1w3 s1w4
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s0r1 s0r2 s1w2 s1w3 s0c s1w4
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s0r1 s0r2 s1w2 s1w3 s1w4 s0c
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s0r1 s1w2 s0r2 s0c s1w3 s1w4
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s0r1 s1w2 s0r2 s1w3 s0c s1w4
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s0r1 s1w2 s0r2 s1w3 s1w4 s0c
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s0r1 s1w2 s1w3 s0r2 s0c s1w4
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s0r1 s1w2 s1w3 s0r2 s1w4 s0c
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s0r1 s1w2 s1w3 s1w4 s0r2 s0c
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s1w2 s0r1 s0r2 s0c s1w3 s1w4
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s1w2 s0r1 s0r2 s1w3 s0c s1w4
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s1w2 s0r1 s0r2 s1w3 s1w4 s0c
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s1w2 s0r1 s1w3 s0r2 s0c s1w4
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s1w2 s0r1 s1w3 s0r2 s1w4 s0c
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s1w2 s0r1 s1w3 s1w4 s0r2 s0c
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s1w2 s1w3 s0r1 s0r2 s0c s1w4
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s1w2 s1w3 s0r1 s0r2 s1w4 s0c
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s1w2 s1w3 s0r1 s1w4 s0r2 s0c
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)
+
+starting permutation: s1w1 s1w2 s1w3 s1w4 s0r1 s0r2 s0c
+step s1w1: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'a', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w2: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'b', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w3: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'c', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s1w4: MATCH (n:Doc {name:'d'}) SET n.blob = reduce(s = 'd', i IN range(1, 16) | s + s) RETURN size(n.blob) AS bytes
+bytes
+-----
+65536
+(1 row)
+step s0r1: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0r2: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head, n.blob = reduce(s = 'z', i IN range(1, 16) | s + s) AS original
+bytes|head |original
+-----+-----+--------
+65536|"zzz"|true    
+(1 row)
+step s0c: COMMIT
+final final: MATCH (n:Doc {name:'d'}) RETURN size(n.blob) AS bytes, substring(n.blob, 0, 3) AS head
+bytes|head 
+-----+-----
+65536|"ddd"
+(1 row)

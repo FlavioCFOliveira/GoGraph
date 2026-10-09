@@ -180,9 +180,10 @@ func NewCreateIndexOp(
 // standalone form does; the companion's ErrIndexExists is always absorbed,
 // since two user indexes on the same (label, property) legitimately share one
 // companion. onSchemaChange, when non-nil, is invoked INSIDE the barrier after
-// a real registration, so the caches it invalidates cannot be repopulated from
-// the pre-change catalog before the change is visible. It is NOT invoked when
-// IF NOT EXISTS absorbed the primary. The Engine's CREATE INDEX (btree) path
+// a real registration. The barrier does not exclude a cache refill running
+// concurrently, so a cache it invalidates must itself refuse an entry computed
+// from the pre-change catalog, as the plan cache does (rmp #2854). It is NOT
+// invoked when IF NOT EXISTS absorbed the primary. The Engine's CREATE INDEX (btree) path
 // wires e.ClearPlanCache as onSchemaChange, so cached plans are invalidated
 // after a real schema mutation.
 //
@@ -315,9 +316,12 @@ func (op *CreateIndexOp) registerWith(reg index.RegisterFunc, sub index.Subscrib
 	}
 
 	// Real schema mutation: notify so dependent caches (e.g. the plan cache)
-	// can invalidate stale entries built before the new index existed. Called
-	// inside the barrier, so no cache can be refilled from the pre-change
-	// catalog between the registration and the invalidation.
+	// can invalidate stale entries built before the new index existed. The
+	// barrier does NOT stop a cache refill: the plan cache compiles outside it,
+	// so a compilation that read the pre-change catalog can finish after this
+	// call. What keeps its entry out is the plan cache's own generation check,
+	// which refuses to publish an entry compiled before the invalidation
+	// (rmp #2854). A cache wired here must provide that guarantee itself.
 	if op.onSchemaChange != nil {
 		op.onSchemaChange()
 	}

@@ -36,7 +36,9 @@ func TestRemoveNode_AddNode_Resurrects(t *testing.T) {
 		t.Fatal("node auth was not interned")
 	}
 
-	g.RemoveNode("auth")
+	if err := g.RemoveNode("auth"); err != nil {
+		t.Fatalf("g.RemoveNode(\"auth\"): %v", err)
+	}
 	if !g.IsTombstoned(id) {
 		t.Fatal("node auth should be tombstoned immediately after RemoveNode")
 	}
@@ -75,7 +77,9 @@ func TestSetNodeLabel_DoesNotRevive(t *testing.T) {
 		t.Fatalf("AddNode: %v", err)
 	}
 	id, _ := g.AdjList().Mapper().Lookup("auth")
-	g.RemoveNode("auth")
+	if err := g.RemoveNode("auth"); err != nil {
+		t.Fatalf("g.RemoveNode(\"auth\"): %v", err)
+	}
 	if !g.IsTombstoned(id) {
 		t.Fatal("auth should be tombstoned")
 	}
@@ -97,7 +101,9 @@ func TestRemoveEdge_StripsPerPairStateOnFullDisconnect(t *testing.T) {
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "REL")
+	if err := g.SetEdgeLabel("a", "b", "REL"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.SetEdgeProperty("a", "b", "since", Int64Value(2020)); err != nil {
 		t.Fatalf("SetEdgeProperty: %v", err)
 	}
@@ -105,7 +111,7 @@ func TestRemoveEdge_StripsPerPairStateOnFullDisconnect(t *testing.T) {
 		t.Fatalf("precondition EdgeLabels = %v, want [REL]", got)
 	}
 
-	g.RemoveEdge("a", "b")
+	must(t).E(g.RemoveEdge("a", "b"))
 
 	if g.AdjList().HasEdge("a", "b") {
 		t.Fatal("edge a->b should be gone after RemoveEdge")
@@ -139,9 +145,11 @@ func TestRemoveEdge_KeepsPerPairStateWhileParallelEdgeRemains(t *testing.T) {
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge 2: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "REL")
+	if err := g.SetEdgeLabel("a", "b", "REL"); err != nil {
+		t.Fatal(err)
+	}
 
-	g.RemoveEdge("a", "b") // one parallel edge remains
+	must(t).E(g.RemoveEdge("a", "b")) // one parallel edge remains
 	if !g.AdjList().HasEdge("a", "b") {
 		t.Fatal("a parallel edge a->b should still exist")
 	}
@@ -149,7 +157,7 @@ func TestRemoveEdge_KeepsPerPairStateWhileParallelEdgeRemains(t *testing.T) {
 		t.Fatalf("per-pair label = %v, want [REL] retained while a parallel edge remains", got)
 	}
 
-	g.RemoveEdge("a", "b") // now fully disconnected
+	must(t).E(g.RemoveEdge("a", "b")) // now fully disconnected
 	if g.AdjList().HasEdge("a", "b") {
 		t.Fatal("edge a->b should be gone")
 	}
@@ -169,10 +177,14 @@ func TestRemoveEdge_DirectedDoesNotStripReverseEdge(t *testing.T) {
 	if err := g.AddEdge("b", "a", 0); err != nil {
 		t.Fatalf("AddEdge b->a: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "FWD")
-	g.SetEdgeLabel("b", "a", "REV")
+	if err := g.SetEdgeLabel("a", "b", "FWD"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("b", "a", "REV"); err != nil {
+		t.Fatal(err)
+	}
 
-	g.RemoveEdge("a", "b")
+	must(t).E(g.RemoveEdge("a", "b"))
 
 	if got := g.EdgeLabels("a", "b"); len(got) != 0 {
 		t.Fatalf("a->b labels = %v, want empty", got)
@@ -198,8 +210,12 @@ func TestTombstonedIDs(t *testing.T) {
 	}
 	idA, _ := g.AdjList().Mapper().Lookup("a")
 	idC, _ := g.AdjList().Mapper().Lookup("c")
-	g.RemoveNode("a")
-	g.RemoveNode("c")
+	if err := g.RemoveNode("a"); err != nil {
+		t.Fatalf("g.RemoveNode(\"a\"): %v", err)
+	}
+	if err := g.RemoveNode("c"); err != nil {
+		t.Fatalf("g.RemoveNode(\"c\"): %v", err)
+	}
 
 	got := g.TombstonedIDs()
 	if len(got) != 2 {

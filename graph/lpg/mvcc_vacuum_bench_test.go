@@ -79,8 +79,8 @@ func benchVacuumCommitLatency(b *testing.B, onCommit bool) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := g.ApplyAtomically(func() error {
-			return g.SetNodeProperty("a", "w", Int64Value(int64(i)))
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			return g.Writer(tx).SetNodeProperty("a", "w", Int64Value(int64(i)))
 		}); err != nil {
 			b.Fatalf("write %d: %v", i, err)
 		}

@@ -55,12 +55,16 @@ func intoRing(t *testing.T, n, degree int) (*lpg.Graph[string, float64], map[int
 			if err := g.AddEdge(keys[i], keys[j], 1.0); err != nil {
 				t.Fatalf("AddEdge: %v", err)
 			}
-			g.SetEdgeLabel(keys[i], keys[j], "K")
+			if err := g.SetEdgeLabel(keys[i], keys[j], "K"); err != nil {
+				t.Fatal(err)
+			}
 			adj[i] = append(adj[i], j)
 			if err := g.AddEdge(keys[j], keys[i], 1.0); err != nil {
 				t.Fatalf("AddEdge reverse: %v", err)
 			}
-			g.SetEdgeLabel(keys[j], keys[i], "K")
+			if err := g.SetEdgeLabel(keys[j], keys[i], "K"); err != nil {
+				t.Fatal(err)
+			}
 			adj[j] = append(adj[j], i)
 		}
 	}
@@ -175,11 +179,15 @@ func TestExpandInto_ParallelEdgesPreserveCardinality(t *testing.T) {
 			t.Fatalf("AddEdge a->b: %v", err)
 		}
 	}
-	g.SetEdgeLabel("a", "b", "K")
+	if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.AddEdge("b", "a", 1.0); err != nil {
 		t.Fatalf("AddEdge b->a: %v", err)
 	}
-	g.SetEdgeLabel("b", "a", "K")
+	if err := g.SetEdgeLabel("b", "a", "K"); err != nil {
+		t.Fatal(err)
+	}
 
 	eng := cypher.NewEngine(g)
 	// The pattern is symmetric, so it matches in both orientations:
@@ -213,15 +221,21 @@ func TestExpandInto_SelfLoopAndDirections(t *testing.T) {
 	if err := g.AddEdge("a", "a", 1.0); err != nil { // self-loop
 		t.Fatalf("AddEdge a->a: %v", err)
 	}
-	g.SetEdgeLabel("a", "a", "K")
+	if err := g.SetEdgeLabel("a", "a", "K"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.AddEdge("a", "b", 1.0); err != nil {
 		t.Fatalf("AddEdge a->b: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "K")
+	if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.AddEdge("b", "a", 1.0); err != nil {
 		t.Fatalf("AddEdge b->a: %v", err)
 	}
-	g.SetEdgeLabel("b", "a", "K")
+	if err := g.SetEdgeLabel("b", "a", "K"); err != nil {
+		t.Fatal(err)
+	}
 
 	eng := cypher.NewEngine(g)
 	for _, tc := range []struct {

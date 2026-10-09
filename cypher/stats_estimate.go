@@ -35,6 +35,8 @@ package cypher
 import (
 	"math"
 
+	"github.com/RoaringBitmap/roaring/v2/roaring64"
+
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	labelidx "github.com/FlavioCFOliveira/GoGraph/graph/index/label"
@@ -166,7 +168,22 @@ func resolveLabelPopulation(src statsSource, label string) labelPopulation {
 		// caller must demote rather than invent one.
 		return labelPopulation{}
 	}
-	bm := r.ResolveLabelBitmap(label)
+	// The rendering paths that reach here carry the statement's context on the
+	// resolver, so the correction is cancellable (rmp #3010). A cancelled
+	// resolution is NOT a count: N is reported unknown, the estimate demotes, and
+	// the rendering build returns the context's error rather than this rendering
+	// ([Engine.buildReadPhysical]).
+	var bm *roaring64.Bitmap
+	if sr, ok := r.(interface {
+		statementLabelBitmap(string) (*roaring64.Bitmap, error)
+	}); ok {
+		var err error
+		if bm, err = sr.statementLabelBitmap(label); err != nil {
+			return labelPopulation{}
+		}
+	} else {
+		bm = r.ResolveLabelBitmap(label)
+	}
 	if bm == nil {
 		// An unknown label resolves to the empty bitmap (zero live nodes); a nil
 		// bitmap is treated the same, exactly as [labelCardinalityEstimate] does.

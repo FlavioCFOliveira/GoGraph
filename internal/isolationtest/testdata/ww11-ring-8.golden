@@ -1,0 +1,229 @@
+spec ww11-ring-8: 8 sessions, 2 permutations
+# WW11. A ring of 8 transactions, each writing its own node and then its
+# successor's — the N-way deadlock cycle. No step may ever wait (F7); each write
+# succeeds or is refused. Every transaction then rolls back and the vacuum is drained
+# (H1), after which one autocommit statement rewrites the whole ring and must
+# succeed: the cycle leaves nothing behind that blocks progress. Named interleavings:
+# round-robin, sequential.
+
+starting permutation: s0b s1b s2b s3b s4b s5b s6b s7b s0own s1own s2own s3own s4own s5own s6own s7own s0next s1next s2next s3next s4next s5next s6next s7next s0rb s0dr s1rb s1dr s2rb s2dr s3rb s3dr s4rb s4dr s5rb s5dr s6rb s6dr s7rb s7dr retry
+step s0b: BEGIN
+step s1b: BEGIN
+step s2b: BEGIN
+step s3b: BEGIN
+step s4b: BEGIN
+step s5b: BEGIN
+step s6b: BEGIN
+step s7b: BEGIN
+step s0own: MATCH (n:Ring {name:'r0'}) SET n.v = 's0' RETURN n.v AS v
+v   
+----
+"s0"
+(1 row)
+step s1own: MATCH (n:Ring {name:'r1'}) SET n.v = 's1' RETURN n.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2own: MATCH (n:Ring {name:'r2'}) SET n.v = 's2' RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+step s3own: MATCH (n:Ring {name:'r3'}) SET n.v = 's3' RETURN n.v AS v
+v   
+----
+"s3"
+(1 row)
+step s4own: MATCH (n:Ring {name:'r4'}) SET n.v = 's4' RETURN n.v AS v
+v   
+----
+"s4"
+(1 row)
+step s5own: MATCH (n:Ring {name:'r5'}) SET n.v = 's5' RETURN n.v AS v
+v   
+----
+"s5"
+(1 row)
+step s6own: MATCH (n:Ring {name:'r6'}) SET n.v = 's6' RETURN n.v AS v
+v   
+----
+"s6"
+(1 row)
+step s7own: MATCH (n:Ring {name:'r7'}) SET n.v = 's7' RETURN n.v AS v
+v   
+----
+"s7"
+(1 row)
+step s0next: MATCH (n:Ring {name:'r1'}) SET n.v = 's0' RETURN n.v AS v
+ERROR: serialization conflict
+step s1next: MATCH (n:Ring {name:'r2'}) SET n.v = 's1' RETURN n.v AS v
+ERROR: serialization conflict
+step s2next: MATCH (n:Ring {name:'r3'}) SET n.v = 's2' RETURN n.v AS v
+ERROR: serialization conflict
+step s3next: MATCH (n:Ring {name:'r4'}) SET n.v = 's3' RETURN n.v AS v
+ERROR: serialization conflict
+step s4next: MATCH (n:Ring {name:'r5'}) SET n.v = 's4' RETURN n.v AS v
+ERROR: serialization conflict
+step s5next: MATCH (n:Ring {name:'r6'}) SET n.v = 's5' RETURN n.v AS v
+ERROR: serialization conflict
+step s6next: MATCH (n:Ring {name:'r7'}) SET n.v = 's6' RETURN n.v AS v
+ERROR: serialization conflict
+step s7next: MATCH (n:Ring {name:'r0'}) SET n.v = 's7' RETURN n.v AS v
+ERROR: serialization conflict
+step s0rb: ROLLBACK
+step s0dr: <vacuum drain>
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+step s3rb: ROLLBACK
+step s3dr: <vacuum drain>
+step s4rb: ROLLBACK
+step s4dr: <vacuum drain>
+step s5rb: ROLLBACK
+step s5dr: <vacuum drain>
+step s6rb: ROLLBACK
+step s6dr: <vacuum drain>
+step s7rb: ROLLBACK
+step s7dr: <vacuum drain>
+step retry: MATCH (n:Ring) SET n.v = 'retry' RETURN count(n) AS written
+written
+-------
+8      
+(1 row)
+final final: MATCH (n:Ring) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v      
+----+-------
+"r0"|"retry"
+"r1"|"retry"
+"r2"|"retry"
+"r3"|"retry"
+"r4"|"retry"
+"r5"|"retry"
+"r6"|"retry"
+"r7"|"retry"
+(8 rows)
+
+starting permutation: s0b s0own s0next s0rb s0dr s1b s1own s1next s1rb s1dr s2b s2own s2next s2rb s2dr s3b s3own s3next s3rb s3dr s4b s4own s4next s4rb s4dr s5b s5own s5next s5rb s5dr s6b s6own s6next s6rb s6dr s7b s7own s7next s7rb s7dr retry
+step s0b: BEGIN
+step s0own: MATCH (n:Ring {name:'r0'}) SET n.v = 's0' RETURN n.v AS v
+v   
+----
+"s0"
+(1 row)
+step s0next: MATCH (n:Ring {name:'r1'}) SET n.v = 's0' RETURN n.v AS v
+v   
+----
+"s0"
+(1 row)
+step s0rb: ROLLBACK
+step s0dr: <vacuum drain>
+step s1b: BEGIN
+step s1own: MATCH (n:Ring {name:'r1'}) SET n.v = 's1' RETURN n.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1next: MATCH (n:Ring {name:'r2'}) SET n.v = 's1' RETURN n.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2b: BEGIN
+step s2own: MATCH (n:Ring {name:'r2'}) SET n.v = 's2' RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2next: MATCH (n:Ring {name:'r3'}) SET n.v = 's2' RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2rb: ROLLBACK
+step s2dr: <vacuum drain>
+step s3b: BEGIN
+step s3own: MATCH (n:Ring {name:'r3'}) SET n.v = 's3' RETURN n.v AS v
+v   
+----
+"s3"
+(1 row)
+step s3next: MATCH (n:Ring {name:'r4'}) SET n.v = 's3' RETURN n.v AS v
+v   
+----
+"s3"
+(1 row)
+step s3rb: ROLLBACK
+step s3dr: <vacuum drain>
+step s4b: BEGIN
+step s4own: MATCH (n:Ring {name:'r4'}) SET n.v = 's4' RETURN n.v AS v
+v   
+----
+"s4"
+(1 row)
+step s4next: MATCH (n:Ring {name:'r5'}) SET n.v = 's4' RETURN n.v AS v
+v   
+----
+"s4"
+(1 row)
+step s4rb: ROLLBACK
+step s4dr: <vacuum drain>
+step s5b: BEGIN
+step s5own: MATCH (n:Ring {name:'r5'}) SET n.v = 's5' RETURN n.v AS v
+v   
+----
+"s5"
+(1 row)
+step s5next: MATCH (n:Ring {name:'r6'}) SET n.v = 's5' RETURN n.v AS v
+v   
+----
+"s5"
+(1 row)
+step s5rb: ROLLBACK
+step s5dr: <vacuum drain>
+step s6b: BEGIN
+step s6own: MATCH (n:Ring {name:'r6'}) SET n.v = 's6' RETURN n.v AS v
+v   
+----
+"s6"
+(1 row)
+step s6next: MATCH (n:Ring {name:'r7'}) SET n.v = 's6' RETURN n.v AS v
+v   
+----
+"s6"
+(1 row)
+step s6rb: ROLLBACK
+step s6dr: <vacuum drain>
+step s7b: BEGIN
+step s7own: MATCH (n:Ring {name:'r7'}) SET n.v = 's7' RETURN n.v AS v
+v   
+----
+"s7"
+(1 row)
+step s7next: MATCH (n:Ring {name:'r0'}) SET n.v = 's7' RETURN n.v AS v
+v   
+----
+"s7"
+(1 row)
+step s7rb: ROLLBACK
+step s7dr: <vacuum drain>
+step retry: MATCH (n:Ring) SET n.v = 'retry' RETURN count(n) AS written
+written
+-------
+8      
+(1 row)
+final final: MATCH (n:Ring) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v      
+----+-------
+"r0"|"retry"
+"r1"|"retry"
+"r2"|"retry"
+"r3"|"retry"
+"r4"|"retry"
+"r5"|"retry"
+"r6"|"retry"
+"r7"|"retry"
+(8 rows)

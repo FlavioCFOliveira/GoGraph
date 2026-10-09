@@ -10,9 +10,9 @@ package sim
 // [wal.Writer] is the component that owns the durable file, but most of what it
 // EXPORTS was invisible to the simulator. [wal.Writer.Stats],
 // [wal.Writer.DurableOffset], [wal.Writer.Poisoned] and [wal.Writer.SyncBuffered]
-// were never read by any scenario, and the whole-file [wal.Writer.Truncate] — as
-// distinct from [wal.Writer.TruncatePrefix], which the checkpoint path drives —
-// was never called. Each of them states a contract that the rest of the store
+// were never read by any scenario, and [wal.Writer.Truncate] — as distinct from
+// [wal.Writer.MarkCheckpoint] and [wal.Writer.ReclaimSegments], which the
+// checkpoint path drives — was never called. Each of them states a contract that the rest of the store
 // relies on: the checkpointer picks its WAL cut point from DurableOffset and
 // aborts on Poisoned, and the txn layer's empty commit resolves through
 // SyncBuffered. A silent change in any of them would be adjudicated nowhere.
@@ -135,10 +135,11 @@ type walWatermarkSample struct {
 //     that are actually on disk.
 //
 // The second form deliberately asserts NO absolute size. rmp #2521 measured that
-// the durable image varies with process wall-clock time, because a commit marker
-// encodes the instant at which it was written; an oracle pinning a byte count
-// would be pinning the clock. Monotonicity and the frame-boundary relation are
-// invariant under that variation.
+// the durable image is not byte-stable across runs in one process: the hidden
+// node key "__cx_"+hex(n) is minted from a process-global counter
+// (cypher/exec/create_node.go), so its width tracks how many nodes the process
+// minted before. An oracle pinning a byte count would be pinning that history.
+// Monotonicity and the frame-boundary relation are invariant under it.
 type WALWatermarkEvidence struct {
 	// Label names the arm in a failure message.
 	Label string
@@ -198,7 +199,7 @@ func newWALWatermarkMonitor(disk *SimDisk, w *wal.Writer, path, label string, ex
 // account records the bytes of one frame the caller is about to emit, so the
 // monitor can hold the exact accumulation. Only the exact arms call it.
 func (m *walWatermarkMonitor) account(payload []byte) {
-	m.expBytes += uint64(wal.HeaderSize + len(payload))
+	m.expBytes += uint64(wal.HeaderSizeV2 + len(payload))
 	m.expFrms++
 }
 
@@ -206,14 +207,14 @@ func (m *walWatermarkMonitor) account(payload []byte) {
 // [wal.Writer.AppendRun] returned for the commit just acknowledged, or -1 when
 // the caller cannot know it.
 func (m *walWatermarkMonitor) observe(wantDurable int64) error {
-	img, err := m.disk.ReadFile(m.path)
+	img, err := simWALFrameImage(m.disk, m.path, m.disk.ReadFile)
 	if err != nil {
 		return fmt.Errorf("sim: wal-watermark %q: read durable image: %w", m.ev.Label, err)
 	}
 	_, plens, tailErr := walFrameLayout(img)
 	var boundary int64
 	for _, n := range plens {
-		boundary += int64(wal.HeaderSize + n)
+		boundary += int64(wal.HeaderSizeV2 + n)
 	}
 	st := m.w.Stats()
 	m.ev.Samples = append(m.ev.Samples, walWatermarkSample{
@@ -419,8 +420,8 @@ const tmplCreateWALBeacon = "CREATE (n:WALBeacon {name:$name})"
 // WAL-backed [SimStore] whose frames the engine composes, observed after every
 // acknowledged commit.
 //
-// It is the arm that proves the oracle is size-agnostic. The engine's commit
-// markers encode the instant they were written, so the durable image is not
+// It is the arm that proves the oracle is size-agnostic. The engine's generated
+// node keys come from a process-global counter, so the durable image is not
 // byte-stable across runs (rmp #2521); the relative clauses — monotonicity, the
 // accepted-bytes ceiling, and the frame-boundary relation — hold regardless,
 // and are exactly what a watermark defect would break.
@@ -893,19 +894,18 @@ func walContiguityCensus(disk *SimDisk, path string, cfg WALContiguityConfig) (W
 	ev := WALContiguityEvidence{
 		Committers: cfg.Committers, FramesPerTx: cfg.FramesPerTx, PerFrameAppend: cfg.PerFrameAppend,
 	}
-	img, err := disk.ReadFile(path)
+	img, err := simWALFrameImage(disk, path, disk.ReadFile)
 	if err != nil {
 		return ev, fmt.Errorf("sim: wal-contiguity read image: %w", err)
 	}
 	ev.ImageLen = int64(len(img))
 
-	rh, err := disk.OpenFile(path, 0)
+	r, err := wal.OpenLogFS(simLogFS{disk: disk}, path)
 	if err != nil {
 		return ev, fmt.Errorf("sim: wal-contiguity open image: %w", err)
 	}
-	defer func() { _ = rh.Close() }()
+	defer func() { _ = r.Close() }()
 
-	r := wal.NewReader(rh, rh)
 	fragments := make(map[uint16]int) // txID -> number of maximal runs
 	frameCount := make(map[uint16]int)
 	var prevTx uint16
@@ -1082,22 +1082,10 @@ const (
 //     fires. It is correct — nothing accepted is un-durable — but it means
 //     SyncBuffered is NOT a health probe; [wal.Writer.Poisoned] is.
 //
-//   - [wal.Writer.Truncate] on a poisoned writer SUCCEEDS and empties the file,
-//     while the writer stays poisoned. Truncate is the one mutator that does not
-//     consult the sticky error. It is not a durability hole — the writer still
-//     refuses every append, so nothing can be written after the emptied file —
-//     and Truncate is documented as a maintenance helper off the production
-//     checkpoint path (which cuts the WAL with TruncatePrefix instead). It is
-//     pinned here so that a change putting Truncate on a live path is caught.
-//
-//     The SUCCESS is specific to this arm's ONE-SHOT disk fault
-//     ([SimDisk.ArmSyncFaultAt]), under which Truncate's own fsync succeeds.
-//     rmp #2525 measured the other regime directly: with the fault still
-//     firing, Truncate empties the file and leaves the writer poisoned exactly
-//     as here, but returns the raw fsync error rather than nil. What this
-//     clause pins is therefore the transient-fault reading; the invariant
-//     common to both is that Truncate never consults the STICKY error, which
-//     StillPoisonedAfterTruncate below is what actually guards.
+//   - [wal.Writer.Truncate] on a poisoned writer returns the IDENTICAL sticky
+//     error and touches nothing (WAL v2: it rolls the active segment over, which
+//     a poisoned writer refuses). It is pinned here so a change that lets the
+//     maintenance helper act on a writer whose durability failed is caught.
 //
 //   - After Close, Append and Truncate return [wal.ErrWriterClosed] rather than
 //     the sticky poison: the closed check precedes the poison check. Poisoned()
@@ -1158,8 +1146,10 @@ type WALLifecycleResult struct {
 	// equality.
 	AppendedAtPoison uint64
 	// TruncateOnPoisonedErr / TruncateOnPoisonedReturned / ImageAfterPoisonTruncate
-	// / StillPoisonedAfterTruncate pin the undocumented behaviour above.
+	// / StillPoisonedAfterTruncate pin the behaviour above; TruncateOnPoisonedIsSticky
+	// reports that the error is the identical sticky one.
 	TruncateOnPoisonedErr      error
+	TruncateOnPoisonedIsSticky bool
 	TruncateOnPoisonedReturned int64
 	ImageAfterPoisonTruncate   int64
 	StillPoisonedAfterTruncate error
@@ -1236,15 +1226,15 @@ func walLifecycleTruncateHalf(ctx context.Context, seed uint64, r *WALLifecycleR
 	r.TruncateReturned, r.TruncateErr = w.Truncate()
 	r.StatsAfter = w.Stats()
 	r.DurableAfterTruncate = w.DurableOffset()
-	img, rerr := disk.ReadFile(path)
+	img, rerr := simWALFrameImage(disk, path, disk.ReadFile)
 	if rerr != nil {
 		return fmt.Errorf("sim: wal-lifecycle read after truncate: %w", rerr)
 	}
 	r.ImageAfterTruncate = int64(len(img))
 
-	// The append after the truncate must land at offset 0 of the empty file, and
-	// the recovered image must hold ONLY it: that is what makes the truncate a
-	// truncate rather than a bookkeeping reset.
+	// The append after the truncate must land at the position the truncate left
+	// (positions never reset), and the log must hold ONLY it: that is what makes
+	// the truncate a truncate rather than a bookkeeping reset.
 	post, aerr := w.AppendRun(func(emit func([]byte) error) error {
 		return emit(walSurfaceFrame(0xD0, 0, walLifecyclePayload))
 	})
@@ -1255,7 +1245,7 @@ func walLifecycleTruncateHalf(ctx context.Context, seed uint64, r *WALLifecycleR
 		return fmt.Errorf("sim: wal-lifecycle post-truncate sync: %w", serr)
 	}
 	r.PostTruncateMark = post
-	img, rerr = disk.ReadFile(path)
+	img, rerr = simWALFrameImage(disk, path, disk.ReadFile)
 	if rerr != nil {
 		return fmt.Errorf("sim: wal-lifecycle read after post-truncate commit: %w", rerr)
 	}
@@ -1331,10 +1321,12 @@ func walLifecyclePoisonHalf(ctx context.Context, seed uint64, r *WALLifecycleRes
 	//nolint:errorlint // identity is the contract under test; see the comment above
 	r.SyncGroupLostMarkIsSticky = w.SyncGroup(lost) == sticky
 
-	// Truncate does not consult the poison. Measured here before it was
-	// documented; the [wal.Writer.Truncate] godoc now states it (rmp #2525).
+	// Truncate on a poisoned writer returns the sticky error and touches
+	// nothing (WAL v2; the [wal.Writer.Truncate] godoc states it).
 	r.TruncateOnPoisonedReturned, r.TruncateOnPoisonedErr = w.Truncate()
-	img, rerr := disk.ReadFile(path)
+	//nolint:errorlint // identity is the contract under test; see the comment above
+	r.TruncateOnPoisonedIsSticky = r.TruncateOnPoisonedErr == sticky
+	img, rerr := simWALFrameImage(disk, path, disk.ReadFile)
 	if rerr != nil {
 		return fmt.Errorf("sim: wal-lifecycle poison read after truncate: %w", rerr)
 	}
@@ -1351,7 +1343,7 @@ func walLifecyclePoisonHalf(ctx context.Context, seed uint64, r *WALLifecycleRes
 }
 
 // walLifecycleFrameBytes is the byte cost of one lifecycle frame.
-const walLifecycleFrameBytes = wal.HeaderSize + walLifecyclePayload
+const walLifecycleFrameBytes = wal.HeaderSizeV2 + walLifecyclePayload
 
 // checkWALLifecycle adjudicates the truncate and poisoned-writer contracts. It
 // is a PURE function of the measured result, so a test can falsify it with a
@@ -1381,19 +1373,22 @@ func checkWALLifecycle(r *WALLifecycleResult) []Violation {
 			"Truncate reported freeing %d byte(s) but %d were durable: its return is documented as the bytes in the file at truncation",
 			r.TruncateReturned, r.DurableBeforeTruncate))
 	}
-	if r.DurableAfterTruncate != 0 || r.ImageAfterTruncate != 0 {
+	if r.DurableAfterTruncate != r.DurableBeforeTruncate || r.ImageAfterTruncate != 0 {
 		add(ViolationOracleDeviation, fmt.Sprintf(
-			"after Truncate the watermark is %d and the file %d byte(s); both must be zero, or a later rollback truncates to a stale size",
-			r.DurableAfterTruncate, r.ImageAfterTruncate))
+			"after Truncate the watermark is %d (want the unchanged position %d) and the log holds %d frame byte(s) (want 0): positions never reset and every frame was discarded",
+			r.DurableAfterTruncate, r.DurableBeforeTruncate, r.ImageAfterTruncate))
 	}
-	if r.StatsBefore != r.StatsAfter {
+	// Lifetime counters are not reset. Truncate rolls the active segment over,
+	// which is one more data sync, so Syncs may advance; nothing may go back.
+	if r.StatsAfter.Frames != r.StatsBefore.Frames || r.StatsAfter.Bytes != r.StatsBefore.Bytes ||
+		r.StatsAfter.SyncFailed != r.StatsBefore.SyncFailed || r.StatsAfter.Syncs < r.StatsBefore.Syncs {
 		add(ViolationOracleDeviation, fmt.Sprintf(
 			"Truncate changed the LIFETIME counters, %+v -> %+v; they are documented as not reset", r.StatsBefore, r.StatsAfter))
 	}
-	if r.PostTruncateMark != walLifecycleFrameBytes {
+	if want := r.DurableBeforeTruncate + walLifecycleFrameBytes; r.PostTruncateMark != want {
 		add(ViolationOracleDeviation, fmt.Sprintf(
-			"the commit after the truncate landed at offset %d; a %d-byte frame written to a freshly-empty file ends at %d",
-			r.PostTruncateMark, walLifecycleFrameBytes, walLifecycleFrameBytes))
+			"the commit after the truncate ends at position %d; a %d-byte frame written at the truncate's position %d ends at %d",
+			r.PostTruncateMark, walLifecycleFrameBytes, r.DurableBeforeTruncate, want))
 	}
 	if r.PostTruncateFrames != 1 {
 		add(ViolationACIDDurability, fmt.Sprintf(
@@ -1453,16 +1448,13 @@ func checkWALLifecycle(r *WALLifecycleResult) []Violation {
 				"and the durable-already fast path fires. If this now errors the contract has changed and callers using it as a flush must be re-checked",
 			r.SyncBufferedAfterPoison))
 	}
-	// Truncate does not consult the poison; documented on [wal.Writer.Truncate]
-	// as of rmp #2525. Under this arm's ONE-SHOT fault its own fsync succeeds, so
-	// the reading here is nil; rmp #2525 measured the persistent-fault regime,
-	// where it empties the file identically but returns the raw fsync error.
-	if r.TruncateOnPoisonedErr != nil || r.ImageAfterPoisonTruncate != 0 {
+	// Truncate on a poisoned writer returns the sticky error and touches
+	// nothing (WAL v2, documented on [wal.Writer.Truncate]).
+	if !r.TruncateOnPoisonedIsSticky || r.ImageAfterPoisonTruncate != walLifecycleFrameBytes {
 		add(ViolationOracleDeviation, fmt.Sprintf(
-			"Truncate on a POISONED writer returned %v leaving %d byte(s); under this arm's ONE-SHOT fault the documented behaviour is a successful empty. "+
-				"Truncate is the one mutator that does not consult the sticky error; it is safe only because the writer stays poisoned and refuses every later "+
-				"append, and because the production checkpoint cuts the WAL with TruncatePrefix instead. A change here needs judging, not absorbing",
-			r.TruncateOnPoisonedErr, r.ImageAfterPoisonTruncate))
+			"Truncate on a POISONED writer returned %v (sticky=%t) leaving %d frame byte(s); the documented behaviour is the identical sticky error "+
+				"and the %d durable byte(s) left untouched. A change here needs judging, not absorbing",
+			r.TruncateOnPoisonedErr, r.TruncateOnPoisonedIsSticky, r.ImageAfterPoisonTruncate, walLifecycleFrameBytes))
 	}
 	if r.StillPoisonedAfterTruncate == nil {
 		add(ViolationACIDDurability,

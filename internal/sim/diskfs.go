@@ -1,8 +1,13 @@
 package sim
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"os"
+	"slices"
+	"strings"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -53,6 +58,14 @@ func (s simSnapshotFS) DirSync(path string) error { return s.disk.DirSync(path) 
 
 func (s simSnapshotFS) ParentDirSync(childPath string) error { return s.disk.ParentDirSync(childPath) }
 
+// simBulkImportFS adapts a [SimDisk] to the store/bulkimport filesystem seam
+// ([bulkimport.PublishFS], [bulkimport.ImportIntoFS]): the store/snapshot seam
+// plus the directory listing the importer's empty-directory check needs
+// (rmp #2518).
+type simBulkImportFS struct{ simSnapshotFS }
+
+func (s simBulkImportFS) ReadDir(dir string) ([]fs.DirEntry, error) { return s.disk.ReadDir(dir) }
+
 // simCSRFS adapts a [SimDisk] to the store/csrfile filesystem seam. It is a
 // distinct type from [simSnapshotFS] because csrfile's Create returns
 // csrfile.File whereas snapshot's returns snapshot.File — one Go type cannot
@@ -85,12 +98,34 @@ func (s simRecoveryFS) RemoveAll(path string) error { return s.disk.RemoveAll(pa
 
 func (s simRecoveryFS) ParentDirSync(childPath string) error { return s.disk.ParentDirSync(childPath) }
 
-func (s simRecoveryFS) OpenWALReader(path string) (*wal.Reader, error) {
-	rh, err := s.disk.OpenFile(path, os.O_RDONLY)
+func (s simRecoveryFS) OpenWALLog(walPath string) (*wal.Log, error) {
+	return wal.OpenLogFS(simLogFS(s), walPath)
+}
+
+// simLogFS adapts a [SimDisk] to the read-only WAL log seam ([wal.LogFS]), so
+// recovery reads the control file, the segments and the legacy log off the
+// in-memory disk.
+type simLogFS struct{ disk *SimDisk }
+
+func (s simLogFS) Open(path string) (io.ReadCloser, error) { return s.disk.OpenFile(path, os.O_RDONLY) }
+
+func (s simLogFS) ReadDir(dir string) ([]string, error) { return simReadDirNames(s.disk, dir) }
+
+// simReadDirNames lists the entry names of dir on disk.
+func simReadDirNames(disk *SimDisk, dir string) ([]string, error) {
+	ents, err := disk.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	return wal.NewReader(rh, rh), nil
+	names := make([]string, 0, len(ents))
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
+func (s simRecoveryFS) WritePrefixMarker(walPath string) error {
+	return wal.WritePrefixMarkerFS(simWALFS(s), walPath)
 }
 
 func (s simRecoveryFS) LoadSnapshot(snapDir string) (snapshot.LoadedSnapshot, error) {
@@ -98,9 +133,9 @@ func (s simRecoveryFS) LoadSnapshot(snapDir string) (snapshot.LoadedSnapshot, er
 }
 
 // simWALFS adapts a [SimDisk] to the store/wal path-based filesystem seam
-// (wal.OpenFS), so the WAL writer's crash-safe prefix truncation
-// (temp-write -> rename -> parent-dir fsync -> reopen) runs entirely against
-// the in-memory disk. OpenFile returns a *SimFileHandle, which satisfies the
+// (wal.OpenFS), so the segmented WAL writer's control-file writes, segment
+// creation and checkpoint segment unlinks run entirely against the in-memory
+// disk. OpenFile returns a *SimFileHandle, which satisfies the
 // wal package's open-handle interface (Write/Read/Seek/Sync/Truncate/Close);
 // the structural satisfaction check for wal's unexported walFS happens at the
 // wal.OpenFS call site (OpenSimStore), exactly as wal.OpenWith resolves
@@ -116,6 +151,10 @@ func (s simWALFS) Rename(oldPath, newPath string) error { return s.disk.Rename(o
 func (s simWALFS) Remove(path string) error { return s.disk.Remove(path) }
 
 func (s simWALFS) ParentDirSync(childPath string) error { return s.disk.ParentDirSync(childPath) }
+
+func (s simWALFS) ReadDir(dir string) ([]string, error) { return simReadDirNames(s.disk, dir) }
+
+func (s simWALFS) MkdirAll(dir string) error { return s.disk.MkdirAll(dir, 0) }
 
 // simCheckpointBackend adapts a [SimDisk] to the store/checkpoint snapshot
 // backend seam, routing the snapshot write and the manifest read-back through
@@ -181,4 +220,120 @@ func (s simCheckpointBackend[N, W]) VerifySnapshotReadable(snapDir string, codec
 		return err
 	}
 	return snapshot.VerifyMapperDecodable[N](loaded.Mapper, codec)
+}
+
+// simWALSegments returns the segment files of the WAL at walPath on disk,
+// oldest first; none for a store with no segment directory.
+func simWALSegments(disk *SimDisk, walPath string) []string {
+	names, err := simReadDirNames(disk, wal.SegmentDir(walPath))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, n := range names {
+		if strings.HasSuffix(n, ".wal") && len(n) == 16+len(".wal") {
+			out = append(out, wal.SegmentDir(walPath)+"/"+n)
+		}
+	}
+	slices.Sort(out) // fixed-width hex names sort numerically
+	return out
+}
+
+// simWALSegmentHeader is the size of a segment file's header.
+const simWALSegmentHeader = 32
+
+// simWALFrameImage returns the frame bytes of the WAL at walPath: every
+// segment's bytes past its header, concatenated oldest first — a frame stream
+// [wal.NewReader] decodes, whose offsets are log positions relative to the
+// oldest retained segment. A store with no segments (a legacy single-file log)
+// returns that file's bytes. read selects the visible or the durable image of
+// a file.
+func simWALFrameImage(disk *SimDisk, walPath string, read func(string) ([]byte, error)) ([]byte, error) {
+	segs := simWALSegments(disk, walPath)
+	if len(segs) == 0 {
+		return read(walPath)
+	}
+	var out []byte
+	for _, p := range segs {
+		b, err := read(p)
+		if err != nil {
+			return nil, err
+		}
+		if len(b) > simWALSegmentHeader {
+			out = append(out, b[simWALSegmentHeader:]...)
+		}
+	}
+	return out, nil
+}
+
+// simWALTailSegment returns the newest segment of walPath holding a frame byte,
+// and false when there is none.
+func simWALTailSegment(disk *SimDisk, walPath string) (string, bool) {
+	segs := simWALSegments(disk, walPath)
+	for i := len(segs) - 1; i >= 0; i-- {
+		b, err := disk.ReadFile(segs[i])
+		if err == nil && len(b) > simWALSegmentHeader {
+			return segs[i], true
+		}
+	}
+	return "", false
+}
+
+// simWALLogImage returns every file of the WAL at walPath — the legacy file,
+// the control file and each segment — concatenated, for a check that nothing in
+// the log changed.
+func simWALLogImage(disk *SimDisk, walPath string) ([]byte, error) {
+	var out []byte
+	for _, p := range append([]string{walPath, wal.ControlPath(walPath)}, simWALSegments(disk, walPath)...) {
+		b, err := disk.ReadFile(p)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, err
+		}
+		out = append(out, []byte(fmt.Sprintf("%s:%d\n", p, len(b)))...)
+		out = append(out, b...)
+	}
+	return out, nil
+}
+
+// simWALReplayable returns how many frame bytes of the WAL of the store under
+// dir a recovery would still replay: the bytes at or above the redo position
+// when the control file records the published snapshot's checkpoint (the
+// prefix-truncated flag and a checkpoint redo position equal to the snapshot's
+// wal_redo_pos), and every retained frame byte otherwise. It is the segmented
+// log's measure of "the checkpoint emptied the WAL": a checkpoint discards
+// whole segments only, but recovery starts from the recorded redo position.
+func simWALReplayable(disk *SimDisk, dir string) (int64, error) {
+	walPath := walPathFor(dir)
+	log, err := wal.OpenLogFS(simLogFS{disk: disk}, walPath)
+	if err != nil {
+		return 0, err
+	}
+	var first int64 = -1
+	for f := range log.Frames() {
+		if first < 0 {
+			first = int64(f.Pos)
+		}
+	}
+	end := log.TailOffset()
+	ctl, segmented := log.Control()
+	if !segmented {
+		b, err := simWALFrameImage(disk, walPath, disk.ReadFile)
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return int64(len(b)), err
+	}
+	from := first
+	if from < 0 {
+		from = end
+	}
+	if m, merr := snapshot.ReadManifestFileFS(simSnapshotFS{disk: disk}, dir+"/"+simSnapshotName+"/manifest.json"); merr == nil &&
+		m.WALFormat == snapshot.WALFormatSegmented && ctl.Flags&wal.ControlPrefixTruncated != 0 &&
+		ctl.CheckpointRedoPos == m.WALRedoPos {
+		from = int64(m.WALRedoPos)
+	}
+	return end - from, nil
 }

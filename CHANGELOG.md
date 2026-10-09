@@ -4,7 +4,550 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.16.0] — 2026-10-09
+
+**167 commits** — 164 non-merge commits and 3 sprint merges — counted at `60c90d73`, the
+`develop` tip before release preparation. **Three sprints delivered this window:** 363,
+*Performance and Efficiency Laboratory 260924* (24 commits, merged at `f984222f`); 364,
+*Correctness and Security Laboratory 260928* (76 commits, merged at `c63fd1fd`); and 365,
+*Observe, Correct and Optimize MVCC, Store and LPG Exercise* (64 commits, merged at `60c90d73`).
+1 085 files changed, 152 515 insertions, 14 958 deletions (`git diff --shortstat v0.15.0..60c90d73`).
+
+**This release breaks the exported API and changes the on-disk format.** Measured by parsing every
+non-test Go file outside `internal/`, `examples/`, `cmd/` and any `gen/`, `tck/` or `testdata/`
+directory at both `v0.15.0` and `60c90d73`, and diffing the rendered declarations — a **superset**
+of the API surface [docs/semver.md](docs/semver.md) defines: 4 822 exported declarations before,
+5 160 after. **74 declarations changed signature, 4 were removed and 342 were added.** Of the 74,
+two are parameter renames only (`wal.Open`, `wal.OpenFS`) and one widens a parameter to an
+interface the old type satisfies (`recovery.ReplayWAL`), so **71 re-signings and 4 removals are
+source-incompatible.** Under [docs/semver.md](docs/semver.md) a `0.y.z` release absorbs breaking
+changes in the MINOR digit.
+
+### Security
+
+- **Toolchain pinned to `go1.27.2`** (`go.mod` `toolchain` directive, was `go1.27.0`). The
+  vulnerability database of 2026-10-08 lists 13 standard-library vulnerabilities in `go1.27.1`,
+  9 reachable from GoGraph (`net/http`, `crypto/tls`, `net/textproto`, `mime/multipart`), from
+  GO-2026-6599 to GO-2026-6617. With `go1.27.2`, `make vulncheck` (govulncheck v1.8.0, source mode,
+  symbol level, 140 packages) reports none.
+
+### Changed — BREAKING: WAL v2 on-disk format
+
+- **The write-ahead log is segmented, position-chained and bound to its store (rmp #3020,
+  #2195, #3014).** The design is [docs/design-wal-v2.md](docs/design-wal-v2.md) and the format is
+  specified in [store/wal/FORMAT.md](store/wal/FORMAT.md). A store's log is now a 64-byte control
+  file `wal.control` carrying a random, per-store id, and numbered 16 MiB segments under `wal.d/`.
+  Each frame has a 36-byte header (frame version `2`) carrying its logical position, the length
+  back to its predecessor (the prev-link) and the store id. Recovery streams the segments and
+  refuses, each with its own error, a frame from another store (`wal.ErrForeignStore`), a frame
+  at the wrong position (`wal.ErrFramePosition`), a broken prev-link (`wal.ErrPrevLink`), a
+  segment gap (`wal.ErrSegmentGap`), a torn non-tail segment (`wal.ErrTornSegment`), and a
+  snapshot too old for or ahead of the retained log (`recovery.ErrSnapshotTooOld`,
+  `recovery.ErrSnapshotAheadOfWAL`). A checkpoint reclaims space by unlinking whole segments
+  below the oldest retained position, without the commit lock; it no longer rewrites the log's
+  suffix.
+- **One-way migration on the first writable, clean open.** A store written by an earlier release
+  keeps its single-file `wal`; the first writable clean open seals it with a `LegacySeal` control
+  record, writes the control file and continues in segments. The sealed legacy log stays readable.
+  **A migrated store cannot be opened by `v0.15.0` or any earlier build**: the seal is a version-2
+  frame, so an older reader refuses the directory instead of ignoring the segments. A torn legacy
+  log followed by segment frames is refused with `wal.ErrLegacyNotSealed`. Take a copy of the
+  store directory before the first open with `v0.16.0` if a downgrade must remain possible.
+- **Node ids survive a reopen exactly (rmp #3021).** Every commit marker carries an annex naming
+  each node id the transaction created, and recovery places those ids before it applies the
+  operations, so a rolled-back `CREATE` or the commit order no longer moves a node's `id()` or
+  `elementId()` across a reopen. An operation naming an unbound key, or an id held by another key,
+  refuses the store (`recovery.ErrUnboundNodeKey`, `graph.ErrNodeIDMismatch`,
+  `recovery.ErrCommitAnnexCorrupt`, `recovery.ErrIDRecordCorrupt`).
+- **Node ids are reserved ahead of use (rmp #3021).** A node id is issued only below a per-shard
+  limit logged in a `ReserveIDs` control record (no fsync); batches double from 64 to 65 536
+  (`txn.DefaultIDBatch`, `txn.MaxIDBatch`). Checkpoints store the per-shard high-water marks in a
+  new snapshot component, `nodeids.bin`, and the snapshot manifest moves to **version 4** with
+  `StoreID`, `WALFormat` and `WALRedoPos` fields. `v0.15.0` reads manifests up to version 3 and
+  refuses version 4. Recovery refuses an id beyond its reservation
+  (`recovery.ErrIDBeyondReservation`).
+- **Ids assigned but never born are holes, not errors.** A capture no longer refuses an instant
+  with an open transaction, and never writes such an id as a tombstone. This fixes a node interned
+  at the capture instant and created afterwards through `AddEdge` alone, which recovery brought
+  back dead.
+- **A truncated WAL without its snapshot is refused (rmp #2990, #2991, #3002).** Before the first
+  prefix truncation the WAL writes a durable `wal.prefix-truncated` marker, kept current by every
+  checkpoint whose snapshot is self-sufficient and written by the first clean recovery that finds
+  it missing. A marked directory without a snapshot manifest is refused with
+  `recovery.ErrMissingSnapshot`; before, it recovered as clean and silently dropped every commit
+  the checkpoint had folded.
+- **Anonymous Cypher node keys come from a per-graph sequence** (`lpg.Graph.KeySequence`) instead
+  of a process-wide counter, so identical runs write identical logs.
+
+### Changed — BREAKING: exported API
+
+- **Removed:** `store/wal.(*Writer).TruncatePrefix` and `store/wal.ErrPrefixTruncateUnsupported`
+  (segments are unlinked instead); `store/recovery.Result.WALTailOffset` (replaced by `WALEnd`,
+  `WALLastFramePos`, `WALTailSegment` and `WALTailSegmentOffset`); and
+  `store/snapshot.ErrCaptureNotQuiesced` (a capture is no longer refused at an instant with an
+  open transaction).
+- **Re-signed, in addition to the lists under rmp #2748 and #2947 below:**
+  - `graph/lpg.Graph`: `RemoveNode`, `RemoveNodeLabel`, `DelNodeProperty`, `Revive` and
+    `RestoreTombstones` now return `error`.
+  - `store/snapshot.ApplyTombstonesToGraph` now returns `error`.
+  - `graph.(*Mapper).LoadFrom` takes a second argument, the per-shard high-water marks
+    (`*[graph.MapperShards]uint64`).
+  - `cypher/ast.ExistsSubquery.Query` and `cypher/ast.CountSubquery.Query` are now `ast.Query`
+    (a possibly multi-branch query) instead of `*ast.SingleQuery`, and
+    `cypher/ir.TranslateSubquery` takes an `ast.Query`.
+  - `cypher/exec.MergeActionEvalKey` takes the action's ordinal as its first argument.
+- **Widened, source-compatible:** `store/recovery.ReplayWAL` takes a `wal.FrameSource`, which
+  `*wal.Reader` satisfies.
+
+### Changed — BREAKING: behaviour
+
+- **One token limit on every layer: 65535 bytes (rmp #2748).** A node label, a
+  relationship type or a property key longer than `lpg.MaxTokenLen` (65535) bytes is
+  refused with an error wrapping `lpg.ErrTokenTooLong`, before any state change, by the
+  in-memory engine (`graph/lpg`), the WAL-backed store (`store/txn`, whose
+  `ErrTokenTooLong` is the same value), bulk import (`store/bulkimport`, before it
+  publishes) and both Cypher engines. Before, only the WAL refused such a name, so the same
+  graph was durable or not depending on how it was built. `lpg.CheckToken` validates a name
+  before any write. A snapshot carrying an over-long token, which only a pre-bound bulk
+  import could write, now fails to open with that error instead of loading silently.
+- **Signatures changed to carry the refusal:**
+  - `graph/lpg.Graph`: `SetEdgeLabel`, `RemoveEdgeLabel`, `DelEdgeProperty`,
+    `SetEdgeLabelAt`, `SetEdgeLabelByHandle`, `DelEdgePropertyByHandle`,
+    `SetEdgeLabelByHandleID`, `SetEdgePropertyByHandleID` and `DelEdgePropertyByHandleID`
+    now return `error`; `SetEdgeRelTypeAtSlotByID` and `AddEdgeRelTypeOverflowByID` now
+    return `(bool, error)`.
+  - `graph/lpg.WriteView`: `RemoveNodeLabel`, `DelNodeProperty`, `SetEdgeLabel`,
+    `RemoveEdgeLabel`, `DelEdgeProperty`, `SetEdgeLabelAt`, `SetEdgeLabelByHandle` and
+    `DelEdgePropertyByHandle` now return `error`.
+  - `graph/lpg.LabelRegistry.Intern` and `graph/lpg.PropertyKeyRegistry.Intern` now return
+    `(id, error)`.
+  - `graph/lpg/schema.Schema.RegisterLabel` now returns `(lpg.LabelID, error)`.
+  - `store/snapshot.ApplyEdgeHandlesToGraph` now returns `error`.
+  - `cypher/exec.GraphMutator`: `RemoveNodeLabel`, `DelNodeProperty`, `SetEdgeLabel`,
+    `DelEdgeProperty`, `SetEdgeLabelAt`, `SetEdgeLabelByHandle` and
+    `DelEdgePropertyByHandle` now return `error`.
+- **A direct write is a single-operation transaction (rmp #2947).** A mutator of
+  `graph/lpg.Graph` called outside any transaction — and a `Graph.Writer` view over the
+  zero `WriteTx` — now runs as an implicit transaction of its own: it conflict-tests and
+  claims exactly as a statement does, commits at one instant, and on a refusal aborts
+  and changes nothing. While another transaction holds an uncommitted write on what it
+  would change — a node's properties, labels or existence, an edge's adjacency entry,
+  or an edge's per-handle, per-ordinal or overflow records — it returns an error
+  wrapping the new `lpg.ErrDirectWriteConflict` and a `*mvcc.Conflict`. The refusal is
+  retryable. A refusal caused by another direct write is retried internally for up to
+  1 s first; one caused by an explicit transaction is returned at once. Before,
+  such a write returned `nil` and was lost when that transaction rolled back, and a
+  direct edge or node removal could be left half applied. Separately, `Graph.ApplyVersioned` and
+  `Graph.BeginVersionedTx` no longer claim the graph's ambient write slot: a direct write
+  made while one is open is no longer stamped with its record, so it is visible at once
+  instead of when that transaction ends. A direct call made inside an `ApplyVersioned`
+  function is therefore its own transaction, not part of that bracket — write through
+  `Graph.Writer(tx)` there, as the documentation already requires.
+- **Breaking: a direct write is never part of an exclusive bracket (rmp #2947).** Inside
+  `ApplyAtomically`, `ApplyAtomicallyTx` and `LockBarrier`/`ApplyInsideLocked`, a direct
+  mutator call used to join the bracket's transaction, and so did a direct write from
+  any other goroutine made while the bracket was open: it was acknowledged, and then
+  lost when the bracket aborted. A direct call is now its own implicit transaction in
+  every context. It commits at its own instant, survives the bracket, and is refused
+  with `ErrDirectWriteConflict` by the bracket's own uncommitted writes. A bracket whose
+  writes must land together writes through `Graph.Writer(tx)` over the `WriteTx` that
+  `ApplyAtomicallyTx` or `ApplyInsideLockedTx` hands it; `ApplyAtomicallyTx` returns the
+  conflict that doomed the bracket even when the function ignored the refused call's
+  error. `ApplyAtomically` keeps its signature: its function has no transaction to
+  write through, so it is for exclusive work that writes no versioned data.
+  `WriteView.AddEdgeLabeledWithProperty` is new, so a labelled, propertied append can
+  be written through a transaction.
+- **The adjacency refuses a write that would build on an uncommitted entry (rmp #2947).**
+  `graph/adjlist` refuses, with a `*mvcc.Conflict` and before changing anything, every
+  write — with or without a transaction, implicit or explicit — over an entry another
+  transaction published and has not committed. An undirected edge write takes both endpoints' shard locks in
+  ascending shard order and tests both entries before writing either; an undirected
+  `RemoveAllEdgesFrom` grows its locked set until it covers every neighbour, in at most
+  256 rounds.
+- **Signatures changed to carry the refusal (rmp #2947):**
+  - `graph.Graph.RemoveEdge` now returns `error`, and so does every implementation.
+  - `graph/adjlist.AdjList` and `adjlist.Writer`: `RemoveEdge`, `RemoveAllEdgesFrom` and
+    `ClearEdgeLabelSlots` now return `error`; `RemoveEdgeByHandle`, `UpdateEntryAux`,
+    `SetEdgeLabelSlot` and `ClearEdgeLabelSlotValue` now return `(bool, error)`;
+    `SetEdgeLabelSlotsAt`, `ClearEdgeLabelSlotsValue` and `SetEdgeLabelSlots` now return
+    `(int, error)`. `Writer.AppendEdge` is new.
+  - `graph/lpg.Graph`: `RemoveEdge`, `RemoveAllEdgesFrom`, `RemoveEdgeInstance` and
+    `RemoveEdgeInstanceByHandle` now return `error`; `RemoveEdgeByHandle` now returns
+    `(bool, error)`. `SetEdgeRelTypeAtSlotByID` and `AddEdgeRelTypeOverflowByID` keep
+    their signatures and can now return the refusal.
+  - `graph/lpg.WriteView`: `Revive`, `RemoveEdgeInstance` and
+    `RemoveEdgeInstanceByHandle` now return `error`. `RemoveNode` now returns
+    `(bool, error)`: the error is the refusal behind a `false`, the transaction's
+    recorded conflict inside a transaction and the wrapped `ErrDirectWriteConflict`
+    over the zero `WriteTx`. Over the zero `WriteTx`, `RemoveEdge`, `RemoveEdgeByHandle`
+    and `RemoveAllEdgesFrom` report `false` for the refusal.
+  - `graph/lpg.Graph.ApplyDurable`, new in this release, takes a `context.Context` as its
+    first argument.
+    It bounds the waits behind conflicting commits; a cancelled call returns an error
+    wrapping the context's error, with nothing applied and nothing durable.
+  - `store/txn.Tx.CommitCtx(ctx)` is new: `Commit` with its waits behind conflicting
+    commits bounded by `ctx`; a cancellation before the apply holds its claims writes
+    nothing to the WAL. `Commit` is `CommitCtx(context.Background())`.
+    `ErrCommittedNotApplied` is deprecated: no function returns it any longer.
+  - `graph/mvcc`: `ImplicitTxBit`, `IsImplicitTx`, `Clock.NextImplicitTxID` and
+    `Tx.Implicit` are new.
+  - `graph/adjlist.AdjList`: `WithdrawTx` and the diagnostic `CheckInvariants` are new
+    (rmp #2965).
+  - `graph/mvcc`: `TxState.NoteAdjacency`, `TxState.AdjacencyWrites`, `TxState.Touch`,
+    `TxState.Touched` and `Tx.NoteAdjacency` are new (rmp #2965).
+- **Direct present-state reads return the newest COMMITTED state (rmp #2965, round 5).**
+  `graph/lpg.Graph`'s node property and label accessors (`GetNodeProperty`,
+  `NodeProperties`, `NodePropertiesByID`, `NodePropertyByID`, `NodePropertiesByIDFunc`,
+  `HasNodeLabel`, `HasNodeLabelByID`, `NodeLabels`, `NodeLabelsByID`,
+  `ForEachNodeLabelByID`), its edge label and property accessors (`EdgeLabels`,
+  `EdgeLabelsByID`, `ForEachEdgeLabelByID`, `HasEdgeLabel`, `EdgeLabelsAt`,
+  `EdgeLabelsByHandle`, `EdgeLabelsByHandleID`, `HasEdgeHandleLabelRecordByID`,
+  `ForEachSlotRelTypeByID`, `ForEachPairSlotRelTypeByID`, `ForEachPairOverflowRelTypeByID`,
+  `EdgeProperties`, `EdgePropertiesByID`, `GetEdgeProperty`, `EdgeHasProperty`,
+  `ForEachEdgeProperty`, `ForEachEdgePropertyByID`, `EdgePropertiesAt`,
+  `EdgePropertiesByHandle`, `EdgePropertiesByHandleID`, `EdgePropertyByHandle`), its
+  topology accessors (`EdgeWeight`, `FirstEdgeHandle`, `HasEdgeHandle`,
+  `AppendEdgeHandles`, `WalkEdgeHandles`, `OutDegree`, `OutDegreeByID`,
+  `OutDegreeByType`, `OutDegreeBounded…` and `OutDegreeMatchingBoundedByID`), and
+  `graph/adjlist.AdjList`'s `HasEdge`, `Neighbours`, `OutDegree`, `OutDegreeByID`,
+  `OutDegreeByType`, `OutDegreeFunc`, `OutDegreeFuncBounded`, `OutDegreeFuncBoundedByID`,
+  `InNeighbourIDs` and `InNeighbours` used to read the stored value, which carries every
+  uncommitted write: a durable commit applied but not yet fsynced was visible through
+  them and was withdrawn again if the fsync failed. They now step back over every
+  uncommitted version, as an implicit transaction reads; a read whose newest version is
+  committed allocates nothing. A transaction reads its own writes through
+  `Graph.WriterViewOf` / `Graph.Writer`; the `…AsOf` forms with a nil snapshot still read
+  the stored value. `Graph.HasEdgeHandleAsOf`, `Graph.AppendEdgeHandlesAsOf`,
+  `adjlist.AdjList.InNeighbourIDsStored` and `lpg.WriteTx.Versions` are new.
+  `Graph.IsTombstoned`, `TombstonedIDs`, `TombstoneCount`, `LiveOrder` and `LiveNodeFilter`
+  now read the newest committed state as well, through the node-life records; the stored
+  bitmap readers are kept as `IsTombstonedStored`, `TombstonedIDsStored`,
+  `TombstoneCountStored`, `LiveOrderStored` and `LiveNodeFilterStored`. Not changed, and
+  documented as stored-state primitives: the label index returned by `NodeIndex`, the
+  aggregate counts, `AdjList.Size`/`Order` and the raw `AdjList.LoadEntry*` loaders, which
+  have no versioned form.
+- **The WAL records effects, not requests (rmp #2965, round 5).** `store/txn.Tx.Commit`
+  and the Cypher engine's durable write path log only the operations that changed
+  something: an `AddNode` of a live node, a label already present, a property set to the
+  value it holds, or a removal of something absent writes no WAL frame, and a commit in
+  which nothing took effect writes nothing and mints no sequence. Such an operation holds
+  no claim, so another commit could change the object and log first, and recovery then
+  replayed the no-op after it, where it was no longer one: recovery rebuilt a node the
+  acknowledged state had deleted and a label it had removed. This change alone alters
+  neither the record format nor the recovery contract (the WAL v2 format change above is
+  separate). The four schema-DDL ops are still always logged.
+
+### Added
+
+- **`store.Open` / `store.OpenCtx`: the composed open (rmp #2523).** One call runs the
+  reopen sequence every embedder used to hand-write: recovery, the clean gate,
+  `wal.Open`, and the transactional store built from the recovery result. The returned
+  `*store.Opened[N, W]` embeds `*store.DB` (with the store's commit lock already wired as
+  the close quiesce) and exposes `Store()`, `Graph()`, `Recovery()` and `WAL()`, so the
+  recovered transaction sequence, the replay op cap, the codecs and the schema cannot be
+  dropped by omission. A recovery that is not clean, including the nil-error
+  `recovery.ErrCommittedTxnCorruptOp` outcome, is refused with a
+  `*store.UncleanRecoveryError` wrapping `store.ErrUncleanRecovery` and the recovery's
+  `TailErr`; nothing is opened for append. With `Options.AllowUnclean` such a directory
+  opens **read-only** instead: the committed prefix and `Recovery()` are readable,
+  `ReadOnly()` reports it, no WAL writer is opened (no lock, no byte written), and every
+  commit that would write, including every Cypher write, fails with
+  `store.ErrReadOnlyStore` (= `txn.ErrReadOnlyStore`). `txn.NewReadOnlyStore` and
+  `txn.Store.ReadOnly` are the store side of that mode. `cypher.NewEngineWithOpened` builds the engine
+  over an opened store and re-registers the recovered schema. Non-breaking: the low-level
+  `recovery.Open`, `Result.NewStore` and `store.New` are unchanged. Examples 24 and 25 now
+  reopen through `store.OpenCtx`.
+- **`store/txn.(*Store).Close` (rmp #3021).** Ends the store's use of its WAL for node-id
+  reservations: it stops the reservation prefetch goroutine and appends the exact per-shard
+  high-water marks (a `NextIDsExact` control record), so a clean restart wastes no node id. It
+  does not close the WAL and does not refuse later transactions. Call it with writers quiesced,
+  before the WAL is closed; `store.Opened`'s close does so under the commit lock. Without it, the
+  next recovery falls back to the logged reservations and wastes at most one batch per shard. It
+  is idempotent and safe for concurrent use.
+- **WAL v2 API (`store/wal`).** `OpenWithOptions`, `OpenFSWithOptions` and `Options`
+  (segment size, fsync latency injection), `OpenLog`/`OpenLogFS` and `Log` for reading a
+  segmented log, `FrameSource`, `Control`, `ControlPath`, `SegmentDir`, `SegmentPath`,
+  `PrefixTruncatedMarkerPath`, `WritePrefixMarker`/`WritePrefixMarkerFS`, the control-record
+  codecs (`AppendReserveIDs`, `DecodeReserveIDs`, `AppendNextIDsExact`, `DecodeNextIDsExact`,
+  `EncodeLegacySeal`, `DecodeLegacySeal`) and the errors named above.
+  `wal.NewSyncLatency`/`store.Options.SyncLatency` inject a seeded fsync latency for tests.
+- **Node-id reservation API.** `graph.IDReserver`, `graph.MapperWatermark`,
+  `graph.MapperShards` and the `Mapper` methods `PlaceUnborn`, `Unplace`, `PublishReservation`,
+  `ReservedLimit(s)`, `RestoreNext`, `SetIDReserver` and `Watermark`; `lpg.Graph.ReserveNodeID`,
+  `PlaceNodeID`, `UnplaceNodeID`, `NodeBornAsOf` and `SettleNeverBorn`; `txn.Tx.AttachWriteTx`;
+  `snapshot.WriteNodeIDs`/`ReadNodeIDs` and `snapshot.NodeIDsFile`.
+- **Cypher: `UNION` and `UNION ALL` inside `EXISTS { }` and `COUNT { }` (rmp #2627).** `EXISTS`
+  evaluates branches in order and stops at the first match; `COUNT` sums branch counts for
+  `UNION ALL` and de-duplicates for `UNION`. Column compatibility and mixing are checked as at
+  statement level. `ast.QueryBranches` is new.
+- **Cypher: `PROFILE` of writing statements (rmp #2626, #2790).** `PROFILE` of `CREATE`, `SET`,
+  `REMOVE`, `DELETE`, `DETACH DELETE` and `MERGE` now runs; the write applies exactly once, with
+  the same counters as without the prefix. `Engine.Run` still refuses a writing `PROFILE`, as it
+  refuses any write.
+- **Fail-stop sentinels.** `cypher.ErrEngineFailStopped` (a commit-time delivery panicked and
+  the engine refuses further work) and `graph/index.ErrIndexStateUndefined` (an index delivery
+  was cut short; a reopen rebuilds the indexes). `lpg.ErrIndexedRawWrite` refuses a raw write
+  while a secondary index is registered. `txn.ErrValueTooLong` separates an over-long property
+  value from other `txn.ErrFieldTooLong` causes, and `errors.Is(err, txn.ErrFieldTooLong)` still
+  holds for it (rmp #2942).
+- **Byte-reproducible output, fault-injectable bulk import (rmp #2518, #2519, #2521, #2534).**
+  Snapshot, JSONL and GraphML output sort property keys and labels, so identical input yields
+  identical bytes. `bulkimport.PublishFS` and `bulkimport.ImportIntoFS` publish over a
+  caller-supplied filesystem.
+
+### Fixed
+
+- **A degree read no longer hides a neighbour removed after its snapshot (rmp #2969).**
+  The typed, matching and bounded out-degree walkers filtered neighbours on the stored
+  tombstone bitmap even when reading as of a snapshot, so a removal committed after the
+  snapshot, or one not committed at all, lowered the count. Liveness is now resolved at
+  the read position.
+- **The durable engine no longer writes the per-CREATE-ordinal edge store (rmp #2968).**
+  It had no WAL frame, so it was lost on recovery and kept a deleted relationship's
+  entry in memory. Every reader of it is a fallback that the WAL-described handle store
+  answers for every relationship the engine creates, so the store is retired on the
+  durable path; the live engine now equals the recovered one.
+- **WAL order now equals publication order (rmp #2965, round 5).** The transaction
+  sequence of a durable commit is minted inside the WAL writer's append critical section,
+  so sequence order — the order transactions become visible — is the order their records
+  appear in the file. It used to be minted before the append, so two committers could
+  take sequences in one order and append in the other.
+- **A write waiting for a durable commit parks instead of polling (rmp #2965, round 5).**
+  A store commit or direct write refused by another durable commit's uncommitted version
+  used to abort, back off for at most a few hundred microseconds and rerun until the 1 s
+  budget ran out, so whoever reran first won: at 32 committers on one node the commit
+  p99 was 1.000 s, with committers refused at the budget. It now parks on that commit's
+  end and is woken in arrival order, holding nothing while it waits; the commit releases
+  its waiters on every exit, including a failed fsync and a panic. Measured on the same
+  probe: zero refusals and a p99 of 136 ms at 32 committers. Commits of one object still
+  serialise across the fsync, which is inherent to claiming before the commit record.
+
+- **An aborted transaction left its adjacency writes applied (rmp #2965).** A write
+  transaction that added or removed an edge and was then aborted by a conflict on
+  another store withdrew its node and edge-side writes but not the adjacency entry,
+  when no undo log ran: `Graph.ApplyVersioned` as the durable store's in-memory apply
+  runs it, `Graph.ApplyAtomicallyTx`, and an explicit transaction ended without the
+  Cypher engine's undo. The added edge stayed present and the removed edge stayed
+  removed for every present-time reader, in the reverse index and the edge count, and
+  the next write on the node built on it. Every abort now restores the entries the
+  transaction published to their pre-images before it marks the transaction aborted.
+  It visits only the transaction's own adjacency write set, and restores each entry
+  as a copy whose columns carry no spare capacity, so the next append cannot write
+  into memory a reader of the aborted entry still holds.
+- **An explicit transaction could build on another's uncommitted relationships (rmp
+  #2966).** A relationship-property or relationship-type write of an explicit
+  transaction rebuilt the source node's adjacency entry without claiming the node,
+  so it carried another transaction's uncommitted relationships into its own
+  commit: through the Cypher engine, a relationship a doomed transaction rolled back
+  was committed by the other. Every such write now claims the node. **Behaviour
+  change:** two transactions writing properties or types on relationships out of
+  the same node now conflict, and the second returns a retryable serialization
+  conflict, as two transactions creating relationships from one node already did.
+- **A durable store commit could publish another transaction's uncommitted edge
+  (rmp #2965 audit).** The store's edge apply (`Graph.AddEdgeHIfAbsent` inside
+  `txn.Tx.Commit`) claimed nothing, and the adjacency let an explicit transaction
+  write over another explicit transaction's uncommitted entry. The commit's entry
+  then carried that transaction's arc: a Cypher reader saw it while the transaction
+  was open, it stayed in the graph after the transaction rolled back with no WAL
+  record of it, and an undirected edge was left in one endpoint only. The
+  adjacency now refuses every write over another transaction's uncommitted entry,
+  and `AddEdgeHIfAbsent` claims both endpoints as `AddEdge` does.
+- **`AdjList.Compact` dropped the version chain of every entry it trimmed (rmp
+  #2965 audit).** A snapshot reader then saw uncommitted arcs, and an aborted
+  transaction's arc on a trimmed entry survived its rollback. The trimmed entry now
+  keeps the chain.
+- **A durable store commit is refused before its WAL record, never after it (rmp
+  #2965 audit).** `txn.Tx.Commit` fsynced its record and then applied it in memory,
+  where a concurrent direct write or an open explicit transaction could refuse it:
+  measured 85 of 268 commits returned `txn.ErrCommittedNotApplied` in one second
+  with four direct writers on the same node. Commit now applies first, as an
+  uncommitted transaction whose versions claim what it writes, then appends and
+  fsyncs, then publishes (`lpg.Graph.ApplyDurable`, new). **Behaviour change:**
+  `Commit` no longer returns `ErrCommittedNotApplied`. A conflict, a validator
+  refusal or `adjlist.ErrShardFull` is returned with nothing written to the WAL;
+  a conflict wraps `mvcc.ErrSerializationConflict` and is retryable. A conflict
+  with a direct write or another store commit is waited out first, within 1 s;
+  one with an explicit transaction is returned at once. Writes to the same object
+  now serialise across the fsync: a direct write on a node a store commit is
+  writing waits for that commit's fsync. `mvcc.BoundedTxBit`, `mvcc.IsBoundedTx`
+  and `mvcc.Clock.NextBoundedTxID` are new.
+- **`AdjList.RemoveAllEdgesFrom` released its shard locks by hand
+  (rmp #2965 audit).** A panic under them would have left the shards locked and
+  deadlocked the aborting transaction's withdrawal; they are now released by a
+  deferred call.
+- **A raw adjacency write made during an exclusive bracket was lost with it (rmp
+  #2967).** A write made on `Graph.AdjList()` with no transaction while
+  `ApplyAtomically`, `ApplyAtomicallyTx` or `LockBarrierCtx` was open took the
+  bracket's commit record and could displace the bracket's uncommitted entries;
+  when the bracket aborted, the acknowledged write became invisible to every
+  snapshot reader. **Behaviour change:** such a write is now its own
+  single-operation transaction. It commits at its own instant and survives the
+  bracket, and over an entry the bracket — or any other transaction — has written
+  and not committed it returns a retryable `*mvcc.Conflict` and changes nothing.
+- **An abort no longer scans every node-life record and adjacency claim (rmp
+  #2965).** Each abort ran both scans whatever it had written; they now run only
+  after an abort that wrote to those stores. A refused direct append allocates no
+  commit record, so it needs no abort.
+- **A direct write that panics no longer leaves its transaction in flight (rmp
+  #2947).** The panic still reaches the caller; the implicit transaction is aborted
+  on the way out.
+- **A deleted node could stay in a label index after a concurrent label change (rmp
+  #2947).** A peer's label removal on a node being deleted replaced the deletion's
+  pending index removal, so the peer's rollback withdrew both; and a label set while the
+  deletion was between its index strip and its tombstone flip was never retired. In
+  both cases every present-time scan of the label kept returning the deleted node.
+- **A revival refused by a conflict still revived the node (rmp #2947).** The tombstone
+  was cleared after the existence claim had been refused, undoing another
+  transaction's pending delete in the present state.
+- **The overflow relationship-type gate could read zero while overflow types existed
+  (rmp #2947).** Withdrawing an aborted transaction's overflow change restored the list
+  without adjusting the count, so a later read could skip a pair's overflow types.
+- **A deleted node could stay in a label index for good, and a revived one could drop
+  out of it (rmp #2964).** Re-asserting a label on a node while its removal was in
+  flight withdrew the removal's pending index entry, so every present-time label scan
+  kept returning the deleted node. Reviving a node did not withdraw its earlier
+  removal, so the next reclamation took the restored entry out. A removal is now
+  withdrawn only by the node's revival.
+- **`MVCCStats.NodeLifeRecords` over-reported, and the node-life gate never returned to
+  zero, after a node was revived or removed twice (rmp #2962).** A second birth or death
+  of the same node overwrites its record but was counted as a new one.
+- **A relationship type over 65535 bytes was acknowledged on a WAL-backed store and
+  recovered with no type (rmp #2956).** The WAL adapter discarded the staging refusal, so
+  the statement and its commit succeeded while nothing reached the log. The statement is now
+  refused before commit with `Neo.ClientError.Schema.TokenLengthError` over Bolt, and nothing
+  is written.
+
+The entries below are one line per commit and carry its subject's meaning; the commit body
+holds the detail and the regression test.
+
+**Durability and recovery**
+
+- A WAL-v2 recovery that read no frame from the first retained segment lost the prev-link, so
+  the next commit was acknowledged and the following open failed; it is now seeded on every
+  exit (`6725348d`).
+- A bulk-import publish now fsyncs every directory it creates, so an acknowledged publish
+  survives a host crash (rmp #2970, `93ec8926`).
+- `ApplyDurable` honours its context while it waits at the visibility gate (rmp #2985,
+  `97732d9c`).
+- A store commit strips a removed node through a view taken after its claim (`f6f78930`).
+- A checkpoint capture is no longer refused when a rolled-back creation withdraws a birth
+  record after the capture instant (`828f1661`).
+
+**MVCC, indexes and constraints**
+
+- Commits, indexes and constraints stay consistent under concurrency; index and constraint
+  state is read at the reader's snapshot (`bfaf3ed6`, `d1a9cfe7`).
+- A displaced adjacency or constraint commit stays visible after an abort; node visibility is
+  stable inside one snapshot (`32efbe73`, `c3764022`, `676a6b94`).
+- Hash and label indexes stay in step with no-op writes under churn; no-op writes take no
+  conflict stamps; a by-handle removal of an absent key writes nothing (`8999e4b4`,
+  `19443683`, `ac2d0203`).
+- Writes and removals on a node whose creation is aborting are refused as a retryable
+  conflict (`1196fe2b`).
+- An admitted no-op in a bounded transaction is decided through an unpinned view
+  (`569925f3`).
+- The node-life gate is raised under the shard lock that publishes the record (`bc9b6cad`).
+- A cancelled gate request is withdrawn instead of left queued (`3e8e2103`).
+- A `UNIQUE` reservation whose release predates the constraint is accepted (`42fef7f2`).
+- `DELETE` is decided from the transaction snapshot, undirected mirror handles are cleared, and
+  a raw write under a registered index is refused (`cd27c23f`).
+- `Mapper.Walk` callbacks no longer re-enter the mapper (`dbef3823`, `b2260658`).
+
+**Cypher engine**
+
+- Rollback undoes parallel edges by instance handle and captures undirected removal
+  pre-images in the creation direction (`47334e3b`, `787e674a`).
+- A rolled-back explicit transaction and a failed autocommit statement end as aborts
+  (`e68915bc`, `2a5ad3c5`).
+- DDL and the autocommit write's schema-gate wait honour the caller's context; cancellation is
+  honoured before plan initialisation (`9fac2b0a`, `a3aa78e4`, `f14fb3bf`).
+- Deleting a relationship a peer removed records a conflict; `DETACH DELETE` removes every
+  parallel incoming arc; a concurrent autocommit `MERGE` matches the `UNIQUE` winner
+  (`8f933554`, `9d0d315e`, `fe8864b0`).
+- Explicit-statement counters are reported, removal side effects are gated, and a property
+  removal is recorded and counted only when it took effect (`3f545e44`, `6b5525dd`).
+- Write-clause property maps are read through the transaction snapshot; a bound relationship
+  resolves inside write-path maps; every map-write value is stored or refused, `MERGE` actions
+  are ordered and the `DELETE` guard is deferred (`c8e27ba8`, `5b183a3c`, `25999b58`).
+- Node keys are minted so that they never collide with keys the target graph already holds
+  (`cd97fdf5`).
+- Index nested-loop coverage is proved at the reader's snapshot; the label of its seek hits is
+  guarded (`4fc83efd`, `b60c31c1`).
+- The key-set seek declines a non-string key, and a mismatched seek-set key returns a typed
+  error (`e8a1c74d`, `03301f27`).
+- A list property containing `null` is refused as `InvalidPropertyType`; `ErrFieldTooLong` is
+  split by field kind with its own Bolt code (`7e74e34f`, `7083ffcc`).
+- A plan compiled before a DDL cleared the cache is not cached (`5b5b4477`).
+- Boundary outputs are marked scalar so an integer is never decoded as a node; binding metadata
+  is re-keyed at projection boundaries and relationship uniqueness is scoped per pattern
+  (`73d3a4f0`, `0a2b7d18`).
+- Every relationship variable is addressed by its stable handle; named-path hops are rendered
+  from the bound edge handle (`0846713a`, `09a0b34c`).
+- Pattern predicates: relationship uniqueness, bound relationship variables and relationship
+  property maps, exact variable-length hops, bound first hops, type conflicts and outer-row
+  property maps (`b2260658`, `1075ceaa`, `bd5f7fbe`, `dfa9187f`, `79a50e41`).
+- Variable-length lists across `WITH`, identity-based no-repeat, per-edge properties after
+  `WITH` and `size()` of variable-length lists (`23b5b860`, `4af8739c`).
+- Same-hop property maps in pattern comprehensions are evaluated per candidate; property access
+  and labels are allowed after a list subscript (`1f6aec45`, `65a38f1a`).
+- Per-variable build facts are scoped like the schema (`3cef9714`).
+- Parser: `reduce()` is a grammar rule and parses inside subscripts and slices; hand-patched
+  rules set their invoking states; parenthesised commas stay inside a property-map value;
+  `STARTS WITH` and `ENDS WITH` parse in a query part after `WITH` (`d18650bb`, `789732a5`,
+  `9080e5b8`, `0a210dff`).
+- Temporal values order between Path and String per CIP2016-06-14 (`208a3ec7`).
+
+**Other components**
+
+- `graph/io` exporter name tables are bounded against concurrently created nodes
+  (`0e0e126a`).
+- Metric shards are chosen from a mixed stack address; under `-race` only 16 of 32 shards were
+  reachable (rmp #3065, `0f0ab6f4`).
+
+### Performance
+
+Figures are development-time measurements recorded by the commit that shipped each change,
+against that commit's own control. They are not additive and no whole-release delta is claimed.
+
+- **Index seek on absent values (rmp #3061, #3062).** A btree equality, prefix, range or
+  intersected conjunct whose value the index does not hold now seeks instead of scanning the
+  label: absent equality at 20 000 nodes 1.32 ms → 3.65 µs. A multi-key hash seek whose keys
+  are all absent seeks too: 20 000 nodes 9.3 ms → 4.22 µs. Present values are unchanged
+  (`3a715fa1`, `720545e5`).
+- **Sole-leaf seek on a written property (rmp #3056).** A seek that is the plan's only leaf,
+  under `SET`/`REMOVE` operators that initialise their child once, keeps the index when the
+  statement writes the property it seeks: `BenchmarkWriteScalingUnique` sec/op −52.9 % at 1
+  writer to −83.0 % at 32 (`7947c3b9`). String seek keys in the snapshot fallback match without
+  allocating: allocs/op 76–79 at 1–32 writers, was 78–490 (rmp #3057, `5c8511ee`).
+- **Planning over label churn (rmp #3010, #3011).** Plan-choice sites use a bounded label count
+  above 4 096 unreclaimed records, corrections are cancellable and memoised per statement:
+  high-churn count −72 %, cancelled-statement lag 685 ms → 12 ms under `-race` (`2df8273b`).
+- **MVCC housekeeping.** A long snapshot's visibility memo prunes resolved transactions: B/op
+  −59.5 % over 200 000 operations (rmp #3026, `5150034e`). A small vacuum pass waits for the
+  next wake: direct-write benchmarks −23.5 % (rmp #3060, `a859dddd`). A churned label is counted
+  without cloning its bitmap, and a small emptied stamp map is kept across vacuums
+  (`2f64a880`, `11305259`).
+- **Bolt:** `Server.Transactions` sorts in n log n: 1 024 open transactions 2 536 µs → 92 µs
+  (rmp #2562, `e7d59dc3`).
+- **Sprint 363 waste hunt.** Unbracketed adjacency writes are stored in place unless a snapshot
+  pinned the version; forward expansion inside a write transaction reads live adjacency;
+  per-slot type resolution, per-row expression evaluation and the row passed to a child `Next`
+  stop allocating; pattern predicates reject non-matching neighbours before the label lookup
+  (`4f733f9e`, `fa6fc459`, `a1c7bb9f`, `f6b96b15`, `5de6174b`, `120bff89`). The sprint's merge
+  records elevated-pass CPU −61.6 % and allocation about −62 % across the examples; the
+  methodology is in [docs/campaign-waste-hunt-2026-09-24.md](docs/campaign-waste-hunt-2026-09-24.md).
+
+### Removed
+
+- `store/wal.(*Writer).TruncatePrefix`, `store/wal.ErrPrefixTruncateUnsupported`,
+  `store/recovery.Result.WALTailOffset` and `store/snapshot.ErrCaptureNotQuiesced`; see
+  *Changed — BREAKING: exported API*.
+
+### Deprecated
+
+- `store/txn.ErrCommittedNotApplied`: no function returns it any longer (rmp #2965).
+
+[0.16.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.16.0
 
 ## [0.15.0] — 2026-09-17
 

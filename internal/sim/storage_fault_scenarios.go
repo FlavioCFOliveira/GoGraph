@@ -468,7 +468,13 @@ func runWALCorruptionFailStopWith(ctx context.Context, seed uint64, opts walCorr
 		return nil, fmt.Errorf("sim: ST5 close: %w", err)
 	}
 
-	cleanBytes, err := disk.ReadFile(walPath)
+	// The frames live in the log's segments; the workload is far below one
+	// segment, so the whole log is the tail segment past its header.
+	tailSeg, ok := simWALTailSegment(disk, walPath)
+	if !ok || len(simWALSegments(disk, walPath)) > 2 {
+		return nil, fmt.Errorf("sim: ST5 expected the WAL in one segment (tail found %t, %d segments)", ok, len(simWALSegments(disk, walPath)))
+	}
+	cleanBytes, err := simWALFrameImage(disk, walPath, disk.ReadFile)
 	if err != nil {
 		return nil, fmt.Errorf("sim: ST5 read WAL image: %w", err)
 	}
@@ -504,9 +510,9 @@ func runWALCorruptionFailStopWith(ctx context.Context, seed uint64, opts walCorr
 	if plens[mid] == 0 {
 		return nil, fmt.Errorf("sim: ST5 middle frame %d has an empty payload", mid)
 	}
-	corruptOff := offsets[mid] + int64(wal.HeaderSize)
+	corruptOff := offsets[mid] + int64(wal.HeaderSizeV2)
 	if !opts.skipCorruption {
-		if err := disk.CorruptRange(walPath, corruptOff, 1); err != nil {
+		if err := disk.CorruptRange(tailSeg, simWALSegmentHeader+corruptOff, 1); err != nil {
 			return nil, fmt.Errorf("sim: ST5 corrupt frame %d: %w", mid, err)
 		}
 	}
@@ -521,7 +527,7 @@ func runWALCorruptionFailStopWith(ctx context.Context, seed uint64, opts walCorr
 		return nil, fmt.Errorf("sim: ST5 prefix replay was not clean: %w", prefixErr)
 	}
 
-	corruptBytes, err := disk.ReadFile(walPath)
+	corruptBytes, err := simWALFrameImage(disk, walPath, disk.ReadFile)
 	if err != nil {
 		return nil, fmt.Errorf("sim: ST5 read corrupt WAL image: %w", err)
 	}
@@ -597,7 +603,7 @@ func walFrameLayout(image []byte) (offsets []int64, plens []int, tailErr error) 
 	for f := range r.Frames() {
 		offsets = append(offsets, off)
 		plens = append(plens, len(f.Payload))
-		off += int64(wal.HeaderSize + len(f.Payload))
+		off += int64(wal.FrameSize(f))
 	}
 	return offsets, plens, r.TailError()
 }
@@ -618,7 +624,7 @@ func replayOrder(ctx context.Context, image []byte, gcfg adjlist.Config, codec t
 }
 
 // -----------------------------------------------------------------------------
-// ST6 — checkpoint WAL-truncate post-rename dir-fsync fault + poison
+// ST6 — checkpoint control-file post-rename dir-fsync fault
 // -----------------------------------------------------------------------------
 
 // checkpointDirFsyncTxns is how many single-node transactions ST6 commits before
@@ -627,29 +633,29 @@ const checkpointDirFsyncTxns = 16
 
 // checkpointDirFsyncFaultScenario is ST6. Against a full-stack durable
 // [SimStore] (WAL + snapshot) on a [SimDisk] it commits several node
-// transactions, arms a one-shot fault on the WAL's post-rename parent-dir fsync
-// ([SimDisk.ArmParentDirSyncFaultForPath]), then runs a checkpoint. The
-// checkpoint publishes a durable self-sufficient snapshot, then its WAL-prefix
-// truncation renames the suffix-only WAL and fsyncs the parent dir — which
-// faults. It asserts the [wal.Writer] poisonAfterRename contract: the checkpoint
-// errors, the WAL writer is poisoned (every later Append/Sync returns the sticky
-// error), YET a reopen through real recovery reconstructs the exact committed
-// state (no committed op lost, no phantom, no torn transaction). It is
+// transactions, arms a one-shot fault on the post-rename parent-dir fsync of the
+// WAL control file ([SimDisk.ArmParentDirSyncFaultForPath]), then runs a
+// checkpoint. The checkpoint publishes a durable self-sufficient snapshot, then
+// writes the control file that records it — temp, fsync, rename, parent-dir
+// fsync — and the dir fsync faults. It asserts the segmented WAL's contract: the
+// checkpoint errors and unlinks nothing, the WAL writer is NOT poisoned (no log
+// byte was touched, so commits still succeed), and a reopen through real
+// recovery reconstructs the exact committed state (no committed op lost, no
+// phantom, no torn transaction) whichever control file survived. It is
 // deterministic and bit-reproducible.
 func checkpointDirFsyncFaultScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioCheckpointDirFsyncFault,
-		Description: "checkpoint WAL-truncate post-rename dir-fsync fault poisons the writer yet recovery restores the exact committed state",
+		Description: "checkpoint control-file post-rename dir-fsync fault fails the checkpoint, leaves the writer healthy, and recovery restores the exact committed state",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0xD125F00D,
 		run:         runCheckpointDirFsyncFault,
 	}
 }
 
-// runCheckpointDirFsyncFault performs one ST6 run. It abandons the poisoned
-// writer (the production contract is that the owner reopens the WAL) and reopens
-// over the SAME durable image WITHOUT crashing the disk, so the invariant is the
-// "on reopen" recovery the poisonAfterRename doc describes.
+// runCheckpointDirFsyncFault performs one ST6 run. It closes the writer and
+// reopens over the SAME durable image WITHOUT crashing the disk, so the
+// invariant is the "on reopen" recovery after a failed control write.
 func runCheckpointDirFsyncFault(ctx context.Context, seed uint64) (*SimReport, error) {
 	disk := NewSimDisk(NewSeed(seed^durableDiskSeedMix), 0)
 	cfg := fullStackStoreConfig()  // dir == "db": WAL at db/wal, snapshot at db/snapshot
@@ -670,10 +676,11 @@ func runCheckpointDirFsyncFault(ctx context.Context, seed uint64) (*SimReport, e
 		committed[name] = struct{}{}
 	}
 
-	// Arm the one-shot fault on the WAL's post-rename parent-dir fsync. The
-	// snapshot publish that precedes the truncate fsyncs only snapshot-component
-	// paths, so this fault fires precisely on the WAL-truncate dir-fsync.
-	disk.ArmParentDirSyncFaultForPath(walPath)
+	// Arm the one-shot fault on the control file's post-rename parent-dir
+	// fsync. The snapshot publish that precedes it fsyncs only
+	// snapshot-component paths, so this fault fires precisely on the
+	// checkpoint's control write.
+	disk.ArmParentDirSyncFaultForPath(wal.ControlPath(walPath))
 
 	cpErr := st.Checkpoint()
 	if cpErr == nil {
@@ -684,29 +691,31 @@ func runCheckpointDirFsyncFault(ctx context.Context, seed uint64) (*SimReport, e
 		}}), nil
 	}
 
-	// Invariant (a): the fault poisons the WAL writer — every later Sync/Append
-	// returns the sticky error.
+	// Invariant (a): the failed control write touched no log byte, so the WAL
+	// writer is NOT poisoned and an acknowledged commit after it still lands.
 	var v []Violation
-	if syncErr := st.wlog.Sync(); syncErr == nil {
+	if perr := st.wlog.Poisoned(); perr != nil {
 		v = append(v, Violation{
-			Kind: ViolationACIDDurability, Op: "<poison>",
-			Message: "WAL Sync succeeded after a post-rename dir-fsync fault — the writer was not poisoned",
+			Kind: ViolationOracleDeviation, Op: "<poison>",
+			Message: fmt.Sprintf("the WAL writer is poisoned after a failed control-file write (%v): no log byte was touched", perr),
 		})
 	}
-	if appendErr := st.wlog.Append([]byte("post-poison")); appendErr == nil {
+	const afterName = "cp-after-fault"
+	if err := commitCreatePerson(ctx, st.Engine(), afterName, checkpointDirFsyncTxns); err != nil {
 		v = append(v, Violation{
 			Kind: ViolationACIDDurability, Op: "<poison>",
-			Message: "WAL Append succeeded after a post-rename dir-fsync fault — the writer was not poisoned",
+			Message: fmt.Sprintf("a commit after the failed control write was refused: %v", err),
 		})
+	} else {
+		committed[afterName] = struct{}{}
 	}
 	if len(v) > 0 {
 		st.Crash()
 		return storageFaultReport(seed, v), nil
 	}
 
-	// Abandon the poisoned writer WITHOUT crashing the disk (Close is best-effort;
-	// it touches only the orphaned pre-truncate handle, never the durable
-	// suffix-only WAL). Then reopen over the same image through real recovery.
+	// Close the writer WITHOUT crashing the disk, then reopen over the same
+	// image through real recovery.
 	_ = st.Close()
 
 	st2, err := OpenSimStore(disk, cfg)
@@ -724,13 +733,13 @@ func runCheckpointDirFsyncFault(ctx context.Context, seed uint64) (*SimReport, e
 	for _, missing := range setMinus(committed, recovered) {
 		v = append(v, Violation{
 			Kind: ViolationACIDDurability, Op: "<recovery>",
-			Message: fmt.Sprintf("committed node %q lost after the poisoned checkpoint (recovered=%d committed=%d)", missing, len(recovered), len(committed)),
+			Message: fmt.Sprintf("committed node %q lost after the failed checkpoint (recovered=%d committed=%d)", missing, len(recovered), len(committed)),
 		})
 	}
 	for _, phantom := range setMinus(recovered, committed) {
 		v = append(v, Violation{
 			Kind: ViolationACIDConsistency, Op: "<recovery>",
-			Message: fmt.Sprintf("recovered node %q was never committed (phantom after the poisoned checkpoint)", phantom),
+			Message: fmt.Sprintf("recovered node %q was never committed (phantom after the failed checkpoint)", phantom),
 		})
 	}
 	for _, torn := range partial {

@@ -71,6 +71,16 @@ func (g *Graph[N, W]) HasNodeLabelByIDAsOf(id graph.NodeID, name string, s *Snap
 	if !ok {
 		return false
 	}
+	return g.HasNodeLabelIDAsOf(id, lid, s)
+}
+
+// HasNodeLabelIDAsOf is [Graph.HasNodeLabelByIDAsOf] for a label already
+// resolved to its interned id, for a caller that holds the id and would
+// otherwise pay a name round trip per call (the commit-time index fan-out, rmp
+// #2931).
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) HasNodeLabelIDAsOf(id graph.NodeID, lid LabelID, s *Snapshot) bool {
 	// Written out for the same reason as [Graph.NodePropertyByIDAsOf]: this is a
 	// per-ROW predicate on every labelled scan. The membership test runs INSIDE
 	// the lock, because the bag aliases the stored backing array; see
@@ -187,6 +197,14 @@ func (g *Graph[N, W]) NodePropertyByIDAsOf(id graph.NodeID, key string, s *Snaps
 	if !ok {
 		return PropertyValue{}, false
 	}
+	return g.NodePropertyIDAsOf(id, pid, s)
+}
+
+// NodePropertyIDAsOf is [Graph.NodePropertyByIDAsOf] for a property key already
+// resolved to its interned id; see [Graph.HasNodeLabelIDAsOf].
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) NodePropertyIDAsOf(id graph.NodeID, pid PropertyKeyID, s *Snapshot) (PropertyValue, bool) {
 	// The fast path is written out HERE rather than delegated through
 	// propBagAsOf, and that is measured: this is the per-ROW accessor of a
 	// scalar projection, so two extra call frames returning a 32-byte bag cost
@@ -208,6 +226,66 @@ func (g *Graph[N, W]) NodePropertyByIDAsOf(id graph.NodeID, key string, s *Snaps
 	v, ok2 := bag.get(pid)
 	sh.mu.RUnlock()
 	return v, ok2
+}
+
+// NodePropertyStringIDAsOf is [Graph.NodePropertyIDAsOf] for a caller that only
+// compares string values: it returns the string without boxing it into a
+// [PropertyValue], so it allocates nothing on the current-version path. isString
+// is false when the property holds another kind; ok is false when it is absent.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) NodePropertyStringIDAsOf(id graph.NodeID, pid PropertyKeyID, s *Snapshot) (str string, isString, ok bool) {
+	// The same lock and snapshot visibility as [Graph.NodePropertyIDAsOf], but the
+	// version chain is walked for pid alone ([propStringAsOfLockedSnap]) instead of
+	// rebuilding the whole bag, which cloned it for every node a later commit had
+	// touched.
+	sh := g.nodePropShardFor(id)
+	sh.mu.RLock()
+	if s != nil && sh.d != nil {
+		str, isString, ok = propStringAsOfLockedSnap(sh, id, pid, s)
+	} else {
+		bag := sh.m[id]
+		str, isString, ok = bag.getString(pid)
+	}
+	sh.mu.RUnlock()
+	return str, isString, ok
+}
+
+// propStringAsOfLockedSnap is [Graph.propBagAsOfLockedSnap] followed by
+// [propBag.getString], restricted to the one key pid. The chain walk visits the
+// same undo records in the same order and stops at the same visible one; an undo
+// on another key cannot change pid's value, so applying only pid's undos yields
+// the value the rebuilt bag would hold, and allocates nothing. The caller holds
+// the shard's read lock.
+func propStringAsOfLockedSnap(sh *nodePropShard, id graph.NodeID, pid PropertyKeyID, snap *Snapshot) (string, bool, bool) {
+	cur := sh.m[id]
+	undone, present := false, false
+	var val PropertyValue
+	for d := sh.d[id]; d != nil; d = d.next {
+		if snap.visible(d.info, d.ts, snap.startTS, snap.txID) {
+			break
+		}
+		if d.key != pid {
+			continue
+		}
+		switch d.action {
+		case undoSetProp:
+			undone, present, val = true, true, d.prev
+		case undoDelProp:
+			undone, present, val = true, false, PropertyValue{}
+		}
+	}
+	if !undone {
+		return cur.getString(pid)
+	}
+	if !present {
+		return "", false, false
+	}
+	if val.kind != PropString {
+		return "", false, true
+	}
+	str, _ := val.v.(string)
+	return str, true, true
 }
 
 // GetNodePropertyAsOf is [Graph.NodePropertyByIDAsOf] keyed by the external
@@ -251,6 +329,43 @@ func (g *Graph[N, W]) EntryViewAsOf(id graph.NodeID, s *Snapshot) adjlist.EntryV
 		return g.adj.LoadEntryView(id)
 	}
 	return g.adj.EntryViewAsOfVisible(id, func(info *commitInfo, ts uint64) bool {
+		return s.visible(info, ts, startTS, txID)
+	})
+}
+
+// InNeighbourIDsAsOf returns the distinct NodeIDs holding an edge into dstID
+// as it stood at s, excluding dstID itself, in [graph.Mapper.Walk] order. A nil
+// s reads the present, exactly as [adjlist.AdjList.InNeighbourIDs] does.
+//
+// It is the question the delete path asks — "does this node still have an
+// incoming relationship", and "which ones must DETACH DELETE remove" — answered
+// from the reader's snapshot plus its own writes, never from another in-flight
+// transaction's work (rmp #2884). See [adjlist.AdjList.InNeighbourIDsVisible]
+// for how the present-state in-edge index is reconciled with the snapshot.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) InNeighbourIDsAsOf(dstID graph.NodeID, s *Snapshot) []graph.NodeID {
+	startTS, txID, walk := snapshotTimes(s)
+	if !walk {
+		// The STORED in-edges, including uncommitted writes: the adjacency's own
+		// InNeighbourIDs is committed-only (rmp #2965, round 5).
+		return g.adj.InNeighbourIDsStored(dstID)
+	}
+	return g.adj.InNeighbourIDsVisible(dstID, func(info *commitInfo, ts uint64) bool {
+		return s.visible(info, ts, startTS, txID)
+	})
+}
+
+// HasInNeighbourAsOf reports whether [Graph.InNeighbourIDsAsOf] would return at
+// least one NodeID, stopping at the first confirmed one.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) HasInNeighbourAsOf(dstID graph.NodeID, s *Snapshot) bool {
+	startTS, txID, walk := snapshotTimes(s)
+	if !walk {
+		return len(g.adj.InNeighbourIDsStored(dstID)) > 0
+	}
+	return g.adj.HasInNeighbourVisible(dstID, func(info *commitInfo, ts uint64) bool {
 		return s.visible(info, ts, startTS, txID)
 	})
 }

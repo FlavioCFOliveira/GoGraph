@@ -42,13 +42,17 @@ func TestDemo2403_OrdinalSurvivesSiblingDeleteButHandleIsSlotPrecise(t *testing.
 		}
 		handles = append(handles, h)
 		idx := g.IncEdgeCreateCount("a", "b")
-		g.SetEdgeLabelAt("a", "b", idx, rt)
-		g.SetEdgeLabelByHandle("a", "b", h, rt)
+		if err := g.SetEdgeLabelAt("a", "b", idx, rt); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.SetEdgeLabelByHandle("a", "b", h, rt); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Remove the MIDDLE instance through the handle-precise path, which is what
 	// DELETE uses for a bound relationship.
-	g.RemoveEdgeInstanceByHandle("a", "b", handles[1])
+	must(t).E(g.RemoveEdgeInstanceByHandle("a", "b", handles[1]))
 
 	// The handle surface is instance-precise: the removed one is gone, the
 	// survivors still resolve to their OWN types.
@@ -92,14 +96,22 @@ func TestDemo2403_BothSurfacesResolveAsOfASnapshot(t *testing.T) {
 		t.Fatalf("AddEdgeH: %v", err)
 	}
 	idx := g.IncEdgeCreateCount("a", "b")
-	g.SetEdgeLabelAt("a", "b", idx, "BEFORE")
-	g.SetEdgeLabelByHandle("a", "b", h, "BEFORE")
+	if err := g.SetEdgeLabelAt("a", "b", idx, "BEFORE"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabelByHandle("a", "b", h, "BEFORE"); err != nil {
+		t.Fatal(err)
+	}
 
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
 
-	g.SetEdgeLabelAt("a", "b", idx, "AFTER")
-	g.SetEdgeLabelByHandle("a", "b", h, "AFTER")
+	if err := g.SetEdgeLabelAt("a", "b", idx, "AFTER"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabelByHandle("a", "b", h, "AFTER"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Both surfaces must show the reader its own instant, not the later write.
 	ordinal := g.EdgeLabelsAtAsOf("a", "b", idx, snap)

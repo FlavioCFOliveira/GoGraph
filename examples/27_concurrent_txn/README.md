@@ -7,10 +7,10 @@ WAL-backed Cypher engine, certified under concurrency and the race detector.
 Many writer goroutines move money between accounts while many reader goroutines
 continuously observe an invariant that can only hold if the engine isolates
 in-flight transactions from readers and never loses a concurrent update. It is
-the only example whose runtime exercises `cypher.Engine.BeginTx` (multi-statement
-explicit transactions), `cypher.Engine.RunInTx` (single-statement autocommit
-writes), and `cypher.Engine.BeginReadTx` (read-only transactions) together under
-contention.
+the only example whose runtime exercises multi-statement explicit transactions
+(`cypher.Session.BeginTx`), single-statement autocommit writes
+(`cypher.Session.RunAny`, which routes to `RunInTx`), and `cypher.Engine.BeginReadTx`
+(read-only transactions) together under contention.
 
 ## Domain / scenario
 
@@ -239,9 +239,15 @@ therefore built to be *attributable*, not merely loud.
 ## Key APIs
 
 - `cypher.NewEngineWithStore` — a WAL-backed engine over a `txn.Store`.
-- `cypher.Engine.BeginTx` / `cypher.ExplicitTx.Exec` / `Commit` / `Rollback` —
+- `cypher.Engine.NewSession` — one `cypher.Session` per writer goroutine. A writer's
+  next transfer reads balances its own earlier transfers wrote, and the bare
+  `Engine` does not promise a statement observes the caller's own earlier commit
+  while another writer's older commit is in flight (see
+  [`docs/mvcc-frontier-visibility.md`](../../docs/mvcc-frontier-visibility.md)); the
+  session does, so the counted conflicts are contention between writers.
+- `cypher.Session.BeginTx` / `cypher.ExplicitTx.Exec` / `Commit` / `Rollback` —
   multi-statement explicit write transactions (the debit-then-credit transfer).
-- `cypher.Engine.RunInTx` (via `RunAny`) — single-statement autocommit writes.
+- `cypher.Session.RunAny` (routing to `RunInTx`) — single-statement autocommit writes.
 - `cypher.Engine.BeginReadTx` — read-only transactions for the invariant reads.
 - `cypher.Engine.Run` — the concurrent read path used by the other readers.
 

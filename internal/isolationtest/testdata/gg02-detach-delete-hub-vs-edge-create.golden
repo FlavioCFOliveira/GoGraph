@@ -1,0 +1,234 @@
+spec gg02-detach-delete-hub-vs-edge-create: 2 sessions, 6 permutations
+# GG02. s1 DETACH DELETEs a hub with three incoming edges; s2 creates x->hub. One
+# is refused in every order: no edge into the dead hub survives, and the relationship
+# count agrees with the arcs the probe walks.
+# The final dangling probe must count 0 in every permutation: an edge to a dead node
+# is never committed (catalogue §9 point 3).
+
+starting permutation: s1d s1c s2e s2c
+step s1d: MATCH (h:N {name:'hub'}) DETACH DELETE h RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2e: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final rels: MATCH ()-[r:R]->() RETURN count(r) AS rels
+rels
+----
+0   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"x" 
+"x1"
+"x2"
+"x3"
+(4 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s1d s2e s1c s2c
+step s1d: MATCH (h:N {name:'hub'}) DETACH DELETE h RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2e: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final rels: MATCH ()-[r:R]->() RETURN count(r) AS rels
+rels
+----
+0   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"x" 
+"x1"
+"x2"
+"x3"
+(4 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s1d s2e s2c s1c
+step s1d: MATCH (h:N {name:'hub'}) DETACH DELETE h RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2e: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final rels: MATCH ()-[r:R]->() RETURN count(r) AS rels
+rels
+----
+0   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"x" 
+"x1"
+"x2"
+"x3"
+(4 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+(0 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+0        |0       
+(1 row)
+
+starting permutation: s2e s1d s1c s2c
+step s2e: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (h:N {name:'hub'}) DETACH DELETE h RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+ERROR: serialization conflict
+step s2c: COMMIT
+final rels: MATCH ()-[r:R]->() RETURN count(r) AS rels
+rels
+----
+4   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"x3" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst  
+----+--+-----
+"x" |4 |"hub"
+"x1"|1 |"hub"
+"x2"|2 |"hub"
+"x3"|3 |"hub"
+(4 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+4        |0       
+(1 row)
+
+starting permutation: s2e s1d s2c s1c
+step s2e: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s1d: MATCH (h:N {name:'hub'}) DETACH DELETE h RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: serialization conflict
+final rels: MATCH ()-[r:R]->() RETURN count(r) AS rels
+rels
+----
+4   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"x3" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst  
+----+--+-----
+"x" |4 |"hub"
+"x1"|1 |"hub"
+"x2"|2 |"hub"
+"x3"|3 |"hub"
+(4 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+4        |0       
+(1 row)
+
+starting permutation: s2e s2c s1d s1c
+step s2e: MATCH (x:N {name:'x'}), (h:N {name:'hub'}) CREATE (x)-[:R {id:4}]->(h) RETURN count(*) AS created
+created
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1d: MATCH (h:N {name:'hub'}) DETACH DELETE h RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+ERROR: serialization conflict
+final rels: MATCH ()-[r:R]->() RETURN count(r) AS rels
+rels
+----
+4   
+(1 row)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name 
+-----
+"hub"
+"x"  
+"x1" 
+"x2" 
+"x3" 
+(5 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src |id|dst  
+----+--+-----
+"x" |4 |"hub"
+"x1"|1 |"hub"
+"x2"|2 |"hub"
+"x3"|3 |"hub"
+(4 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+4        |0       
+(1 row)

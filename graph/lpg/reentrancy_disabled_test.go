@@ -4,8 +4,9 @@ package lpg
 
 // reentrancy_disabled_test.go — pins the PRODUCTION contract of the barrier
 // re-entrancy guard (rmp #2168): without -race and without -tags gograph_debug
-// the guard is compiled out entirely, so [Graph.View] costs exactly its
-// RWMutex pair and allocates nothing.
+// the guard is compiled out entirely, so [Graph.ApplyAtomically] pays nothing
+// for it and allocates nothing for it. (This named Graph.View, removed by rmp
+// #2344 together with the guard's reader half.)
 //
 // The enforcing behaviour — a nested acquisition panicking with an explanation
 // instead of deadlocking — is pinned by reentrancy_test.go and
@@ -50,9 +51,9 @@ func TestBarrierGuard_ApplyAtomicallyAllocatesNothing(t *testing.T) {
 
 // TestBarrierGuard_ConcurrentReadersAndWriterUnaffected keeps the concurrency
 // coverage that reentrancy_test.go provides under -race, where its
-// no-false-positive assertion lives: many concurrent View readers alongside an
-// ApplyAtomically writer must all complete, in this build as in that one.
-// Removing the guard must not have changed how visMu admits them.
+// no-false-positive assertion lives: many concurrent lock-free readers alongside
+// an ApplyAtomically writer must all complete, in this build as in that one.
+// Removing the guard must not have changed how the barrier admits the writer.
 func TestBarrierGuard_ConcurrentReadersAndWriterUnaffected(t *testing.T) {
 	t.Parallel()
 	g := New[string, int64](adjlist.Config{Directed: true})
@@ -76,8 +77,8 @@ func TestBarrierGuard_ConcurrentReadersAndWriterUnaffected(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for j := 0; j < iterations; j++ {
-			if err := g.ApplyAtomically(func() error {
-				return g.SetNodeProperty("a", "v", Int64Value(int64(j)))
+			if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+				return g.Writer(tx).SetNodeProperty("a", "v", Int64Value(int64(j)))
 			}); err != nil {
 				t.Errorf("ApplyAtomically: %v", err)
 				return

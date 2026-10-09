@@ -1,0 +1,390 @@
+spec ix02-own-write-btree-seek: 2 sessions, 8 permutations
+# IX02 (#2814). Btree index on (:L).s over 1 100 nodes. Inside one transaction s1
+# moves n7 to s='v999x' and creates s='v999y'; the range seek s >= 'v999' and the
+# prefix seek STARTS WITH 'v999' must each equal the scan after every write (2, then
+# 3). s2 reads the range in an autocommit statement and sees s1's writes only after
+# its commit.
+
+starting permutation: s1w s1rg s1px s1cr s1rg2 s1px2 s1c s2r
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'v999x' RETURN n.s AS s
+s      
+-------
+"v999x"
+(1 row)
+step s1rg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1px: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'v999y'}) RETURN n.s AS s
+s      
+-------
+"v999y"
+(1 row)
+step s1rg2: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1px2: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final frg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final fpx: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+
+starting permutation: s1w s1rg s1px s1cr s1rg2 s1px2 s2r s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'v999x' RETURN n.s AS s
+s      
+-------
+"v999x"
+(1 row)
+step s1rg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1px: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'v999y'}) RETURN n.s AS s
+s      
+-------
+"v999y"
+(1 row)
+step s1rg2: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1px2: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s2r: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final frg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final fpx: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+
+starting permutation: s1w s1rg s1px s1cr s1rg2 s2r s1px2 s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'v999x' RETURN n.s AS s
+s      
+-------
+"v999x"
+(1 row)
+step s1rg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1px: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'v999y'}) RETURN n.s AS s
+s      
+-------
+"v999y"
+(1 row)
+step s1rg2: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s2r: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1px2: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1c: COMMIT
+final frg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final fpx: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+
+starting permutation: s1w s1rg s1px s1cr s2r s1rg2 s1px2 s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'v999x' RETURN n.s AS s
+s      
+-------
+"v999x"
+(1 row)
+step s1rg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1px: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'v999y'}) RETURN n.s AS s
+s      
+-------
+"v999y"
+(1 row)
+step s2r: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1rg2: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1px2: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1c: COMMIT
+final frg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final fpx: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+
+starting permutation: s1w s1rg s1px s2r s1cr s1rg2 s1px2 s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'v999x' RETURN n.s AS s
+s      
+-------
+"v999x"
+(1 row)
+step s1rg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1px: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s2r: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'v999y'}) RETURN n.s AS s
+s      
+-------
+"v999y"
+(1 row)
+step s1rg2: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1px2: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1c: COMMIT
+final frg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final fpx: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+
+starting permutation: s1w s1rg s2r s1px s1cr s1rg2 s1px2 s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'v999x' RETURN n.s AS s
+s      
+-------
+"v999x"
+(1 row)
+step s1rg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s2r: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1px: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'v999y'}) RETURN n.s AS s
+s      
+-------
+"v999y"
+(1 row)
+step s1rg2: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1px2: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1c: COMMIT
+final frg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final fpx: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+
+starting permutation: s1w s2r s1rg s1px s1cr s1rg2 s1px2 s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'v999x' RETURN n.s AS s
+s      
+-------
+"v999x"
+(1 row)
+step s2r: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1rg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1px: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'v999y'}) RETURN n.s AS s
+s      
+-------
+"v999y"
+(1 row)
+step s1rg2: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1px2: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1c: COMMIT
+final frg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final fpx: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+
+starting permutation: s2r s1w s1rg s1px s1cr s1rg2 s1px2 s1c
+step s2r: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'v999x' RETURN n.s AS s
+s      
+-------
+"v999x"
+(1 row)
+step s1rg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1px: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'v999y'}) RETURN n.s AS s
+s      
+-------
+"v999y"
+(1 row)
+step s1rg2: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1px2: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+step s1c: COMMIT
+final frg: MATCH (n:L) WHERE n.s >= 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' >= 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)
+final fpx: MATCH (n:L) WHERE n.s STARTS WITH 'v999' WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE left(m.s, size('v999')) = 'v999' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+3   |3   
+(1 row)

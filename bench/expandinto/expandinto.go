@@ -91,14 +91,18 @@ func SeedRing(n, degree int, mutual bool) (*lpg.Graph[string, float64], error) {
 			if err := g.AddEdge(keys[i], keys[j], 1.0); err != nil {
 				return nil, fmt.Errorf("AddEdge(%s->%s): %w", keys[i], keys[j], err)
 			}
-			g.SetEdgeLabel(keys[i], keys[j], "K")
+			if err := g.SetEdgeLabel(keys[i], keys[j], "K"); err != nil {
+				return nil, err
+			}
 		}
 		if mutual {
 			j := (i - 1 + n) % n
 			if err := g.AddEdge(keys[i], keys[j], 1.0); err != nil {
 				return nil, fmt.Errorf("AddEdge back(%s->%s): %w", keys[i], keys[j], err)
 			}
-			g.SetEdgeLabel(keys[i], keys[j], "K")
+			if err := g.SetEdgeLabel(keys[i], keys[j], "K"); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return g, nil
@@ -134,7 +138,9 @@ func SeedReverseHub(hubOut, nLeaf int) (*lpg.Graph[string, float64], error) {
 		if err := g.AddEdge("hub", k, 1.0); err != nil {
 			return nil, fmt.Errorf("AddEdge(hub->%s): %w", k, err)
 		}
-		g.SetEdgeLabel("hub", k, "R")
+		if err := g.SetEdgeLabel("hub", k, "R"); err != nil {
+			return nil, err
+		}
 	}
 	for i := 0; i < nLeaf; i++ {
 		k := "l" + itoa(i)
@@ -151,7 +157,9 @@ func SeedReverseHub(hubOut, nLeaf int) (*lpg.Graph[string, float64], error) {
 	if err := g.AddEdge("hub", "l0", 1.0); err != nil {
 		return nil, fmt.Errorf("AddEdge(hub->l0): %w", err)
 	}
-	g.SetEdgeLabel("hub", "l0", "R")
+	if err := g.SetEdgeLabel("hub", "l0", "R"); err != nil {
+		return nil, err
+	}
 	return g, nil
 }
 

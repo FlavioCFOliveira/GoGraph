@@ -1,0 +1,64 @@
+spec fp03-session-read-bounded-by-context: 2 sessions, 2 permutations
+# FP03. s0 writes s and reserves its commit instant (the commit hold); s1 commits t1 through a cypher.Session (autocommit CREATE)
+# and then waits for its own commit with a 50 ms deadline: the wait returns the context
+# error instead of hanging (CLAUDE.md, context-aware blocking). After s0 publishes, the
+# same wait returns at once. The control interleaving publishes s0 before s1 commits.
+
+starting permutation: s0w s0a s1w s1r s0p s1r2
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s1w: <cypher.Session, deadline 30s> CREATE (n:N {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1r: <cypher.Session, deadline 50ms> MATCH (n {name:'t1'}) RETURN n.name AS name
+ERROR: deadline exceeded
+step s0p: lpg: Session.EndVersionedTx
+step s1r2: <cypher.Session, deadline 30s> MATCH (n {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v   
+----+----
+"s" |1   
+"t1"|null
+(2 rows)
+
+starting permutation: s0w s0a s0p s1w s1r s1r2
+step s0w: lpg: SetNodeProperty(s, v, 1)
+step s0a: lpg: Graph.AllocateCommitTS (instant reserved, not published)
+step s0p: lpg: Session.EndVersionedTx
+step s1w: <cypher.Session, deadline 30s> CREATE (n:N {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1r: <cypher.Session, deadline 50ms> MATCH (n {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1r2: <cypher.Session, deadline 30s> MATCH (n {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+final ffr: <MVCCStats: in_flight_commits, sessions_waiting>
+in_flight_commits|sessions_waiting
+-----------------+----------------
+0                |0               
+(1 row)
+final final: <sessionless> MATCH (n) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v   
+----+----
+"s" |1   
+"t1"|null
+(2 rows)

@@ -32,7 +32,6 @@ package checkpoint_test
 // remaining link: that installing the guard did not break the ordinary case.
 
 import (
-	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -40,6 +39,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -105,11 +105,7 @@ func TestCheckpoint_HandleRecordUnderCapStillFolds_2784(t *testing.T) {
 		t.Fatalf("handle carries %d properties, want %d — the fixture did not land, so "+
 			"anything this test goes on to assert is vacuous", got, perTx*txCount)
 	}
-	fi, err := os.Stat(walPath)
-	if err != nil {
-		t.Fatalf("stat wal: %v", err)
-	}
-	if fi.Size() == 0 {
+	if w.DurableOffset() == 0 {
 		t.Fatal("the WAL is empty before the checkpoint, so a later truncation would " +
 			"prove nothing")
 	}
@@ -122,13 +118,9 @@ func TestCheckpoint_HandleRecordUnderCapStillFolds_2784(t *testing.T) {
 	if err := cp.RunCheckpoint(); err != nil {
 		t.Fatalf("a by-handle record well under the cap could not be checkpointed: %v", err)
 	}
-	fi2, err := os.Stat(walPath)
-	if err != nil {
-		t.Fatalf("stat wal after checkpoint: %v", err)
-	}
-	if fi2.Size() >= fi.Size() {
-		t.Fatalf("the checkpoint did not reclaim the WAL prefix: %d bytes before, %d after. "+
-			"That is the shape of the rmp #2784 defect — capture refused, phase 3 never "+
-			"ran — and it must not appear for a record under the cap", fi.Size(), fi2.Size())
+	if _, ok, err := waltest.CheckpointRecorded(dir); err != nil || !ok {
+		t.Fatalf("the checkpoint did not record its snapshot as the start of recovery (err %v). "+
+			"That is the shape of the rmp #2784 defect — capture refused, nothing discarded "+
+			"— and it must not appear for a record under the cap", err)
 	}
 }

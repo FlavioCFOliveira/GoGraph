@@ -45,12 +45,13 @@ import (
 )
 
 // nodeLifeHeadFor returns the effective timestamp of the latest existence
-// event (birth, death) recorded for id, or zero when the node has no record.
+// event (birth, death) recorded for id, raised to its existence claim when it
+// has one ([Graph.noteNodeClaim]), or zero when the node has neither.
 // Safe for concurrent use; takes the life shard's read lock.
 func (g *Graph[N, W]) nodeLifeHeadFor(id graph.NodeID) uint64 {
 	sh := g.nodeLifeShardFor(id)
 	sh.mu.RLock()
-	head := sh.headStamp(id)
+	head := sh.headStampWithClaim(id)
 	sh.mu.RUnlock()
 	return head
 }

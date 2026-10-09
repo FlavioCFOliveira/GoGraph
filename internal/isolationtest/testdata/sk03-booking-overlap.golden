@@ -1,0 +1,584 @@
+spec sk03-booking-overlap: 2 sessions, 20 permutations
+# SK03. Predicate-insert write skew. Each session checks that no booking of room r1
+# overlaps 13-14, finds none, and creates one. Without predicate locks (F7) both
+# commit and two overlapping bookings exist: snapshot isolation permits it.
+
+starting permutation: s1r s1w s1c s2r s2w s2c
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s2c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s1r s1w s2r s1c s2w s2c
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1c: COMMIT
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s2c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s1r s1w s2r s2w s1c s2c
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s1r s1w s2r s2w s2c s1c
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s1r s2r s1w s1c s2w s2c
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s1c: COMMIT
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s2c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s1r s2r s1w s2w s1c s2c
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s1r s2r s1w s2w s2c s1c
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s1r s2r s2w s1w s1c s2c
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s1r s2r s2w s1w s2c s1c
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s1r s2r s2w s2c s1w s1c
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s2c: COMMIT
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s1c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s2r s1r s1w s1c s2w s2c
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s1c: COMMIT
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s2c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s2r s1r s1w s2w s1c s2c
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s2r s1r s1w s2w s2c s1c
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s2r s1r s2w s1w s1c s2c
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s2r s1r s2w s1w s2c s1c
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s2r s1r s2w s2c s1w s1c
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s2c: COMMIT
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s1c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s2r s2w s1r s1w s1c s2c
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s2r s2w s1r s1w s2c s1c
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s2r s2w s1r s2c s1w s1c
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2c: COMMIT
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s1c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)
+
+starting permutation: s2r s2w s2c s1r s1w s1c
+step s2r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s2w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s2'}) RETURN b.owner AS owner
+owner
+-----
+"s2" 
+(1 row)
+step s2c: COMMIT
+step s1r: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+0          
+(1 row)
+step s1w: CREATE (b:Booking {room:'r1', start:13, end:14, owner:'s1'}) RETURN b.owner AS owner
+owner
+-----
+"s1" 
+(1 row)
+step s1c: COMMIT
+final final: MATCH (b:Booking {room:'r1'}) WHERE b.start < 14 AND b.end > 13 RETURN count(b) AS overlapping
+overlapping
+-----------
+2          
+(1 row)

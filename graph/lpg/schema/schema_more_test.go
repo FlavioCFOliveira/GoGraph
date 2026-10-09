@@ -68,8 +68,11 @@ func TestSchema_PropertyKeyRegistry(t *testing.T) {
 func TestSchema_RegisterLabel_DoubleCheck(t *testing.T) {
 	t.Parallel()
 	s := New(nil, nil)
-	a := s.RegisterLabel("Foo")
-	b := s.RegisterLabel("Foo")
+	a, errA := s.RegisterLabel("Foo")
+	b, errB := s.RegisterLabel("Foo")
+	if errA != nil || errB != nil {
+		t.Fatalf("RegisterLabel: %v, %v", errA, errB)
+	}
 	if a != b {
 		t.Fatalf("RegisterLabel not idempotent: %d != %d", a, b)
 	}

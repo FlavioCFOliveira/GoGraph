@@ -61,7 +61,7 @@ func TestPlanBuildGroupCollapsesConcurrentBuilds(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		got[0], _ = g.do("k", build)
+		got[0], _ = g.do("k", 0, build)
 	}()
 
 	<-leaderIn // the leader is inside build and cannot finish yet
@@ -76,7 +76,7 @@ func TestPlanBuildGroupCollapsesConcurrentBuilds(t *testing.T) {
 		fwg.Add(1)
 		go func(i int) {
 			defer fwg.Done()
-			got[i], _ = g.do("k", build)
+			got[i], _ = g.do("k", 0, build)
 		}(i)
 	}
 
@@ -121,10 +121,10 @@ func TestPlanBuildGroupSharesTheError(t *testing.T) {
 		return nil, wantErr
 	}
 
-	if _, err := g.do("k", build); !errors.Is(err, wantErr) {
+	if _, err := g.do("k", 0, build); !errors.Is(err, wantErr) {
 		t.Fatalf("first do err = %v, want %v", err, wantErr)
 	}
-	if _, err := g.do("k", build); !errors.Is(err, wantErr) {
+	if _, err := g.do("k", 0, build); !errors.Is(err, wantErr) {
 		t.Fatalf("second do err = %v, want %v", err, wantErr)
 	}
 	if n := builds.Load(); n != 2 {
@@ -153,7 +153,7 @@ func TestPlanBuildGroupDoesNotBlockOtherKeys(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = g.do("a", func(string) (*planCacheEntry, error) {
+		_, _ = g.do("a", 0, func(string) (*planCacheEntry, error) {
 			close(aIn)
 			<-bDone // "b" must be able to finish while "a" is still building
 			return newTestEntry("a"), nil
@@ -161,7 +161,7 @@ func TestPlanBuildGroupDoesNotBlockOtherKeys(t *testing.T) {
 	}()
 
 	<-aIn
-	if _, err := g.do("b", func(string) (*planCacheEntry, error) {
+	if _, err := g.do("b", 0, func(string) (*planCacheEntry, error) {
 		return newTestEntry("b"), nil
 	}); err != nil {
 		t.Fatalf("do(b) while a was in flight: %v", err)
@@ -187,7 +187,7 @@ func TestPlanBuildGroupPanickingLeaderReleasesWaiters(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		defer func() { _ = recover() }() // the TEST recovers, the library does not
-		_, _ = g.do("k", func(string) (*planCacheEntry, error) {
+		_, _ = g.do("k", 0, func(string) (*planCacheEntry, error) {
 			close(leaderIn)
 			<-release
 			panic("build exploded")
@@ -198,7 +198,7 @@ func TestPlanBuildGroupPanickingLeaderReleasesWaiters(t *testing.T) {
 
 	waiter := make(chan *planCacheEntry, 1)
 	go func() {
-		e, _ := g.do("k", func(string) (*planCacheEntry, error) { return want, nil })
+		e, _ := g.do("k", 0, func(string) (*planCacheEntry, error) { return want, nil })
 		waiter <- e
 	}()
 
@@ -328,3 +328,38 @@ var (
 type errSentinel string
 
 func (e errSentinel) Error() string { return string(e) }
+
+// TestBuildPlanCacheEntryDoesNotAdoptABuildFromBeforeAClear pins the second
+// half of rmp #2854: a caller that misses AFTER a plan-cache clear must not
+// adopt the result of a build whose leader started before it, because that
+// leader may have read the pre-change index catalog. The planted build carries
+// the generation before the clear; the miss after the clear must compile its
+// own entry instead of returning the planted one.
+func TestBuildPlanCacheEntryDoesNotAdoptABuildFromBeforeAClear(t *testing.T) {
+	t.Parallel()
+
+	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	e := NewEngine(g)
+
+	const q = "MATCH (n) RETURN n"
+	planted := newTestEntry("planted")
+
+	done := make(chan struct{})
+	close(done)
+	e.planBuilds.mu.Lock()
+	e.planBuilds.inflight[q] = &planBuild{done: done, entry: planted, gen: e.cache.generation()}
+	e.planBuilds.mu.Unlock()
+
+	e.ClearPlanCache()
+
+	got, err := e.buildPlanCacheEntry(q)
+	if err != nil {
+		t.Fatalf("buildPlanCacheEntry: %v", err)
+	}
+	if got == planted {
+		t.Fatal("buildPlanCacheEntry adopted a build that started before the plan-cache clear")
+	}
+	if got.plan == nil {
+		t.Fatal("buildPlanCacheEntry returned an entry with no plan")
+	}
+}

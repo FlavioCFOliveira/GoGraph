@@ -137,6 +137,20 @@ func (fs *rewindWALFS) Rename(oldPath, newPath string) error { return os.Rename(
 
 func (fs *rewindWALFS) Remove(path string) error { return os.Remove(path) }
 
+func (fs *rewindWALFS) MkdirAll(dir string) error { return os.MkdirAll(dir, 0o700) }
+
+func (fs *rewindWALFS) ReadDir(dir string) ([]string, error) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(ents))
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
 func (fs *rewindWALFS) ParentDirSync(childPath string) error {
 	d, err := os.Open(filepath.Dir(childPath))
 	if err != nil {

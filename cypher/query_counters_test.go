@@ -297,8 +297,9 @@ func TestQueryCounters_RolledBackStatementReportsNothing(t *testing.T) {
 		_ = res.Close()
 	}
 	if err == nil {
-		t.Skip("the seeded statement did not fail on this build; the rule is covered by " +
-			"the per-statement counter lifetime instead")
+		t.Fatal("precondition lost: `CREATE (n:N) SET n.p = 1/0` succeeded, so this test " +
+			"no longer exercises a failed statement; replace it with a statement that " +
+			"still fails at run time")
 	}
 
 	// A subsequent statement must report only ITS OWN effects.

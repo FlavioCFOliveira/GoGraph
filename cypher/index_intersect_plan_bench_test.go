@@ -177,3 +177,34 @@ func BenchmarkIndexIntersectPlan_ControlNoIndex(b *testing.B) {
 	benchPlanBuild(b, iiBenchBig(b),
 		`MATCH (n:Doc) WHERE n.missing1 < 10 AND n.missing2 < 30 RETURN n.s AS s`)
 }
+
+// ── EXECUTION: a conjunct whose range is empty (rmp #3061) ─────────────────────
+
+// BenchmarkIndexIntersectExec_EmptyConjunct runs, end to end, conjunctions in
+// which one indexed conjunct's range is empty in its index. The selectivity gate
+// now admits an empty range, so such a conjunct joins the intersection instead
+// of being declined. Present is the non-empty control.
+func BenchmarkIndexIntersectExec_EmptyConjunct(b *testing.B) {
+	fx := iiBenchBig(b)
+	for _, c := range []struct{ name, q string }{
+		{"EmptyString", `MATCH (n:Doc) WHERE n.a < 10 AND n.s = "absent" RETURN n.s AS s`},
+		{"EmptyNumeric", `MATCH (n:Doc) WHERE n.a < 10 AND n.b < -5 RETURN n.s AS s`},
+		{"Present", `MATCH (n:Doc) WHERE n.a < 10 AND n.b < 30 RETURN n.s AS s`},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			ctx := context.Background()
+			b.ReportAllocs()
+			for b.Loop() {
+				res, err := fx.eng.Run(ctx, c.q, nil)
+				if err != nil {
+					b.Fatal(err)
+				}
+				for res.Next() {
+				}
+				if err := res.Close(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

@@ -201,18 +201,22 @@ func TestCheckDurability_RealWALTruncationLosesCommittedOps(t *testing.T) {
 
 	// Injected durability fault: truncate the durable WAL image so a committed
 	// suffix is permanently lost (as a torn-but-undetected drop would).
-	full := disk.Snapshot()[simWALPath]
+	seg, ok := simWALTailSegment(disk, simWALPath)
+	if !ok {
+		t.Fatal("no WAL segment holds a frame")
+	}
+	full := disk.Snapshot()[seg]
 	if len(full) < 64 {
 		t.Fatalf("WAL too small to truncate meaningfully: %d bytes", len(full))
 	}
-	h, err := disk.OpenFile(simWALPath, os.O_RDWR)
+	h, err := disk.OpenFile(seg, os.O_RDWR)
 	if err != nil {
 		t.Fatalf("open WAL for truncation: %v", err)
 	}
 	// Drop the trailing half of the WAL: this severs committed frames. Half of a
 	// 12-create WAL is guaranteed to land past the first few committed ops, so a
 	// committed suffix is always lost.
-	if err := h.Truncate(int64(len(full) / 2)); err != nil {
+	if err := h.Truncate(int64(simWALSegmentHeader + (len(full)-simWALSegmentHeader)/2)); err != nil {
 		t.Fatalf("truncate WAL: %v", err)
 	}
 	_ = h.Close()

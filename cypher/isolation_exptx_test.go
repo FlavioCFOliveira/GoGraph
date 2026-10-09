@@ -3,18 +3,20 @@ package cypher_test
 // isolation_exptx_test.go — regression gate for ExplicitTx read-committed
 // isolation (task #1412, isolation option b: whole-tx visMu.Lock).
 //
-// # Isolation contract after task #1412
+// # Isolation contract
 //
-// [Engine.BeginTx] now acquires the graph's transaction-visibility write lock
-// (visMu via [lpg.Graph.LockBarrier]) for the whole lifetime of the explicit
-// transaction. A concurrent [Engine.Run] or [lpg.Graph.View] call acquires the
-// read-side of the same lock, so it BLOCKS while the explicit transaction is open
-// and is released only once [ExplicitTx.Commit] or [ExplicitTx.Rollback] is
-// called. Readers therefore observe either the pre-transaction state or the fully
-// committed/rolled-back state — never an intermediate dirty write.
+// Task #1412 made [Engine.BeginTx] hold the graph's barrier exclusively for the
+// whole transaction, so readers blocked. That is no longer the mechanism: rmp
+// #2305 retired the hold, and rmp #2344 removed lpg.Graph.View. Each statement
+// of an explicit transaction now holds the schema barrier SHARED for its own
+// duration only ([lpg.Graph.ApplyInVersionedTx]), and every write it makes is
+// stamped with the transaction's commit record, which stays unpublished until
+// [ExplicitTx.Commit]. A concurrent [Engine.Run] reads at its own MVCC snapshot
+// and never blocks, so it observes either the pre-transaction state or the
+// fully committed state — never an intermediate dirty write.
 //
 // The tests in this file cover:
-//   - Readers block during an open ExplicitTx and observe the post-Commit state.
+//   - Readers do not block during an open ExplicitTx and observe the post-Commit state.
 //   - After Rollback, readers observe the pre-transaction state (0 nodes).
 //   - Across multiple Exec calls within one ExplicitTx, no intermediate count is
 //     ever observable by a concurrent reader (atomic multi-statement visibility).
@@ -144,9 +146,9 @@ func TestExplicitTx_Isolation_ReadCommitted(t *testing.T) {
 		}
 		_ = res.Close()
 
-		// Concurrent reader: launched while the transaction is still open.
-		// Because ExplicitTx now holds visMu.Lock, Engine.Run blocks on visMu.RLock
-		// inside Graph.View and cannot proceed until Commit releases the lock.
+		// Concurrent reader: launched while the transaction is still open. It
+		// reads at its own MVCC snapshot; the open transaction's commit record is
+		// unpublished, so none of its writes are visible.
 		type readResult struct {
 			count int64
 			err   error
@@ -763,5 +765,73 @@ func TestExplicitTx_DoomedCreateLeavesNoOrphanSlot(t *testing.T) {
 	}
 	if int64(v) != 1 {
 		t.Fatalf("after doomed-create rollback: MATCH (n) count=%d, want 1 (orphan slot leaked)", int64(v))
+	}
+}
+
+// TestExplicitTx_StackedRelationshipWriteCannotCommitARolledBackRelationship is
+// the audit's Cypher reproduction of rmp #2966 crossed with rmp #2965. T1
+// creates a->c; T2 sets a property on a->b, which rebuilt a's adjacency entry
+// with T1's uncommitted arc in it; T1 is doomed by a conflict on a node and
+// rolls back. The undo removed T1's arc, the abort's withdrawal then restored
+// T2's entry, which still held it, and T2's commit made the rolled-back
+// relationship permanent: count 2 where 1 is right. The relationship-property
+// write now claims a, so T2 is refused and the arc never leaves T1.
+func TestExplicitTx_StackedRelationshipWriteCannotCommitARolledBackRelationship(t *testing.T) {
+	for _, doomed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("doomed=%v", doomed), func(t *testing.T) {
+			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			t.Cleanup(func() { _ = g.Close() })
+			eng := cypher.NewEngine(g)
+			ctx := context.Background()
+			run := func(r *cypher.Result, err error) error {
+				if err != nil {
+					return err
+				}
+				for r.Next() {
+				}
+				return r.Close()
+			}
+			if err := run(eng.RunAny(ctx, "CREATE (a:N {id:'a'})-[:R]->(b:N {id:'b'}), (c:N {id:'c'}), (x:N {id:'x'})", nil)); err != nil {
+				t.Fatal(err)
+			}
+			t1, err := eng.BeginTx(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := run(t1.ExecAny("MATCH (a:N {id:'a'}), (c:N {id:'c'}) CREATE (a)-[:R]->(c)", nil)); err != nil {
+				t.Fatal(err)
+			}
+			t2, err := eng.BeginTx(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = run(t2.ExecAny("MATCH (:N {id:'a'})-[r:R]->(:N {id:'b'}) SET r.p = 1", nil))
+			if doomed {
+				t3, err := eng.BeginTx(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = run(t3.ExecAny("MATCH (x:N {id:'x'}) SET x.v = 3", nil))
+				if err := run(t1.ExecAny("MATCH (x:N {id:'x'}) SET x.v = 1", nil)); err == nil {
+					t.Fatal("setup: T1 was not doomed by T3's pending write")
+				}
+				_ = t3.Rollback()
+			}
+			_ = t1.Rollback()
+			_ = t2.Commit()
+			g.ReclaimNow()
+			r, err := eng.RunAny(ctx, "MATCH (:N {id:'a'})-[r:R]->(m) RETURN count(r) AS n, collect(m.id) AS ids", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got any
+			for r.Next() {
+				got = r.Record()
+			}
+			_ = r.Close()
+			if fmt.Sprint(got) != `map[ids:["b"] n:1]` {
+				t.Errorf("the rolled-back relationship a->c is committed: %v", got)
+			}
+		})
 	}
 }

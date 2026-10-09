@@ -83,7 +83,7 @@ func TestReclaimVersions_FreesOnlyTheUnreachable(t *testing.T) {
 	if freed == 0 {
 		t.Fatal("nothing was freed with a watermark past two of three versions")
 	}
-	l1, l2, l3 := g.reg.Intern("L1"), g.reg.Intern("L2"), g.reg.Intern("L3")
+	l1, l2, l3 := g.reg.intern("L1"), g.reg.intern("L2"), g.reg.intern("L3")
 
 	// The version AT the watermark must survive: it is what a reader that
 	// started then is entitled to see.
@@ -104,7 +104,7 @@ func TestReclaimVersions_FreesOnlyTheUnreachable(t *testing.T) {
 func TestReclaimVersions_PropertiesToo(t *testing.T) {
 	g := reclaimGraph(t)
 	id, _ := g.adj.Mapper().Lookup("a")
-	keyID := g.propKeys().Intern("w")
+	keyID := g.propKeys().intern("w")
 
 	for i := int64(1); i <= 3; i++ {
 		if err := g.SetNodeProperty("a", "w", Int64Value(i)); err != nil {
@@ -136,7 +136,7 @@ func TestReclaimVersions_HeldBackByAReader(t *testing.T) {
 	if err := g.SetNodeLabel("a", "L"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	lid := g.reg.Intern("L")
+	lid := g.reg.intern("L")
 
 	var h mvcc.Horizon
 	slot := h.Enter(old) // a reader that began before the write

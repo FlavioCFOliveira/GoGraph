@@ -1,0 +1,180 @@
+spec ri06-parallel-edges-disjoint-lpg: 2 sessions, 6 permutations
+# RI06, parallel edges. s1 SETs r.w on edge id 1, s2 on edge id 2; both run from a
+# to b. The catalogue expects no conflict: the two are different relationships.
+# Through the lpg API: SetEdgePropertyByHandle on each instance.
+# The final dangling probe must count 0 in every permutation: an edge to a dead node
+# is never committed (catalogue §9 point 3).
+
+starting permutation: s1w s1c s2w s2c
+step s1w: lpg: SetEdgePropertyByHandle(a, b, <id 1>, w, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2w: lpg: SetEdgePropertyByHandle(a, b, <id 2>, w, 2)
+step s2c: lpg: Session.EndVersionedTx
+final weights: MATCH (:N {name:'a'})-[r]->(:N {name:'b'}) RETURN r.id AS id, r.w AS w ORDER BY id
+id|w
+--+-
+1 |1
+2 |2
+(2 rows)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|2 |"b"
+(2 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+2        |0       
+(1 row)
+
+starting permutation: s1w s2w s1c s2c
+step s1w: lpg: SetEdgePropertyByHandle(a, b, <id 1>, w, 1)
+step s2w: lpg: SetEdgePropertyByHandle(a, b, <id 2>, w, 2)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final weights: MATCH (:N {name:'a'})-[r]->(:N {name:'b'}) RETURN r.id AS id, r.w AS w ORDER BY id
+id|w
+--+-
+1 |1
+2 |2
+(2 rows)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|2 |"b"
+(2 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+2        |0       
+(1 row)
+
+starting permutation: s1w s2w s2c s1c
+step s1w: lpg: SetEdgePropertyByHandle(a, b, <id 1>, w, 1)
+step s2w: lpg: SetEdgePropertyByHandle(a, b, <id 2>, w, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final weights: MATCH (:N {name:'a'})-[r]->(:N {name:'b'}) RETURN r.id AS id, r.w AS w ORDER BY id
+id|w
+--+-
+1 |1
+2 |2
+(2 rows)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|2 |"b"
+(2 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+2        |0       
+(1 row)
+
+starting permutation: s2w s1w s1c s2c
+step s2w: lpg: SetEdgePropertyByHandle(a, b, <id 2>, w, 2)
+step s1w: lpg: SetEdgePropertyByHandle(a, b, <id 1>, w, 1)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final weights: MATCH (:N {name:'a'})-[r]->(:N {name:'b'}) RETURN r.id AS id, r.w AS w ORDER BY id
+id|w
+--+-
+1 |1
+2 |2
+(2 rows)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|2 |"b"
+(2 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+2        |0       
+(1 row)
+
+starting permutation: s2w s1w s2c s1c
+step s2w: lpg: SetEdgePropertyByHandle(a, b, <id 2>, w, 2)
+step s1w: lpg: SetEdgePropertyByHandle(a, b, <id 1>, w, 1)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final weights: MATCH (:N {name:'a'})-[r]->(:N {name:'b'}) RETURN r.id AS id, r.w AS w ORDER BY id
+id|w
+--+-
+1 |1
+2 |2
+(2 rows)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|2 |"b"
+(2 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+2        |0       
+(1 row)
+
+starting permutation: s2w s2c s1w s1c
+step s2w: lpg: SetEdgePropertyByHandle(a, b, <id 2>, w, 2)
+step s2c: lpg: Session.EndVersionedTx
+step s1w: lpg: SetEdgePropertyByHandle(a, b, <id 1>, w, 1)
+step s1c: lpg: Session.EndVersionedTx
+final weights: MATCH (:N {name:'a'})-[r]->(:N {name:'b'}) RETURN r.id AS id, r.w AS w ORDER BY id
+id|w
+--+-
+1 |1
+2 |2
+(2 rows)
+final final: MATCH (n) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"b" 
+(2 rows)
+final edges: MATCH (x)-[r]->(y) RETURN x.name AS src, r.id AS id, y.name AS dst ORDER BY src, id, dst
+src|id|dst
+---+--+---
+"a"|1 |"b"
+"a"|2 |"b"
+(2 rows)
+final dangling: <lpg: arcs touching a dead node, at a fresh snapshot>
+live_arcs|dangling
+---------+--------
+2        |0       
+(1 row)

@@ -84,7 +84,9 @@ func hashJoinOrderFixture(t *testing.T, n int) *lpg.Graph[string, float64] {
 		if err := g.AddEdge(src, dst, 1); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
-		g.SetEdgeLabel(src, dst, "K")
+		if err := g.SetEdgeLabel(src, dst, "K"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return g
 }

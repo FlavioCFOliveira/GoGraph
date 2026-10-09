@@ -1,0 +1,101 @@
+spec ix03-own-write-autocommit: 2 sessions, 3 permutations
+# IX03 (#2814). Hash index on (:L).s. ONE autocommit statement writes and then reads
+# through the equality seek: CREATE then MATCH must count the created node, and SET
+# then MATCH must count the moved one. #2814 reproduced with a single statement.
+# s2 reads 'q' in its own autocommit statement.
+
+starting permutation: s1cr s1set s2r
+step s1cr: CREATE (:L {name:'c1', s:'q'}) WITH 1 AS x MATCH (n:L {s:'q'}) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1set: MATCH (n:L {name:'n9'}) SET n.s = 'yyy' WITH 1 AS x MATCH (m:L {s:'yyy'}) RETURN count(m) AS c
+c
+-
+1
+(1 row)
+step s2r: MATCH (n:L {s:'q'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'q' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fq: MATCH (n:L {s:'q'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'q' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fold: MATCH (n:L {s:'v9'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v9' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1cr s2r s1set
+step s1cr: CREATE (:L {name:'c1', s:'q'}) WITH 1 AS x MATCH (n:L {s:'q'}) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s2r: MATCH (n:L {s:'q'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'q' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1set: MATCH (n:L {name:'n9'}) SET n.s = 'yyy' WITH 1 AS x MATCH (m:L {s:'yyy'}) RETURN count(m) AS c
+c
+-
+1
+(1 row)
+final fq: MATCH (n:L {s:'q'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'q' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fold: MATCH (n:L {s:'v9'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v9' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2r s1cr s1set
+step s2r: MATCH (n:L {s:'q'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'q' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: CREATE (:L {name:'c1', s:'q'}) WITH 1 AS x MATCH (n:L {s:'q'}) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1set: MATCH (n:L {name:'n9'}) SET n.s = 'yyy' WITH 1 AS x MATCH (m:L {s:'yyy'}) RETURN count(m) AS c
+c
+-
+1
+(1 row)
+final fq: MATCH (n:L {s:'q'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'q' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'yyy'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'yyy' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fold: MATCH (n:L {s:'v9'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v9' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)

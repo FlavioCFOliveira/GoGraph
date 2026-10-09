@@ -64,7 +64,22 @@ func FromAST(q ast.Query) (LogicalPlan, error) {
 // call safe — it is not stateless, and it was not safe before rmp #2508. The
 // regression test TestSubqueryConcurrentFirstExecution_2508 is what holds the
 // precondition in place.
-func TranslateSubquery(q *ast.SingleQuery, outerVars []string, argTag uint32) (LogicalPlan, error) {
+//
+// # A UNION body (rmp #2627)
+//
+// When q is a *ast.MultiQuery the result is the left-associative fold of the
+// branches under [Union] (UNION) or [UnionAll] (UNION ALL) — the same shape
+// [translator.multiQuery] gives a top-level UNION — and every branch is a
+// [ProduceResults] over its own pipeline rooted at its OWN [Argument] leaf
+// carrying outerVars and argTag. The [ProduceResults] is kept, unlike the
+// one-branch case, because it names the branch's columns: a de-duplicating
+// UNION compares rows column by column, so the consumer must project each
+// branch onto exactly its declared columns. One [translator] translates every
+// branch, so synthetic anonymous names never collide across branches. The
+// consumer — the subquery evaluator in cypher/subquery_eval.go — builds and
+// seeds each branch separately; the fold records the order and the
+// de-duplication mode, and is not a pipeline to build in one piece.
+func TranslateSubquery(q ast.Query, outerVars []string, argTag uint32) (LogicalPlan, error) {
 	t := &translator{}
 	// The subquery is a NEW translator, so its anonymous-variable counter would
 	// otherwise restart at zero and mint `__anon_0` for the inner pattern's first
@@ -78,6 +93,114 @@ func TranslateSubquery(q *ast.SingleQuery, outerVars []string, argTag uint32) (L
 	// counts zero. Naming the outer relationship — `-[rr:KNOWS]->` — made the same
 	// query answer correctly, which is what identified the cause.
 	t.reserveAnonVars(outerVars)
+	switch v := q.(type) {
+	case *ast.SingleQuery:
+		return t.subqueryBranch(v, outerVars, argTag, false)
+	case *ast.MultiQuery:
+		if len(v.Parts) == 0 {
+			return nil, &TranslateError{UnsupportedClause: "empty UNION", Pos: v.Pos}
+		}
+		left, err := t.subqueryBranch(v.Parts[0], outerVars, argTag, true)
+		if err != nil {
+			return nil, err
+		}
+		for _, part := range v.Parts[1:] {
+			right, err := t.subqueryBranch(part, outerVars, argTag, true)
+			if err != nil {
+				return nil, err
+			}
+			if v.All {
+				left = NewUnionAll(left, right)
+			} else {
+				left = NewUnion(left, right)
+			}
+		}
+		return left, nil
+	default:
+		return nil, &TranslateError{UnsupportedClause: fmt.Sprintf("subquery body %T", q)}
+	}
+}
+
+// stripProduceResults returns plan without the terminal [ProduceResults] that
+// [translator.returnClause] wraps every projection in.
+//
+// A subquery body is not a query: its rows are consumed by the EXISTS / COUNT
+// driver in cypher/subquery_eval.go, which only asks how many there are, never
+// what they are called. [ProduceResults] exists to name and order a RESULT's
+// columns, and the physical builder handles it only at the plan ROOT
+// (cypher/api.go asserts the root is a *ir.ProduceResults and builds its child),
+// so leaving one in the middle of a subquery pipeline would fail the build. It
+// changes no cardinality — it drops the hidden ORDER-BY passthrough columns and
+// renames the rest — so removing it cannot change the counted quantity.
+func stripProduceResults(plan LogicalPlan) LogicalPlan {
+	if pr, ok := plan.(*ProduceResults); ok {
+		return pr.Child
+	}
+	return plan
+}
+
+// translator is an internal, single-use helper that threads the bottom-up plan
+// construction. It carries an anonCounter for generating unique internal variable
+// names for anonymous nodes in CREATE patterns (e.g. CREATE ()-[:R]->()).
+type translator struct {
+	// outerBoundRels carries the relationship-variable names already in
+	// scope at the entry of the current matchPattern call that the current
+	// MATCH pattern names again (a reused relationship variable); a variable
+	// the pattern does not name is not in it (rmp #2921). The
+	// VarLengthExpand construction inside matchExpandStepBoundWithFrom
+	// reads this so excluded-edge bitsets honour rel vars bound by
+	// preceding MATCH/WITH clauses (Match4 [7]) even though those vars
+	// are not visible inside the inner-MATCH child subtree (which is
+	// rooted at an Argument leaf). matchPattern saves and restores this
+	// set per call so nested patterns observe the correct scope.
+	outerBoundRels map[string]struct{}
+	// clausePatternRels carries the relationship-variable names bound by
+	// the path patterns that precede the current one WITHIN THE SAME
+	// comma-separated MATCH clause. openCypher applies relationship-
+	// isomorphism (cyphermorphism) across the entire MATCH clause
+	// (openCypher 9 §3.2.2; Francis et al. SIGMOD 2018 §3), so two
+	// comma-separated patterns must not bind the same physical edge to two
+	// DISTINCT relationship variables. matchPattern grows this set as it
+	// walks the comma-separated path list and the per-path builders seed
+	// each pattern's sibling/excluded-rel set from it. It is DISTINCT from
+	// [outerBoundRels]: that set carries rels bound by preceding MATCH/WITH
+	// CLAUSES, where the no-repeat rule does NOT apply between distinct
+	// variables (two different rel vars in separate clauses may bind the
+	// same edge) — it only matters there for a single rel variable reused
+	// across clauses, which the VLE exclusion handles via outerBoundRels.
+	// matchPattern saves and restores clausePatternRels per call so nested
+	// patterns observe the correct scope.
+	clausePatternRels map[string]struct{}
+	// clauseVLERels marks which entries of clausePatternRels are bound by a
+	// variable-length relationship pattern (and therefore hold a LIST of
+	// edges rather than a single edge). The single-edge identity
+	// predicate used for the cross-pattern no-repeat-relationship filter
+	// cannot address a list, so VLE clause rels are skipped by that filter.
+	clauseVLERels map[string]struct{}
+	anonCounter   int // monotonic counter for synthetic anonymous-node vars
+}
+
+// anonVarPrefix is the reserved prefix [translator.freshAnonVar] gives every
+// synthetic variable it mints. It is not a legal openCypher identifier start, so
+// no user variable can collide with one.
+const anonVarPrefix = "__anon_"
+
+// freshAnonVar returns a unique internal variable name for an anonymous node
+// created in a CREATE clause. The name is prefixed with "__anon_" to avoid
+// collisions with user-visible variable names.
+//
+// Uniqueness holds only WITHIN one translator. A translator that inherits
+// variables from an enclosing scope must call [translator.reserveAnonVars] first.
+func (t *translator) freshAnonVar() string {
+	n := t.anonCounter
+	t.anonCounter++
+	return anonVarPrefix + strconv.Itoa(n)
+}
+
+// subqueryBranch translates one branch of a subquery body onto a fresh
+// [Argument] leaf. keepProduceResults is true for a branch of a UNION body; see
+// [TranslateSubquery].
+func (t *translator) subqueryBranch(q *ast.SingleQuery, outerVars []string, argTag uint32, keepProduceResults bool) (LogicalPlan, error) {
 	arg := NewArgumentWithTag(outerVars, argTag)
 	plan := LogicalPlan(arg)
 	for _, rc := range q.ReadingClauses {
@@ -117,83 +240,12 @@ func TranslateSubquery(q *ast.SingleQuery, outerVars []string, argTag uint32) (L
 		if err != nil {
 			return nil, err
 		}
+		if keepProduceResults {
+			return projected, nil
+		}
 		plan = stripProduceResults(projected)
 	}
 	return plan, nil
-}
-
-// stripProduceResults returns plan without the terminal [ProduceResults] that
-// [translator.returnClause] wraps every projection in.
-//
-// A subquery body is not a query: its rows are consumed by the EXISTS / COUNT
-// driver in cypher/subquery_eval.go, which only asks how many there are, never
-// what they are called. [ProduceResults] exists to name and order a RESULT's
-// columns, and the physical builder handles it only at the plan ROOT
-// (cypher/api.go asserts the root is a *ir.ProduceResults and builds its child),
-// so leaving one in the middle of a subquery pipeline would fail the build. It
-// changes no cardinality — it drops the hidden ORDER-BY passthrough columns and
-// renames the rest — so removing it cannot change the counted quantity.
-func stripProduceResults(plan LogicalPlan) LogicalPlan {
-	if pr, ok := plan.(*ProduceResults); ok {
-		return pr.Child
-	}
-	return plan
-}
-
-// translator is an internal, single-use helper that threads the bottom-up plan
-// construction. It carries an anonCounter for generating unique internal variable
-// names for anonymous nodes in CREATE patterns (e.g. CREATE ()-[:R]->()).
-type translator struct {
-	// outerBoundRels carries the relationship-variable names already in
-	// scope at the entry of the current matchPattern call. The
-	// VarLengthExpand construction inside matchExpandStepBoundWithFrom
-	// reads this so excluded-edge bitsets honour rel vars bound by
-	// preceding MATCH/WITH clauses (Match4 [7]) even though those vars
-	// are not visible inside the inner-MATCH child subtree (which is
-	// rooted at an Argument leaf). matchPattern saves and restores this
-	// set per call so nested patterns observe the correct scope.
-	outerBoundRels map[string]struct{}
-	// clausePatternRels carries the relationship-variable names bound by
-	// the path patterns that precede the current one WITHIN THE SAME
-	// comma-separated MATCH clause. openCypher applies relationship-
-	// isomorphism (cyphermorphism) across the entire MATCH clause
-	// (openCypher 9 §3.2.2; Francis et al. SIGMOD 2018 §3), so two
-	// comma-separated patterns must not bind the same physical edge to two
-	// DISTINCT relationship variables. matchPattern grows this set as it
-	// walks the comma-separated path list and the per-path builders seed
-	// each pattern's sibling/excluded-rel set from it. It is DISTINCT from
-	// [outerBoundRels]: that set carries rels bound by preceding MATCH/WITH
-	// CLAUSES, where the no-repeat rule does NOT apply between distinct
-	// variables (two different rel vars in separate clauses may bind the
-	// same edge) — it only matters there for a single rel variable reused
-	// across clauses, which the VLE exclusion handles via outerBoundRels.
-	// matchPattern saves and restores clausePatternRels per call so nested
-	// patterns observe the correct scope.
-	clausePatternRels map[string]struct{}
-	// clauseVLERels marks which entries of clausePatternRels are bound by a
-	// variable-length relationship pattern (and therefore hold a LIST of
-	// edges rather than a single edge). The single-edge endpoint-pair
-	// predicate used for the cross-pattern no-repeat-relationship filter
-	// cannot address a list, so VLE clause rels are skipped by that filter.
-	clauseVLERels map[string]struct{}
-	anonCounter   int // monotonic counter for synthetic anonymous-node vars
-}
-
-// anonVarPrefix is the reserved prefix [translator.freshAnonVar] gives every
-// synthetic variable it mints. It is not a legal openCypher identifier start, so
-// no user variable can collide with one.
-const anonVarPrefix = "__anon_"
-
-// freshAnonVar returns a unique internal variable name for an anonymous node
-// created in a CREATE clause. The name is prefixed with "__anon_" to avoid
-// collisions with user-visible variable names.
-//
-// Uniqueness holds only WITHIN one translator. A translator that inherits
-// variables from an enclosing scope must call [translator.reserveAnonVars] first.
-func (t *translator) freshAnonVar() string {
-	n := t.anonCounter
-	t.anonCounter++
-	return anonVarPrefix + strconv.Itoa(n)
 }
 
 // reserveAnonVars advances this translator's anonymous-variable counter past

@@ -29,14 +29,15 @@ package cypher
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 
+	storecheckpoint "github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
+
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
-	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/count"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
-	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -100,20 +101,16 @@ func countRunCycle(t *testing.T, dir string, g *lpg.Graph[string, float64], chec
 	}
 	snap := cs(eng).Snapshot()
 	if checkpoint {
-		csrGraph := csr.BuildFromAdjList(g.AdjList())
-		if werr := snapshot.WriteSnapshotFullWithMapperCodec(
-			filepath.Join(dir, "snapshot"), csrGraph, g, txn.NewStringCodec(),
-		); werr != nil {
-			t.Fatalf("WriteSnapshotFullWithMapperCodec: %v", werr)
+		// A real checkpoint: a self-sufficient snapshot recorded in the WAL
+		// control file as the start of recovery.
+		var cpMu sync.Mutex
+		if werr := storecheckpoint.New[string, float64](storecheckpoint.Config{Dir: dir}, g, w, &cpMu,
+			storecheckpoint.WithMapperCodec[string, float64](txn.NewStringCodec())).RunCheckpoint(); werr != nil {
+			t.Fatalf("checkpoint: %v", werr)
 		}
 	}
 	if serr := w.Sync(); serr != nil {
 		t.Fatalf("wal.Sync: %v", serr)
-	}
-	if checkpoint {
-		if _, terr := w.Truncate(); terr != nil {
-			t.Fatalf("wal.Truncate: %v", terr)
-		}
 	}
 	if cerr := w.Close(); cerr != nil {
 		t.Fatalf("wal.Close: %v", cerr)

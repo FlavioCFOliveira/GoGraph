@@ -57,11 +57,8 @@ func TestWriter_AppendReadBack(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // path is from t.TempDir
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	rdr := bytes.NewReader(data)
+	rdr := bytes.NewReader(segmentFrameBytes(t, path))
+	var pos uint64
 	for i, want := range payloads {
 		got, err := Decode(rdr)
 		if err != nil {
@@ -70,6 +67,11 @@ func TestWriter_AppendReadBack(t *testing.T) {
 		if !bytes.Equal(got.Payload, want) {
 			t.Fatalf("frame %d payload mismatch", i)
 		}
+		if got.Version != CurrentVersion || got.Pos != pos || got.StoreID == 0 {
+			t.Fatalf("frame %d: version %d pos %d store %x, want version %d pos %d and a store id",
+				i, got.Version, got.Pos, got.StoreID, CurrentVersion, pos)
+		}
+		pos += uint64(FrameSize(got))
 	}
 	if _, err := Decode(rdr); !errors.Is(err, ErrTornFrame) {
 		t.Fatalf("tail: expected ErrTornFrame, got %v", err)
@@ -117,19 +119,16 @@ func TestWriter_CreatesFileWith0600(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
+	for _, p := range append([]string{path, ControlPath(path)}, segmentPaths(t, path)...) {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("Stat: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("WAL file %s mode = %#o, want 0o600", p, got)
+		}
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("WAL file mode = %#o, want 0o600", got)
-	}
-
-	data, err := os.ReadFile(path) //nolint:gosec // path is from t.TempDir
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	out, err := Decode(bytes.NewReader(data))
+	out, err := Decode(bytes.NewReader(segmentFrameBytes(t, path)))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}

@@ -26,7 +26,7 @@ func TestAdjList_NodeID_NoReuse(t *testing.T) {
 		t.Fatalf("Lookup after AddEdge: A ok=%v B ok=%v", okA, okB)
 	}
 
-	a.RemoveEdge("A", "B")
+	must(t).E(a.RemoveEdge("A", "B"))
 
 	if err := a.AddEdge("A", "C", 2); err != nil {
 		t.Fatalf("AddEdge A->C: %v", err)
@@ -114,7 +114,7 @@ func TestAdjList_NodeID_StableAfterRemove(t *testing.T) {
 	idY, _ := a.Mapper().Lookup("Y")
 	idZ, _ := a.Mapper().Lookup("Z")
 
-	a.RemoveEdge("X", "Y")
+	must(t).E(a.RemoveEdge("X", "Y"))
 
 	// All three original IDs must still resolve correctly.
 	for node, want := range map[string]graph.NodeID{"X": idX, "Y": idY, "Z": idZ} {
