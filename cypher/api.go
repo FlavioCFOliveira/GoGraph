@@ -16665,14 +16665,26 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 			// defaulted to forward) and, crucially, lets the property fetch be
 			// skipped (#1630) without losing the direction signal.
 			stKey, enKey := srcKey, dstKey
+			// stID/enID are the NodeIDs of stKey/enKey. The Mapper is an
+			// append-only bijection (an interned key never changes id), so the
+			// ids that just Resolved to srcKey/dstKey ARE what Lookup(srcKey) /
+			// Lookup(dstKey) would return: the ID-keyed label reads below are
+			// the key-keyed ones minus two Mapper lookups each (rmp #3080).
+			stID, enID := graph.NodeID(srcID), graph.NodeID(dstID)
 			// The row's edge id IS the stable handle since rmp #2317, so it is
 			// recovered BEFORE the orientation decision below, which consults it.
 			fwdHandle := uint64(edgeIDVal)
 			if relStoredInvertedForHop(row, meta, g, graph.NodeID(srcID), graph.NodeID(dstID), srcKey, dstKey, fwdHandle) {
 				storageStart, storageEnd = dstID, srcID
 				stKey, enKey = dstKey, srcKey
+				stID, enID = enID, stID
 			}
-			ets := g.EdgeLabels(stKey, enKey)
+			// ets is the type set the edge's type is picked from. The per-pair
+			// union (EdgeLabelsByID, an O(deg(src)) scan of src's slot label
+			// column) is read LAST and only when neither per-instance source
+			// below answered: it used to be read first and then overwritten,
+			// unread, for every by-handle-typed (Cypher-created) edge (rmp #3080).
+			var ets []string
 			// Per-instance label override: when the CSR slot at
 			// edgeIDVal corresponds to a specific parallel CREATE,
 			// narrow the edge's type to that
@@ -16723,7 +16735,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 			// propertied sibling's keys. len(perHandle) > 0 captures it here.
 			hasByHandleEntry := false
 			if fwdHandle != 0 {
-				if perHandle := g.EdgeLabelsByHandle(stKey, enKey, fwdHandle); len(perHandle) > 0 {
+				if perHandle := g.EdgeLabelsByHandleID(stID, enID, fwdHandle); len(perHandle) > 0 {
 					ets = perHandle
 					handled = true
 					hasByHandleEntry = true
@@ -16734,8 +16746,12 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 				if instanceIdx > 0 && parallelCount >= totalCreates && totalCreates > 0 {
 					if perInstance := g.EdgeLabelsAt(stKey, enKey, instanceIdx); len(perInstance) > 0 {
 						ets = perInstance
+						handled = true
 					}
 				}
+			}
+			if !handled {
+				ets = g.EdgeLabelsByID(stID, enID)
 			}
 			if len(ets) > 0 {
 				edgeType = pickEdgeType(ets, meta.acceptedTypes)
