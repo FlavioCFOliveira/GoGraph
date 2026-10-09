@@ -68,7 +68,7 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 	// BFS below — otherwise the level filter `distFromU[v]==k` would
 	// be corrupted after the first iteration. distInner is the scratch
 	// used exclusively by the per-vertex eccentricity sweeps.
-	scratch := make([]int, n)
+	scratch := newBFSDist(n)
 	// One caller-owned BFS frontier queue, threaded through every sweep
 	// below exactly as scratch is. A BFS enqueues each vertex at most
 	// once, so capacity n is a hard bound and the append inside
@@ -81,15 +81,15 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 		metrics.IncCounter("search.DiameterCtx.errors", 1)
 		return 0, 0, false, err
 	}
-	farU, _, queue := bfsFarthest(verts, edges, graph.NodeID(seed), scratch, queue)
+	farU, _, _, queue := bfsFarthest(verts, edges, graph.NodeID(seed), scratch, queue)
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("search.DiameterCtx.errors", 1)
 		return 0, 0, false, err
 	}
-	farW, _, queue := bfsFarthest(verts, edges, farU, scratch, queue)
+	_, eccU, _, queue := bfsFarthest(verts, edges, farU, scratch, queue)
 	distFromU := make([]int, n)
 	copy(distFromU, scratch)
-	lo = distFromU[farW]
+	lo = eccU
 
 	// iFUB upper bound. From the centre-most vertex on the lo path
 	// (here: farU, the source of the longest known path), the
@@ -98,12 +98,9 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 	// maximum distance at level k satisfies 2*k > lo, the current
 	// hi stays at 2*k; once 2*k <= lo the bound has converged and
 	// hi can be set to lo.
-	maxLevel := 0
-	for _, d := range distFromU {
-		if d > maxLevel {
-			maxLevel = d
-		}
-	}
+	// The deepest BFS level from farU is farU's eccentricity, which the
+	// sweep that found farW already returned (it is lo).
+	maxLevel := eccU
 	hi = 2 * maxLevel
 	if hi <= lo {
 		return lo, lo, true, nil
@@ -116,7 +113,10 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 	// improvement is possible and the bounds have converged.
 	// Serial eccentricity scratch, reused across levels; the parallel path
 	// (wide levels) allocates private per-worker scratch.
-	distInner := make([]int, n)
+	// scratch is free once distFromU holds its copy, and queue still lists
+	// exactly the vertices scratch holds distances for, which is the pairing
+	// bfsFarthest's reset relies on.
+	distInner := scratch
 	numWorkers := runtime.GOMAXPROCS(0)
 	var levelVerts []int
 	for k := maxLevel; k > 0; k-- {
@@ -184,14 +184,8 @@ func levelMaxEccentricity(ctx context.Context, verts []uint64, edges []graph.Nod
 			if err := ctx.Err(); err != nil {
 				return 0, serialQueue, err
 			}
-			var distV []int
-			_, distV, serialQueue = bfsFarthest(verts, edges, graph.NodeID(v), serialScratch, serialQueue)
-			ecc := 0
-			for _, d := range distV {
-				if d > ecc {
-					ecc = d
-				}
-			}
+			var ecc int
+			_, ecc, _, serialQueue = bfsFarthest(verts, edges, graph.NodeID(v), serialScratch, serialQueue)
 			if ecc > maxEcc {
 				maxEcc = ecc
 			}
@@ -208,7 +202,7 @@ func levelMaxEccentricity(ctx context.Context, verts []uint64, edges []graph.Nod
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			dist := make([]int, n)          // private per-worker scratch
+			dist := newBFSDist(n)           // private per-worker scratch
 			q := make([]graph.NodeID, 0, n) // private per-worker BFS frontier
 			m := 0
 			for i := w; i < len(levelVerts); i += numWorkers {
@@ -216,14 +210,8 @@ func levelMaxEccentricity(ctx context.Context, verts []uint64, edges []graph.Nod
 					localErr[w] = err
 					return
 				}
-				var distV []int
-				_, distV, q = bfsFarthest(verts, edges, graph.NodeID(levelVerts[i]), dist, q)
-				ecc := 0
-				for _, d := range distV {
-					if d > ecc {
-						ecc = d
-					}
-				}
+				var ecc int
+				_, ecc, _, q = bfsFarthest(verts, edges, graph.NodeID(levelVerts[i]), dist, q)
 				if ecc > m {
 					m = ecc
 				}
@@ -248,40 +236,61 @@ func levelMaxEccentricity(ctx context.Context, verts []uint64, edges []graph.Nod
 	return maxEcc, serialQueue, nil
 }
 
-// bfsFarthest runs a single BFS from src and returns the farthest
-// vertex (smallest NodeID on tie) along with the per-vertex distance
-// slice. dist and queue are caller-provided scratch: dist is rewritten
-// in place, and queue is truncated to zero length before use and
-// returned as its (possibly grown) header so the caller keeps the
-// capacity across sources — the same contract
-// search/centrality.brandesSource uses for its queue and stack. Passing
-// a queue with capacity len(dist) makes the traversal allocation-free,
-// because a BFS enqueues each vertex at most once.
-//
-// Traversal order is unchanged by the threading: the frontier is still
-// consumed head-first in enqueue order, so (farthest, dist) are
-// bit-identical to the per-call-queue form.
-func bfsFarthest(verts []uint64, edges []graph.NodeID, src graph.NodeID, dist []int, queue []graph.NodeID) (farthest graph.NodeID, distOut []int, queueOut []graph.NodeID) {
+// newBFSDist returns a distance scratch of length n in the state
+// [bfsFarthest] requires on first use: every entry -1 (unvisited).
+func newBFSDist(n int) []int {
+	dist := make([]int, n)
 	for i := range dist {
 		dist[i] = -1
+	}
+	return dist
+}
+
+// bfsFarthest runs a single BFS from src and returns the farthest
+// vertex (smallest NodeID on tie), its distance from src — the
+// eccentricity of src within its component — and the per-vertex distance
+// slice (-1 for vertices src does not reach).
+//
+// dist and queue are caller-provided scratch that travel as a PAIR: on
+// entry, dist must be -1 everywhere except at the vertices listed in queue
+// (the previous sweep's visited set). The sweep resets only those vertices,
+// O(visited) instead of O(V), so a fresh pair is [newBFSDist] with an empty
+// queue, and a caller that sweeps again must pass back the queue the
+// previous sweep returned with the same dist. queue is returned as its
+// (possibly grown) header so the caller keeps the capacity across sources —
+// the same contract search/centrality.brandesSource uses for its queue and
+// stack. Passing a queue with capacity len(dist) makes the traversal
+// allocation-free, because a BFS enqueues each vertex at most once.
+//
+// Traversal order is that of a head-first FIFO in enqueue order, so
+// (farthest, ecc, dist) are bit-identical to a sweep over a freshly reset
+// dist.
+func bfsFarthest(verts []uint64, edges []graph.NodeID, src graph.NodeID, dist []int, queue []graph.NodeID) (farthest graph.NodeID, ecc int, distOut []int, queueOut []graph.NodeID) {
+	for _, v := range queue {
+		dist[uint64(v)] = -1
 	}
 	dist[uint64(src)] = 0
 	queue = append(queue[:0], src)
 	farthest = src
+	// BFS assigns distances in non-decreasing enqueue order, so a newly
+	// reached vertex is never nearer than the current farthest: the local
+	// farD replaces the two dist loads per discovery.
+	farD := 0
 	for qh := 0; qh < len(queue); qh++ {
 		v := queue[qh]
-		dv := dist[uint64(v)]
+		nd := dist[uint64(v)] + 1
 		for k := verts[uint64(v)]; k < verts[uint64(v)+1]; k++ {
 			nb := edges[k]
 			if dist[uint64(nb)] >= 0 {
 				continue
 			}
-			dist[uint64(nb)] = dv + 1
+			dist[uint64(nb)] = nd
 			queue = append(queue, nb)
-			if dist[uint64(nb)] > dist[uint64(farthest)] || (dist[uint64(nb)] == dist[uint64(farthest)] && uint64(nb) < uint64(farthest)) {
+			if nd > farD || (nd == farD && uint64(nb) < uint64(farthest)) {
 				farthest = nb
+				farD = nd
 			}
 		}
 	}
-	return farthest, dist, queue
+	return farthest, farD, dist, queue
 }

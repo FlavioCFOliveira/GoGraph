@@ -110,19 +110,19 @@ func TestBfsFarthest_ReusesCallerQueue(t *testing.T) {
 	edges := c.EdgesSlice()
 	n := int(c.MaxNodeID())
 
-	dist := make([]int, n)
+	dist := newBFSDist(n)
 	queue := make([]graph.NodeID, 0, n)
 
 	// First sweep: grows the queue to the reachable-set size.
 	var farthest graph.NodeID
-	farthest, _, queue = bfsFarthest(verts, edges, 0, dist, queue)
+	farthest, _, _, queue = bfsFarthest(verts, edges, 0, dist, queue)
 	if len(queue) == 0 {
 		t.Fatal("bfsFarthest returned an empty frontier: the sweep never ran")
 	}
 	grown := len(queue)
 
 	allocs := testing.AllocsPerRun(5, func() {
-		_, _, queue = bfsFarthest(verts, edges, 0, dist, queue)
+		_, _, _, queue = bfsFarthest(verts, edges, 0, dist, queue)
 	})
 	if allocs != 0 {
 		t.Fatalf("bfsFarthest allocated %.0f objects per sweep over a caller-owned queue, want 0", allocs)
@@ -130,7 +130,7 @@ func TestBfsFarthest_ReusesCallerQueue(t *testing.T) {
 
 	// Traversal order is unchanged, so the repeated sweeps agree with the
 	// first on both outputs.
-	again, distAgain, _ := bfsFarthest(verts, edges, 0, dist, queue)
+	again, _, distAgain, _ := bfsFarthest(verts, edges, 0, dist, queue)
 	if again != farthest {
 		t.Fatalf("farthest vertex changed across sweeps: %d then %d", farthest, again)
 	}

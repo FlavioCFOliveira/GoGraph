@@ -103,7 +103,7 @@ func bruteDiameter(c *csr.CSR[struct{}]) int {
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
 	mask := c.LiveMask()
-	scratch := make([]int, n)
+	scratch := newBFSDist(n)
 	queue := make([]graph.NodeID, 0, n)
 	best := 0
 	for u := 0; u < n; u++ {
@@ -111,7 +111,7 @@ func bruteDiameter(c *csr.CSR[struct{}]) int {
 			continue
 		}
 		var distU []int
-		_, distU, queue = bfsFarthest(verts, edges, graph.NodeID(u), scratch, queue)
+		_, _, distU, queue = bfsFarthest(verts, edges, graph.NodeID(u), scratch, queue)
 		for _, d := range distU {
 			if d > best {
 				best = d
