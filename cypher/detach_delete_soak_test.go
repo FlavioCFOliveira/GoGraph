@@ -20,7 +20,7 @@ import (
 func TestDetachDelete_Hub1M_Soak(t *testing.T) {
 	const leaves = 1_000_000
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:HubM {name: "hugeHub"})`)

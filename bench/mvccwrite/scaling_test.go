@@ -181,7 +181,7 @@ type rig struct {
 // concurrency-control path and not in the graph.
 func newRig(tb testing.TB, w wiring) *rig {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	switch w {
 	case wiringMem:
 		return &rig{eng: cypher.NewEngine(g), close: func() error { return nil }}

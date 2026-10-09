@@ -21,7 +21,7 @@ func TestReader_LargeFile_RMAT(t *testing.T) {
 	testlayers.RequireSoak(t)
 
 	outPath := filepath.Join(t.TempDir(), "rmat20.csr")
-	loader := bulk.New(bulk.Options{OutputPath: outPath, Directed: true})
+	loader := bulk.New(bulk.Options{OutputPath: outPath})
 	rmat.Generate(rmat.Spec{Scale: 20, EdgeFactor: 8, Seed: 42}, loader)
 	_, _, err := loader.Finalise()
 	if err != nil {

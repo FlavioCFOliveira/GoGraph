@@ -70,14 +70,14 @@ func TestLeiden_LFR_MuSweep(t *testing.T) {
 				100,      // maxCom
 				tc.muPct, // muPercent
 				42,       // seed
-			).Build(adjlist.Config{Directed: false})
+			).Build(adjlist.Config{})
 			if err != nil {
 				// LFR is a rejection sampler; some parameter combinations
 				// can fail. Skip rather than fail hard so CI stays green.
 				t.Skipf("LFR Build failed (mu=%d%%): %v", tc.muPct, err)
 			}
 			a := g.AdjList()
-			c := csr.BuildFromAdjList(a)
+			c := csr.BuildFromAdjList(a).BuildSymmetric()
 
 			p := Leiden(c, DefaultLeidenOptions())
 

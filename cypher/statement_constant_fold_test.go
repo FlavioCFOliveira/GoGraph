@@ -22,7 +22,7 @@ import (
 )
 
 func foldEngine() *cypher.Engine {
-	return cypher.NewEngineWithOptions(lpg.New[string, float64](adjlist.Config{Directed: true}), cypher.EngineOptions{})
+	return cypher.NewEngineWithOptions(lpg.New[string, float64](adjlist.Config{}), cypher.EngineOptions{})
 }
 
 // foldColumn runs q and returns column col of every row.

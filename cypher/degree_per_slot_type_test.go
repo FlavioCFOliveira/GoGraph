@@ -38,7 +38,7 @@ import (
 // (handle-carrying slot) and a Go-API AddEdge (handle-less slot) on ONE pair.
 func perSlotFixture(t *testing.T) (*lpg.Graph[string, float64], *Engine) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for i, k := range []string{"a", "b", "c"} {
 		if err := g.AddNode(k); err != nil {

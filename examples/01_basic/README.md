@@ -19,7 +19,8 @@ integer-rounded straight-line distance between them (always ≥ 1). The radius
 is tuned just above the geometric-graph connectivity threshold
 (`r ≈ span·√(ln N / (π·N))`) so the network forms one connected component,
 and an id-ordered backbone (junction `i ↔ i+1`, carrying its true geometric
-weight) is laid down as a synthetic connectivity guarantee so every junction
+weight, laid only where `i` and `i+1` are not already joined by local roads,
+so no road is stored twice) is laid down as a synthetic connectivity guarantee so every junction
 is reachable from the source for any seed and scale. The backbone roads are
 long, so Dijkstra routes around them through the short local roads — the
 shortest paths are genuinely multi-hop, which is what makes this a
@@ -63,7 +64,7 @@ config.span=4000
 config.radius=139
 config.seed=1
 nodes.junctions=5000
-edges.roads=101974
+edges.roads=101944
 query.reachable=5000
 dist.to_1250=811
 dist.to_2500=3945

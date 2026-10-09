@@ -41,7 +41,7 @@ func (w *errAfterN) Write(p []byte) (int, error) {
 // inside the encode loop rather than only at Flush.
 func bigAdjList(t *testing.T, nodes int) *adjlist.AdjList[string, int64] {
 	t.Helper()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := range nodes {
 		// Long keys inflate each node record so a few thousand nodes
 		// overflow the 64 KiB write buffer.
@@ -59,7 +59,7 @@ func TestReadIntoCtx_ScannerError(t *testing.T) {
 	// A single line longer than the 16 MiB scanner cap triggers
 	// bufio.ErrTooLong, which is neither io.EOF nor nil.
 	huge := strings.Repeat("a", 17*1024*1024)
-	_, _, err := ReadInto(strings.NewReader(huge), adjlist.Config{Directed: true})
+	_, _, err := ReadInto(strings.NewReader(huge), adjlist.Config{})
 	if err == nil {
 		t.Fatal("expected scanner error for oversized line")
 	}
@@ -69,7 +69,7 @@ func TestReadIntoCtx_ScannerError(t *testing.T) {
 // ReadWithProps convenience wrapper.
 func TestReadWithProps_ErrorWrapper(t *testing.T) {
 	t.Parallel()
-	_, _, err := ReadWithProps(strings.NewReader("not json\n"), adjlist.Config{Directed: true})
+	_, _, err := ReadWithProps(strings.NewReader("not json\n"), adjlist.Config{})
 	if err == nil {
 		t.Fatal("expected error from ReadWithProps on malformed JSON")
 	}
@@ -80,7 +80,7 @@ func TestReadWithProps_ErrorWrapper(t *testing.T) {
 // not reach.
 func TestReadWithPropsCtx_Branches(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true}
+	cfg := adjlist.Config{}
 
 	cases := []struct {
 		name  string
@@ -112,7 +112,7 @@ func TestReadWithPropsCtx_Branches(t *testing.T) {
 func TestReadWithPropsCtx_EmptyLine(t *testing.T) {
 	t.Parallel()
 	in := "\n" + `{"type":"node","id":"a"}` + "\n" + "\n"
-	g, rows, err := ReadWithPropsCtx(context.Background(), strings.NewReader(in), adjlist.Config{Directed: true})
+	g, rows, err := ReadWithPropsCtx(context.Background(), strings.NewReader(in), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadWithPropsCtx: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestReadWithPropsCtx_Cancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	in := `{"type":"node","id":"a"}` + "\n"
-	_, _, err := ReadWithPropsCtx(ctx, strings.NewReader(in), adjlist.Config{Directed: true})
+	_, _, err := ReadWithPropsCtx(ctx, strings.NewReader(in), adjlist.Config{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
@@ -141,7 +141,7 @@ func TestReadWithPropsCtx_Cancelled(t *testing.T) {
 func TestReadWithPropsCtx_ScannerError(t *testing.T) {
 	t.Parallel()
 	huge := strings.Repeat("a", 17*1024*1024)
-	_, _, err := ReadWithPropsCtx(context.Background(), strings.NewReader(huge), adjlist.Config{Directed: true})
+	_, _, err := ReadWithPropsCtx(context.Background(), strings.NewReader(huge), adjlist.Config{})
 	if err == nil {
 		t.Fatal("expected scanner error for oversized line")
 	}
@@ -215,7 +215,7 @@ func TestWrite_FailingWriter(t *testing.T) {
 		t.Parallel()
 		// A tiny graph fits in the buffer, so the error only surfaces at
 		// Flush. n=0 makes every underlying Write fail.
-		a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+		a := adjlist.New[string, int64](adjlist.Config{})
 		if err := a.AddNode("a"); err != nil {
 			t.Fatalf("AddNode: %v", err)
 		}
@@ -238,7 +238,7 @@ func TestWrite_FailingWriter(t *testing.T) {
 		t.Parallel()
 		// Let all node records through (n large enough), then fail when the
 		// edge loop starts writing, exercising the edge encode error branch.
-		a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+		a := adjlist.New[string, int64](adjlist.Config{})
 		for i := range 4000 {
 			if err := a.AddEdge(
 				fmt.Sprintf("src-with-a-long-name-%06d", i),
@@ -270,7 +270,7 @@ func TestWriteWithProps_FailingWriter(t *testing.T) {
 
 	t.Run("flush_error_small_graph", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		if err := g.AddNode("a"); err != nil {
 			t.Fatalf("AddNode: %v", err)
 		}
@@ -295,7 +295,7 @@ func TestWriteWithProps_FailingWriter(t *testing.T) {
 		// Small graph with one node and many properties so that the node
 		// phase fits in the buffer but the property phase overflows it,
 		// surfacing the failure inside the property encode loop.
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		if err := g.AddNode("n"); err != nil {
 			t.Fatalf("AddNode: %v", err)
 		}
@@ -322,7 +322,7 @@ func TestWriteWithPropsCtx_Cancelled(t *testing.T) {
 		t.Parallel()
 		// 4096 nodes plus one edge: the edge-loop ctx check fires at
 		// written==4096 on the first edge iteration.
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		for i := range 4096 {
 			if err := g.AddNode(fmt.Sprintf("n%d", i)); err != nil {
 				t.Fatalf("AddNode: %v", err)
@@ -343,7 +343,7 @@ func TestWriteWithPropsCtx_Cancelled(t *testing.T) {
 		t.Parallel()
 		// 4096 nodes, no edges, plus one property: the property-loop ctx
 		// check fires at written==4096 on the first property iteration.
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		for i := range 4096 {
 			if err := g.AddNode(fmt.Sprintf("n%d", i)); err != nil {
 				t.Fatalf("AddNode: %v", err)
@@ -376,7 +376,7 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 // pair is linked so the edge phase also produces overflowing output.
 func bigLPG(t *testing.T, nodes int, withEdges bool) *lpg.Graph[string, int64] {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for i := range nodes {
 		if err := g.AddNode(fmt.Sprintf("node-with-a-fairly-long-identifier-%06d", i)); err != nil {
 			t.Fatalf("AddNode: %v", err)

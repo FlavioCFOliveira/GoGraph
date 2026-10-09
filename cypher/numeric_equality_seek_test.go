@@ -49,7 +49,7 @@ import (
 //   - 2^53, 2^53+1 and 2^53+2, which all collide in float64 space
 func seedNumericSeekGraph(t *testing.T, withIndex bool) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	run := func(q string) {

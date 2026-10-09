@@ -117,7 +117,7 @@ func TestLatencyP99_Stable(t *testing.T) {
 		dur, windowSize, nGoroutines, int(dur/windowSize), p99WarmupWindows, minRegressionPoints)
 
 	// ── Build server ──────────────────────────────────────────────────────────
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for i := range 16 {
 		res, err := eng.RunInTx(context.Background(),

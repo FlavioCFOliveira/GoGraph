@@ -26,7 +26,7 @@ func TestCartesianNotification_BothDirections(t *testing.T) {
 // every arm must hold on an empty graph too. This is what lets the scenario run
 // it at tick 0 and straight after a crash.
 func TestCartesianNotification_EmptyGraph(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	a := NewEngineAdapter(cypher.NewEngine(g))
 	if v := CheckCartesianNotification(0, a); len(v) > 0 {
 		t.Fatalf("cartesian notification checker reported a violation on an empty graph: %v", v)

@@ -175,7 +175,7 @@ var errWVInjected = errors.New("injected durable-step failure")
 
 func wvNew(t *testing.T, setup func(WriteView[string, float64]) error) *Graph[string, float64] {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.ApplyDurable(context.Background(), func(wtx WriteTx) error { return setup(g.Writer(wtx)) }, func() error { return nil }); err != nil {
 		t.Fatalf("setup: %v", err)
 	}

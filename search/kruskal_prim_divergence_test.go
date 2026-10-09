@@ -20,14 +20,14 @@ func TestKruskalPrim_Divergence(t *testing.T) {
 	// different tie-breaking strategies (every edge has the same weight),
 	// giving both algorithms freedom to diverge on edge selection while
 	// still having the same total cost.
-	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		next := (i + 1) % n
 		if err := a.AddEdge(i, next, 1.0); err != nil {
 			t.Fatalf("AddEdge(%d,%d): %v", i, next, err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 
 	kEdges, kTotal, err := KruskalMST[float64](c)
 	if err != nil {

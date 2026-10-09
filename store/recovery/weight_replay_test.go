@@ -52,7 +52,7 @@ func TestTxn_RoundtripWeightedEdge_Recovery(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		opts := txn.Options[string, int64]{
 			Codec:       txn.NewStringCodec(),
 			WeightCodec: txn.NewInt64WeightCodec(),
@@ -90,7 +90,7 @@ func TestTxn_RoundtripWeightedEdge_Recovery(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		opts := txn.Options[string, float64]{
 			Codec:       txn.NewStringCodec(),
 			WeightCodec: txn.NewFloat64WeightCodec(),
@@ -136,7 +136,7 @@ func TestTxn_ForwardCompat_PreT8WALReplays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	pre := txn.NewStoreWithCodec[string, int64](g, w, txn.NewStringCodec())
 	tx := pre.Begin()
 	if err := tx.AddEdge("alice", "bob", 0); err != nil {

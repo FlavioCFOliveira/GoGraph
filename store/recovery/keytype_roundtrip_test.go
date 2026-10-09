@@ -39,7 +39,7 @@ func TestRecovery_KeyTypeRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("wal.Open: %v", err)
 		}
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		opts := txn.Options[string, float64]{
 			Codec:       txn.NewStringCodec(),
 			WeightCodec: txn.NewFloat64WeightCodec(),
@@ -119,7 +119,7 @@ func TestRecovery_KeyTypeRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("wal.Open: %v", err)
 		}
-		g := lpg.New[[16]byte, int64](adjlist.Config{Directed: true})
+		g := lpg.New[[16]byte, int64](adjlist.Config{})
 		opts := txn.Options[[16]byte, int64]{
 			Codec:       txn.NewUUIDCodec(),
 			WeightCodec: txn.NewInt64WeightCodec(),

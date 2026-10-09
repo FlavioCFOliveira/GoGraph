@@ -28,7 +28,7 @@ import (
 
 func counters3004Engine(t *testing.T, durable bool) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	var eng *cypher.Engine
 	if durable {
 		w, err := wal.Open(filepath.Join(t.TempDir(), "wal"))

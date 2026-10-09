@@ -458,15 +458,12 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 }
 
 // appendMatches appends to op.matches every relationship stored as
-// (srcKey, dstKey) whose own type and properties satisfy the pattern. An
-// instance already matched through the other order — an undirected graph's
-// mirror slot shares its relationship's handle — is not appended twice.
+// (srcKey, dstKey) whose own type and properties satisfy the pattern. Storage
+// is directed (rmp #3072), so the two orders an undirected pattern reads never
+// list the same instance; the caller skips the reverse order of a self-loop.
 func (op *MergeRelationship) appendMatches(srcKey, dstKey string, srcID, dstID graph.NodeID, preds []propLiteral) {
 	op.handleBuf = op.mutator.EdgeHandles(srcKey, dstKey, op.handleBuf[:0])
 	for _, h := range op.handleBuf {
-		if h != 0 && op.matchedHandle(h) {
-			continue
-		}
 		if !relInstanceHasType(op.mutator, srcKey, dstKey, h, op.relType) {
 			continue
 		}
@@ -475,16 +472,6 @@ func (op *MergeRelationship) appendMatches(srcKey, dstKey string, srcID, dstID g
 		}
 		op.matches = append(op.matches, mergeRelMatch{srcKey: srcKey, dstKey: dstKey, srcID: srcID, dstID: dstID, handle: h})
 	}
-}
-
-// matchedHandle reports whether op.matches already holds handle.
-func (op *MergeRelationship) matchedHandle(handle uint64) bool {
-	for i := range op.matches {
-		if op.matches[i].handle == handle {
-			return true
-		}
-	}
-	return false
 }
 
 // matchesRelProps reports whether the relationship instance handle stored as
@@ -574,7 +561,7 @@ func (op *MergeRelationship) emitRow(row Row, srcID, dstID graph.NodeID, srcKey,
 // per-edge handle of the edge the actions target: the just-allocated handle on
 // the ON CREATE path, or the matched instance's own handle on the ON MATCH path,
 // which runs once per matched instance (rmp #2939). handle == 0 means the edge carries no stable
-// handle (simple-graph / pre-handle storage): the by-handle mirror is skipped and
+// handle (pre-handle storage): the by-handle mirror is skipped and
 // only the per-pair store is written, byte-identical to the pre-#1684 behaviour.
 //
 // A whole-entity REPLACE item (`SET r = {…}` / `SET r = node` with the `=`

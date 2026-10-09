@@ -38,7 +38,7 @@ import (
 //	(:Person {name:'carol'})   (isolated, no outgoing KNOWS)
 func newOptionalMatchEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:Person {name: 'alice'})-[:KNOWS]->(:Person {name: 'bob'})`)
 	runSetup(t, eng, `CREATE (:Person {name: 'carol'})`)
@@ -133,7 +133,7 @@ func TestOptionalMatchNullPlan_NullPropagation(t *testing.T) {
 func TestOptionalMatchNullPlan_AllIsolated(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, name := range []string{"x", "y", "z"} {
 		runSetup(t, eng, fmt.Sprintf(`CREATE (:Person {name: '%s'})`, name))

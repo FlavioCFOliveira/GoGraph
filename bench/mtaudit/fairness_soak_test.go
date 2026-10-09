@@ -132,7 +132,7 @@ type fairnessCell struct {
 func TestFairScheduling_LongReadPlusWriterDoesNotStarveReaders(t *testing.T) {
 	testlayers.RequireSoak(t)
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < fairnessNodes; i++ {
 		k := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(k); err != nil {

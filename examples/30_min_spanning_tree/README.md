@@ -5,8 +5,10 @@
 GoGraph's two minimum-spanning-tree algorithms, `search.PrimMST` and
 `search.KruskalMST`, run over one shared immutable CSR snapshot and
 cross-checked against each other as a correctness oracle. It shows how to
-build an undirected weighted graph, freeze it into a CSR, compute the MST two
-independent ways, and prove they agree.
+store a weighted graph with one directed relationship per link, freeze it into
+a CSR, project it to its symmetric (undirected) view with
+`csr.CSR.BuildSymmetric`, compute the MST two independent ways, and prove they
+agree.
 
 ## Domain / scenario
 
@@ -108,8 +110,9 @@ Following the search/path-finding row of the examples taxonomy:
   spanning forest, returning `search.MSTEdge` records.
 - `search.WCC` — weakly-connected components, for an independent component count
   and per-component Prim roots.
-- `graph/adjlist.New` with `Config{Directed: false}` and `graph/csr.BuildFromAdjList`
-  — build an undirected weighted graph and freeze it into a symmetric CSR.
+- `graph/adjlist.New` / `AdjList.AddEdge`, `graph/csr.BuildFromAdjList` and
+  `CSR.BuildSymmetric` — store one directed relationship per link, freeze the
+  graph into a CSR, and project it to the symmetric CSR both MST algorithms read.
 
 ## Further reading
 

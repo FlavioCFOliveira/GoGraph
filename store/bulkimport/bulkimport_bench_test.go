@@ -59,7 +59,7 @@ func BenchmarkImport_LabelsAndProperties(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		builder := New[int64](Options{Directed: true, Multigraph: true, ExpectNodes: benchNodes})
+		builder := New[int64](Options{ExpectNodes: benchNodes})
 		if err := builder.AddNodes(nodes); err != nil {
 			b.Fatal(err)
 		}
@@ -89,7 +89,7 @@ func BenchmarkImport_NodesOnly(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		builder := New[int64](Options{Directed: true, Multigraph: true, ExpectNodes: benchNodes})
+		builder := New[int64](Options{ExpectNodes: benchNodes})
 		if err := builder.AddNodes(nodes); err != nil {
 			b.Fatal(err)
 		}

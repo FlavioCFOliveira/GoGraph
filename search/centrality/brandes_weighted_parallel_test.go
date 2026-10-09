@@ -21,7 +21,7 @@ import (
 // parallel reduces.
 func buildWeightedParallelFixture(tb testing.TB, n, edges int, seed1, seed2 uint64) *csr.CSR[float64] {
 	tb.Helper()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	r := rand.New(rand.NewPCG(seed1, seed2)) //nolint:gosec // deterministic test RNG
 	for i := 0; i < edges; i++ {
 		u := r.IntN(n)
@@ -33,7 +33,7 @@ func buildWeightedParallelFixture(tb testing.TB, n, edges int, seed1, seed2 uint
 			tb.Fatalf("AddEdge: %v", err)
 		}
 	}
-	return csr.BuildFromAdjList(a)
+	return csr.BuildFromAdjList(a).BuildSymmetric()
 }
 
 // TestWeightedBetweennessParallel_VsSerial asserts the parallel
@@ -116,14 +116,14 @@ func TestWeightedBetweennessParallel_InvalidInput(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			a := adjlist.New[int, float64](adjlist.Config{Directed: false})
+			a := adjlist.New[int, float64](adjlist.Config{})
 			if err := a.AddEdge(0, 1, 1.0); err != nil {
 				t.Fatalf("AddEdge: %v", err)
 			}
 			if err := a.AddEdge(1, 2, tc.w); err != nil {
 				t.Fatalf("AddEdge: %v", err)
 			}
-			c := csr.BuildFromAdjList(a)
+			c := csr.BuildFromAdjList(a).BuildSymmetric()
 			got, err := WeightedBetweennessParallel(c, 4)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err=%v, want %v", err, tc.want)

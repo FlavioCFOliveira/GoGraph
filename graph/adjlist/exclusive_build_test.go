@@ -23,7 +23,7 @@ import (
 // recovery and bulk import hand it.
 func exclusiveRig(t *testing.T) *AdjList[string, float64] {
 	t.Helper()
-	a := New[string, float64](Config{Directed: true, Multigraph: true})
+	a := New[string, float64](Config{})
 	a.EnableVersioning()
 	ws := &mvcc.WriteStamp{}
 	ws.SetClock(&mvcc.Clock{})

@@ -38,7 +38,7 @@ import (
 const durableGateBackstop = 10 * time.Second
 
 func TestApplyDurable_HonoursDeadlineBehindHeldVisibilityGate(t *testing.T) {
-	g := newDirectTxGraph(t, true)
+	g := newDirectTxGraph(t)
 	requireNoErr(t, g.AddNode("x"))
 
 	// Hold the gate strongly from another goroutine, as an embedder's

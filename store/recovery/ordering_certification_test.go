@@ -110,7 +110,7 @@ func buildHighDegreeGraph(t *testing.T, dir string) (*lpg.Graph[string, int64], 
 	t.Helper()
 	// A single-file log: this test damages or erases it as one file.
 	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions(g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

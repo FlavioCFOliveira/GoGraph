@@ -45,7 +45,7 @@ import (
 // differs, which is what switches mapper.bin to the version-2 codec layout.
 func decodeBenchGraph(tb testing.TB) *lpg.Graph[int, int64] {
 	tb.Helper()
-	g := lpg.New[int, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int, int64](adjlist.Config{})
 	for i := 0; i < gateBenchNodes; i++ {
 		if err := g.AddNode(i); err != nil {
 			tb.Fatalf("AddNode: %v", err)

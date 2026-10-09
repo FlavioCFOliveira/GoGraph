@@ -13,7 +13,7 @@ package exec
 // lpg.Graph[string, float64] does not expose a first-class RemoveNode
 // operation; the Mapper permanently interns node IDs. "Deleting" a node in
 // this implementation means:
-//   - Verify that OutDegree == 0 (and the reverse for undirected graphs).
+//   - Verify that the node has no outgoing and no incoming relationship.
 //   - Remove all labels and all properties from the node.
 //   - The NodeID remains in the Mapper and is no longer reachable from
 //     the live graph via label/property queries.
@@ -384,8 +384,8 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 						// its forward-CSR edge position (the IntegerValue in this
 						// column). A non-zero handle removes the EXACT slot plus its
 						// per-handle metadata and snapshots the deleted-row view by
-						// handle; a zero handle (simple graph, or a position that no
-						// longer resolves) falls back to the first-match endpoint
+						// handle; a zero handle (pre-handle storage, or a position
+						// that no longer resolves) falls back to the first-match endpoint
 						// removal — unchanged behaviour.
 						// The column IS the handle since rmp #2317; it used to be a
 						// forward-CSR position needing a lookup to recover it.
@@ -655,7 +655,7 @@ func (op *DeleteRelationship) Next(out *Row) (bool, error) {
 	// edge position (when the endpoint/edge-position columns were wired via
 	// WithRelCols). A non-zero handle removes the EXACT instance plus its
 	// per-handle metadata and snapshots the deleted-row view by handle; a zero
-	// handle (no RelCols, simple graph, or a post-projection binding whose edge
+	// handle (no RelCols, pre-handle storage, or a post-projection binding whose edge
 	// position is gone) falls back to the first-match endpoint removal —
 	// unchanged behaviour (rmp #2018).
 	// With no relationship columns wired the value's own ID is the handle

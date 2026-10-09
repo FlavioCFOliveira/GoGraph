@@ -47,7 +47,7 @@ import (
 // the "return on first collector error" mutant (it would surface the error).
 func TestWriteLabels_SelfHealRetriesAndSucceeds(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.SetNodeLabel("alice", "Person"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestWriteLabels_SelfHealRetriesAndSucceeds(t *testing.T) {
 // Kills the "break as soon as the node collector succeeds" mutant.
 func TestWriteLabels_BreakRequiresBothCollectors(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestWriteLabels_BreakRequiresBothCollectors(t *testing.T) {
 // any mutant that flushes partial output before returning the exhaustion error.
 func TestWriteLabels_ExhaustionReturnsErrorWritesNothing(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.SetNodeLabel("alice", "Person"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestWriteLabels_ExhaustionReturnsErrorWritesNothing(t *testing.T) {
 // out of the loop makes the factory fire once instead of once per attempt.
 func TestWriteProperties_SelfHealRetriesAndSucceeds(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.SetNodeProperty("alice", "name", lpg.StringValue("a")); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestWriteProperties_SelfHealRetriesAndSucceeds(t *testing.T) {
 // arena factory to confirm the real wiring works through the seam.
 func TestWriteProperties_BreakRequiresBothCollectors(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestWriteProperties_BreakRequiresBothCollectors(t *testing.T) {
 // only the succeeding one.
 func TestWriteProperties_ExhaustionReturnsErrorWritesNothing(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.SetNodeProperty("alice", "name", lpg.StringValue("a")); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}

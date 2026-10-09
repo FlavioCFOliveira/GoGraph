@@ -13,8 +13,9 @@
 //
 //	Traversal — shortestPath and allShortestPaths over the undirected KNOWS
 //	relation between two seeded users, cross-checked against an independent
-//	in-Go oracle. The oracle mirrors the same KNOWS edges into an undirected
-//	graph/csr.CSR and searches it with search.BiBFS; a hand-written BFS over
+//	in-Go oracle. The oracle copies the same KNOWS relationships into a CSR,
+//	projects it to its undirected view with csr.CSR.BuildSymmetric, and
+//	searches that with search.BiBFS; a hand-written BFS over
 //	that CSR picks the farthest reachable user as the destination. If the
 //	engine and the oracle disagree on the path length that is a module bug, so
 //	the agreement is asserted as a fact (sp.len_matches_bibfs=1).
@@ -205,9 +206,10 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "config.top=%d\n", cfg.top)
 	fmt.Fprintf(w, "config.seed=%d\n", cfg.seed)
 
-	// Multigraph: true is required for openCypher semantics — CREATE always adds
-	// a relationship, including a parallel edge between an existing node pair.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	// The graph is a directed multigraph, the openCypher storage model: CREATE
+	// always adds a relationship, including a parallel edge between an
+	// existing node pair.
+	g := lpg.New[string, float64](adjlist.Config{})
 	stats, err := build(ctx, g, cfg)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
@@ -568,8 +570,9 @@ func queryKnows(ctx context.Context, eng *cypher.Engine, stats buildStats, w io.
 // the undirected KNOWS relation and cross-checks the result against a search
 // oracle built from the same edges.
 //
-// It first mirrors the graph's KNOWS edges into an undirected graph/csr.CSR (a
-// snapshot independent of the engine's query path), runs a hand-written BFS to
+// It first copies the graph's KNOWS relationships into a CSR and projects it
+// to its undirected view with csr.CSR.BuildSymmetric (a snapshot independent
+// of the engine's query path), runs a hand-written BFS to
 // pick the farthest reachable user from the anchor as the destination, and
 // confirms the distance with search.BiBFS. It then asks the engine for
 // shortestPath((anchor)-[:KNOWS*..maxHops]-(dst)). If the engine's length
@@ -577,11 +580,10 @@ func queryKnows(ctx context.Context, eng *cypher.Engine, stats buildStats, w io.
 // a fact (sp.len_matches_bibfs=0) and surfaced as an error. allShortestPaths is
 // checked for the invariant that every returned path is a shortest one.
 func queryShortestPaths(ctx context.Context, eng *cypher.Engine, g *lpg.Graph[string, float64], cfg config, stats buildStats, w io.Writer) error {
-	oracle, err := buildUndirectedKnows(ctx, g)
+	oracle, oracleCSR, err := buildUndirectedKnows(ctx, g)
 	if err != nil {
 		return fmt.Errorf("shortest_path oracle: %w", err)
 	}
-	oracleCSR := csr.BuildFromAdjList(oracle)
 
 	src, ok := oracle.Mapper().Lookup(stats.anchorID)
 	if !ok {
@@ -660,14 +662,16 @@ func queryShortestPaths(ctx context.Context, eng *cypher.Engine, g *lpg.Graph[st
 	return nil
 }
 
-// buildUndirectedKnows returns an undirected adjacency holding exactly the
-// KNOWS edges currently stored in g, mirroring each directed KNOWS into an
-// undirected edge. It reads the same adjacency the engine queries, so a search
-// over it exercises the identical edge set on an independent code path.
-// (csr.BuildFromAdjList on g's own adjacency would yield a directed CSR, which
-// would not match the undirected shortestPath pattern.)
-func buildUndirectedKnows(ctx context.Context, g *lpg.Graph[string, float64]) (*adjlist.AdjList[string, float64], error) {
-	oracle := adjlist.New[string, float64](adjlist.Config{Directed: false})
+// buildUndirectedKnows returns the undirected oracle for the KNOWS relation:
+// an adjacency holding one directed relationship per KNOWS relationship
+// currently stored in g, and the symmetric projection of its CSR
+// (csr.CSR.BuildSymmetric), in which each relationship is reachable from both
+// endpoints — the view the undirected pattern -[:KNOWS*..n]- matches. It reads
+// the same adjacency the engine queries, so a search over it exercises the
+// identical edge set on an independent code path. The adjacency is returned
+// for its Mapper, which resolves the CSR's NodeIDs back to user ids.
+func buildUndirectedKnows(ctx context.Context, g *lpg.Graph[string, float64]) (*adjlist.AdjList[string, float64], *csr.CSR[float64], error) {
+	oracle := adjlist.New[string, float64](adjlist.Config{})
 	adj := g.AdjList()
 	var walkErr error
 	visited := 0
@@ -693,9 +697,9 @@ func buildUndirectedKnows(ctx context.Context, g *lpg.Graph[string, float64]) (*
 		return true
 	})
 	if walkErr != nil {
-		return nil, walkErr
+		return nil, nil, walkErr
 	}
-	return oracle, nil
+	return oracle, csr.BuildFromAdjList(oracle).BuildSymmetric(), nil
 }
 
 // bfsDistances computes the unweighted hop distance from src to every node of

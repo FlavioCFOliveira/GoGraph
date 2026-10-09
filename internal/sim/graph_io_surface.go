@@ -117,7 +117,7 @@ const graphIOIsolatedName = "lonely_island"
 // arm exports. Weights mix zero and non-zero so both the labelled and the
 // unlabelled DOT edge branches run.
 func graphIOModel(s *Seed) (*adjlist.AdjList[string, int64], error) {
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true, Multigraph: false})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	names := graphIOHostileNames
 	for i := range names {
 		// Two out-edges per vertex, one deliberately weightless.
@@ -145,7 +145,7 @@ func graphIOModel(s *Seed) (*adjlist.AdjList[string, int64], error) {
 // wire format tags each with its own "kind" literal and a kind that is never
 // written is a kind whose decode is never exercised.
 func graphIOPropModel() (*lpg.Graph[string, int64], []string) {
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	keys := []string{"p0", "p1", "p2", "p3"}
 	// A fixed instant with a NON-UTC offset: the encoder formats in the value's
 	// own location (rmp #1769), so a UTC-only fixture would not detect a
@@ -526,7 +526,6 @@ func graphIOMeasureExportStability(ctx context.Context, model *adjlist.AdjList[s
 		"csv.Write": func() ([]byte, error) {
 			var b bytes.Buffer
 			o := csv.DefaultOptions()
-			o.Directed = true
 			_, err := csv.WriteCtx(ctx, &b, model, o)
 			return b.Bytes(), err
 		},
@@ -634,7 +633,6 @@ func runGraphIOSurface(ctx context.Context, seed uint64, opts graphIOSurfaceOpts
 
 	// --- CSV and JSONL: written and read by the module. ---
 	csvOpts := csv.DefaultOptions()
-	csvOpts.Directed = true
 	var csvBuf bytes.Buffer
 	if _, werr := csv.WriteCtx(ctx, &csvBuf, model, csvOpts); werr != nil {
 		return r, fmt.Errorf("sim: graph-io csv export: %w", werr)
@@ -646,7 +644,7 @@ func runGraphIOSurface(ctx context.Context, seed uint64, opts graphIOSurfaceOpts
 	}
 	r.CSVNodes, r.CSVTriples = adjNodeNames(csvGot), edgeTriples(csvGot)
 
-	cfg := adjlist.Config{Directed: true, Multigraph: false}
+	cfg := adjlist.Config{}
 	var jsonlBuf bytes.Buffer
 	if _, werr := jsonl.WriteCtx(ctx, &jsonlBuf, model); werr != nil {
 		return r, fmt.Errorf("sim: graph-io jsonl export: %w", werr)
@@ -868,7 +866,6 @@ func graphIOCSVArms(ctx context.Context, model *adjlist.AdjList[string, int64], 
 	for i := range arms {
 		arm := &arms[i]
 		opts := csv.DefaultOptions()
-		opts.Directed = true
 		opts.Delimiter = arm.Delimiter
 		opts.Comment = arm.Comment
 		opts.HasHeader = arm.HasHeader
@@ -1698,7 +1695,7 @@ const graphIOEndlessCap int64 = 256 << 10
 // these caps are unreachable from the seeded sweep by construction and are
 // driven deterministically instead.
 func graphIOCapProbes() []graphIOCapProbe {
-	cfg := adjlist.Config{Directed: true}
+	cfg := adjlist.Config{}
 	hugeList := func() lpg.PropertyValue {
 		// One element, larger than the encoders' 64 MiB serialised-value cap.
 		return lpg.ListValue([]lpg.PropertyValue{lpg.StringValue(strings.Repeat("x", (64<<20)+16))})
@@ -1726,7 +1723,7 @@ func graphIOCapProbes() []graphIOCapProbe {
 				return fmt.Sprintf("n%d,n%d,%d\n", n, n+1, n)
 			}}
 			o := csv.DefaultOptions()
-			o.Directed, o.MaxBytes = true, graphIOEndlessCap
+			o.MaxBytes = graphIOEndlessCap
 			_, _, err := csv.ReadIntoCtx(ctx, src, o)
 			return src.Delivered, src.Overran, err
 		}},
@@ -1734,7 +1731,6 @@ func graphIOCapProbes() []graphIOCapProbe {
 			// 70000 > the 65536-field per-record ceiling.
 			doc := "a,b," + strings.Repeat(",", 70000) + "\n"
 			o := csv.DefaultOptions()
-			o.Directed = true
 			_, _, err := csv.ReadIntoCtx(ctx, strings.NewReader(doc), o)
 			return int64(len(doc)), false, err
 		}},
@@ -1824,7 +1820,7 @@ func graphIOCapProbes() []graphIOCapProbe {
 // these documents twice would double the most expensive part of the battery to
 // learn nothing extra.
 func graphIOListDepthCensus(maxDepth int) (sizes []int, deepest int, err error) {
-	cfg := adjlist.Config{Directed: true}
+	cfg := adjlist.Config{}
 	sizes = make([]int, 0, maxDepth)
 	v := lpg.StringValue("leaf")
 	for d := 1; d <= maxDepth; d++ {
@@ -1866,7 +1862,7 @@ const graphIOCancelTriggerUnit = 5000
 
 // graphIOCancelModels builds the chain graph in both representations.
 func graphIOCancelModels() (*adjlist.AdjList[string, int64], *lpg.Graph[string, int64], error) {
-	cfg := adjlist.Config{Directed: true, Multigraph: false}
+	cfg := adjlist.Config{}
 	a := adjlist.New[string, int64](cfg)
 	g := lpg.New[string, int64](cfg)
 	for i := 0; i < graphIOCancelEdges; i++ {
@@ -1903,10 +1899,9 @@ func graphIOCancelArms(ctx context.Context) ([]graphIOCancelArm, map[string]int,
 		return nil, nil, err
 	}
 	want := edgeTriples(adj)
-	cfg := adjlist.Config{Directed: true, Multigraph: false}
+	cfg := adjlist.Config{}
 
 	csvOpts := csv.DefaultOptions()
-	csvOpts.Directed = true
 	var csvBuf, jsonlBuf, jsonlPropBuf, graphmlBuf, graphmlPropBuf bytes.Buffer
 	if _, werr := csv.WriteCtx(ctx, &csvBuf, adj, csvOpts); werr != nil {
 		return nil, nil, fmt.Errorf("csv export: %w", werr)

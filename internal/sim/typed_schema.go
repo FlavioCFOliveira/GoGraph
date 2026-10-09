@@ -715,7 +715,7 @@ func newTypedSchemaSide(nodes int) (*typedSchemaSide, error) {
 	// A MULTIGRAPH: the per-handle and per-instance stores are addressed by
 	// handle and by CREATE ordinal, which a simple graph never mints more than
 	// one of, and the fused path adds an edge per call.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	s := &typedSchemaSide{
 		g:      g,

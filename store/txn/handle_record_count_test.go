@@ -66,7 +66,7 @@ func newHandleRecordTestStore(t *testing.T) (*Store[string, float64], *lpg.Graph
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := NewStoreWithOptions[string, float64](g, w, Options[string, float64]{
 		Codec:       NewStringCodec(),
 		WeightCodec: NewFloat64WeightCodec(),

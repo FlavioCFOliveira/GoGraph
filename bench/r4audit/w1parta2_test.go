@@ -21,7 +21,7 @@ import (
 // substitutions). This is the check that decides whether #2225 part A engages at
 // all, or whether it must be backed out as inert.
 func TestW1PartA_PlanShapes(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for i := 0; i < 20000; i++ {
 		key := fmt.Sprintf("n%d", i)
@@ -88,7 +88,7 @@ func TestW1PartA_PlanShapes(t *testing.T) {
 // statement cost track the RARE label rather than the whole :P scan.
 func TestW1PartA_MinLabelWriteWin(t *testing.T) {
 	seed := func(n int) *cypher.Engine {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		g.SetIndexManager(index.NewManager())
 		for i := 0; i < n; i++ {
 			key := fmt.Sprintf("n%d", i)

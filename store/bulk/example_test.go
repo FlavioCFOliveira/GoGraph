@@ -21,7 +21,7 @@ func Example() {
 	defer func() { _ = os.RemoveAll(dir) }()
 
 	out := filepath.Join(dir, "graph.csr")
-	l := bulk.New(bulk.Options{OutputPath: out, Directed: true})
+	l := bulk.New(bulk.Options{OutputPath: out})
 
 	// Feed edges one at a time and in a batch; both paths funnel into
 	// the same in-memory adjacency list.

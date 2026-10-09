@@ -28,7 +28,7 @@ import (
 func TestRecommendation_PersonalisedPageRank(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 
 	addClique := func(start, end int) {
 		for i := start; i <= end; i++ {
@@ -48,7 +48,7 @@ func TestRecommendation_PersonalisedPageRank(t *testing.T) {
 		t.Fatalf("AddEdge bridge (4–5): %v", err)
 	}
 
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric() // the clusters are undirected
 
 	srcID, ok := a.Mapper().Lookup(0)
 	if !ok {

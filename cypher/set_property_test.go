@@ -19,7 +19,7 @@ import (
 // that did not exist on the node before.
 func TestSet_NonExistentPropertyIsCreated(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// Node created without an email property.
@@ -48,7 +48,7 @@ func TestSet_NonExistentPropertyIsCreated(t *testing.T) {
 // have its properties updated via SET.
 func TestSet_FoundViaLabelScan(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -73,7 +73,7 @@ func TestSet_FoundViaLabelScan(t *testing.T) {
 // immediately visible in a subsequent RETURN within the same query.
 func TestSet_PropertyVisibleViaReturn(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

@@ -144,7 +144,7 @@ func newWALAdapter(t *testing.T) *walMutatorAdapter {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

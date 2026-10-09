@@ -11,7 +11,7 @@ import (
 // Config selects the graph variant; here Directed means AddEdge inserts
 // only the forward edge.
 func ExampleAdjList() {
-	g := adjlist.New[string, int](adjlist.Config{Directed: true})
+	g := adjlist.New[string, int](adjlist.Config{})
 
 	// AddEdge auto-creates endpoint nodes; the third argument is the
 	// edge weight (here an int).
@@ -33,7 +33,7 @@ func ExampleAdjList() {
 // the Go 1.23 range-over-func form, yielding each neighbour together
 // with its edge weight. Iteration order is unspecified.
 func ExampleAdjList_Neighbours() {
-	g := adjlist.New[string, int](adjlist.Config{Directed: true})
+	g := adjlist.New[string, int](adjlist.Config{})
 	_ = g.AddEdge("a", "b", 10)
 	_ = g.AddEdge("a", "c", 20)
 
@@ -43,17 +43,4 @@ func ExampleAdjList_Neighbours() {
 	// Unordered output:
 	// a -> b (weight 10)
 	// a -> c (weight 20)
-}
-
-// ExampleAdjList_undirected shows that an undirected Config mirrors
-// every insertion: AddEdge("a","b") makes both a->b and b->a present.
-func ExampleAdjList_undirected() {
-	g := adjlist.New[string, int](adjlist.Config{Directed: false})
-	_ = g.AddEdge("a", "b", 1)
-
-	fmt.Println("a->b:", g.HasEdge("a", "b"))
-	fmt.Println("b->a:", g.HasEdge("b", "a"))
-	// Output:
-	// a->b: true
-	// b->a: true
 }

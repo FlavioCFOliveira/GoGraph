@@ -40,7 +40,7 @@ func TestRecovery_PropertiesSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	tx := store.Begin()
@@ -169,7 +169,7 @@ func TestRecovery_V1SnapshotPropertiesEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	tx := store.Begin()
 	if err := tx.AddEdge("alice", "bob", 0); err != nil {

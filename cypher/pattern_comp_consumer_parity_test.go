@@ -55,7 +55,7 @@ import (
 // outgoing :KNOWS (to B), so each single-hop probe has one correct answer.
 func pcParityEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
 		`CREATE (:Person {name:'A'})`,
@@ -304,14 +304,12 @@ func TestPatternCompParity_InnerPredicate(t *testing.T) {
 		`(c)<-[r:KNOWS]-(x:Person) WHERE x.name = 'B' | x.name`)
 }
 
-// TestPatternCompParity_SimpleGraph repeats the incoming and undirected parity
-// on a NON-multigraph, where every adjacency slot carries the 0 handle. Both
-// per-instance ladders (type resolution and the per-slot type filter) must fall
-// back to the per-pair surfaces there, so this arm guards the fallback the
-// multigraph fixture never exercises.
-func TestPatternCompParity_SimpleGraph(t *testing.T) {
+// TestPatternCompParity_SingleEdgePairs repeats the incoming and undirected
+// parity on a fixture where every pair holds exactly one relationship, the
+// counterpart of the parallel-edge fixture above.
+func TestPatternCompParity_SingleEdgePairs(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
 		`CREATE (:Person {name:'A'})`,
@@ -354,7 +352,7 @@ func TestPatternCompParity_SimpleGraph(t *testing.T) {
 // so the loop must appear ONCE there, never twice.
 func TestPatternCompParity_SelfLoop(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
 		`CREATE (:Person {name:'S'})`,

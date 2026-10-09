@@ -55,13 +55,8 @@ func assertReverseAgrees[N comparable, W any](t *testing.T, a *AdjList[N, W], wh
 // collapsing, self-loop exclusion, and the Mapper.Walk ordering.
 func TestReverseIndexAgreesWithFullScan(t *testing.T) {
 	t.Parallel()
-	for _, cfg := range []Config{
-		{Directed: true},
-		{Directed: true, Multigraph: true},
-		{Directed: false},
-		{Directed: false, Multigraph: true},
-	} {
-		name := fmt.Sprintf("directed=%v/multi=%v", cfg.Directed, cfg.Multigraph)
+	for _, cfg := range []Config{{}} {
+		name := "default"
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			const nodes = 60
@@ -114,7 +109,7 @@ func TestReverseIndexAgreesWithFullScan(t *testing.T) {
 // destination itself.
 func TestReverseIndexSelfLoopExcluded(t *testing.T) {
 	t.Parallel()
-	a := New[string, float64](Config{Directed: true, Multigraph: true})
+	a := New[string, float64](Config{})
 	if err := a.AddEdge("a", "a", 1); err != nil {
 		t.Fatalf("AddEdge self-loop: %v", err)
 	}
@@ -138,7 +133,7 @@ func TestReverseIndexSelfLoopExcluded(t *testing.T) {
 // slot without visiting the same source twice.
 func TestReverseIndexParallelEdgesCollapse(t *testing.T) {
 	t.Parallel()
-	a := New[string, float64](Config{Directed: true, Multigraph: true})
+	a := New[string, float64](Config{})
 	const parallel = 4
 	for i := 0; i < parallel; i++ {
 		if err := a.AddEdge("s", "d", float64(i)); err != nil {

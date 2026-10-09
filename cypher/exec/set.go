@@ -228,7 +228,7 @@ type entityBinding struct {
 	// relHandle is the stable per-edge handle of the bound parallel
 	// relationship instance, resolved from its forward-CSR edge position
 	// (valid when isRel). It is 0 when no handle is resolvable — the edge
-	// carries no stable handle (simple-graph storage), the binding came from a
+	// carries no stable handle (pre-handle storage), the binding came from a
 	// post-projection RelationshipValue that carries no edge position, or the
 	// position did not resolve — in which case the per-instance by-handle store
 	// is left untouched and only the per-pair store is written (#1686).

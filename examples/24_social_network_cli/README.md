@@ -73,7 +73,7 @@ Exit codes:
 ## End-to-end session
 
 ```bash
-DATA_DIR=/tmp/social
+DATA_DIR=$(mktemp -d)   # a fresh temporary data directory (mktemp follows TMPDIR)
 go run ./examples/24_social_network_cli init  -d "$DATA_DIR"
 go run ./examples/24_social_network_cli seed  -d "$DATA_DIR"
 go run ./examples/24_social_network_cli stats -d "$DATA_DIR"

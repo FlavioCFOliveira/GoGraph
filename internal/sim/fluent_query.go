@@ -1923,7 +1923,7 @@ const fluentQueryGhostLabel = "FQGhost"
 // is drawn from the INTERIOR of a path graph, and an interior node always has an
 // incoming arc.
 func fluentQueryGhostFixture(tick int64, seed *Seed, perturb fqPerturb) ([]Violation, int) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	names := make([]string, fluentQueryGhostFixtureNodes)
 	for i := range names {
 		names[i] = fmt.Sprintf("fqg-%d", i)

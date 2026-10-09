@@ -22,7 +22,7 @@ func TestCSR_Weightless_NilWeightsForNonEmptyW(t *testing.T) {
 		t.Fatal("precondition: hasWeights[int64]() should be true")
 	}
 
-	weightless := adjlist.New[string, int64](adjlist.Config{Directed: true, Weightless: true})
+	weightless := adjlist.New[string, int64](adjlist.Config{Weightless: true})
 	if err := weightless.AddEdge("a", "b", 100); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestCSR_Weightless_NilWeightsForNonEmptyW(t *testing.T) {
 // not perturb the weighted path.
 func TestCSR_Weighted_Unchanged(t *testing.T) {
 	t.Parallel()
-	weighted := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	weighted := adjlist.New[string, int64](adjlist.Config{})
 	if err := weighted.AddEdge("a", "b", 100); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

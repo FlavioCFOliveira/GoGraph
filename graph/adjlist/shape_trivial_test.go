@@ -18,7 +18,7 @@ func TestAdjList_TrivialShapes(t *testing.T) {
 
 	t.Run("EmptyGraph", func(t *testing.T) {
 		t.Parallel()
-		g, err := shapegen.EmptyGraph().Build(adjlist.Config{Directed: true})
+		g, err := shapegen.EmptyGraph().Build(adjlist.Config{})
 		if err != nil {
 			t.Fatalf("Build: %v", err)
 		}
@@ -33,7 +33,7 @@ func TestAdjList_TrivialShapes(t *testing.T) {
 
 	t.Run("SingleNode", func(t *testing.T) {
 		t.Parallel()
-		g, err := shapegen.SingleNode().Build(adjlist.Config{Directed: true})
+		g, err := shapegen.SingleNode().Build(adjlist.Config{})
 		if err != nil {
 			t.Fatalf("Build: %v", err)
 		}
@@ -49,7 +49,7 @@ func TestAdjList_TrivialShapes(t *testing.T) {
 	t.Run("SingleEdge_directed", func(t *testing.T) {
 		t.Parallel()
 		// directed=true, weighted=false, selfLoop=false → K2 directed
-		g, err := shapegen.SingleEdge(true, false, false).Build(adjlist.Config{Directed: true})
+		g, err := shapegen.SingleEdge(false, false).Build(adjlist.Config{})
 		if err != nil {
 			t.Fatalf("Build: %v", err)
 		}
@@ -68,32 +68,10 @@ func TestAdjList_TrivialShapes(t *testing.T) {
 		}
 	})
 
-	t.Run("SingleEdge_undirected", func(t *testing.T) {
-		t.Parallel()
-		// directed=false, weighted=false, selfLoop=false → K2 undirected
-		g, err := shapegen.SingleEdge(false, false, false).Build(adjlist.Config{Directed: false})
-		if err != nil {
-			t.Fatalf("Build: %v", err)
-		}
-		a := g.AdjList()
-		if got := a.Order(); got != 2 {
-			t.Errorf("Order = %d, want 2", got)
-		}
-		if got := a.Size(); got != 1 {
-			t.Errorf("Size = %d, want 1", got)
-		}
-		if !a.HasEdge(0, 1) {
-			t.Error("HasEdge(0,1) = false, want true")
-		}
-		if !a.HasEdge(1, 0) {
-			t.Error("HasEdge(1,0) = false, want true (undirected mirror)")
-		}
-	})
-
 	t.Run("SingleEdge_selfloop", func(t *testing.T) {
 		t.Parallel()
 		// directed=true, weighted=false, selfLoop=true
-		g, err := shapegen.SingleEdge(true, false, true).Build(adjlist.Config{Directed: true})
+		g, err := shapegen.SingleEdge(false, true).Build(adjlist.Config{})
 		if err != nil {
 			t.Fatalf("Build: %v", err)
 		}
@@ -169,7 +147,7 @@ func TestAdjList_TrivialShapes(t *testing.T) {
 			n := n
 			t.Run("", func(t *testing.T) {
 				t.Parallel()
-				g, err := shapegen.IsolatedOnly(n).Build(adjlist.Config{Directed: true})
+				g, err := shapegen.IsolatedOnly(n).Build(adjlist.Config{})
 				if err != nil {
 					t.Fatalf("IsolatedOnly(%d) Build: %v", n, err)
 				}
@@ -197,7 +175,7 @@ func TestAdjList_TrivialShapes(t *testing.T) {
 			n := n
 			t.Run("", func(t *testing.T) {
 				t.Parallel()
-				g, err := shapegen.UniversalSelfLoops(n, false).Build(adjlist.Config{Directed: true})
+				g, err := shapegen.UniversalSelfLoops(n, false).Build(adjlist.Config{})
 				if err != nil {
 					t.Fatalf("UniversalSelfLoops(%d) Build: %v", n, err)
 				}

@@ -12,7 +12,7 @@ import (
 func TestLoader_AddAndFinalise(t *testing.T) {
 	t.Parallel()
 	out := filepath.Join(t.TempDir(), "graph.csr")
-	l := New(Options{OutputPath: out, Directed: true})
+	l := New(Options{OutputPath: out})
 	_ = l.Add(Edge{Src: "a", Dst: "b", Weight: 1})
 	_ = l.AddBatch([]Edge{{Src: "b", Dst: "c", Weight: 2}, {Src: "c", Dst: "a", Weight: 3}})
 	if l.Rows() != 3 {
@@ -40,7 +40,7 @@ func TestLoader_AddAndFinalise(t *testing.T) {
 
 func TestLoader_DrainChannel(t *testing.T) {
 	t.Parallel()
-	l := New(Options{Directed: true})
+	l := New(Options{})
 	ch := make(chan Edge, 4)
 	ch <- Edge{Src: "x", Dst: "y", Weight: 0}
 	ch <- Edge{Src: "y", Dst: "z", Weight: 0}
@@ -56,7 +56,7 @@ func TestLoader_DrainChannel(t *testing.T) {
 
 func TestLoader_DrainCancelled(t *testing.T) {
 	t.Parallel()
-	l := New(Options{Directed: true})
+	l := New(Options{})
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan Edge)
 	cancel()
@@ -67,7 +67,7 @@ func TestLoader_DrainCancelled(t *testing.T) {
 
 func TestLoader_MaxRowsCap(t *testing.T) {
 	t.Parallel()
-	l := New(Options{Directed: true, MaxRows: 2})
+	l := New(Options{MaxRows: 2})
 	if err := l.Add(Edge{Src: "a", Dst: "b", Weight: 1}); err != nil {
 		t.Fatalf("Add 1: %v", err)
 	}

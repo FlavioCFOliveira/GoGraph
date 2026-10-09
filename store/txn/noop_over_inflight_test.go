@@ -175,7 +175,7 @@ func ioOpen(t *testing.T, dir string) (*wal.Writer, *lpg.Graph[string, float64],
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return w, g, txn.NewStoreWithOptions[string, float64](g, w, ioOpts)
 }
 

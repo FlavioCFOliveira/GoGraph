@@ -51,7 +51,7 @@ import (
 func TestVacuumSoak_NoUnboundedGrowthUnderSustainedChurn(t *testing.T) {
 	testlayers.RequireSoak(t)
 
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() {
 		if err := g.Close(); err != nil {
 			t.Errorf("Close: %v", err)

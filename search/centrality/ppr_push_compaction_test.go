@@ -101,11 +101,14 @@ type pprEquivCase struct {
 func buildPPREquivCases(t *testing.T) []pprEquivCase {
 	t.Helper()
 	mk := func(name string, sh shapegen.Shape[int, int64], directed bool, src int) pprEquivCase {
-		g, err := sh.Build(adjlist.Config{Directed: directed})
+		g, err := sh.Build(adjlist.Config{})
 		if err != nil {
 			t.Fatalf("%s build: %v", name, err)
 		}
 		c := csr.BuildFromAdjList(g.AdjList())
+		if !directed {
+			c = c.BuildSymmetric()
+		}
 		s, ok := g.AdjList().Mapper().Lookup(src)
 		if !ok {
 			t.Fatalf("%s: source %d not interned", name, src)
@@ -115,7 +118,7 @@ func buildPPREquivCases(t *testing.T) []pprEquivCase {
 	return []pprEquivCase{
 		mk("dense-clique-64", shapegen.Complete(64, false), false, 0),
 		mk("dense-clique-128-directed", shapegen.Complete(128, true), true, 7),
-		mk("path-200", shapegen.Path(200, false), false, 0),
+		mk("path-200", shapegen.Path(200), false, 0),
 		mk("star-out-300", shapegen.Star(300, true), true, 0),
 		mk("grid-20x20", shapegen.Grid(20, 20, true), false, 0),
 		mk("rmat-scale10", shapegen.RMAT(10, 8, 57, 19, 19, 5, 42), true, 1),
@@ -169,11 +172,11 @@ func TestPPRPush_CompactionPreservesResults(t *testing.T) {
 // tighter epsilon lengthens the worklist and exercises more compactions.
 func TestPPRPush_CompactionPreservesResults_VariedParams(t *testing.T) {
 	t.Parallel()
-	g, err := shapegen.Complete(96, false).Build(adjlist.Config{Directed: false})
+	g, err := shapegen.Complete(96, false).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 	src, _ := g.AdjList().Mapper().Lookup(0)
 
 	params := []PPRPushOptions{
@@ -238,7 +241,7 @@ func (p *worklistPeak) observe(qlen, qcap int) {
 // the push count, far above the node bound) and PASSES with compaction.
 func TestPPRPush_WorklistTracksFrontier(t *testing.T) {
 	const order = 200 // dense clique: order*(order-1) directed arcs
-	g, err := shapegen.Complete(order, true).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.Complete(order, true).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -334,7 +337,7 @@ func TestCompactWorklist_Unit(t *testing.T) {
 // path is unaffected by the new compaction/observer code in the loop head.
 func TestPPRPush_CancellationStillWorks(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 50; i++ {
 		for j := 0; j < 50; j++ {
 			if i != j {

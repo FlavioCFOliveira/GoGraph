@@ -16,7 +16,7 @@ import (
 )
 
 func TestDisconnectedMatchExplainCartesian_1807(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	plan, err := eng.ExplainLogical(`MATCH (a:A), (b:B) RETURN a, b`, nil)

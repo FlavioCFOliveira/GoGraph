@@ -134,7 +134,6 @@ func TestRandom_ErdosRenyiNP_Invariants(t *testing.T) {
 				t.Fatalf("Build: %v", err)
 			}
 			assertOrder(t, g, uint64(c.n))
-			assertDirected(t, g, false)
 			maxEdges := uint64(c.n * (c.n - 1) / 2)
 			gotSize := g.AdjList().Size()
 			if c.pPercent == 0 && gotSize != 0 {
@@ -273,7 +272,7 @@ func TestRandom_ErdosRenyiNP_Golden(t *testing.T) {
 // mapper. The seed is fixed so the test is deterministic.
 func TestRandom_ErdosRenyiNP_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: false, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	if err := buildErdosRenyiNP(g, 300, 100, 1); err == nil {
 		t.Fatal("buildErdosRenyiNP(g, 300, 100, 1) with MaxShardCapacity=1 returned nil error, want adjlist.ErrShardFull")
@@ -325,7 +324,6 @@ func TestRandom_ErdosRenyiNM_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(c.n))
 			assertSize(t, g, uint64(c.m))
-			assertDirected(t, g, false)
 			// AC #3: exactly m unique unordered edges, no parallel
 			// edges, no self-loops.
 			if hasSelfLoop(g) {
@@ -439,7 +437,7 @@ func TestRandom_ErdosRenyiNM_Golden(t *testing.T) {
 // least one source with intraIdx >= 1 is reached).
 func TestRandom_ErdosRenyiNM_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: false, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	if err := buildErdosRenyiNM(g, 300, 1000, 1); err == nil {
 		t.Fatal("buildErdosRenyiNM(g, 300, 1000, 1) with MaxShardCapacity=1 returned nil error, want adjlist.ErrShardFull")
@@ -588,7 +586,7 @@ func TestRandom_PairIndexToIJ_OutOfRange(t *testing.T) {
 // other-family contracts.
 func TestRandom_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	for _, tc := range []struct {
 		name string
 		s    Shape[int, int64]

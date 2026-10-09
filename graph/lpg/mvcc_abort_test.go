@@ -51,7 +51,7 @@ import (
 // against the build that published unconditionally, reading back the refused
 // transaction's write.
 func TestAbort_ConflictedTransactionIsNeverVisible(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.SetNodeProperty("n", "v", Int64Value(0)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestAbort_ConflictedTransactionIsNeverVisible(t *testing.T) {
 // Without this, returning AbortedTS unconditionally would satisfy the first test and
 // make every write invisible.
 func TestAbort_ASuccessfulTransactionStillPublishes(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.SetNodeProperty("n", "v", Int64Value(0)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestAbort_ASuccessfulTransactionStillPublishes(t *testing.T) {
 // sequence through the substrate: abort on an object, then write it again, twice, and
 // read the result back.
 func TestAbort_AnAbortedObjectStaysWritable(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.SetNodeProperty("n", "v", Int64Value(0)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestAbort_AnAbortedObjectStaysWritable(t *testing.T) {
 // [Graph.withdrawAbortedNow] for why a present-time read leaves no correct
 // asynchronous option.
 func TestAbort_VersionsAreWithdrawnAtAbort(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	if err := g.SetNodeProperty("n", "v", Int64Value(0)); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -316,8 +316,8 @@ func TestAbort_AdjacencyWritesAreWithdrawn(t *testing.T) {
 		},
 	}
 	keys := []string{"a", "b", "c", "d"}
-	seed := func(t *testing.T, directed bool) *Graph[string, float64] {
-		g := New[string, float64](adjlist.Config{Directed: directed, Multigraph: true})
+	seed := func(t *testing.T) *Graph[string, float64] {
+		g := New[string, float64](adjlist.Config{})
 		t.Cleanup(func() { _ = g.Close() })
 		for _, err := range []error{
 			g.AddEdge("a", "b", 1), g.AddEdge("b", "c", 2), g.AddNode("d"),
@@ -337,37 +337,35 @@ func TestAbort_AdjacencyWritesAreWithdrawn(t *testing.T) {
 			t.Fatalf("later write: %v", err)
 		}
 	}
-	for _, directed := range []bool{true, false} {
-		for bn, bracket := range brackets {
-			for on, op := range ops {
-				t.Run(fmt.Sprintf("directed=%v/%s/%s", directed, bn, on), func(t *testing.T) {
-					g := seed(t, directed)
-					before := adjAbortState(g, keys...)
-					peer := g.BeginVersionedTx()
-					if err := g.Writer(peer).SetNodeProperty("x", "v", Int64Value(1)); err != nil {
-						t.Fatalf("peer: %v", err)
-					}
-					err := bracket(g, func(tx WriteTx) error {
-						wv := g.Writer(tx)
-						op(t, wv)
-						_ = wv.SetNodeProperty("x", "v", Int64Value(2)) // dooms the bracket
-						return tx.Err()
-					})
-					g.EndVersionedTx(peer)
-					if !errors.Is(err, mvcc.ErrSerializationConflict) {
-						t.Errorf("the doomed bracket returned %v, want a serialization conflict", err)
-					}
-					if got := adjAbortState(g, keys...); got != before {
-						t.Errorf("the aborted bracket's adjacency write is still applied\nbefore:\n%safter:\n%s", before, got)
-					}
-					later(t, g)
-					ref := seed(t, directed)
-					later(t, ref)
-					if got, want := adjAbortState(g, keys...), adjAbortState(ref, keys...); got != want {
-						t.Errorf("a later write built on the aborted entry\ngot:\n%swant:\n%s", got, want)
-					}
+	for bn, bracket := range brackets {
+		for on, op := range ops {
+			t.Run(fmt.Sprintf("%s/%s", bn, on), func(t *testing.T) {
+				g := seed(t)
+				before := adjAbortState(g, keys...)
+				peer := g.BeginVersionedTx()
+				if err := g.Writer(peer).SetNodeProperty("x", "v", Int64Value(1)); err != nil {
+					t.Fatalf("peer: %v", err)
+				}
+				err := bracket(g, func(tx WriteTx) error {
+					wv := g.Writer(tx)
+					op(t, wv)
+					_ = wv.SetNodeProperty("x", "v", Int64Value(2)) // dooms the bracket
+					return tx.Err()
 				})
-			}
+				g.EndVersionedTx(peer)
+				if !errors.Is(err, mvcc.ErrSerializationConflict) {
+					t.Errorf("the doomed bracket returned %v, want a serialization conflict", err)
+				}
+				if got := adjAbortState(g, keys...); got != before {
+					t.Errorf("the aborted bracket's adjacency write is still applied\nbefore:\n%safter:\n%s", before, got)
+				}
+				later(t, g)
+				ref := seed(t)
+				later(t, ref)
+				if got, want := adjAbortState(g, keys...), adjAbortState(ref, keys...); got != want {
+					t.Errorf("a later write built on the aborted entry\ngot:\n%swant:\n%s", got, want)
+				}
+			})
 		}
 	}
 }
@@ -402,58 +400,56 @@ func adjNodeID(g *Graph[string, float64], n string) graph.NodeID {
 // TestAbort_AdjacencyWithdrawalIsExact is the audit's withdrawal probe (rmp
 // #2965): an aborted explicit transaction's appends, removals, self-loop removal
 // and an append creating a new source are withdrawn exactly — every entry, the
-// reverse index and the edge count — on both graph shapes, also while a pinned
+// reverse index and the edge count — also while a pinned
 // snapshot forces the restoration onto a cloned slot array, and the next write
 // builds on the pre-image.
 func TestAbort_AdjacencyWithdrawalIsExact(t *testing.T) {
-	for _, directed := range []bool{true, false} {
-		for _, pin := range []bool{false, true} {
-			g := New[string, float64](adjlist.Config{Directed: directed, Multigraph: true})
-			t.Cleanup(func() { _ = g.Close() })
-			for _, e := range []error{g.AddEdge("a", "b", 1), g.AddEdge("a", "c", 1), g.AddEdge("a", "a", 1), g.AddEdge("b", "c", 1)} {
-				if e != nil {
-					t.Fatal(e)
-				}
+	for _, pin := range []bool{false, true} {
+		g := New[string, float64](adjlist.Config{})
+		t.Cleanup(func() { _ = g.Close() })
+		for _, e := range []error{g.AddEdge("a", "b", 1), g.AddEdge("a", "c", 1), g.AddEdge("a", "a", 1), g.AddEdge("b", "c", 1)} {
+			if e != nil {
+				t.Fatal(e)
 			}
-			keys := []string{"a", "b", "c", "d"}
-			before := map[string]string{}
-			for _, n := range keys {
-				before[n] = adjEntryString(g, n)
-			}
-			size0 := g.adj.Size()
-			if pin {
-				_ = g.adj.PinSnapshot()
-			}
-			tx := g.BeginVersionedTx()
-			wv := g.Writer(tx)
-			if err := wv.AddEdge("a", "b", 2); err != nil {
-				t.Fatal(err)
-			}
-			wv.RemoveEdge("a", "c")
-			if err := wv.AddEdge("d", "a", 3); err != nil {
-				t.Fatal(err)
-			}
-			wv.RemoveEdge("a", "a")
-			doomForTest(tx)
-			g.EndVersionedTx(tx)
-			for _, n := range keys {
-				if got := adjEntryString(g, n); got != before[n] && (before[n] != "<none>" || got != "[]") {
-					t.Errorf("directed=%v pin=%v: %s entry %s, want %s", directed, pin, n, got, before[n])
-				}
-			}
-			if g.adj.Size() != size0 {
-				t.Errorf("directed=%v pin=%v: edge count %d, want %d", directed, pin, g.adj.Size(), size0)
-			}
-			requireAdjInvariants(t, g, fmt.Sprintf("directed=%v pin=%v after the abort", directed, pin))
-			g.ReclaimNow()
-			if err := g.AddEdge("a", "e", 1); err != nil {
-				t.Fatal(err)
-			}
-			if g.adj.HasEdge("d", "a") || !g.adj.HasEdge("a", "c") || !g.adj.HasEdge("a", "a") {
-				t.Errorf("directed=%v pin=%v: the aborted change leaked into the next write: %s", directed, pin, adjEntryString(g, "a"))
-			}
-			requireAdjInvariants(t, g, "after the next write")
 		}
+		keys := []string{"a", "b", "c", "d"}
+		before := map[string]string{}
+		for _, n := range keys {
+			before[n] = adjEntryString(g, n)
+		}
+		size0 := g.adj.Size()
+		if pin {
+			_ = g.adj.PinSnapshot()
+		}
+		tx := g.BeginVersionedTx()
+		wv := g.Writer(tx)
+		if err := wv.AddEdge("a", "b", 2); err != nil {
+			t.Fatal(err)
+		}
+		wv.RemoveEdge("a", "c")
+		if err := wv.AddEdge("d", "a", 3); err != nil {
+			t.Fatal(err)
+		}
+		wv.RemoveEdge("a", "a")
+		doomForTest(tx)
+		g.EndVersionedTx(tx)
+		for _, n := range keys {
+			if got := adjEntryString(g, n); got != before[n] && (before[n] != "<none>" || got != "[]") {
+				t.Errorf("pin=%v: %s entry %s, want %s", pin, n, got, before[n])
+			}
+		}
+		if g.adj.Size() != size0 {
+			t.Errorf("pin=%v: edge count %d, want %d", pin, g.adj.Size(), size0)
+		}
+		requireAdjInvariants(t, g, fmt.Sprintf("pin=%v after the abort", pin))
+		g.ReclaimNow()
+		if err := g.AddEdge("a", "e", 1); err != nil {
+			t.Fatal(err)
+		}
+		if g.adj.HasEdge("d", "a") || !g.adj.HasEdge("a", "c") || !g.adj.HasEdge("a", "a") {
+			t.Errorf("pin=%v: the aborted change leaked into the next write: %s", pin, adjEntryString(g, "a"))
+		}
+		requireAdjInvariants(t, g, "after the next write")
 	}
 }
 
@@ -474,7 +470,7 @@ func TestAbort_EdgeWriteCannotStackOnAnUncommittedEntry(t *testing.T) {
 	for wn, write := range writes {
 		for _, order := range []string{"T1abort-T2commit", "T1abort-T2abort", "T2abort-T1abort"} {
 			t.Run(wn+"/"+order, func(t *testing.T) {
-				g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+				g := New[string, float64](adjlist.Config{})
 				t.Cleanup(func() { _ = g.Close() })
 				requireNoErr(t, g.AddEdge("a", "b", 1), g.SetEdgeProperty("a", "b", "k", Int64Value(0)), g.SetEdgeLabel("a", "b", "L"))
 				t1 := g.BeginVersionedTx()
@@ -528,7 +524,7 @@ func TestAbort_EdgeWriteCannotStackOnAnUncommittedEntry(t *testing.T) {
 // now refused, so the undo and the withdrawal both see T1's own pre-image.
 func TestAbort_UndoThenAbortDoesNotReinstateTheArc(t *testing.T) {
 	for _, t2commit := range []bool{true, false} {
-		g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := New[string, float64](adjlist.Config{})
 		t.Cleanup(func() { _ = g.Close() })
 		requireNoErr(t, g.AddEdge("a", "b", 1))
 		t1 := g.BeginVersionedTx()
@@ -559,37 +555,12 @@ func TestAbort_UndoThenAbortDoesNotReinstateTheArc(t *testing.T) {
 	}
 }
 
-// TestAbort_UndirectedStackingLeavesNoHalfEdge is #2966 on an undirected graph:
-// a withdrawal that could restore one endpoint's entry and not the other's left
-// half an edge (the audit measured "asym [140 242] 1 vs 0").
-func TestAbort_UndirectedStackingLeavesNoHalfEdge(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: false, Multigraph: true})
-	t.Cleanup(func() { _ = g.Close() })
-	requireNoErr(t, g.AddEdge("a", "b", 1), g.AddNode("c"))
-	t1 := g.BeginVersionedTx()
-	requireNoErr(t, g.Writer(t1).AddEdge("a", "c", 1))
-	t2 := g.BeginVersionedTx()
-	_ = g.Writer(t2).SetEdgeProperty("a", "b", "p", Int64Value(1))
-	doomForTest(t1)
-	g.EndVersionedTx(t1)
-	g.EndVersionedTx(t2)
-	g.ReclaimNow()
-	requireAdjInvariants(t, g, "after the abort")
-	if g.adj.HasEdge("a", "c") || g.adj.HasEdge("c", "a") {
-		t.Errorf("an aborted undirected edge survives: a=%s c=%s", adjEntryString(g, "a"), adjEntryString(g, "c"))
-	}
-	if err := g.RemoveEdge("a", "b"); err != nil {
-		t.Fatal(err)
-	}
-	requireAdjInvariants(t, g, "after a later removal")
-}
-
 // TestAbort_WithdrawalDoesNotShareTheAbortedBackingArray is audit finding 2: the
 // aborted entry extended the pre-image's backing arrays in place, the
 // withdrawal re-published the pre-image with its spare capacity, and the next
 // append wrote into memory a reader of the aborted entry still held.
 func TestAbort_WithdrawalDoesNotShareTheAbortedBackingArray(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	for _, d := range []string{"b", "c", "d"} {
 		requireNoErr(t, g.AddEdge("a", d, 1))
@@ -611,7 +582,7 @@ func TestAbort_WithdrawalDoesNotShareTheAbortedBackingArray(t *testing.T) {
 // TestAbort_WithdrawalRacesNoReader is finding 2 under the race detector: a
 // lock-free reader of the entry while aborts and appends alternate on it.
 func TestAbort_WithdrawalRacesNoReader(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	for _, d := range []string{"b", "c", "d"} {
 		requireNoErr(t, g.AddEdge("a", d, 1))
@@ -648,7 +619,7 @@ func TestAbort_WithdrawalRacesNoReader(t *testing.T) {
 // that wrote only node properties records none, and one that wrote k entries
 // records exactly k.
 func TestAbort_OnlyAdjacencyWritesReachTheAdjacency(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: false, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	requireNoErr(t, g.AddEdge("a", "b", 1))
 	props := g.BeginVersionedTx()
@@ -659,9 +630,9 @@ func TestAbort_OnlyAdjacencyWritesReachTheAdjacency(t *testing.T) {
 	g.EndVersionedTx(props)
 	edge := g.BeginVersionedTx()
 	requireNoErr(t, g.Writer(edge).AddEdge("a", "c", 1), g.Writer(edge).AddEdge("a", "d", 1))
-	// a, c and d: a's entry once however often it was rebuilt.
-	if n := len(edge.w.tx.AdjacencyWrites()); n != 3 {
-		t.Errorf("a transaction that wrote three entries recorded %d adjacency writes, want 3", n)
+	// Both arcs live in a's entry, recorded once however often it was rebuilt.
+	if n := len(edge.w.tx.AdjacencyWrites()); n != 1 {
+		t.Errorf("a transaction that wrote one entry recorded %d adjacency writes, want 1", n)
 	}
 	doomForTest(edge)
 	g.EndVersionedTx(edge)
@@ -673,7 +644,7 @@ func TestAbort_OnlyAdjacencyWritesReachTheAdjacency(t *testing.T) {
 // source first, which allocates the commit record, so the refusal had to abort
 // a transaction holding one. Both endpoints are now claimed in one step.
 func TestAbort_RefusedDirectAppendAllocatesNoRecord(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	requireNoErr(t, g.AddNode("x"), g.AddNode("hub"))
 	peer := g.BeginVersionedTx()
@@ -696,7 +667,7 @@ func TestAbort_RefusedDirectAppendAllocatesNoRecord(t *testing.T) {
 // direct write's operation must not leave its implicit transaction in flight,
 // where its record would refuse every later write on what it touched.
 func TestDirect_PanicSettlesTheImplicitTransaction(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	requireNoErr(t, g.SetNodeProperty("n", "k", Int64Value(0)))
 	func() {
@@ -723,19 +694,15 @@ func TestDirect_PanicSettlesTheImplicitTransaction(t *testing.T) {
 // TestAbort_AdjacencyInvariantsUnderMixedLoad is the audit's mixed stress: direct
 // appends, removals, bulk removals and entry rebuilds, explicit transactions
 // and ApplyVersioned brackets of which half are doomed, a reader pinning the
-// horizon and a reclaimer, on both shapes. After quiescence the stored adjacency
+// horizon and a reclaimer. After quiescence the stored adjacency
 // must equal the latest committed view, and the reverse index and the edge
 // count must agree with it. Run under -race in the battery.
 func TestAbort_AdjacencyInvariantsUnderMixedLoad(t *testing.T) {
-	for _, directed := range []bool{true, false} {
-		t.Run(fmt.Sprintf("directed=%v", directed), func(t *testing.T) {
-			adjMixedLoad(t, directed, 500*time.Millisecond)
-		})
-	}
+	adjMixedLoad(t, 500*time.Millisecond)
 }
 
-func adjMixedLoad(t *testing.T, directed bool, dur time.Duration) {
-	g := New[string, float64](adjlist.Config{Directed: directed, Multigraph: true})
+func adjMixedLoad(t *testing.T, dur time.Duration) {
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	const nodes = 10
 	name := func(i int) string { return fmt.Sprintf("n%d", i) }
@@ -824,7 +791,7 @@ func adjMixedLoad(t *testing.T, directed bool, dur time.Duration) {
 func BenchmarkAbortCost(b *testing.B) {
 	for _, held := range []int{0, 100000} {
 		b.Run(fmt.Sprintf("history=%d", held), func(b *testing.B) {
-			g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := New[string, float64](adjlist.Config{})
 			defer func() { _ = g.Close() }()
 			_ = g.AddNode("n")
 			rd := g.BeginRead()

@@ -89,14 +89,14 @@ func check2955(t *testing.T, eng *Engine) {
 
 func TestIndexNestedLoopJoin_SeekHitsCarryTheLabel_2955(t *testing.T) {
 	t.Run("memory", func(t *testing.T) {
-		eng := NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+		eng := NewEngine(lpg.New[string, float64](adjlist.Config{}))
 		runAll2955(t, eng, seed2955)
 		mustCreateIndex(t, eng)
 		runAll2955(t, eng, relabel2955)
 		check2955(t, eng)
 	})
 	t.Run("memory/same transaction", func(t *testing.T) {
-		eng := NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+		eng := NewEngine(lpg.New[string, float64](adjlist.Config{}))
 		runAll2955(t, eng, seed2955)
 		mustCreateIndex(t, eng)
 		tx, err := eng.BeginTx(context.Background())
@@ -131,7 +131,7 @@ func TestIndexNestedLoopJoin_SeekHitsCarryTheLabel_2955(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		st := txn.NewStoreWithOptions[string, float64](lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}), w,
+		st := txn.NewStoreWithOptions[string, float64](lpg.New[string, float64](adjlist.Config{}), w,
 			txn.Options[string, float64]{Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec()})
 		eng := NewEngineWithStore(st)
 		runAll2955(t, eng, seed2955)

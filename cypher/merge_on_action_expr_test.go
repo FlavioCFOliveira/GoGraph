@@ -40,7 +40,7 @@ func mergeExprScalar(t *testing.T, eng *cypher.Engine, query, col string) any {
 // on every re-merge (was fail-silent, #1965).
 func TestMerge_OnMatchSet_SelfReferentialExpr_Node(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	const q = `MERGE (n:Person {name:'x'}) ON CREATE SET n.num = 1 ON MATCH SET n.num = n.num + 1`
@@ -70,7 +70,7 @@ func TestMerge_OnMatchSet_SelfReferentialExpr_Node(t *testing.T) {
 // single edge (was a literal-parse error, #1965).
 func TestMerge_OnActions_SelfReferentialExpr_Relationship(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (a:A {id:1}), (b:B {id:2})`)
@@ -104,7 +104,7 @@ func TestMerge_OnActions_SelfReferentialExpr_Relationship(t *testing.T) {
 // pattern (#1965).
 func TestMerge_OnActions_SelfReferentialExpr_Pattern(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	const q = `MERGE (a:A {id:1})-[r:R]->(b:B {id:2})
@@ -139,7 +139,7 @@ func TestMerge_OnActions_SelfReferentialExpr_Pattern(t *testing.T) {
 // ON MATCH RHS keeps taking the literal fast path unchanged.
 func TestMerge_OnMatchSet_ConstantRHS_StillWorks(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Person {name:'y'})`)
@@ -154,7 +154,7 @@ func TestMerge_OnMatchSet_ConstantRHS_StillWorks(t *testing.T) {
 // reference) — the general expression path, exercised on the node Merge.
 func TestMerge_OnActions_CrossVariableExpr(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (s:Source {v: 7})`)
@@ -171,7 +171,7 @@ func TestMerge_OnActions_CrossVariableExpr(t *testing.T) {
 // removes the property.
 func TestMerge_OnMatchSet_ExprToNull_RemovesProperty(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Person {name:'k', num: 5})`)
@@ -191,7 +191,7 @@ func TestMerge_OnMatchSet_ExprToNull_RemovesProperty(t *testing.T) {
 // the shared SET machinery is untouched.
 func TestRegularSet_SelfReferentialExpr_Unaffected(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Counter {v: 10})`)

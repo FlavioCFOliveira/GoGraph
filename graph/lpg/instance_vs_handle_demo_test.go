@@ -24,7 +24,7 @@ import (
 // so a surviving edge resolves to its own metadata regardless of what happened
 // to its siblings.
 func TestDemo2403_OrdinalSurvivesSiblingDeleteButHandleIsSlotPrecise(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode %s: %v", n, err)
@@ -84,7 +84,7 @@ func TestDemo2403_OrdinalSurvivesSiblingDeleteButHandleIsSlotPrecise(t *testing.
 // not — both surfaces carry their own side-version chains and both reconstruct
 // a pre-image at a reader's start timestamp.
 func TestDemo2403_BothSurfacesResolveAsOfASnapshot(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	g.armMVCC()
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {

@@ -21,7 +21,7 @@ func TestAdjList_ConcurrentReads_NeighboursIterator(t *testing.T) {
 	t.Parallel()
 
 	shape := shapegen.BarabasiAlbert(10000, 3, 42)
-	g, err := shape.Build(adjlist.Config{Directed: true})
+	g, err := shape.Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestAdjList_ConcurrentReads_NeighboursIterator(t *testing.T) {
 // parallel sub-test.
 func TestAdjList_ConcurrentReads_ZeroAllocs(t *testing.T) {
 	shape := shapegen.BarabasiAlbert(1000, 3, 42)
-	g, err := shape.Build(adjlist.Config{Directed: true})
+	g, err := shape.Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}

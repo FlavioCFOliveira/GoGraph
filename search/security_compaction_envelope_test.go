@@ -41,7 +41,7 @@ func secShardFloodChainCSR(tb testing.TB, n int) (*csr.CSR[int64], int, uint64) 
 	if len(keys) < n {
 		tb.Fatalf("GenerateShardZeroKeys(%d) returned %d keys", n, len(keys))
 	}
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := 0; i+1 < n; i++ {
 		if err := a.AddEdge(keys[i], keys[i+1], int64(1)); err != nil {
 			tb.Fatalf("AddEdge: %v", err)

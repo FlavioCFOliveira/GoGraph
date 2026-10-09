@@ -20,7 +20,7 @@ func buildBenchLPG(tb testing.TB) *lpg.Graph[int, int64] {
 	tb.Helper()
 	const nodes = 4000
 	const k = 4 // out-degree
-	g := lpg.New[int, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int, int64](adjlist.Config{})
 	labels := [...]string{"Account", "Verified", "Premium", "Dormant"}
 	for i := 0; i < nodes; i++ {
 		for j := 1; j <= k; j++ {

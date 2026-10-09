@@ -66,7 +66,7 @@ func drainAll(t *testing.T, eng *cypher.Engine, query string) []map[string]any {
 // TestExistsSubquery_True asserts EXISTS { (n)-->() } returns true for at
 // least one outer node when the graph has an outgoing edge.
 func TestExistsSubquery_True(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:A)-[:R]->(:B)`)
 
@@ -103,7 +103,7 @@ func TestExistsSubquery_True(t *testing.T) {
 // avoid the multi-pattern CREATE bug that affects TCK ExistentialSubquery
 // scenarios (tracked separately; not in scope for task-396).
 func TestCountSubquery_NonEmpty(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	// Single CREATE clause per edge avoids multi-pattern CREATE bug.
 	runSetup(t, eng, `CREATE (:A)-[:R]->(:B)`)
@@ -141,7 +141,7 @@ func TestCountSubquery_NonEmpty(t *testing.T) {
 // TestCountSubquery_Zero asserts COUNT { } returns 0 when the inner plan
 // produces no rows for any outer row.
 func TestCountSubquery_Zero(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:Alone)`)
 
@@ -162,7 +162,7 @@ func TestCountSubquery_Zero(t *testing.T) {
 // TestExistsSubquery_InAndPredicate asserts EXISTS works when nested inside a
 // larger boolean expression (AND).
 func TestExistsSubquery_InAndPredicate(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:A {tag: 1})-[:R]->(:B {tag: 2})`)
 
@@ -185,7 +185,7 @@ func TestExistsSubquery_InAndPredicate(t *testing.T) {
 // TestCountSubquery_InComparison asserts COUNT works inside a comparison
 // expression (e.g. COUNT { … } > 0 used as a WHERE predicate).
 func TestCountSubquery_InComparison(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:A)-[:R]->(:B)`)
 
@@ -199,7 +199,7 @@ func TestCountSubquery_InComparison(t *testing.T) {
 // TestExistsSubquery_NotExistsInOr asserts NOT EXISTS used inside OR is
 // evaluated through the expression path (not the SemiApply short-circuit).
 func TestExistsSubquery_NotExistsInOr(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:A {tag: 1})-[:R]->(:B {tag: 2})`)
 
@@ -224,7 +224,7 @@ func TestExistsSubquery_NotExistsInOr(t *testing.T) {
 // path covered: EXISTS as the sole WHERE predicate must still produce the
 // correct result.
 func TestExistsSubquery_TopLevelWhere(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:A)-[:R]->(:B)`)
 

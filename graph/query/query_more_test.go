@@ -108,7 +108,7 @@ func TestQuery_SecondVertex_WithLabel_UnknownLabel(t *testing.T) {
 // indirectly), covering equal, unequal, and kind-mismatch paths.
 func TestQuery_EqualValue_AllKinds(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	t0 := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
 	bytesEq := []byte{0x01, 0x02, 0x03}
 	bytesDiffLen := []byte{0x01, 0x02}
@@ -204,7 +204,7 @@ func TestQuery_EqualValue_UnknownKind(t *testing.T) {
 // withLabel struct from inside the package.
 func TestQuery_WithLabel_Match_ResolveMiss(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.SetNodeLabel("alice", "Person"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}

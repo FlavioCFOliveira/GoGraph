@@ -44,7 +44,7 @@ func runCypherRW(ctx context.Context, outDir string) {
 	log.Printf("cypher-rw: start readers=%d write-pct=%d sample-interval=%v duration=%v",
 		*flagConcurrent, *flagCypherWritePct, *flagSampleN, *flagDuration)
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	// Seed with a handful of nodes so the initial MATCH scan is non-trivial.
 	for i := range 32 {
 		if err := g.AddNode(fmt.Sprintf("seed_%d", i)); err != nil {

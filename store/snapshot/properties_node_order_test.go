@@ -21,7 +21,7 @@ import (
 // differed byte for byte.
 func TestWriteProperties_NodeRecordOrderIsDeterministic(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, n := range []string{"wide", "listy", "small"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%q): %v", n, err)

@@ -27,7 +27,7 @@ var slotCowSizes = []int{5_000, 50_000, 150_000}
 // under measurement's per-write copy.
 func newSlotCowGraph(tb testing.TB, n int) *adjlist.AdjList[int, float64] {
 	tb.Helper()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	a.BeginCommit()
 	for i := 0; i < n; i++ {
 		if err := a.AddEdge(i, (i+1)%n, 1); err != nil {

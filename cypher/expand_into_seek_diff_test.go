@@ -48,7 +48,7 @@ type seekArc struct{ from, to int }
 // property i) with exactly the given arcs, all of type K.
 func seekFixture(t *testing.T, n int, arcs []seekArc) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(k); err != nil {

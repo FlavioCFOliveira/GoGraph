@@ -88,7 +88,7 @@ var relTypeShapeQueries = []struct{ family, q string }{
 // reverse side has ordinals to get wrong.
 func buildRelTypeShapeFixture(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	stmts := []string{
 		`CREATE (:P {sid:'p'}), (:P {sid:'q'}), (:P {sid:'r'}), (:P {sid:'s'})`,

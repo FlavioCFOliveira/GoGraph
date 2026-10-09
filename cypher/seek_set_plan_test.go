@@ -26,7 +26,7 @@ const (
 // one node and a key count converts directly into a posting count.
 func seekSetFixture(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	run := func(q string) {
 		t.Helper()
@@ -299,7 +299,7 @@ func TestSeekSet_SizeGateDeclinesBeforeExtracting(t *testing.T) {
 // floor rather than the assertion being relaxed. What the floor buys is not speed
 // at 500 nodes; it is not taking a count for a label too small to win.
 func TestSeekSet_PopulationFloor(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
 		// Under rangeSeekMinLabelPopulation, so the floor is what declines the seek.
@@ -338,7 +338,7 @@ func TestSeekSet_ResultIdentity(t *testing.T) {
 	// The differential partner: the same data and index, but a label population
 	// under the floor, so no seek can fire and every query takes the scan path.
 	scanEng := func() *cypher.Engine {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		e := cypher.NewEngine(g)
 		for _, q := range []string{
 			`UNWIND range(1, 20) AS i CREATE (:P {id: i, name: 'name-' + toString(i)})`,
@@ -478,7 +478,7 @@ func TestSeekSet_DeclinedGateIsResultIdentical(t *testing.T) {
 // than a scan leaf. So there is nothing here for a key-set seek to compose with,
 // and the composition cannot be built until the intersection access path is.
 func TestSeekSet_MultiLabelPatternIsNotServed(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
 		`UNWIND range(1, 4000) AS i CREATE (:A:B {name: 'ab-' + toString(i)})`,

@@ -18,7 +18,7 @@ import (
 // defer. The reader streams adjacency from the mapped file; extern's
 // algorithms never materialise the CSR in memory.
 func writeDiamond() (*csrfile.Reader, *graph.Mapper[int], func()) {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for _, e := range [][2]int{{0, 1}, {0, 2}, {1, 3}, {2, 3}} {
 		_ = a.AddEdge(e[0], e[1], struct{}{})
 	}

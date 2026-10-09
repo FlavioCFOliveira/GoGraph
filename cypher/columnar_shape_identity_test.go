@@ -80,7 +80,7 @@ func shapeIdentityGraph(t *testing.T) *lpg.Graph[string, float64] {
 		{true, lpg.DateValue(day)},
 		{false, lpg.PropertyValue{}}, // absent v → NULL
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	keys := make([]string, len(vals))
 	for i, cell := range vals {
 		k := fmt.Sprintf("s%03d", i)

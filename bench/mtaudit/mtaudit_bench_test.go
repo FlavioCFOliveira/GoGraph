@@ -19,7 +19,7 @@ import (
 // property "v". Labelling exercises the LabelRegistry path; the property
 // exercises the PropertyKeyRegistry path.
 func seed(n int) *lpg.Graph[string, float64] {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(id); err != nil {

@@ -17,7 +17,7 @@ import (
 // multigraph, matching the scenario that hosts the probe.
 func buildDeleteContractFixture(t *testing.T) (*EngineAdapter, *GraphOracle) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	a, o := NewEngineAdapter(cypher.NewEngine(g)), NewGraphOracle()
 	ctx := context.Background()
 	apply := func(query string, params map[string]any) {
@@ -87,7 +87,7 @@ func TestDeleteContract_SensitivityToWrongDegree(t *testing.T) {
 		// Hide the KNOWS edge from the model: "conn" now looks isolated, so the
 		// probe predicts a commit while the engine (which still has the edge)
 		// refuses.
-		delete(o.edges, edgeKey{src: o.byName["conn"], dst: o.byName["peer"], label: "KNOWS"})
+		delete(o.edges, o.instanceKey(edgeKey{src: o.byName["conn"], dst: o.byName["peer"], label: "KNOWS"}))
 		var st deleteContractStats
 		v := probeDeleteContract(context.Background(), 0, o, a, &st)
 		if len(v) == 0 {
@@ -102,7 +102,7 @@ func TestDeleteContract_SensitivityToWrongDegree(t *testing.T) {
 		// An EDGELESS engine paired with a model holding a phantom edge: the
 		// probe picks the phantom-connected node for the reject arm and predicts
 		// a refusal, but the engine — which really has no edge — deletes it.
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		a, o := NewEngineAdapter(cypher.NewEngine(g)), NewGraphOracle()
 		ctx := context.Background()
 		for i, name := range []string{"n1", "n2"} {

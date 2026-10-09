@@ -48,7 +48,7 @@ func (c liveCounters) since(prev liveCounters) liveCounters {
 // traversal disabled when control is true.
 func newLiveTestEngine(t *testing.T, control bool) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	eng.disableLiveTraversalForTest = control
 	return eng
@@ -267,7 +267,7 @@ type liveFixtureEdge struct {
 // handle) and multi-slot pairs are both observable.
 func newLiveFixture(t *testing.T, control bool) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for k := 0; k <= 5; k++ {
 		key := fmt.Sprintf("s%d", k)
 		if err := g.AddNode(key); err != nil {
@@ -542,7 +542,7 @@ func TestLiveTopo_EveryAdjacencyWriteIsJournaled(t *testing.T) {
 		}
 		for _, kind := range []string{"lpg", "wal"} {
 			t.Run(method+"/"+kind, func(t *testing.T) {
-				g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+				g := lpg.New[string, float64](adjlist.Config{})
 				for _, n := range []string{"a", "b", "c"} {
 					if err := g.AddNode(n); err != nil {
 						t.Fatal(err)
@@ -598,7 +598,7 @@ func TestLiveTopo_EveryAdjacencyWriteIsJournaled(t *testing.T) {
 // an Init is served from its capture, a node written before it is served live,
 // and liveness follows the same rule.
 func TestLiveTopo_CaptureRule(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "c"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatal(err)

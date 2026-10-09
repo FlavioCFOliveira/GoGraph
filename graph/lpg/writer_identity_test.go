@@ -26,7 +26,7 @@ import (
 // write transaction gets a distinct, monotone, never-reused id, carried on a
 // snapshot the write path reads through.
 func TestWriter_HasADistinctTransactionIdentity(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 
 	seen := make(map[uint64]bool)
 	var prev uint64
@@ -69,7 +69,7 @@ func TestWriter_HasADistinctTransactionIdentity(t *testing.T) {
 // ts == txID branch of [mvcc.Visible] is LIVE. Delete that branch and this test
 // fails — the writer stops seeing what it just wrote.
 func TestWriter_ReadsItsOwnUncommittedWork(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestWriter_ReadsItsOwnUncommittedWork(t *testing.T) {
 // representable. What is tested here is the property that matters and the one
 // #2301 must preserve: identity-scoped visibility.
 func TestWriter_DoesNotObserveAnotherInFlightWriter(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode %s: %v", n, err)
@@ -174,7 +174,7 @@ func TestWriter_DoesNotObserveAnotherInFlightWriter(t *testing.T) {
 // was sound precisely because the writer read no snapshot at all (audit finding
 // E22).
 func TestWriter_RegistersWithTheReclamationHorizon(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestWriter_RegistersWithTheReclamationHorizon(t *testing.T) {
 // criterion 5: a version the running writer can still reach is not reclaimed
 // out from under it.
 func TestWriter_HoldsReclamationBackWhileItRuns(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

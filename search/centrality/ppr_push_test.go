@@ -11,7 +11,7 @@ import (
 
 func TestPPR_SourceCarriesMostMass(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 9; i++ {
 		if err := a.AddEdge(0, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -36,7 +36,7 @@ func TestPPR_SourceCarriesMostMass(t *testing.T) {
 
 func TestPPR_UnknownSrc(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestPPR_UnknownSrc(t *testing.T) {
 // strictly dominates any leaf.
 func TestPPR_BoundedMassAtSource(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 1; i <= 5; i++ {
 		if err := a.AddEdge(0, i, struct{}{}); err != nil { // src to dangling leaves
 			t.Fatalf("AddEdge: %v", err)
@@ -81,7 +81,7 @@ func TestPPR_BoundedMassAtSource(t *testing.T) {
 
 func TestPPR_RejectsNaN(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

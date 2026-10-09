@@ -49,7 +49,7 @@ func drainRecords(t *testing.T, res *cypher.Result) []map[string]any {
 // RETURN clause emits one record per created node and persists the
 // node and its properties to the graph.
 func TestRunInTx_CreateReturn(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -79,7 +79,7 @@ func TestRunInTx_CreateReturn(t *testing.T) {
 // TestRunInTx_SetReturn verifies that SET property with RETURN emits
 // one record per affected node carrying the updated value.
 func TestRunInTx_SetReturn(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -115,7 +115,7 @@ func TestRunInTx_SetReturn(t *testing.T) {
 // rollback and the older leak pass the TCK; atomicity is what dictates the
 // rollback.
 func TestRunInTx_DeleteReturn(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

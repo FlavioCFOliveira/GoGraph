@@ -33,10 +33,7 @@ import (
 // the given label, so a labelled-count benchmark fixture builds quickly.
 func seedGraphLabeled(b *testing.B, n int, label string) *lpg.Graph[string, float64] {
 	b.Helper()
-	// Multigraph so NewEngineWithOptions does not emit its non-multigraph warning
-	// (which would pollute stdout and the benchstat input); node-count semantics
-	// are identical either way.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := "n" + itoaBench(i)
 		if err := g.AddNode(k); err != nil {

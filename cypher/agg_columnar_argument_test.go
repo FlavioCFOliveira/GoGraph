@@ -105,7 +105,7 @@ func absent() *lpg.PropertyValue { return nil }
 // node, which is how the NULL-argument branch is exercised.
 func gArg(t *testing.T, groups int, vals ...*lpg.PropertyValue) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i, v := range vals {
 		k := fmt.Sprintf("n%03d", i)
 		if err := g.AddNode(k); err != nil {
@@ -319,7 +319,7 @@ func indexOf(s, sub string) int {
 func TestColumnarAggArgument_CrossBatchTypeChange(t *testing.T) {
 	t.Parallel()
 	const per = 4200 // > DefaultChunkCapacity (4096), so at least two batches
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < per; i++ {
 		k := fmt.Sprintf("i%05d", i)
 		if err := g.AddNode(k); err != nil {
@@ -359,7 +359,7 @@ func TestColumnarAggArgument_CrossBatchTypeChange(t *testing.T) {
 // rather than merely taken.
 func TestColumnarAggArgument_RelationshipPropertyArgument(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		if err := g.AddNode(fmt.Sprintf("n%d", i)); err != nil {
 			t.Fatalf("AddNode: %v", err)

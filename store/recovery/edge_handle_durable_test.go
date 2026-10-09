@@ -38,7 +38,7 @@ func TestRecovery_HandleOps_RebuildsPerHandleType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -96,7 +96,7 @@ func TestRecovery_HandleOps_DuplicateAddIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -144,7 +144,7 @@ func TestRecovery_HandleOps_RemoveInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -187,7 +187,7 @@ func TestRecovery_HandleOps_DelProperty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

@@ -40,7 +40,7 @@ import (
 // TestExpandReInit_ExistsReverseDoesNotLeakPriorSource is the regression gate.
 func TestExpandReInit_ExistsReverseDoesNotLeakPriorSource(t *testing.T) {
 	ctx := context.Background()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b", "c", "d"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode(%q): %v", k, err)

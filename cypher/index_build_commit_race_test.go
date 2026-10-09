@@ -40,7 +40,7 @@ const buildRacePopulation = 512
 // the in-memory or the WAL wiring.
 func buildRaceEngine(t *testing.T, walBacked bool) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < buildRacePopulation; i++ {
 		n := fmt.Sprintf("filler%d", i)
 		if err := g.AddNode(n); err != nil {

@@ -373,7 +373,7 @@ func TestRunSurfacesATruncatedTranscript(t *testing.T) {
 	// and the test would pass for the wrong reason.
 	w := &failingWriter{ok: 2, err: boom}
 	r := &Runner{NewEngine: func() (*Engine, error) {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		return &Engine{Eng: cypher.NewEngine(g), Close: func() error { return nil }}, nil
 	}}
 	s := &Spec{Name: "trunc", Sessions: []*Session{{Name: "s", Steps: []Step{{Name: "a", Query: "RETURN 1"}}}}}

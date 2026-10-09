@@ -15,13 +15,13 @@ import (
 // per-sweep working set the most times per call.
 func benchDiameterCycle(b *testing.B, n int) *csr.CSR[struct{}] {
 	b.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		if err := a.AddEdge(i, (i+1)%n, struct{}{}); err != nil {
 			b.Fatalf("AddEdge(%d,%d): %v", i, (i+1)%n, err)
 		}
 	}
-	return csr.BuildFromAdjList(a)
+	return csr.BuildFromAdjList(a).BuildSymmetric()
 }
 
 // benchDiameterSpider builds a hub with legs of equal length. Each BFS
@@ -29,7 +29,7 @@ func benchDiameterCycle(b *testing.B, n int) *csr.CSR[struct{}] {
 // legs the walk takes the parallel per-worker arm.
 func benchDiameterSpider(b *testing.B, legs, length int) *csr.CSR[struct{}] {
 	b.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	key := 1
 	for l := 0; l < legs; l++ {
 		prev := 0
@@ -41,7 +41,7 @@ func benchDiameterSpider(b *testing.B, legs, length int) *csr.CSR[struct{}] {
 			key++
 		}
 	}
-	return csr.BuildFromAdjList(a)
+	return csr.BuildFromAdjList(a).BuildSymmetric()
 }
 
 // BenchmarkDiameter_CycleSerialLevels drives the serial arm of the

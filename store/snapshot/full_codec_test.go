@@ -21,7 +21,7 @@ import (
 // LoadSnapshotFull, and confirm the mapper readback holds all original pairs.
 func TestWriteSnapshotFullWithMapperCodec_RoundTrip(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("alice", "bob", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestWriteSnapshotFullWithMapperCodec_RoundTrip(t *testing.T) {
 // at least one RawPair.
 func TestWriteSnapshotFullWithMapperCodec_NonString(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[int64, float64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, float64](adjlist.Config{})
 	if err := g.AddEdge(1, 2, 0.5); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestWriteSnapshotFullWithMapperCodec_NonString(t *testing.T) {
 // guard path: a nil codec must return an error without touching the filesystem.
 func TestWriteSnapshotFullWithMapperCodec_NilCodecErrors(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("x"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestWriteSnapshotFullWithMapperCodec_NilCodecErrors(t *testing.T) {
 // cancel path at the earliest checkpoint inside writeCaptureCore.
 func TestWriteSnapshotFullWithMapperCodec_CancelledCtx(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestWriteSnapshotFullWithMapperCodec_ReadOnly(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("running as root: read-only permission tests are unreliable")
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("x"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

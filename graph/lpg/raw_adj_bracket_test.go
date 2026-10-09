@@ -2,7 +2,6 @@ package lpg
 
 import (
 	"errors"
-	"fmt"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
@@ -54,8 +53,8 @@ func TestRawAdjacencyWrite_NeverJoinsAnExclusiveBracket(t *testing.T) {
 		},
 	}
 	keys := []string{"a", "b", "c", "d", "p", "q", "x"}
-	seed := func(t *testing.T, directed bool) *Graph[string, float64] {
-		g := New[string, float64](adjlist.Config{Directed: directed, Multigraph: true})
+	seed := func(t *testing.T) *Graph[string, float64] {
+		g := New[string, float64](adjlist.Config{})
 		t.Cleanup(func() { _ = g.Close() })
 		for _, err := range []error{
 			g.AddEdge("a", "b", 1), g.AddEdge("p", "b", 2),
@@ -68,77 +67,75 @@ func TestRawAdjacencyWrite_NeverJoinsAnExclusiveBracket(t *testing.T) {
 		}
 		return g
 	}
-	for _, directed := range []bool{true, false} {
-		for bn, bracket := range brackets {
-			name := fmt.Sprintf("directed=%v/%s", directed, bn)
+	for bn, bracket := range brackets {
+		name := bn
 
-			// Over entries the bracket never wrote: the raw writes commit at
-			// once and survive the bracket's abort.
-			t.Run(name+"/untouched-entry-survives", func(t *testing.T) {
-				g := seed(t, directed)
-				ref := seed(t, directed)
-				var addErr, delErr error
-				err := bracket(t, g, func(tx WriteTx) {
-					if err := g.Writer(tx).SetNodeProperty("x", "v", Int64Value(1)); err != nil {
-						t.Fatalf("bracket write: %v", err)
-					}
-					addErr = g.AdjList().AddEdge("q", "c", 5)
-					delErr = g.AdjList().RemoveEdge("p", "b")
-				})
-				if !errors.Is(err, mvcc.ErrSerializationConflict) {
-					t.Fatalf("the doomed bracket returned %v, want a serialization conflict", err)
+		// Over entries the bracket never wrote: the raw writes commit at
+		// once and survive the bracket's abort.
+		t.Run(name+"/untouched-entry-survives", func(t *testing.T) {
+			g := seed(t)
+			ref := seed(t)
+			var addErr, delErr error
+			err := bracket(t, g, func(tx WriteTx) {
+				if err := g.Writer(tx).SetNodeProperty("x", "v", Int64Value(1)); err != nil {
+					t.Fatalf("bracket write: %v", err)
 				}
-				if addErr != nil || delErr != nil {
-					t.Fatalf("raw writes over untouched entries were refused: add=%v remove=%v", addErr, delErr)
-				}
-				if err := ref.AdjList().AddEdge("q", "c", 5); err != nil {
-					t.Fatalf("reference add: %v", err)
-				}
-				if err := ref.AdjList().RemoveEdge("p", "b"); err != nil {
-					t.Fatalf("reference remove: %v", err)
-				}
-				if got, want := adjAbortState(g, keys...), adjAbortState(ref, keys...); got != want {
-					t.Errorf("an acknowledged raw write was lost with the bracket's abort\ngot:\n%swant:\n%s", got, want)
-				}
-				requireAdjInvariants(t, g, "after the abort")
+				addErr = g.AdjList().AddEdge("q", "c", 5)
+				delErr = g.AdjList().RemoveEdge("p", "b")
 			})
+			if !errors.Is(err, mvcc.ErrSerializationConflict) {
+				t.Fatalf("the doomed bracket returned %v, want a serialization conflict", err)
+			}
+			if addErr != nil || delErr != nil {
+				t.Fatalf("raw writes over untouched entries were refused: add=%v remove=%v", addErr, delErr)
+			}
+			if err := ref.AdjList().AddEdge("q", "c", 5); err != nil {
+				t.Fatalf("reference add: %v", err)
+			}
+			if err := ref.AdjList().RemoveEdge("p", "b"); err != nil {
+				t.Fatalf("reference remove: %v", err)
+			}
+			if got, want := adjAbortState(g, keys...), adjAbortState(ref, keys...); got != want {
+				t.Errorf("an acknowledged raw write was lost with the bracket's abort\ngot:\n%swant:\n%s", got, want)
+			}
+			requireAdjInvariants(t, g, "after the abort")
+		})
 
-			// Over an entry the bracket wrote: refused retryably, so the abort
-			// leaves the pre-image and nothing acknowledged is lost.
-			t.Run(name+"/owned-entry-refuses", func(t *testing.T) {
-				g := seed(t, directed)
-				before := adjAbortState(g, keys...)
-				var rawErr error
-				err := bracket(t, g, func(tx WriteTx) {
-					if err := g.Writer(tx).AddEdge("a", "c", 3); err != nil {
-						t.Fatalf("bracket append: %v", err)
-					}
-					rawErr = g.AdjList().AddEdge("a", "d", 4)
-				})
-				if !errors.Is(err, mvcc.ErrSerializationConflict) {
-					t.Fatalf("the doomed bracket returned %v, want a serialization conflict", err)
+		// Over an entry the bracket wrote: refused retryably, so the abort
+		// leaves the pre-image and nothing acknowledged is lost.
+		t.Run(name+"/owned-entry-refuses", func(t *testing.T) {
+			g := seed(t)
+			before := adjAbortState(g, keys...)
+			var rawErr error
+			err := bracket(t, g, func(tx WriteTx) {
+				if err := g.Writer(tx).AddEdge("a", "c", 3); err != nil {
+					t.Fatalf("bracket append: %v", err)
 				}
-				var c *mvcc.Conflict
-				if !errors.As(rawErr, &c) || c.Store != mvcc.StoreAdjacency {
-					t.Fatalf("a raw write over the bracket's uncommitted entry returned %v, want a *mvcc.Conflict for the adjacency", rawErr)
-				}
-				if got := adjAbortState(g, keys...); got != before {
-					t.Errorf("the aborted bracket left the adjacency changed\nbefore:\n%safter:\n%s", before, got)
-				}
-				requireAdjInvariants(t, g, "after the abort")
-				// The refusal is retryable: once the bracket has aborted the
-				// same raw write applies.
-				if err := g.AdjList().AddEdge("a", "d", 4); err != nil {
-					t.Fatalf("the raw write after the abort: %v", err)
-				}
-				snap := g.BeginRead()
-				defer g.EndRead(snap)
-				if !g.HasEdgeAsOf("a", "d", snap) || g.HasEdgeAsOf("a", "c", snap) {
-					t.Errorf("after the retry a fresh snapshot sees a->d=%t a->c=%t, want true false",
-						g.HasEdgeAsOf("a", "d", snap), g.HasEdgeAsOf("a", "c", snap))
-				}
+				rawErr = g.AdjList().AddEdge("a", "d", 4)
 			})
-		}
+			if !errors.Is(err, mvcc.ErrSerializationConflict) {
+				t.Fatalf("the doomed bracket returned %v, want a serialization conflict", err)
+			}
+			var c *mvcc.Conflict
+			if !errors.As(rawErr, &c) || c.Store != mvcc.StoreAdjacency {
+				t.Fatalf("a raw write over the bracket's uncommitted entry returned %v, want a *mvcc.Conflict for the adjacency", rawErr)
+			}
+			if got := adjAbortState(g, keys...); got != before {
+				t.Errorf("the aborted bracket left the adjacency changed\nbefore:\n%safter:\n%s", before, got)
+			}
+			requireAdjInvariants(t, g, "after the abort")
+			// The refusal is retryable: once the bracket has aborted the
+			// same raw write applies.
+			if err := g.AdjList().AddEdge("a", "d", 4); err != nil {
+				t.Fatalf("the raw write after the abort: %v", err)
+			}
+			snap := g.BeginRead()
+			defer g.EndRead(snap)
+			if !g.HasEdgeAsOf("a", "d", snap) || g.HasEdgeAsOf("a", "c", snap) {
+				t.Errorf("after the retry a fresh snapshot sees a->d=%t a->c=%t, want true false",
+					g.HasEdgeAsOf("a", "d", snap), g.HasEdgeAsOf("a", "c", snap))
+			}
+		})
 	}
 }
 
@@ -147,7 +144,7 @@ func TestRawAdjacencyWrite_NeverJoinsAnExclusiveBracket(t *testing.T) {
 // open resolves no version through the ambient slot, so it is visible to a
 // reader that begins while the bracket is still open.
 func TestRawAdjacencyWrite_CommitsOutsideTheBracketRecord(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	if err := g.AddNode("m"); err != nil {
 		t.Fatal(err)

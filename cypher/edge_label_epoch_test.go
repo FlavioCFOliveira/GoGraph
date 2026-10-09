@@ -80,7 +80,7 @@ func labelEpochScalar(t *testing.T, eng *Engine, q string) string {
 // one edge a->b carrying exactly one type, T1.
 func labelEpochFixture(t *testing.T) (*lpg.Graph[string, float64], *Engine) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode(%s): %v", k, err)
@@ -156,7 +156,7 @@ func TestEdgeLabelEpoch_RemoveEdgeLabelLeavesNoPhantomType_2255(t *testing.T) {
 // what the durable OpSetEdgeLabelByHandle applies.
 func TestEdgeLabelEpoch_ByHandleVisibleToWarmEngine_2255(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode(%s): %v", k, err)

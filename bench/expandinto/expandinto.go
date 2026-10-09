@@ -70,7 +70,7 @@ const OpenControlQuery = `MATCH (a:P)-[:K]->(b:P)-[:K]->(c:P) RETURN count(*) AS
 // false for the pure-waste worst case (the audit's own fixture) and true for a
 // fixture that also emits rows.
 func SeedRing(n, degree int, mutual bool) (*lpg.Graph[string, float64], error) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	keys := make([]string, n)
 	for i := 0; i < n; i++ {
 		k := "n" + itoa(i)
@@ -117,7 +117,7 @@ func SeedRing(n, degree int, mutual bool) (*lpg.Graph[string, float64], error) {
 // the price of scanning nLeaf nodes and probing the Hub's forward range for that
 // edge. Before #2150 that re-rooting was vetoed for being reverse-introducing.
 func SeedReverseHub(hubOut, nLeaf int) (*lpg.Graph[string, float64], error) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("hub"); err != nil {
 		return nil, fmt.Errorf("AddNode(hub): %w", err)
 	}

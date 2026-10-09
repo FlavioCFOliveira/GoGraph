@@ -28,7 +28,7 @@ func TestLabelBitmapAsOf_AbortedCreateBetweenTheSamples_2999(t *testing.T) {
 	}{{"quiet gate", false}, {"live gate", true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := New[string, float64](adjlist.Config{})
 			t.Cleanup(func() { _ = g.Close() })
 			for _, k := range []string{"a", "b"} {
 				if err := g.ApplyVersioned(func(tx WriteTx) error {

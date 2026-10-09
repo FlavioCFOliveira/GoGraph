@@ -34,7 +34,7 @@ import (
 // test appear to fail non-deterministically. Serial execution is the simplest
 // defence against that phenomenon.
 func TestEngine_ReturnRelationshipVar(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	// Per-test deadline: if the engine somehow gets stuck under heavy system
 	// load, the test should fail with a clear timeout message rather than
@@ -107,7 +107,7 @@ func TestEngine_ReturnRelationshipVar(t *testing.T) {
 // guard in TestEngine_ReturnAggregateAlias_NotUpgraded (return_node_shape_test.go).
 func TestEngine_ReturnAggregateAlias_Rel_NotUpgraded(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

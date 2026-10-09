@@ -58,7 +58,7 @@ type cpRig struct {
 func newCPRig(tb testing.TB, withCheckpointer bool) *cpRig {
 	tb.Helper()
 	dir := tb.TempDir()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	wr, err := wal.Open(filepath.Join(dir, "wal"))
 	if err != nil {
 		tb.Fatalf("wal.Open: %v", err)

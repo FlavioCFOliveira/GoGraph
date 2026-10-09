@@ -18,7 +18,7 @@ import (
 // label's population.
 func TestSnapshotSeekResidual_StringKeys(t *testing.T) {
 	const population = 256
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < population; i++ {
 		id := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(id); err != nil {

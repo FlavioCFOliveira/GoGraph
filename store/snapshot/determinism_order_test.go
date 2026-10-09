@@ -33,7 +33,7 @@ import (
 // defects above are in play.
 func buildMultiPropGraph(t *testing.T) *lpg.Graph[string, int64] {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	srcs := []string{"s1", "s2", "s3"}
 	dsts := []string{"d9", "d7", "d5", "d3", "d1"} // descending by name and by intern order
 	for _, s := range srcs {
@@ -126,7 +126,7 @@ func TestCollectors_IndependentOfInsertionOrder(t *testing.T) {
 	dsts := []string{"d1", "d3", "d5", "d7", "d9"}
 
 	build := func(descending bool) *lpg.Graph[string, int64] {
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		// Intern every endpoint up front, in the SAME order for both graphs, so
 		// the mapper and therefore the NodeIDs are identical.
 		if err := g.AddNode("s1"); err != nil {

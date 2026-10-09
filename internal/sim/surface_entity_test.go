@@ -91,11 +91,11 @@ func TestSurfaceEntity_PassAndCatch(t *testing.T) {
 		// Rewrite s1->s2 as s2->s1 in the model only: the row count is
 		// unchanged, so only an endpoint-aware probe can see the difference.
 		src, dst := o.byName["s1"], o.byName["s2"]
-		e := o.edges[edgeKey{src: src, dst: dst, label: "KNOWS"}]
+		e := o.edges[o.instanceKey(edgeKey{src: src, dst: dst, label: "KNOWS"})]
 		if e == nil {
 			t.Fatal("fixture is missing the s1->s2 edge")
 		}
-		delete(o.edges, edgeKey{src: src, dst: dst, label: "KNOWS"})
+		delete(o.edges, o.instanceKey(edgeKey{src: src, dst: dst, label: "KNOWS"}))
 		o.edges[edgeKey{src: dst, dst: src, label: "KNOWS"}] = &EdgeState{
 			SrcID: dst, DstID: src, Label: "KNOWS", Properties: map[string]any{},
 		}
@@ -115,10 +115,10 @@ func TestSurfaceEntity_PassAndCatch(t *testing.T) {
 		// leaves the row COUNT untouched, so only a probe that compares the
 		// bindings — through both consumers — can see it.
 		src, dst := o.byName["s1"], o.byName["s2"]
-		if o.edges[edgeKey{src: src, dst: dst, label: "KNOWS"}] == nil {
+		if o.edges[o.instanceKey(edgeKey{src: src, dst: dst, label: "KNOWS"})] == nil {
 			t.Fatal("fixture is missing the s1->s2 edge")
 		}
-		delete(o.edges, edgeKey{src: src, dst: dst, label: "KNOWS"})
+		delete(o.edges, o.instanceKey(edgeKey{src: src, dst: dst, label: "KNOWS"}))
 		o.edges[edgeKey{src: dst, dst: src, label: "KNOWS"}] = &EdgeState{
 			SrcID: dst, DstID: src, Label: "KNOWS", Properties: map[string]any{},
 		}
@@ -237,7 +237,7 @@ func TestSurfaceEntity_PassAndCatch(t *testing.T) {
 
 	t.Run("removed oracle edge fires the path histogram", func(t *testing.T) {
 		a, o := entityFixture(t)
-		delete(o.edges, edgeKey{src: o.byName["s2"], dst: o.byName["s3"], label: "KNOWS"})
+		delete(o.edges, o.instanceKey(edgeKey{src: o.byName["s2"], dst: o.byName["s3"], label: "KNOWS"}))
 		if v := checkEntityPaths(ctx, 0, o, a); len(v) == 0 {
 			t.Fatal("path probe FAILED to detect paths the engine returns and the model does not expect")
 		}

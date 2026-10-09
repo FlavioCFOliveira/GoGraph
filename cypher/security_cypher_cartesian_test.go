@@ -45,7 +45,7 @@ const cartesianNotificationCode = "Neo.ClientNotification.Statement.CartesianPro
 // (no CREATE round-trip), so the Cartesian product has a real binding set.
 func secCartesianEngine(t *testing.T, n int) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(key); err != nil {

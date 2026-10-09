@@ -14,7 +14,7 @@ import (
 
 func TestWriteToFile_AtomicProducesValidFile(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := 0; i < 64; i++ {
 		if err := a.AddEdge("hub", string(rune('a'+i%26)), int64(i)); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -66,7 +66,7 @@ func TestWriteToFile_AtomicProducesValidFile(t *testing.T) {
 // It also confirms the file still round-trips through Open.
 func TestWriteToFile_Perm0600(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := 0; i < 8; i++ {
 		if err := a.AddEdge("hub", string(rune('a'+i)), int64(i)); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -103,7 +103,7 @@ func TestWriteToFile_Perm0600(t *testing.T) {
 
 func TestWriteToFile_StructWeightDowngrades(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	if err := a.AddEdge("a", "b", struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestWriteToFile_UnsupportedWeightKind(t *testing.T) {
 		X complex128
 		Y complex128
 	}
-	a := adjlist.New[string, CustomWeight](adjlist.Config{Directed: true})
+	a := adjlist.New[string, CustomWeight](adjlist.Config{})
 	if err := a.AddEdge("a", "b", CustomWeight{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

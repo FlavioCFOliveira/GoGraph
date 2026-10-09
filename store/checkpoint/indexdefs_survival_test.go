@@ -75,7 +75,7 @@ func TestCheckpointer_IndexSurvivesCheckpoint_WithIndexSpecs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, csStoreOpts())
 	eng := cypher.NewEngineWithStore(store)
 
@@ -207,7 +207,7 @@ func TestRecovery_BackCompat_SnapshotWithoutIndexDefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, csStoreOpts())
 	commitStoreDirect(t, store, func(tx *txn.Tx[string, float64]) error {
 		return tx.AddNode("alice")

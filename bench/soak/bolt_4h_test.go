@@ -65,7 +65,7 @@ func TestBoltSoak_1024_4h(t *testing.T) {
 	t.Logf("soak_1024_4h: config nConns=%d duration=%v snapshotInterval=%v", nConns, duration, snapshotInterval)
 
 	// ── Build graph and engine ────────────────────────────────────────────────
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// Pre-seed the graph with two Person nodes so MATCH returns non-empty results.

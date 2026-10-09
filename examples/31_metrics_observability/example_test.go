@@ -225,7 +225,7 @@ func TestRestoresBackend(t *testing.T) {
 	// left the surface in a clean, usable state.
 	after := &recordingBackend{}
 	metrics.SetBackend(after)
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

@@ -14,7 +14,7 @@ func TestReadInto_Basic(t *testing.T) {
 {"type":"node","id":"bob"}
 {"type":"edge","src":"alice","dst":"bob","weight":7}
 `
-	a, n, err := ReadInto(strings.NewReader(in), adjlist.Config{Directed: true})
+	a, n, err := ReadInto(strings.NewReader(in), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadInto: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestReadInto_Basic(t *testing.T) {
 
 func TestReadInto_BadJSON(t *testing.T) {
 	t.Parallel()
-	_, _, err := ReadInto(strings.NewReader("not json\n"), adjlist.Config{Directed: true})
+	_, _, err := ReadInto(strings.NewReader("not json\n"), adjlist.Config{})
 	if err == nil {
 		t.Fatalf("expected parse error")
 	}
@@ -36,7 +36,7 @@ func TestReadInto_BadJSON(t *testing.T) {
 
 func TestReadInto_UnknownType(t *testing.T) {
 	t.Parallel()
-	_, _, err := ReadInto(strings.NewReader(`{"type":"alien"}`+"\n"), adjlist.Config{Directed: true})
+	_, _, err := ReadInto(strings.NewReader(`{"type":"alien"}`+"\n"), adjlist.Config{})
 	if err == nil {
 		t.Fatalf("expected unknown-type error")
 	}
@@ -44,17 +44,17 @@ func TestReadInto_UnknownType(t *testing.T) {
 
 func TestReadInto_MissingFields(t *testing.T) {
 	t.Parallel()
-	if _, _, err := ReadInto(strings.NewReader(`{"type":"node"}`+"\n"), adjlist.Config{Directed: true}); err == nil {
+	if _, _, err := ReadInto(strings.NewReader(`{"type":"node"}`+"\n"), adjlist.Config{}); err == nil {
 		t.Fatalf("missing node id should error")
 	}
-	if _, _, err := ReadInto(strings.NewReader(`{"type":"edge","src":"a"}`+"\n"), adjlist.Config{Directed: true}); err == nil {
+	if _, _, err := ReadInto(strings.NewReader(`{"type":"edge","src":"a"}`+"\n"), adjlist.Config{}); err == nil {
 		t.Fatalf("missing edge dst should error")
 	}
 }
 
 func TestWrite_Roundtrip(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("alice", "bob", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestWrite_Roundtrip(t *testing.T) {
 	if _, err := Write(&buf, a); err != nil {
 		t.Fatal(err)
 	}
-	b, _, err := ReadInto(&buf, adjlist.Config{Directed: true})
+	b, _, err := ReadInto(&buf, adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadInto: %v", err)
 	}

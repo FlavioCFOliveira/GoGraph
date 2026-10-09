@@ -152,7 +152,7 @@ func TestByHandleDualWrite_Remove(t *testing.T) {
 }
 
 // TestByHandleDualWrite_NoHandleFallsBackToPerPairOnly verifies that when the
-// resolver returns 0 (no stable handle, e.g. simple-graph storage), the
+// resolver returns 0 (no stable handle, e.g. a slot written without one), the
 // by-handle store is left completely untouched and only the per-pair store is
 // written — the mutation never lands on a wrong instance.
 func TestByHandleDualWrite_NoHandleFallsBackToPerPairOnly(t *testing.T) {

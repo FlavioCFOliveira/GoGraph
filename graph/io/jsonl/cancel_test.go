@@ -27,7 +27,7 @@ func TestJSONL_CtxCancelMidStream(t *testing.T) {
 		cancel() // cancel before any I/O
 
 		in := `{"type":"node","id":"alice"}` + "\n"
-		_, _, err := jsonl.ReadIntoCtx(ctx, strings.NewReader(in), adjlist.Config{Directed: true})
+		_, _, err := jsonl.ReadIntoCtx(ctx, strings.NewReader(in), adjlist.Config{})
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("expected context.Canceled, got %v", err)
 		}
@@ -48,7 +48,7 @@ func TestJSONL_CtxCancelMidStream(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1)
 		defer cancel()
 
-		_, _, err := jsonl.ReadIntoCtx(ctx, strings.NewReader(sb.String()), adjlist.Config{Directed: true})
+		_, _, err := jsonl.ReadIntoCtx(ctx, strings.NewReader(sb.String()), adjlist.Config{})
 		if err == nil {
 			t.Fatal("expected deadline error, got nil")
 		}
@@ -63,7 +63,7 @@ func TestJSONL_CtxCancelMidStream(t *testing.T) {
 		// trigger its ctx check (every 4096 records in the edge loop).
 		// We add 4096 nodes plus one edge so the first edge-loop ctx
 		// check fires at written==4096.
-		a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+		a := adjlist.New[string, int64](adjlist.Config{})
 		for i := range 4096 {
 			if err := a.AddNode(fmt.Sprintf("n%d", i)); err != nil {
 				t.Fatalf("AddNode: %v", err)

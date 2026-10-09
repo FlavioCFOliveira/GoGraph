@@ -5,7 +5,7 @@
 Durable recovery of a typed `(int64, float64)` graph through the canonical
 `recovery.Open[N, W]` path. It builds a seeded, scale-parametrised weighted
 network with numeric node IDs and real-valued edge weights, persists it to a
-v2 snapshot, drops every in-memory reference, then rebuilds the graph from
+v5 snapshot, drops every in-memory reference, then rebuilds the graph from
 disk with the matching codec pair — confirming that edges (with **bit-exact**
 float64 weights), labels, and four kinds of typed property all survive the
 round-trip, and that `Result.SnapshotSchemaVersion` reports the on-disk schema
@@ -38,10 +38,11 @@ bit-exact check has something non-trivial to verify. A node and all its
 out-edges are committed in a single transaction through a typed `txn.Store`;
 the graph is then snapshotted and recovered into fresh process state.
 
-Because the keys are `int64` (not `string`), `WriteSnapshotFull` stamps a
-**v2** manifest: a string-keyed graph would additionally emit a `mapper.bin`
-and be stamped v3, but a numeric-keyed graph needs no mapper sidecar, so v2 is
-the correct and expected on-disk version here.
+`WriteSnapshotFull` stamps every manifest it writes with
+`snapshot.ManifestVersion`, which is **5**, so `v5` is the expected on-disk
+version here. The version does not depend on the key type: which components a
+snapshot carries (for example a `mapper.bin` sidecar) is read from its file
+list, never from its version.
 
 ## How to run
 
@@ -74,7 +75,7 @@ recovered.nodes=256
 recovered.edges=1139
 recovered.label_records=1395
 recovered.property_records=4185
-recovered.schema_version=v2
+recovered.schema_version=v5
 weights.verified=1139
 weights.bit_exact=true
 sample.node_name=Northmoor
@@ -121,13 +122,13 @@ bit-exact codec contract hold at any size.
 - `store/recovery.OpenCtx[N, W]` / `recovery.Options[N, W]` — recover a typed graph from a WAL + snapshot directory using a codec pair, honouring context cancellation.
 - `store/recovery.Result` — recovery report: `Graph`, `WALOps`, `SnapshotHit`, `SnapshotSchemaVersion`, `SnapshotLabels`, `SnapshotProperties`, and `IsClean()`.
 - `store/txn.NewStoreWithOptions` / `txn.NewInt64Codec` / `txn.NewFloat64WeightCodec` — the typed store and the codecs that make int64 keys and float64 weights round-trip bit-for-bit.
-- `store/snapshot.WriteSnapshotFullCtx` — write the full snapshot; stamps v2 for a non-string graph, v3 (with `mapper.bin`) for a string-keyed one.
+- `store/snapshot.WriteSnapshotFullCtx` — write the full snapshot; stamps the manifest with `snapshot.ManifestVersion` (5).
 - `graph/lpg.New` / `lpg.Float64Value` / `lpg.Int64Value` / `lpg.StringValue` / `lpg.BoolValue` — the in-memory labelled property graph and its typed property constructors.
 
 ## Further reading
 
 - [`store/recovery`](../../store/recovery) — the typed recovery package documentation
-- [`store/snapshot`](../../store/snapshot) — snapshot format and the v2/v3 manifest distinction
+- [`store/snapshot`](../../store/snapshot) — snapshot format and the manifest versions
 - [`store/txn`](../../store/txn) — the transactional store and codec API
 - [Example 04 — persistence](../04_persistence) — the string-keyed persistence round-trip
 - [Example 17 — transactional log](../17_transactional_log) — WAL + background checkpoint flow

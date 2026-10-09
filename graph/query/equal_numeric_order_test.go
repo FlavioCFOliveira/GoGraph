@@ -334,7 +334,7 @@ func TestWithProperty_EquatableButNotOrderableKindsDivergeFromRange(t *testing.T
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			g := lpg.New[string, int64](adjlist.Config{Directed: true})
+			g := lpg.New[string, int64](adjlist.Config{})
 			if err := g.SetNodeLabel("w", eqKindLabel); err != nil {
 				t.Fatalf("SetNodeLabel: %v", err)
 			}
@@ -372,7 +372,7 @@ func TestWithProperty_EquatableButNotOrderableKindsDivergeFromRange(t *testing.T
 func TestWithProperty_NegativeZeroEqualsZero(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	values := []struct {
 		key string
 		v   lpg.PropertyValue

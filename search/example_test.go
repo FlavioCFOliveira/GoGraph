@@ -14,7 +14,7 @@ import (
 // integer pairs and returns it together with the mapper that resolves
 // NodeIDs back to the user-facing int values.
 func buildDirected(edges [][2]int) (*csr.CSR[struct{}], *graph.Mapper[int]) {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for _, e := range edges {
 		_ = a.AddEdge(e[0], e[1], struct{}{})
 	}
@@ -26,11 +26,15 @@ func buildDirected(edges [][2]int) (*csr.CSR[struct{}], *graph.Mapper[int]) {
 // false the AdjList mirrors every edge, yielding the symmetric CSR the
 // undirected algorithms (Kruskal, Prim) expect.
 func buildWeighted(directed bool, edges [][3]int) (*csr.CSR[int64], *graph.Mapper[int]) {
-	a := adjlist.New[int, int64](adjlist.Config{Directed: directed})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for _, e := range edges {
 		_ = a.AddEdge(e[0], e[1], int64(e[2]))
 	}
-	return csr.BuildFromAdjList(a), a.Mapper()
+	c := csr.BuildFromAdjList(a)
+	if !directed {
+		c = c.BuildSymmetric()
+	}
+	return c, a.Mapper()
 }
 
 // resolvePath maps a path expressed in NodeID space back to the

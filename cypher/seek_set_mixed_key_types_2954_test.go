@@ -109,7 +109,7 @@ func check2954(t *testing.T, eng, ref *cypher.Engine, kind string) {
 // scanRef2954 seeds the fixture on an engine with no index, the scan arm.
 func scanRef2954(t *testing.T) *cypher.Engine {
 	t.Helper()
-	ref := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+	ref := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 	run2954(t, ref, seed2954)
 	run2954(t, ref, mixed2954)
 	return ref
@@ -119,7 +119,7 @@ func TestSeekSetMixedKeyTypes_2954(t *testing.T) {
 	for _, kind := range []string{"hash", "btree"} {
 		ddl := `CREATE INDEX l_s FOR (n:L) ON (n.s) OPTIONS {indexType: '` + kind + `'}`
 		t.Run(kind+"/memory", func(t *testing.T) {
-			eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+			eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 			for _, q := range []string{seed2954, mixed2954, ddl} {
 				run2954(t, eng, q)
 			}
@@ -131,7 +131,7 @@ func TestSeekSetMixedKeyTypes_2954(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			st := txn.NewStoreWithOptions[string, float64](lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}), w,
+			st := txn.NewStoreWithOptions[string, float64](lpg.New[string, float64](adjlist.Config{}), w,
 				txn.Options[string, float64]{Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec()})
 			eng := cypher.NewEngineWithStore(st)
 			// The index exists before the mixed values are written, so the

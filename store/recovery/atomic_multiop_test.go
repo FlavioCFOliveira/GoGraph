@@ -37,7 +37,7 @@ func TestRecovery_MultiOpTransactionAtomic_TornAtEveryBoundary(t *testing.T) {
 	srcWAL := filepath.Join(src, "wal")
 	// A single-file log: this test damages or erases it as one file.
 	w := openSingleFileWAL(t, srcWAL)
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

@@ -21,9 +21,10 @@
 // strength). Every user is given a random out-degree in
 // [followsMin, followsMax] to distinct other users — no self-loops and no
 // duplicate (src,dst) pairs — so the graph is simple and the row count is
-// exactly the edge count. This matters for the round-trip invariant: a
-// simple directed graph re-serialises to exactly as many CSV rows as were
-// ingested, with none collapsed by parallel-edge deduplication.
+// exactly the edge count. This matters for the round-trip invariant: the
+// reader stores every row as one directed relationship and never merges
+// rows, and the writer emits one row per relationship, so the graph
+// re-serialises to exactly as many CSV rows as were ingested.
 //
 // # Pipeline
 //

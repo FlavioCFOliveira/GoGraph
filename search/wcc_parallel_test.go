@@ -40,14 +40,18 @@ func TestWCCParallel_EqualSerial_Shapes(t *testing.T) {
 		c    *csr.CSR[int64]
 	}
 	mk := func(t *testing.T, s shapegen.Shape[int, int64], directed bool) *csr.CSR[int64] {
-		g, err := s.Build(adjlist.Config{Directed: directed})
+		g, err := s.Build(adjlist.Config{})
 		if err != nil {
 			t.Fatalf("Build: %v", err)
 		}
-		return csr.BuildFromAdjList(g.AdjList())
+		c := csr.BuildFromAdjList(g.AdjList())
+		if !directed {
+			c = c.BuildSymmetric()
+		}
+		return c
 	}
 	cases := []shapeCase{
-		{"path-1k", mk(t, shapegen.Path(1000, true), true)},
+		{"path-1k", mk(t, shapegen.Path(1000), true)},
 		{"cycle-1k", mk(t, shapegen.Cycle(1000, false), false)},
 		{"disjoint-stars", mk(t, shapegen.DoubleStar(500, 500), false)},
 		{"ba-5k-directed", mk(t, shapegen.BarabasiAlbert(5000, 6, 17), true)},
@@ -78,7 +82,7 @@ func TestWCCParallel_EqualSerial_Shapes(t *testing.T) {
 func TestWCCParallel_EmptyAndGhost(t *testing.T) {
 	t.Parallel()
 	// Empty graph.
-	empty := csr.BuildFromAdjList(adjlist.New[int, int64](adjlist.Config{Directed: true}))
+	empty := csr.BuildFromAdjList(adjlist.New[int, int64](adjlist.Config{}))
 	wComp, wK, err := WCC(empty)
 	if err != nil {
 		t.Fatalf("serial WCC empty: %v", err)
@@ -94,7 +98,7 @@ func TestWCCParallel_EmptyAndGhost(t *testing.T) {
 // call returns the wrapped ctx.Err() and no partition.
 func TestWCCParallel_Cancellation(t *testing.T) {
 	t.Parallel()
-	g, err := shapegen.BarabasiAlbert(40000, 10, 5).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.BarabasiAlbert(40000, 10, 5).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -110,7 +114,7 @@ func TestWCCParallel_Cancellation(t *testing.T) {
 // buildWCCBenchGraph builds a large power-law graph (E well above
 // wccParallelMinEdges) for the scaling benchmark.
 func buildWCCBenchGraph(b *testing.B) *csr.CSR[int64] {
-	g, err := shapegen.BarabasiAlbert(100000, 12, 7).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.BarabasiAlbert(100000, 12, 7).Build(adjlist.Config{})
 	if err != nil {
 		b.Fatalf("Build: %v", err)
 	}

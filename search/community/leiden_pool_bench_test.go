@@ -40,11 +40,11 @@ func BenchmarkLeiden_PlantedRepeated(b *testing.B) {
 		seed      = 1234
 	)
 	g, err := shapegen.PlantedPartition(k, blockSize, pIn, pOut, seed).
-		Build(adjlist.Config{Directed: false})
+		Build(adjlist.Config{})
 	if err != nil {
 		b.Fatalf("PlantedPartition Build: %v", err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 
 	b.ReportAllocs()
 	b.ResetTimer()

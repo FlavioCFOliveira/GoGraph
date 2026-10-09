@@ -29,7 +29,7 @@ func buildRelGraph() *lpg.Graph[string, float64] {
 	if relGraph != nil {
 		return relGraph
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for i := 0; i < relNodes; i++ {
 		if _, err := eng.RunAny(context.Background(), fmt.Sprintf(

@@ -40,7 +40,7 @@ import (
 //
 // Each generator constructs the underlying [adjlist.Config] from the
 // caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, and
-// overrides cfg.Directed=false and cfg.Multigraph=false: every
+// stores each undirected edge as ONE directed arc, in the orientation the generator enumerates it: every
 // special graph defined here is an undirected simple graph.
 //
 // # Edge ordering and determinism
@@ -147,8 +147,6 @@ func Petersen() Shape[int, int64] {
 	return specialsBase{
 		name: "specials.petersen",
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildLabelledEdgeList(g, petersenLabels[:], petersenEdges[:])
 		},
@@ -207,8 +205,6 @@ func Dodecahedral() Shape[int, int64] {
 	return specialsBase{
 		name: "specials.dodecahedral",
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildLabelledEdgeList(g, dodecahedralLabels[:], dodecahedralEdges[:])
 		},
@@ -296,8 +292,6 @@ func GoldnerHarary() Shape[int, int64] {
 	return specialsBase{
 		name: "specials.goldner-harary",
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildLabelledEdgeList(g, goldnerHararyLabels[:], goldnerHararyEdges[:])
 		},
@@ -353,8 +347,6 @@ func MoserSpindle() Shape[int, int64] {
 	return specialsBase{
 		name: "specials.moser-spindle",
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildLabelledEdgeList(g, moserSpindleLabels[:], moserSpindleEdges[:])
 		},
@@ -446,8 +438,6 @@ func Kneser(n, k int) Shape[int, int64] {
 			{Name: "k", Min: 0, Max: kneserMaxK, Default: 2},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildKneser(g, n, k)
 		},

@@ -39,7 +39,7 @@ const gateBenchN = 20_000
 // seedGateBenchGraph builds gateBenchN :P nodes each carrying an int64 v.
 func seedGateBenchGraph(tb testing.TB) *lpg.Graph[string, float64] {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range gateBenchN {
 		k := "n" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

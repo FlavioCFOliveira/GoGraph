@@ -145,7 +145,7 @@ func run() error {
 		}
 	}
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: *multigraph})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := cypher.NewEngine(g)
 

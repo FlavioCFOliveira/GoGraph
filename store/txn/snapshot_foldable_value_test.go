@@ -115,7 +115,7 @@ func TestSnapshotEncodedValueLen_Exact_2750(t *testing.T) {
 // uint32 prefix describes and exactly what checkSnapshotValueLen measures there.
 func snapshotWrittenValueLen(t *testing.T, value lpg.PropertyValue) int {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("n"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -310,6 +310,6 @@ func newFoldableTestStore(t *testing.T) (*Store[string, float64], func()) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return NewStoreWithCodec[string, float64](g, w, NewStringCodec()), func() { _ = w.Close() }
 }

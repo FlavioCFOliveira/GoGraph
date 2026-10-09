@@ -139,7 +139,7 @@ func TestReadLabels_StringIdxOutOfRange(t *testing.T) {
 // the graph unchanged.
 func TestApplyLabelsToGraph_UnresolvedNodeID(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("alice"); err != nil { // mapper has exactly one node
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestApplyLabelsToGraph_UnresolvedNodeID(t *testing.T) {
 // error).
 func TestApplyLabelsToGraph_MissingEdge(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("alice"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestApplyLabelsToGraph_MissingEdge(t *testing.T) {
 // trust the input blindly.
 func TestApplyLabelsToGraph_StringIdxOutOfRange(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("alice"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestWriteSnapshotFullCtx_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestWriteSnapshotFullCtx_CancelledContext(t *testing.T) {
 // publishing a half-built snapshot.
 func TestWriteSnapshotFullCtx_FlakyCtxAfterCSR(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestWriteSnapshotFullCtx_FlakyCtxAfterCSR(t *testing.T) {
 // post-labels-write context check.
 func TestWriteSnapshotFullCtx_FlakyCtxAfterLabels(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestWriteSnapshotFullCtx_FlakyCtxAfterLabels(t *testing.T) {
 // context check, just before the os.Rename publish step.
 func TestWriteSnapshotFullCtx_FlakyCtxBeforeRename(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestWriteSnapshotFullCtx_FlakyCtxBeforeRename(t *testing.T) {
 // renaming the .tmp into place.
 func TestWriteSnapshotFullCtx_OverwritesExisting(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestWriteSnapshotFullCtx_OverwritesExisting(t *testing.T) {
 // component files.
 func TestWriteSnapshotFullCtx_AtomicPublish(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -442,7 +442,7 @@ func appendUint64(b []byte, v uint64) []byte {
 // truncating.
 func TestWriteLabels_WriterFailureAtMagic(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -467,7 +467,7 @@ func TestWriteSnapshotFull_ParentIsAFile(t *testing.T) {
 	if err := os.WriteFile(blocker, []byte("not a dir"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -484,7 +484,7 @@ func TestWriteSnapshotFull_ParentIsAFile(t *testing.T) {
 // silently returning an empty readback.
 func TestLoadSnapshotFull_MissingLabelsBin(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -512,7 +512,7 @@ func TestLoadSnapshotFull_MissingLabelsBin(t *testing.T) {
 // ErrCorrupted through the v2 helper.
 func TestLoadSnapshotFull_CorruptedCSR(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -546,7 +546,7 @@ func TestLoadSnapshotFull_CorruptedCSR(t *testing.T) {
 // failure surfaces.
 func TestWriteLabels_FlushFailure(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for i := 0; i < 8; i++ {
 		// Build a graph fat enough that the bufio.Writer eventually
 		// flushes mid-emit (the buffer is 1MiB so we cannot reach

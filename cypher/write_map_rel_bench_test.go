@@ -24,7 +24,7 @@ import (
 
 func newWriteMapRelEngine(b *testing.B) *cypher.Engine {
 	b.Helper()
-	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 	runWriteMapRel(b, eng, `UNWIND range(1, 256) AS i CREATE (:A {id: i})-[:T {p: i}]->(:B {id: i})`)
 	runWriteMapRel(b, eng, `CREATE (:X {id: 1})`)
 	return eng

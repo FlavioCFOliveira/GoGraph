@@ -41,7 +41,7 @@ func runLoad(b *testing.B, edges []Edge, opts Options) {
 // ingest, no pre-size hint (MaxRows unset).
 func BenchmarkLoad_Large_Baseline(b *testing.B) {
 	edges := benchEdges(500_000, 50_000)
-	runLoad(b, edges, Options{Directed: true})
+	runLoad(b, edges, Options{})
 }
 
 // BenchmarkLoad_Large_Presize isolates the calibrated pre-size win:
@@ -49,14 +49,14 @@ func BenchmarkLoad_Large_Baseline(b *testing.B) {
 // as a capacity hint for the interning table.
 func BenchmarkLoad_Large_Presize(b *testing.B) {
 	edges := benchEdges(500_000, 50_000)
-	runLoad(b, edges, Options{Directed: true, ExpectNodes: 50_000})
+	runLoad(b, edges, Options{ExpectNodes: 50_000})
 }
 
 // BenchmarkLoad_Large_Parallel measures the partitioned-parallel build
 // on top of the calibrated pre-size hint — the full optimisation.
 func BenchmarkLoad_Large_Parallel(b *testing.B) {
 	edges := benchEdges(500_000, 50_000)
-	runLoad(b, edges, Options{Directed: true, ExpectNodes: 50_000, MaxRows: len(edges), Parallel: true})
+	runLoad(b, edges, Options{ExpectNodes: 50_000, MaxRows: len(edges), Parallel: true})
 }
 
 // BenchmarkLoad_Small_Sequential and BenchmarkLoad_Small_Parallel guard
@@ -65,10 +65,10 @@ func BenchmarkLoad_Large_Parallel(b *testing.B) {
 // goroutine overhead.
 func BenchmarkLoad_Small_Sequential(b *testing.B) {
 	edges := benchEdges(2_000, 500)
-	runLoad(b, edges, Options{Directed: true, ExpectNodes: 500})
+	runLoad(b, edges, Options{ExpectNodes: 500})
 }
 
 func BenchmarkLoad_Small_Parallel(b *testing.B) {
 	edges := benchEdges(2_000, 500)
-	runLoad(b, edges, Options{Directed: true, ExpectNodes: 500, MaxRows: len(edges), Parallel: true})
+	runLoad(b, edges, Options{ExpectNodes: 500, MaxRows: len(edges), Parallel: true})
 }

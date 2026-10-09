@@ -36,7 +36,7 @@ import (
 // property value, and a :Y carrying the same property value.
 func newMergeMultiEngine(t *testing.T, k int) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for i := 0; i < k; i++ {
 		runSetup(t, eng, `CREATE (:X {v: 1, tag: 'match'})`)
@@ -153,7 +153,7 @@ func TestMergeCreatesOnlyWhenNoMatchExists(t *testing.T) {
 func TestMergeMultiMatchLabelsOnly(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for i := 0; i < 3; i++ {
 		runSetup(t, eng, `CREATE (:Z {i: 1})`)
@@ -176,7 +176,7 @@ func TestMergeMultiMatchLabelsOnly(t *testing.T) {
 func TestMergeMultiMatchPropertiesOnly(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for i := 0; i < 3; i++ {
 		runSetup(t, eng, `CREATE (:P1 {k: 7})`)
@@ -201,7 +201,7 @@ func TestMergeMultiMatchPropertiesOnly(t *testing.T) {
 func TestMergeMultiMatchCrossTypeNumericEquality(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:N {v: 1})`)
 	runSetup(t, eng, `CREATE (:N {v: 1.0})`)

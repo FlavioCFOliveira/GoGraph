@@ -39,10 +39,6 @@ var degenerateSpecCases = []struct {
 		wantRefus: true, buildable: true,
 	},
 	{
-		name: "refuse/zero-vertices-multigraph", spec: FixtureSpec{Vertices: 0, Edges: 1, Multigraph: true},
-		wantRefus: true, buildable: true,
-	},
-	{
 		// uint32(1<<32) == 0, so this is the zero-universe divide-by-zero
 		// reached by truncation rather than by asking for it directly.
 		name: "refuse/vertices-exactly-2^32", spec: FixtureSpec{Vertices: 1 << 32, Edges: 1},
@@ -85,33 +81,28 @@ var degenerateSpecCases = []struct {
 		wantRefus: false, buildable: true, wantOrder: 1, wantSize: 1,
 	},
 	{
-		// Edges far exceeding the distinct pairs available. FixtureSpec's
-		// godoc states duplicates are silently collapsed without Multigraph,
-		// so this is documented behaviour, not a degenerate spec.
-		name: "accept/edges-exceed-pairs-collapse", spec: FixtureSpec{Vertices: 1, Edges: 1000},
-		wantRefus: false, buildable: true, wantOrder: 1, wantSize: 1,
-	},
-	{
-		name: "accept/edges-exceed-pairs-multigraph", spec: FixtureSpec{Vertices: 1, Edges: 1000, Multigraph: true},
+		// Edges far exceeding the distinct pairs available: every graph is a
+		// multigraph, so each surplus draw is a parallel edge.
+		name: "accept/edges-exceed-pairs-parallel", spec: FixtureSpec{Vertices: 1, Edges: 1000},
 		wantRefus: false, buildable: true, wantOrder: 1, wantSize: 1000,
 	},
 	{
-		// E >> V^2 on a simple graph: all four directed pairs over {0,1},
-		// self-loops included, and nothing more.
+		// E >> V^2: every draw is kept, as a parallel edge where it repeats.
 		name: "accept/two-vertices-saturated", spec: FixtureSpec{Vertices: 2, Edges: 100},
-		wantRefus: false, buildable: true, wantOrder: 2, wantSize: 4,
+		wantRefus: false, buildable: true, wantOrder: 2, wantSize: 100,
 	},
 	{
 		// The spec cmd/fmtfixture drives when it writes a csrfile sample.
 		//
 		// It does NOT reproduce the committed testdata/v1/sample.csr, and no
 		// spec can: that file's payload was drawn under a per-process random
-		// shard-hash seed (rmp #2752). What this row pins is the spec's SHAPE —
-		// 96 draws over 32 vertices collapsing to 94 distinct edges on a simple
-		// graph — which is where TestCompat_V1FixtureMaps' frozen NEdges=94
-		// comes from.
+		// shard-hash seed (rmp #2752). What this row pins is the spec's SHAPE:
+		// 96 draws over 32 vertices, every one kept now that every graph is a
+		// multigraph. The committed sample was written when the builder still
+		// collapsed repeated draws on a simple graph, which is where
+		// TestCompat_V1FixtureMaps' frozen NEdges=94 comes from.
 		name: "accept/fmtfixture-production-spec", spec: FixtureSpec{Vertices: 32, Edges: 96, Seed: 0x1337},
-		wantRefus: false, buildable: true, wantOrder: 32, wantSize: 94,
+		wantRefus: false, buildable: true, wantOrder: 32, wantSize: 96,
 	},
 	{
 		// Seed 0 is a legal seed: BuildFixture pairs it with a non-zero second

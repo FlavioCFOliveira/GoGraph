@@ -177,7 +177,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 
 	base := readMem()
 
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	stats, err := build(ctx, a, cfg)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)

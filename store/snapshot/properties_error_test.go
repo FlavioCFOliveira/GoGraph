@@ -197,7 +197,7 @@ func TestReadProperties_ValueLenTooLarge(t *testing.T) {
 // error and must leave the graph unchanged.
 func TestApplyPropertiesToGraph_UnresolvedNodeID(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("alice"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestApplyPropertiesToGraph_UnresolvedNodeID(t *testing.T) {
 // connects them.
 func TestApplyPropertiesToGraph_MissingEdge(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("alice"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestApplyPropertiesToGraph_MissingEdge(t *testing.T) {
 // even after ReadProperties has validated indexes.
 func TestApplyPropertiesToGraph_KeyIdxOutOfRange(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("alice"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestApplyPropertiesToGraph_KeyIdxOutOfRange(t *testing.T) {
 // function must skip the record without erroring.
 func TestApplyPropertiesToGraph_BadDecodeSkipped(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("alice"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestApplyPropertiesToGraph_BadDecodeSkipped(t *testing.T) {
 // every byte and verifies WriteProperties surfaces the error.
 func TestWriteProperties_WriterFailure(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestWriteProperties_WriterFailure(t *testing.T) {
 // where the failure surfaces.
 func TestWriteProperties_FlushFailure(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for i := 0; i < 8; i++ {
 		if err := g.AddNode("n"); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -366,7 +366,7 @@ func TestWriteProperties_FlushFailure(t *testing.T) {
 // non-trivial length, exercising the writer's record-size accounting.
 func TestWriteProperties_RoundtripBytesAndStrings(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestWriteProperties_RoundtripBytesAndStrings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored := lpg.New[string, int64](adjlist.Config{Directed: true})
+	restored := lpg.New[string, int64](adjlist.Config{})
 	if err := restored.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestReadProperties_TruncatedKey(t *testing.T) {
 // accept an empty utf-8 string.
 func TestWriteProperties_RoundtripEmptyKeys(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestWriteProperties_RoundtripEmptyKeys(t *testing.T) {
 // missing on disk. LoadSnapshotFull must surface an os.Open error.
 func TestLoadSnapshotFull_MissingPropertiesBin(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -537,7 +537,7 @@ func TestLoadSnapshotFull_MissingPropertiesBin(t *testing.T) {
 // post-properties-write context check.
 func TestWriteSnapshotFullCtx_FlakyCtxAfterProperties(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

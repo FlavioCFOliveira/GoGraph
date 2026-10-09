@@ -57,7 +57,7 @@ const (
 // string, a bool, and a node with no `v` at all.
 func buildMixedValueGraph(tb testing.TB) (*lpg.Graph[string, int64], *csr.CSR[int64]) {
 	tb.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	values := []struct {
 		key string
 		v   lpg.PropertyValue
@@ -262,7 +262,7 @@ func TestWithRange_UnifiedNumericOrder(t *testing.T) {
 func TestWithRange_AbsentPropertyNeverMatches(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.SetNodeLabel("bare", rnLabel); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}

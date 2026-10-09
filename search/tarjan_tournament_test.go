@@ -25,7 +25,7 @@ func TestTarjanSCC_Tournament(t *testing.T) {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			t.Parallel()
 
-			g, err := shapegen.TransitiveTournament(n).Build(adjlist.Config{Directed: true})
+			g, err := shapegen.TransitiveTournament(n).Build(adjlist.Config{})
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}

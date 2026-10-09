@@ -158,8 +158,8 @@ the betweenness elapsed grow as O(V·E) while the allocation counts stay flat
 
 ## Key APIs
 
-- `graph/adjlist.New` / `AdjList.AddEdge` — build the mutable undirected network.
-- `graph/csr.BuildFromAdjList` — freeze the builder into an immutable CSR snapshot for analytics.
+- `graph/adjlist.New` / `AdjList.AddEdge` — build the mutable network, one directed relationship per edge.
+- `graph/csr.BuildFromAdjList` / `CSR.BuildSymmetric` — freeze the builder into an immutable CSR snapshot and project it to the symmetric (undirected) snapshot both analytics read.
 - `graph/adjlist.AdjList.Mapper` / `graph.Mapper.Resolve` — translate compact `NodeID`s back to user-facing node ids.
 - `search/centrality.BetweennessCtx` — exact Brandes betweenness centrality, returned as a `NodeID`-indexed `[]float64`.
 - `search/centrality.ClosenessCtx` / `HarmonicCtx` — distance-based centralities; Closeness uses the Wasserman-Faust normalisation (finite on disconnected graphs), Harmonic sums `1/d` over reachable nodes.

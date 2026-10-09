@@ -26,7 +26,7 @@ func TestCSVStream_1GB_Bounded(t *testing.T) {
 	const n = 5_000_000 // 5M edges ≈ 100+ MB on disk
 
 	// ---- build adjacency list and write to temp file ----
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := range n {
 		src := fmt.Sprintf("n%d", i)
 		dst := fmt.Sprintf("n%d", i+1)

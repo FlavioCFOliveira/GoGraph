@@ -213,9 +213,6 @@ func isSimplicial3Tree(t *testing.T, g *lpg.Graph[int, int64], wantOrder int) {
 	if got := g.AdjList().Size(); got != want3nm6 {
 		t.Fatalf("Size = %d, want 3n-6 = %d", got, want3nm6)
 	}
-	if g.AdjList().Directed() {
-		t.Fatal("isSimplicial3Tree: graph must be undirected")
-	}
 	// Local mutable adjacency copy as a map[int]map[int]struct{} so
 	// "remove neighbour" is O(1) and "is triangle?" is O(d^2) on the
 	// candidate's neighbour list.
@@ -298,7 +295,6 @@ func TestSpecials_Petersen_Invariants(t *testing.T) {
 	}
 	assertOrder(t, g, 10)
 	assertSize(t, g, 15)
-	assertDirected(t, g, false)
 	// 3-regular.
 	adj := undirectedAdj(g)
 	for v := 0; v < 10; v++ {
@@ -432,7 +428,6 @@ func TestSpecials_Dodecahedral_Invariants(t *testing.T) {
 	}
 	assertOrder(t, g, 20)
 	assertSize(t, g, 30)
-	assertDirected(t, g, false)
 	adj := undirectedAdj(g)
 	for v := 0; v < 20; v++ {
 		if got := len(adj[v]); got != 3 {
@@ -483,7 +478,6 @@ func TestSpecials_GoldnerHarary_Invariants(t *testing.T) {
 	}
 	assertOrder(t, g, 11)
 	assertSize(t, g, 27)
-	assertDirected(t, g, false)
 	isSimplicial3Tree(t, g, 11)
 	// Verify literature labels.
 	for v := 0; v < 11; v++ {
@@ -525,7 +519,6 @@ func TestSpecials_MoserSpindle_Invariants(t *testing.T) {
 	}
 	assertOrder(t, g, 7)
 	assertSize(t, g, 11)
-	assertDirected(t, g, false)
 	for v := 0; v < 7; v++ {
 		if !g.HasNodeLabel(v, moserSpindleLabels[v]) {
 			t.Fatalf("MoserSpindle node %d missing label %q", v, moserSpindleLabels[v])
@@ -617,7 +610,6 @@ func TestSpecials_Kneser_Invariants(t *testing.T) {
 			wantDeg := kneserExpectedDegree(c.n, c.k)
 			wantSize := uint64(wantDeg) * wantOrder / 2
 			assertSize(t, g, wantSize)
-			assertDirected(t, g, false)
 			adj := undirectedAdj(g)
 			for v := 0; v < int(wantOrder); v++ {
 				if got := len(adj[v]); got != wantDeg {
@@ -869,7 +861,7 @@ func TestSpecials_Kneser_DisjointAscSubsets(t *testing.T) {
 // other-family contracts.
 func TestSpecials_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	for _, tc := range []struct {
 		name string
 		s    Shape[int, int64]
@@ -915,7 +907,7 @@ func TestSpecials_PreservesMaxShardCapacity(t *testing.T) {
 func TestSpecials_BuildLabelledEdgeList_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
 	const n = 300 // > 256 so at least one NodeID lands at intraIdx >= 1.
-	cfg := adjlist.Config{Directed: false, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	labels := make([]string, n)
 	for i := range labels {
@@ -946,7 +938,7 @@ func TestSpecials_BuildLabelledEdgeList_ShardFullPropagates(t *testing.T) {
 // reach the error branch on their own.
 func TestSpecials_BuildKneser_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: false, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	_, err := Kneser(11, 5).Build(cfg)
 	if err == nil {
 		t.Fatal("Kneser(11,5) Build with MaxShardCapacity=1 returned nil error, want adjlist.ErrShardFull")

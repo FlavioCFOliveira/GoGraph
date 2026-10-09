@@ -101,12 +101,11 @@ type Result[N comparable, W any] struct {
 	// The slice is deterministically ordered (by name).
 	Indexes []IndexRecord
 	// SnapshotSchemaVersion is the on-disk manifest version of the
-	// snapshot that was loaded — 1 for legacy CSR-only directories
-	// produced by [snapshot.WriteSnapshotCSR], 2 for directories
-	// produced by [snapshot.WriteSnapshotFull]. The field is 0 when
-	// no snapshot was found (SnapshotHit == false), so callers can
-	// branch on `Result.SnapshotSchemaVersion >= 2` to detect a v2
-	// snapshot without first re-reading the manifest from disk.
+	// snapshot that was loaded: [snapshot.ManifestVersion] for every
+	// directory this build writes, or 1 to 4 for a directory an older
+	// build wrote. The version does not say which components the
+	// snapshot carries. The field is 0 when no snapshot was found
+	// (SnapshotHit == false).
 	SnapshotSchemaVersion int
 	// SnapshotLabels reports how many label records the snapshot
 	// contributed back into the graph after WAL replay. v1
@@ -251,9 +250,9 @@ type Result[N comparable, W any] struct {
 	// mapper-less path the raw uint64 NodeIDs inside a payload name nothing:
 	// ids are minted by interning during replay, [graph.Mapper] has no
 	// un-intern, and one discarded transaction shifts every later id. It is
-	// surfaced rather than inferred because a caller cannot derive it —
-	// SnapshotSchemaVersion >= 3 implies a mapper was WRITTEN, not that this
-	// open restored one.
+	// surfaced rather than inferred because a caller cannot derive it:
+	// SnapshotSchemaVersion does not say whether a mapper was written, and
+	// a written mapper is not proof that this open restored one.
 	//
 	// False for a directory with no snapshot at all.
 	SnapshotSelfSufficient bool
@@ -1173,6 +1172,24 @@ func accumulateIndexOp(is *indexSet, op *Op) (isIndex, ok bool) {
 // fails with the write error. An unclean recovery writes nothing. [OpenCtx]
 // and [OpenFS] behave identically.
 //
+// A store written before every graph became a directed multigraph, whose
+// snapshot manifest declares an undirected or simple graph, is MIGRATED (rmp
+// #3072): the WAL above the snapshot is replayed with the old semantics — an
+// undirected graph with both directions of every edge stored, duplicate
+// insertions into a simple graph skipped with their edge handles reserved —
+// then each undirected edge is folded to one relationship, oriented from the
+// lower node id to the higher; and the first CLEAN recovery then REWRITES dir
+// before it returns — it publishes a snapshot
+// in the current format and folds the WAL under it, as a checkpoint does. That
+// recovery therefore needs write access to dir, the operating-system
+// filesystem ([ErrLegacyMigrationUnsupportedFS] otherwise) and a non-nil
+// opts.Codec ([ErrLegacyMigrationNeedsCodec] otherwise). An edge whose two
+// directions hold different values in the undirected store is not migrated:
+// Open returns an error wrapping [ErrLegacyMirrorConflict] that names
+// the conflicting relationships, and dir is left as it was found. A crash
+// during the rewrite leaves the legacy store, which the next Open migrates
+// again, or the migrated one.
+//
 // A torn or truncated WAL tail — the normal state after a crash between
 // two fsyncs — is benign: Open recovers the committed prefix, returns a
 // nil error, and records the cut via [Result.TailErr] / [Result.IsClean].
@@ -1295,34 +1312,22 @@ func recoveryCapOption(resolved int) int {
 // defaultRecoveryConfig is the adjacency-list configuration used to
 // reconstruct a graph when no persisted shape is available: no snapshot,
 // a snapshot-load failure (diagnostic graph only), or a snapshot whose
-// manifest predates the persisted config field.
-//
-// Multigraph: true is the historical recovery behaviour. It matches
-// openCypher's property-graph model (CREATE of a relationship is
-// additive — two CREATEs between the same ordered pair must yield two
-// relationships) and the configuration the Cypher TCK harness uses. The
-// WAL, snapshot and CSR layers already round-trip parallel edges with
-// distinct per-instance types/properties, so a graph recovered from a
-// config-less snapshot must be multigraph or those parallel edges
-// collapse to one on the next reopen — silent data loss for every
-// consumer that recovers a pre-config snapshot from disk. A graph that
-// never created a parallel edge behaves identically under either mode,
-// so this default is also safe for simple graphs whose snapshots predate
-// the persisted config.
+// manifest predates the persisted config field. Every graph is a directed
+// multigraph, matching openCypher's property-graph model (CREATE of a
+// relationship is additive), so the default is the zero [adjlist.Config].
 func defaultRecoveryConfig() adjlist.Config {
-	return adjlist.Config{Directed: true, Multigraph: true}
+	return adjlist.Config{}
 }
 
 // recoveryGraphConfig resolves the adjacency-list configuration to
 // reconstruct a graph from a snapshot manifest's persisted graph config
 // (pass [snapshot.Manifest.GraphConfig]). When gc is non-nil (every NEW
-// full snapshot carries it), its directed/multigraph flags are honoured
-// exactly, so a graph created SIMPLE (Multigraph: false) is recovered
-// SIMPLE and a graph created MULTIGRAPH is recovered MULTIGRAPH — the same
-// AddEdge semantics before and after a snapshot round-trip. When gc is nil
-// (an older snapshot, or one written by the CSR-only legacy writer) the
-// historical [defaultRecoveryConfig] is used so pre-existing snapshots
-// replay byte-for-byte as they did before this field existed.
+// full snapshot carries it), its weightless flag is honoured exactly. A
+// manifest written before every graph became a directed multigraph may also
+// carry "multigraph" and "directed": a simple graph is already a valid
+// multigraph and is recovered unchanged, and an undirected one has been
+// migrated by the snapshot loader. When gc is nil (an older snapshot, or one
+// written by the CSR-only legacy writer) [defaultRecoveryConfig] is used.
 //
 // MaxShardCapacity is never restored from the manifest: it is a runtime
 // growth bound, not a property of the stored graph, and re-imposing it
@@ -1333,11 +1338,7 @@ func recoveryGraphConfig(gc *snapshot.GraphConfig) adjlist.Config {
 	if gc == nil {
 		return defaultRecoveryConfig()
 	}
-	return adjlist.Config{
-		Directed:   gc.Directed,
-		Multigraph: gc.Multigraph,
-		Weightless: gc.Weightless,
-	}
+	return adjlist.Config{Weightless: gc.Weightless}
 }
 
 // openCodec is the shared core of [Open] and [OpenCtx]. wcodec is nil
@@ -1453,13 +1454,10 @@ func openCodec[N comparable, W any](
 	touched := newTouchSet()
 
 	// Load the snapshot manifest BEFORE constructing the live graph so the
-	// graph is reconstructed with the directed/multigraph shape the
-	// originating graph was created with. A manifest that predates the
-	// persisted config (or the CSR-only legacy writer, which has no graph to
-	// read) leaves Manifest.GraphConfig nil; recoveryGraphConfig then returns
-	// the historical default {Directed: true, Multigraph: true} so existing
-	// snapshots — including the additive-CREATE openCypher engine snapshots
-	// that depend on multigraph — replay exactly as before.
+	// graph is reconstructed with the weightless shape the originating graph
+	// was created with. A manifest that predates the persisted config (or the
+	// CSR-only legacy writer, which has no graph to read) leaves
+	// Manifest.GraphConfig nil; recoveryGraphConfig then returns the default.
 	var loaded snapshot.LoadedSnapshot
 	haveManifest := false
 	if _, err := fsys.Stat(filepath.Join(snapDir, "manifest.json")); err == nil {
@@ -1473,6 +1471,14 @@ func openCodec[N comparable, W any](
 		}
 		haveManifest = true
 	}
+
+	// MIGRATE A LEGACY STORE (rmp #3072). Every graph is a directed multigraph;
+	// a snapshot of an undirected or simple graph declares so in its manifest.
+	// The WAL above it is replayed with the old semantics (see legacyReplay),
+	// an undirected graph is folded to one relationship per edge once it is
+	// (foldLegacyUndirected), and the store is checkpointed before this
+	// function returns.
+	legacy := legacyReplayOf(&loaded)
 
 	// A WAL whose prefix a checkpoint truncated is a SUFFIX of the history, and
 	// only the snapshot that folded the prefix makes it whole (rmp #2990). The
@@ -1685,7 +1691,7 @@ func openCodec[N comparable, W any](
 	}
 	defer plan.close()
 	if plan.src != nil {
-		walRes, walErr := replayWALInto(ctx, plan.src, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, plan.redo, plan.schemaBelowRedo, loaded.Mapper.Next)
+		walRes, walErr := replayWALInto(ctx, plan.src, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, plan.redo, plan.schemaBelowRedo, loaded.Mapper.Next, legacy)
 		// The node facets the SUFFIX touched. In a checkpointed directory the WAL
 		// replayed IS the suffix above the redo position, so this is exactly what
 		// a caller needs to decide whether a snapshot index payload still
@@ -1862,6 +1868,13 @@ func openCodec[N comparable, W any](
 		metrics.IncCounter("store.recovery.openCodec.corruptTail", 1)
 		return res, res.TailErr
 	}
+	// FOLD A LEGACY UNDIRECTED GRAPH (rmp #3072), replayed with both directions
+	// of every edge intact, to one relationship per edge — before anything is
+	// written to dir, so a refusal leaves the store exactly as it was found.
+	if err := foldLegacyStore(g, legacy); err != nil {
+		metrics.IncCounter("store.recovery.openCodec.errors", 1)
+		return res, fmt.Errorf("recovery: legacy store migration: %w", err)
+	}
 	// GIVE A PRE-MARKER STORE ITS CONTROL RECORD (rmp #3002). A store whose WAL
 	// prefix was truncated before the marker existed has no marker, so losing
 	// its snapshot later would be indistinguishable from a store that never
@@ -1879,6 +1892,16 @@ func openCodec[N comparable, W any](
 	// A segmented store records the same fact in its control file, so it never
 	// needs the marker.
 	if err := ensurePrefixMarker(fsys, walPath, !segmented && res.SnapshotSelfSufficient && res.IsClean()); err != nil {
+		metrics.IncCounter("store.recovery.openCodec.errors", 1)
+		return res, err
+	}
+	// CHECKPOINT A MIGRATED LEGACY STORE (rmp #3072) before any caller can write
+	// to it, so no transaction under the new semantics ever lands in a WAL above
+	// a legacy snapshot. A failure fails the open and leaves the legacy state as
+	// it was, so the next open repeats the migration.
+	if err := migrateLegacyStore(fsys, dir, legacy, res.IsClean(), legacyCheckpoint[N, W]{
+		g: g, codec: codec, wcodec: wcodec, constraints: res.Constraints, indexes: res.Indexes,
+	}); err != nil {
 		metrics.IncCounter("store.recovery.openCodec.errors", 1)
 		return res, err
 	}
@@ -2015,7 +2038,7 @@ func ReplayWAL[N comparable, W any](
 	if log, ok := r.(*wal.Log); ok {
 		res, err = replayLogWithoutSnapshot(ctx, log, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched)
 	} else {
-		res, err = replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false, nil)
+		res, err = replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false, nil, nil)
 	}
 	res.Constraints = cAcc.snapshot()
 	res.Indexes = iAcc.snapshot()
@@ -2080,6 +2103,7 @@ func replayWALInto[N comparable, W any](
 	redo int64,
 	schemaBelowRedo bool,
 	idBase *[graph.MapperShards]uint64,
+	legacy *legacyReplay,
 ) (ReplayResult, error) {
 	var res ReplayResult
 	// WAL v2 step 4: the node id marks the log's reservations and clean-close
@@ -2233,7 +2257,7 @@ func replayWALInto[N comparable, W any](
 			}
 			failedIdx := -1
 			for i := range committed {
-				if !applyOrAccumulate(g, &committed[i], codec, wcodec, cAcc, iAcc, touched) {
+				if !applyOrAccumulate(g, &committed[i], codec, wcodec, cAcc, iAcc, touched, legacy) {
 					failedIdx = i
 					break
 				}
@@ -2299,7 +2323,7 @@ func replayWALInto[N comparable, W any](
 			}
 			continue
 		}
-		if !applyOrAccumulate(g, &op, codec, wcodec, cAcc, iAcc, touched) {
+		if !applyOrAccumulate(g, &op, codec, wcodec, cAcc, iAcc, touched, legacy) {
 			// A malformed v2 body (truncated endpoints, missing or
 			// overflowing trailing label/key length) failed to decode
 			// through the codec; stop replay so callers see the cut-off
@@ -2350,6 +2374,7 @@ func applyOrAccumulate[N comparable, W any](
 	cs *constraintSet,
 	is *indexSet,
 	touched *touchSet,
+	legacy *legacyReplay,
 ) bool {
 	if isConstraint, ok := accumulateConstraintOp(cs, op); isConstraint {
 		return ok
@@ -2357,7 +2382,7 @@ func applyOrAccumulate[N comparable, W any](
 	if isIdx, ok := accumulateIndexOp(is, op); isIdx {
 		return ok
 	}
-	return applyOpCodec(g, op, codec, wcodec, touched)
+	return applyOpCodec(g, op, codec, wcodec, touched, legacy)
 }
 
 // applyOpCodec applies a decoded op into g via codec. It returns
@@ -2409,6 +2434,7 @@ func applyOpCodec[N comparable, W any](
 	codec txn.Codec[N],
 	wcodec txn.WeightCodec[W],
 	touched *touchSet,
+	legacy *legacyReplay,
 ) bool {
 	// v2 and v3 frames share the same codec-encoded body; v3 differs only
 	// in the envelope header (txnSeq) which Decode already stripped into
@@ -2418,15 +2444,41 @@ func applyOpCodec[N comparable, W any](
 	if op.Version != txn.OpRecordV2 && op.Version != txn.OpRecordV3 {
 		return false
 	}
-	src, rest, err := codec.Decode(op.Body)
+	src, dst, rest, skip, err := decodeEndpoints(g, op, codec, legacy)
 	if err != nil {
 		return false
 	}
-	dst, rest, err := codec.Decode(rest)
-	if err != nil {
+	if skip {
+		// The legacy simple-graph engine ignored this insertion, but it had
+		// already drawn the edge handle.
+		return reserveSkippedHandle(g, op.Kind, rest)
+	}
+	var removing []uint64
+	mirror := legacy != nil && legacy.undirected
+	if mirror && op.Kind == txn.OpRemoveEdge {
+		removing = g.AppendEdgeHandles(src, dst, nil)
+	}
+	if !applyDecodedOp(g, op, src, dst, rest, wcodec, touched) {
 		return false
 	}
+	if mirror {
+		return mirrorLegacyEdgeOp(g, op.Kind, src, dst, rest, removing)
+	}
+	return true
+}
 
+// applyDecodedOp applies op, whose endpoints src and dst [applyOpCodec] has
+// already decoded and rest is the body after them. It reports false for a body
+// that does not decode or a write the graph refuses.
+func applyDecodedOp[N comparable, W any](
+	g *lpg.Graph[N, W],
+	op *Op,
+	src, dst N,
+	rest []byte,
+	wcodec txn.WeightCodec[W],
+	touched *touchSet,
+) bool {
+	var err error
 	switch op.Kind {
 	case txn.OpAddEdgeWeighted:
 		var weight W

@@ -85,7 +85,7 @@ func TestMapValueCallWithCommas_2975(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			e := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+			e := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 			if c.setup != "" {
 				if _, err := e.RunAny(ctx, c.setup, nil); err != nil {
 					t.Fatalf("setup %s: %v", c.setup, err)

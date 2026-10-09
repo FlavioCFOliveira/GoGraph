@@ -12,7 +12,7 @@ import (
 // hooks documented on Graph.
 func TestGraph_Accessors(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 
 	if g.AdjList() == nil {
 		t.Fatal("AdjList() returned nil")
@@ -45,7 +45,7 @@ func TestGraph_Accessors(t *testing.T) {
 // pointer.
 func TestGraph_EdgeIndex_TracksSetEdgeLabel(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestGraph_EdgeIndex_TracksSetEdgeLabel(t *testing.T) {
 // where the node was never interned.
 func TestGraph_RemoveNodeLabel_UnknownNode(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	// Must not panic and must be a no-op.
 	if err := g.RemoveNodeLabel("ghost", "AnyLabel"); err != nil {
 		t.Fatalf("g.RemoveNodeLabel(\"ghost\", \"AnyLabel\"): %v", err)
@@ -77,7 +77,7 @@ func TestGraph_RemoveNodeLabel_UnknownNode(t *testing.T) {
 // where the label was never interned, even though the node exists.
 func TestGraph_RemoveNodeLabel_UnknownLabel(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("alice"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestGraph_RemoveNodeLabel_UnknownLabel(t *testing.T) {
 // label.
 func TestGraph_HasNodeLabel_NegativePaths(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 
 	if g.HasNodeLabel("ghost", "Anything") {
 		t.Fatal("HasNodeLabel on unknown node must return false")
@@ -115,7 +115,7 @@ func TestGraph_HasNodeLabel_NegativePaths(t *testing.T) {
 // no-bag early-return branches of NodeLabels.
 func TestGraph_NodeLabels_NegativePaths(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 
 	if got := g.NodeLabels("ghost"); got != nil {
 		t.Fatalf("NodeLabels(ghost) = %v, want nil", got)
@@ -134,7 +134,7 @@ func TestGraph_NodeLabels_NegativePaths(t *testing.T) {
 // does not contain the queried label.
 func TestGraph_HasEdgeLabel_NegativePaths(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 
 	if g.HasEdgeLabel("ghost-src", "alice", "X") {
 		t.Fatal("HasEdgeLabel: unknown src must return false")

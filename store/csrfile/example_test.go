@@ -22,7 +22,7 @@ func Example() {
 
 	// Build a small weighted directed graph and freeze it into an
 	// immutable CSR snapshot.
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for _, e := range []struct {
 		src, dst string
 		w        int64

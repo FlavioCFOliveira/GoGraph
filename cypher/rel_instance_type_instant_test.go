@@ -64,7 +64,7 @@ func TestRelInstanceType_HoldsAcrossConcurrentCreateAndDelete(t *testing.T) {
 		},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			eng := cypher.NewEngine(g)
 			defer func() {
 				if err := eng.Close(); err != nil {

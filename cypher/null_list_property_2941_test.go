@@ -194,7 +194,7 @@ func TestNullListProperty_RefusedInMemory_2941(t *testing.T) {
 	for _, c := range cases2941() {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+			eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 			if _, err := run2941(eng, fixture2941, nil); err != nil {
 				t.Fatalf("fixture: %v", err)
 			}
@@ -213,7 +213,7 @@ func TestNullListProperty_RefusedOnWAL_2941(t *testing.T) {
 			if err != nil {
 				t.Fatalf("wal.Open: %v", err)
 			}
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			st := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 				Codec:       txn.NewStringCodec(),
 				WeightCodec: txn.NewFloat64WeightCodec(),
@@ -247,7 +247,7 @@ func TestNullListProperty_RefusedOnWAL_2941(t *testing.T) {
 // removal rather than an error.
 func TestNullListProperty_ControlsStillStore_2941(t *testing.T) {
 	t.Parallel()
-	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 	if _, err := run2941(eng, fixture2941, nil); err != nil {
 		t.Fatalf("fixture: %v", err)
 	}

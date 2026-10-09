@@ -54,7 +54,7 @@ func edgeDate(i int) PropertyValue {
 // dense; fillEveryN==2 ⇒ 50% fill ⇒ sparse for a string column). The graph is
 // Compacted so the resident footprint reflects the tight final arrays.
 func buildEdgePropGraph(fillEveryN int) *Graph[string, int64] {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	for src := 0; src < sparseMemSources; src++ {
 		s := fmt.Sprintf("s%d", src)
 		_ = g.AddNode(s)

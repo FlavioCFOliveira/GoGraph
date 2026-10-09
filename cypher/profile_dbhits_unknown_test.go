@@ -48,7 +48,7 @@ import (
 // unmistakable next to a plan that claims a single-digit db-hit total.
 func fanGraph(t *testing.T, fan int) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 	mustRun(t, eng, "CREATE (:Root {k:0})")

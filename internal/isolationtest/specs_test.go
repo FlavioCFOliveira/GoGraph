@@ -51,7 +51,7 @@ import (
 // memEngine builds the store-less engine: MVCC concurrency control with no
 // durability cost mixed in, which is the wiring these scenarios are about.
 func memEngine() (*isolationtest.Engine, error) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return &isolationtest.Engine{
 		Eng:   cypher.NewEngine(g),
 		Close: func() error { return nil },
@@ -350,7 +350,7 @@ func TestCommitOfPoisonedTxRollsItBack(t *testing.T) {
 	)
 	r := &isolationtest.Runner{
 		NewEngine: func() (*isolationtest.Engine, error) {
-			g = lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g = lpg.New[string, float64](adjlist.Config{})
 			eng := cypher.NewEngine(g)
 			return &isolationtest.Engine{Eng: eng, Close: eng.Close}, nil
 		},

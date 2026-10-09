@@ -23,7 +23,7 @@ import (
 //     does NOT create a duplicate; the final count is still one.
 func TestMerge_CreateWhenNotPresent(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -43,7 +43,7 @@ func TestMerge_CreateWhenNotPresent(t *testing.T) {
 // to the newly created node.
 func TestMerge_OnCreateSet(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `MERGE (n:Person {name: "Bob"}) ON CREATE SET n.created = true`)

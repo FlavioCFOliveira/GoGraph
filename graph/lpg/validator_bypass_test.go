@@ -28,7 +28,7 @@ func (ageValidator) Validate(key string, value PropertyValue) error {
 // installed and two connected nodes a→b plus one edge handle h.
 func newValidatedGraph(t *testing.T) (g *Graph[string, int64], h uint64) {
 	t.Helper()
-	g = New[string, int64](adjlist.Config{Directed: true})
+	g = New[string, int64](adjlist.Config{})
 	g.SetValidator(ageValidator{})
 
 	if err := g.AddNode("a"); err != nil {
@@ -39,7 +39,7 @@ func newValidatedGraph(t *testing.T) (g *Graph[string, int64], h uint64) {
 	}
 
 	// Use AddEdgeH so we have a handle to pass to SetEdgePropertyByHandle.
-	cfg := adjlist.Config{Directed: true, Multigraph: true}
+	cfg := adjlist.Config{}
 	gm := New[string, int64](cfg)
 	gm.SetValidator(ageValidator{})
 	if err := gm.AddNode("a"); err != nil {

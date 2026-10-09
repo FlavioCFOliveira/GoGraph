@@ -39,7 +39,7 @@ import (
 // which is the documented way to populate a graph that is indexed afterwards.
 func newMergeProbeBenchEngine(b *testing.B, pop int, stringKey bool, ddl string) *cypher.Engine {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < pop; i++ {
 		n := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(n); err != nil {

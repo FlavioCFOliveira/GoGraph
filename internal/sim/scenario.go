@@ -138,11 +138,6 @@ type Scenario struct {
 	// otherwise decide the regime of whatever its neighbours drew; every other
 	// scenario runs under a shared hold. See [gomaxprocsMu] (rmp #2613).
 	ClampsGOMAXPROCS bool
-	// Multigraph opens the engine's graph as a directed multigraph
-	// (ModeDeterministic), so repeated CREATEs between the same endpoints add
-	// parallel edge instances. Only a scenario whose oracle models edges per
-	// instance sets it (edge-properties, rmp #2449). See [Config.Multigraph].
-	Multigraph bool
 	// SearchEvery is the in-loop cadence (in ticks) for the search battery
 	// (ModeDeterministic): [runDeterministic] sets it on the simulator. 0 disables
 	// periodic search checks; the terminal search check still runs when
@@ -239,7 +234,6 @@ func (sc *Scenario) DeterministicConfig(seed uint64) Config {
 		Disk:       sc.Disk,
 		EngineOpts: sc.EngineOpts,
 		CheckEvery: sc.CheckEvery,
-		Multigraph: sc.Multigraph,
 	}
 }
 

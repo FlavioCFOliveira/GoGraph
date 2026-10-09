@@ -33,7 +33,7 @@ import (
 // All nodes carry a "name" string property.
 func newHubSpokeEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:Node {name: 'hub'})-[:E]->(:Node {name: 'sp0'})`)
 	runSetup(t, eng, `MATCH (h:Node {name: 'hub'}) CREATE (h)-[:E]->(:Node {name: 'sp1'})`)
@@ -89,7 +89,7 @@ func TestCountSubquery_ReturnsOutDegree(t *testing.T) {
 // when the matched node has no outgoing edges.
 func TestCountSubquery_IsolatedNode(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:Alone {name: 'solo'})`)
 
@@ -111,7 +111,7 @@ func TestCountSubquery_IsolatedNode(t *testing.T) {
 // therefore no COUNT evaluations) when the graph is empty.
 func TestCountSubquery_OnEmptyGraph(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	rows := drainAll(t, eng, `MATCH (n) RETURN COUNT { (n)-[]->(m) } AS c`)

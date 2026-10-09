@@ -14,7 +14,7 @@ import (
 // snapshot: two :Person nodes (alice, bob) who both BOUGHT a :Product
 // (widget).
 func buildSocialGraph() (*lpg.Graph[string, int], *csr.CSR[int]) {
-	g := lpg.New[string, int](adjlist.Config{Directed: true})
+	g := lpg.New[string, int](adjlist.Config{})
 	for _, p := range []string{"alice", "bob"} {
 		_ = g.AddNode(p)
 		_ = g.SetNodeLabel(p, "Person")

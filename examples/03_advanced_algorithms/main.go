@@ -33,7 +33,10 @@
 // that the bridge nodes have HIGH betweenness but LOW PageRank: the two
 // centrality measures disagree, and the topology shows exactly why.
 //
-// The graph is built UNDIRECTED. Brandes betweenness is classically read on
+// The graph is analysed as UNDIRECTED. Each edge is stored once, as one
+// directed relationship, and every algorithm reads the symmetric projection
+// built by [csr.CSR.BuildSymmetric], which makes each relationship reachable
+// from both endpoints. Brandes betweenness is classically read on
 // undirected graphs, and on a connected undirected graph PageRank always
 // converges with no dangling-node sinks. Edge weights are positive with
 // spread and are consumed ONLY by Dijkstra: BFS counts hops, and both Brandes
@@ -186,7 +189,10 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	// The adjlist stores one directed relationship per edge; BuildSymmetric
+	// projects it to the undirected view (each edge readable from both
+	// endpoints) that the four algorithms are defined on.
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	mapper := a.Mapper()
 
 	fmt.Fprintf(w, "nodes.total=%d\n", c.Order())
@@ -397,9 +403,10 @@ func (c config) bridgeID(community int) int {
 	return c.communities*c.nodesPerCommunity + community
 }
 
-// build materialises the hybrid graph described by cfg into a fresh
-// undirected adjlist, consuming the seeded RNG in a single fixed order so the
-// shape is a pure function of cfg.seed. The order is: each community in turn
+// build materialises the hybrid graph described by cfg into a fresh adjlist,
+// storing one directed relationship per undirected edge and consuming the
+// seeded RNG in a single fixed order so the shape is a pure function of
+// cfg.seed. The order is: each community in turn
 // (seed clique, then preferential-attachment growth), then each bridge node's
 // intra-community edges, then the bridge ring. Edge weights are drawn from
 // [weightMin, weightMax] at creation time. The build honours ctx cancellation
@@ -410,7 +417,7 @@ func build(ctx context.Context, cfg config) (*adjlist.AdjList[int, int64], genRe
 	rng := rand.New(rand.NewSource(cfg.seed))
 	start := time.Now()
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 
 	addEdge := func(u, v int) error {
 		w := cfg.weightMin + rng.Int63n(cfg.weightMax-cfg.weightMin+1)
@@ -461,6 +468,9 @@ func build(ctx context.Context, cfg config) (*adjlist.AdjList[int, int64], genRe
 		next := (community + 1) % cfg.communities
 		if next == community {
 			break // a single community has no ring
+		}
+		if cfg.communities == 2 && community == 1 {
+			break // two bridges share one ring edge; storing it twice would add a parallel relationship
 		}
 		if err := addEdge(cfg.bridgeID(community), cfg.bridgeID(next)); err != nil {
 			return nil, genResult{}, err

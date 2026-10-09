@@ -65,7 +65,7 @@ func (s *gatedHashSub) DistinctValues() uint64 {
 
 func ddlWindowEngine(t *testing.T) (*cypher.Engine, *index.Manager) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	res, err := eng.RunAny(context.Background(), "CREATE (:P {name: 'a'}), (:P {name: 'b'})", nil)
 	if err != nil {

@@ -48,7 +48,7 @@ var noopIndexKinds = []noopIndexKind{
 // the defect.
 func noopFixture(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64]) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 	for _, q := range []string{

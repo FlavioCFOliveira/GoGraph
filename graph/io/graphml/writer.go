@@ -13,8 +13,8 @@ import (
 )
 
 // Write streams a GraphML document representing a to w. The output
-// includes a single <graph> with directed or undirected edgedefault
-// inferred from a, a <key for=edge attr.name=weight attr.type=long>
+// includes a single <graph> with edgedefault="directed" (every stored edge
+// is directed), a <key for=edge attr.name=weight attr.type=long>
 // declaration, and one <node>/<edge> per node and edge.
 //
 // Concurrency: Write and [WriteCtx] are safe to call while other goroutines
@@ -70,10 +70,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 	}{ID: "w", For: "edge", AttrName: "weight", AttrType: "long"}, xml.StartElement{Name: xml.Name{Local: "key"}}); err != nil {
 		return err
 	}
-	dir := "directed"
-	if !a.Directed() {
-		dir = "undirected"
-	}
+	const dir = "directed"
 	graphStart := xml.StartElement{
 		Name: xml.Name{Local: "graph"},
 		Attr: []xml.Attr{

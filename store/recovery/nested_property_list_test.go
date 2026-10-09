@@ -64,7 +64,7 @@ func TestNestedPropertyList_WALOnlyRecoveryLosesNothing_2783(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec[string, int64](g, w, codec)
 
 	tx := store.Begin()

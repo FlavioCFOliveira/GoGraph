@@ -24,7 +24,7 @@ import (
 // section. We use string-keyed nodes with int64 weights so the
 // generic Store instantiation matches the recovery harness.
 func newSmokeGraph() *lpg.Graph[string, int64] {
-	return lpg.New[string, int64](adjlist.Config{Directed: true})
+	return lpg.New[string, int64](adjlist.Config{})
 }
 
 // countingBackend records every metric event so the wire-up smoke
@@ -75,7 +75,7 @@ func (c *countingBackend) counterFor(name string) uint64 {
 // a valid source NodeID for traversal-driven tests.
 func buildSmokeCSR(t *testing.T) (*csr.CSR[int64], graph.NodeID) {
 	t.Helper()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < 6; i++ {
 		if err := a.AddNode(i); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -144,7 +144,7 @@ func driveCentralitySample(t *testing.T, be *countingBackend, c *csr.CSR[int64])
 // driveCSVSample exercises the graph/io/csv writer with context.
 func driveCSVSample(t *testing.T, be *countingBackend) {
 	t.Helper()
-	csvAdj := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	csvAdj := adjlist.New[string, int64](adjlist.Config{})
 	if err := csvAdj.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

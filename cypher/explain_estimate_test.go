@@ -163,7 +163,7 @@ func TestExplainEstimate_RangeStatsWithError(t *testing.T) {
 // store is maintained. The assertion is robust to the anchor-swap peephole:
 // D(Person,KNOWS,Out) == D(Person,KNOWS,In) == 3 for this symmetric fixture.
 func TestExplainEstimate_ExpandDegreeExact(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	e := NewEngine(g)
 	ctx := context.Background()
 	if _, err := e.RunInTx(ctx, `CREATE (a:Person {n:'a'}), (b:Person {n:'b'}),
@@ -189,7 +189,7 @@ func TestExplainEstimate_ExpandDegreeExact(t *testing.T) {
 // fires and the leaf is rendered.
 func TestExplainEstimate_RangeSeekLeafExact(t *testing.T) {
 	const n = 1100
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("i%d", i)
 		if err := g.AddNode(key); err != nil {

@@ -49,7 +49,7 @@ type liDiffNode struct {
 // returns the ground truth alongside it.
 func liDiffGraph(t *testing.T) (*lpg.Graph[string, float64], []liDiffNode) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	truth := make([]liDiffNode, 0, liDiffPop+64)
 
 	add := func(key string, labels ...string) {
@@ -382,7 +382,7 @@ func TestLabelIntersect_Rapid(t *testing.T) {
 		pA := rapid.IntRange(1, 9).Draw(rt, "pctA")
 		pB := rapid.IntRange(1, 9).Draw(rt, "pctB")
 
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		inA := make(map[string]bool, pop)
 		inB := make(map[string]bool, pop)
 		for i := 0; i < pop; i++ {
@@ -460,7 +460,7 @@ func TestLabelIntersect_Rapid(t *testing.T) {
 // outside always ∪ churn.
 func TestLabelIntersect_ConcurrentRelabelling(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	const (
 		alwaysN = 40

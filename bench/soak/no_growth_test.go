@@ -93,7 +93,7 @@ func TestNoGrowth_HeapFDGoroutine(t *testing.T) {
 
 	// ── Build seed graph for background workload ──────────────────────────────
 	const graphN = 512
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	rng := rand.New(rand.NewPCG(7, 11)) //nolint:gosec // deterministic
 	for i := range graphN {
 		if err := a.AddNode(i); err != nil {

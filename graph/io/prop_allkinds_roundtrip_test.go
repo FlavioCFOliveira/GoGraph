@@ -53,7 +53,7 @@ func allKindCases() []propCase {
 // variants as properties.
 func buildGraph(t *testing.T, cases []propCase) *lpg.Graph[string, int64] {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("n"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestAllKindsRoundtrip_JSONL(t *testing.T) {
 		t.Fatalf("WriteWithProps: %v", err)
 	}
 
-	g2, _, err := jsonl.ReadWithProps(strings.NewReader(buf.String()), adjlist.Config{Directed: true})
+	g2, _, err := jsonl.ReadWithProps(strings.NewReader(buf.String()), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadWithProps: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestNonFiniteFloats_RoundTripAndLexical(t *testing.T) {
 		{"ninf", math.Inf(-1)},
 		{"nan", math.NaN()},
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("n"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestNonFiniteFloats_RoundTripAndLexical(t *testing.T) {
 	if _, err := jsonl.WriteWithProps(&jbuf, g); err != nil {
 		t.Fatalf("JSONL WriteWithProps: %v", err)
 	}
-	g3, _, err := jsonl.ReadWithProps(strings.NewReader(jbuf.String()), adjlist.Config{Directed: true})
+	g3, _, err := jsonl.ReadWithProps(strings.NewReader(jbuf.String()), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("JSONL ReadWithProps: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestControlAndBinaryStrings_NoSilentCorruption(t *testing.T) {
 				if _, err := jsonl.WriteWithProps(&jbuf, g); err != nil {
 					t.Fatalf("JSONL WriteWithProps: %v", err)
 				}
-				g2, _, err := jsonl.ReadWithProps(strings.NewReader(jbuf.String()), adjlist.Config{Directed: true})
+				g2, _, err := jsonl.ReadWithProps(strings.NewReader(jbuf.String()), adjlist.Config{})
 				if err != nil {
 					t.Fatalf("JSONL ReadWithProps: %v", err)
 				}

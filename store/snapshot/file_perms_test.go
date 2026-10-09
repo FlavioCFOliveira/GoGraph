@@ -26,7 +26,7 @@ func TestSnapshotFiles_Mode0600(t *testing.T) {
 	}
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
 	bt := btree.New[string]()
@@ -78,7 +78,7 @@ func TestSnapshotFiles_Mode0600(t *testing.T) {
 // break the write+read round-trip. Finding L2.
 func TestSnapshotFiles_RoundTripAfterTightening(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("x", "y", 7); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

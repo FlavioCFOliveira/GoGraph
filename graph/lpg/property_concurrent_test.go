@@ -25,7 +25,7 @@ func TestLPG_Concurrent(t *testing.T) {
 		perGoroutine  = 10_000
 	)
 
-	g := lpg.New[int, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int, int64](adjlist.Config{})
 
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines)

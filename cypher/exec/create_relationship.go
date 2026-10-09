@@ -151,26 +151,13 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 	}
 
 	// AddEdgeH allocates a stable per-edge handle and stamps it onto the
-	// adjacency slot. In multigraph storage (the openCypher TCK model) each
-	// CREATE is a distinct slot with a distinct handle, so the read path
+	// adjacency slot. Storage is a directed multigraph (rmp #3072), so each
+	// CREATE is a distinct slot with a distinct handle, and the read path
 	// resolves this CREATE's type/properties by `handle` — an identity that
 	// survives the deletion of a parallel sibling, unlike the positional
-	// CSR-slot index the old read path re-derived. In simple-graph storage
-	// a duplicate (src, dst) is collapsed and the handle is not stored; the
-	// read path there falls back to the per-pair / per-CREATE-index union,
-	// which the *At writes below keep populated.
-	//
-	// That collapse is why [lpg.Graph.AddEdgeH] documents its handle as
-	// ADVISORY in simple-graph mode, and it is the reason the emitted row's
-	// identity (below) can safely be this handle: a Cypher write never
-	// reaches the collapse. Both mutator adapters reject a duplicate ordered
-	// pair on a non-multigraph graph with ErrParallelEdgeInSimpleGraph
-	// BEFORE any mutation (rmp #1856, cypher/api.go), so every AddEdgeH that
-	// returns here stamped its handle on a real slot. And were the guard ever
-	// removed, the row identity would be no worse than the by-handle writes
-	// immediately below it, which are keyed by the very same handle: an
-	// unstored handle already orphans this CREATE's inline properties, so it
-	// could not orphan a later SET any harder.
+	// CSR-slot index the old read path re-derived. Every AddEdgeH that
+	// returns here stamped its handle on a real slot, which is why the
+	// emitted row's identity (below) is this handle.
 	actualSrcID, actualDstID, handle, err := op.mutator.AddEdgeH(srcLabel, dstLabel, 0)
 	if err != nil {
 		return false, fmt.Errorf("exec: CreateRelationship AddEdge: %w", err)
@@ -180,11 +167,9 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 			return false, err
 		}
 	}
-	// Bump the Cypher CREATE-multiplicity counter even when AddEdge
-	// silently no-ops a duplicate (a→b) in simple-graph storage —
+	// Bump the Cypher CREATE-multiplicity counter for the pair —
 	// `MATCH (a:A),(b:B) MERGE (a)-[r:T]->(b) RETURN count(r)` must
-	// see one row per CREATE statement, not one per distinct storage
-	// entry (Merge5 [3]).
+	// see one row per CREATE statement (Merge5 [3]).
 	instanceIdx := op.mutator.IncEdgeCreateCount(srcLabel, dstLabel)
 	if op.relType != "" {
 		if err := op.mutator.SetEdgeLabelAt(srcLabel, dstLabel, instanceIdx, op.relType); err != nil {

@@ -24,7 +24,7 @@ func TestSnapshot_ForwardCompat(t *testing.T) {
 	t.Parallel()
 	// Build a small string-keyed graph so WriteSnapshotFull produces
 	// a v3 manifest (mapper.bin emitted for string N).
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AdjList().AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

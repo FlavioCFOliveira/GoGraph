@@ -29,7 +29,7 @@ func TestPageRanker_BitIdenticalToOneShot(t *testing.T) {
 
 	t.Run("serial-path-small", func(t *testing.T) {
 		t.Parallel()
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		for i := 0; i < 7; i++ {
 			if err := a.AddEdge(i, (i+1)%7, struct{}{}); err != nil {
 				t.Fatalf("AddEdge: %v", err)
@@ -41,7 +41,7 @@ func TestPageRanker_BitIdenticalToOneShot(t *testing.T) {
 
 	t.Run("parallel-path-large", func(t *testing.T) {
 		t.Parallel()
-		g, err := shapegen.BarabasiAlbert(10000, 6, 17).Build(adjlist.Config{Directed: true})
+		g, err := shapegen.BarabasiAlbert(10000, 6, 17).Build(adjlist.Config{})
 		if err != nil {
 			t.Fatalf("BarabasiAlbert.Build: %v", err)
 		}
@@ -84,7 +84,7 @@ func assertRankerMatchesOneShot[W any](t *testing.T, c *csr.CSR[W], opts PageRan
 // an empty graph (n <= 0) and a graph of only ghost slots (live == 0).
 func TestPageRanker_EmptyAndIsolated(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	c := csr.BuildFromAdjList(a)
 	pr := NewPageRanker(c)
 	ranks, iters, err := pr.Run(context.Background(), DefaultPageRankOptions())
@@ -100,7 +100,7 @@ func TestPageRanker_EmptyAndIsolated(t *testing.T) {
 // only on construction.
 func TestPageRanker_InvalidOptions(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestPageRanker_InvalidOptions(t *testing.T) {
 // shared read-only CSR.
 func TestPageRanker_ConcurrentIndependent(t *testing.T) {
 	t.Parallel()
-	g, err := shapegen.BarabasiAlbert(5000, 5, 23).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.BarabasiAlbert(5000, 5, 23).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("BarabasiAlbert.Build: %v", err)
 	}

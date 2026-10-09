@@ -40,7 +40,7 @@ func TestCommit_ApplyRefusalLeavesNothingDurable(t *testing.T) {
 
 	const n = 400 // distinct edge sources > 256 shards => cap=1 overflows on apply
 	// Cap each shard at a single node slot so the apply phase overflows.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, MaxShardCapacity: 1})
+	g := lpg.New[string, int64](adjlist.Config{MaxShardCapacity: 1})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

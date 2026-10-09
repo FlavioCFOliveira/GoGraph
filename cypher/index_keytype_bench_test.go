@@ -38,7 +38,7 @@ import (
 // Cypher seed would dominate the setup.
 func newKeyTypeEngine(b *testing.B, n int, indexed, idxType string) *cypher.Engine {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("k%d", i)
 		if err := g.AddNode(key); err != nil {

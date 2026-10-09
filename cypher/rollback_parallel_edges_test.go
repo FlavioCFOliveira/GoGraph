@@ -170,7 +170,7 @@ func assertRollbackLeavesGraphUnchanged(t *testing.T, eng *cypher.Engine, base [
 func TestRollback_ParallelEdges_InMemory_2885(t *testing.T) {
 	newSeeded := func(t *testing.T) (*cypher.Engine, []string) {
 		t.Helper()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 		seedParallelEdges(t, eng)
 		base := graphDump(t, eng)
@@ -228,10 +228,6 @@ func TestRollback_ParallelEdges_Durable_2885(t *testing.T) {
 	}
 
 	eng, g, w := open()
-	if !g.AdjList().Multigraph() || !g.AdjList().Directed() {
-		t.Fatalf("recovered graph is not a directed multigraph: directed=%v multigraph=%v",
-			g.AdjList().Directed(), g.AdjList().Multigraph())
-	}
 	seedParallelEdges(t, eng)
 	base := graphDump(t, eng)
 	if len(base) == 0 {

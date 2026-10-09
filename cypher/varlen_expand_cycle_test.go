@@ -37,7 +37,7 @@ func buildCycle(tb testing.TB, n int) (*lpg.Graph[string, float64], *cypher.Engi
 	if n > 26 {
 		tb.Fatal("buildCycle: n must be ≤ 26")
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	names := make([]string, n)
 	for i := range n {
 		names[i] = string(rune('a' + i))

@@ -48,7 +48,7 @@ func TestBetweenness_BridgeCluster_Rapid(t *testing.T) {
 // plus the NodeIDs of the two bridge endpoints (k-1 and k).
 func buildBridgeGraph(tb testing.TB, k int) (bc []float64, bridgeEndpointA, bridgeEndpointB uint64) {
 	tb.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 
 	// Clique A: all edges among 0..k-1.
 	for i := 0; i < k; i++ {
@@ -71,7 +71,7 @@ func buildBridgeGraph(tb testing.TB, k int) (bc []float64, bridgeEndpointA, brid
 		tb.Fatalf("AddEdge bridge (%d,%d): %v", k-1, k, err)
 	}
 
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	bc = Betweenness(c)
 
 	idA, okA := a.Mapper().Lookup(k - 1)

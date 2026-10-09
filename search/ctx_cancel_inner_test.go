@@ -74,7 +74,7 @@ func TestBFSDirectionOptCtx_Cancel_DuringTraversal(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	a := g.AdjList()
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	srcID, ok := a.Mapper().Lookup(0)
 	if !ok {
 		t.Fatalf("key 0 not found in mapper")
@@ -108,7 +108,7 @@ func TestBFSDirectionOptCtx_Cancel_InBottomUpScan(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	a := g.AdjList()
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	srcID, ok := a.Mapper().Lookup(0)
 	if !ok {
 		t.Fatalf("key 0 not found in mapper")
@@ -131,7 +131,7 @@ func TestBFSDirectionOptCtx_Cancel_PreCancelled(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	a := g.AdjList()
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	srcID, ok := a.Mapper().Lookup(0)
 	if !ok {
 		t.Fatalf("key 0 not found in mapper")
@@ -156,7 +156,7 @@ func TestBFSDirectionOptCtx_LiveContext_FullTraversal(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	a := g.AdjList()
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	srcID, ok := a.Mapper().Lookup(0)
 	if !ok {
 		t.Fatalf("key 0 not found in mapper")
@@ -208,11 +208,11 @@ func TestBFSDirectionOptCtx_LiveContext_FullTraversal(t *testing.T) {
 // per-vertex check from the per-level check it replaces.
 func TestDiameterCtx_Cancel_DuringInnerBFS(t *testing.T) {
 	t.Parallel()
-	g, err := shapegen.Complete(1_000, false).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.Complete(1_000, false).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 
 	ctx := &cancelAfterNCalls{Context: context.Background(), n: 3}
 	_, _, _, cerr := DiameterCtx(ctx, c)
@@ -226,11 +226,11 @@ func TestDiameterCtx_Cancel_DuringInnerBFS(t *testing.T) {
 // diameter exactly 1000 and the refinement converges (exact == true).
 func TestDiameterCtx_LiveContext_Unchanged(t *testing.T) {
 	t.Parallel()
-	g, err := shapegen.Cycle(2_000, false).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.Cycle(2_000, false).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 
 	lo, hi, exact, cerr := DiameterCtx(context.Background(), c)
 	if cerr != nil {
@@ -252,7 +252,7 @@ func TestDiameterCtx_LiveContext_Unchanged(t *testing.T) {
 // outer iteration.
 func TestTarjanSCCCtx_Cancel_DuringInnerLoop(t *testing.T) {
 	t.Parallel()
-	g, err := shapegen.Cycle(20_000, true).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.Cycle(20_000, true).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestTarjanSCCCtx_Cancel_DuringInnerLoop(t *testing.T) {
 func TestTarjanSCCCtx_LiveContext_Unchanged(t *testing.T) {
 	t.Parallel()
 	const n = 20_000
-	g, err := shapegen.Cycle(n, true).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.Cycle(n, true).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -313,11 +313,11 @@ func firstLen(sccs [][]graph.NodeID) int {
 // discriminates the inner-work poll from the per-outer-vertex poll it replaces.
 func TestCountTrianglesCtx_Cancel_InHubPairLoop(t *testing.T) {
 	t.Parallel()
-	g, err := shapegen.Complete(300, false).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.Complete(300, false).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 
 	ctx := &cancelAfterFirstCheck{Context: context.Background()}
 	total, perNode, cerr := CountTrianglesCtx(ctx, c)
@@ -335,11 +335,11 @@ func TestCountTrianglesCtx_Cancel_InHubPairLoop(t *testing.T) {
 func TestCountTrianglesCtx_LiveContext_Unchanged(t *testing.T) {
 	t.Parallel()
 	const m = 300
-	g, err := shapegen.Complete(m, false).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.Complete(m, false).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 
 	total, _, cerr := CountTrianglesCtx(context.Background(), c)
 	if cerr != nil {

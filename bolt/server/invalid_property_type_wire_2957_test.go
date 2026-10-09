@@ -30,7 +30,7 @@ import (
 func TestInvalidPropertyType_ReachesTheClientAsTypeError_2957(t *testing.T) {
 	engines := map[string]func(t *testing.T) *cypher.Engine{
 		"memory": func(_ *testing.T) *cypher.Engine {
-			return cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true}))
+			return cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 		},
 		"wal": newWALEngine,
 	}

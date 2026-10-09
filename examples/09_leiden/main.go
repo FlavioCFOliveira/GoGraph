@@ -10,7 +10,9 @@
 //
 // # Model
 //
-// The graph is undirected and unweighted. The N = communities ×
+// The graph is unweighted and analysed as undirected: each edge is stored
+// once, as one directed relationship, and Leiden reads the symmetric
+// projection built by [csr.CSR.BuildSymmetric]. The N = communities ×
 // communitySize nodes are partitioned into K equal blocks. For every
 // unordered node pair (i, j) an edge is drawn independently with
 // probability pIn when i and j share a block and pOut when they do not.
@@ -170,7 +172,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	// One stored relationship per edge; BuildSymmetric projects it to the
+	// undirected view Leiden and the modularity computation are defined on.
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	buildElapsed := time.Since(buildStart)
 
 	nodes := cfg.communities * cfg.communitySize
@@ -211,12 +215,12 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 }
 
 // buildSBM materialises the symmetric stochastic block model described by
-// cfg into a fresh undirected AdjList, returning it together with the
+// cfg into a fresh AdjList, returning it together with the
 // realised edge count (the random draw means the total is not known until
 // the graph is built). Node v in [0, K·s) belongs to planted community
 // v / s. Every unordered pair (i, j) is offered an edge with probability
-// pIn when i and j share a community and pOut otherwise; AddEdge mirrors
-// each undirected edge internally. The build honours ctx cancellation on a
+// pIn when i and j share a community and pOut otherwise; each drawn edge is
+// stored once, as the directed relationship i -> j with i < j. The build honours ctx cancellation on a
 // coarse interval so a cancelled large run stops promptly.
 func buildSBM(ctx context.Context, cfg config) (*adjlist.AdjList[int, struct{}], int, error) {
 	//nolint:gosec // G404: a seeded math/rand is intentional here — the example
@@ -225,7 +229,7 @@ func buildSBM(ctx context.Context, cfg config) (*adjlist.AdjList[int, struct{}],
 	rng := rand.New(rand.NewSource(cfg.seed))
 	n := cfg.communities * cfg.communitySize
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	// Intern every node up front so isolated nodes (none expected at the
 	// configured densities, but possible for adversarial parameters) still
 	// count toward Order and receive a community assignment.
@@ -265,14 +269,14 @@ func buildSBM(ctx context.Context, cfg config) (*adjlist.AdjList[int, struct{}],
 const checkEvery = 256
 
 // computeModularity returns the Newman modularity Q of partition part over
-// the undirected, unweighted snapshot c, using the per-community form
+// the symmetric (undirected), unweighted projection c, using the per-community form
 //
 //	Q = Σ_c [ L_c/m − (D_c/2m)² ]
 //
 // where m is the edge count, L_c the number of edges with both endpoints in
 // community c (counted once), and D_c the summed degree of community c
-// (Newman & Girvan, Phys. Rev. E 69, 026113, 2004). The CSR stores each
-// undirected edge as two directed entries, so m is the total directed
+// (Newman & Girvan, Phys. Rev. E 69, 026113, 2004). The symmetric CSR holds
+// each stored relationship as two directed entries, so m is the total directed
 // entry count halved and L_c counts only the u<v direction of an
 // intra-community adjacency; getting that factor of two right is the one
 // subtle point. Ghost NodeID slots (community -1 from sharded packing) are
@@ -282,7 +286,7 @@ func computeModularity(c *csr.CSR[struct{}], part community.Partition) float64 {
 	edges := c.EdgesSlice()
 	maxID := c.MaxNodeID()
 
-	twoM := len(edges) // each undirected edge contributes two directed entries
+	twoM := len(edges) // each stored relationship contributes two directed entries
 	if twoM == 0 {
 		return 0
 	}

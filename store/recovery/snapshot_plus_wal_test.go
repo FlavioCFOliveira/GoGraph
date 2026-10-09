@@ -37,7 +37,7 @@ func TestRecovery_SnapshotPlusWALReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

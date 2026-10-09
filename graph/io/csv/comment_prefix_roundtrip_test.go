@@ -35,7 +35,7 @@ func TestCSVWrite_CommentPrefixedIDRoundtrip(t *testing.T) {
 			// Options built by hand with Comment left zero must still protect
 			// the default '#', exactly as the reader defaults it.
 			name: "hash_zero_comment_defaulted",
-			opts: func() csv.Options { return csv.Options{Delimiter: ',', Directed: true} },
+			opts: func() csv.Options { return csv.Options{Delimiter: ','} },
 			src:  "#a",
 			dst:  "b",
 		},
@@ -60,7 +60,7 @@ func TestCSVWrite_CommentPrefixedIDRoundtrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+			a := adjlist.New[string, int64](adjlist.Config{})
 			if err := a.AddEdge(tc.src, tc.dst, 1); err != nil {
 				t.Fatalf("AddEdge guard edge: %v", err)
 			}

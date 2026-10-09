@@ -36,7 +36,7 @@ const shapeBenchNodes = 20_000
 // result — which is what makes the labelled arms exact controls.
 func seedShapeGraph(b *testing.B) *lpg.Graph[string, float64] {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	keys := make([]string, shapeBenchNodes)
 	for i := 0; i < shapeBenchNodes; i++ {
 		k := "n" + strconv.Itoa(i)

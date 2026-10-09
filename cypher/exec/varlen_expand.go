@@ -216,7 +216,7 @@ type VarLengthExpand struct {
 	fwdHandles []uint64 // forward per-slot stable handles (nil unless a multigraph snapshot)
 	revVerts   []uint64
 	revEdges   []graph.NodeID
-	revHandles []uint64 // reverse per-slot stable handles (nil for DirOut / non-multigraph)
+	revHandles []uint64 // reverse per-slot stable handles (nil for DirOut / a handle-less snapshot)
 
 	// revToFwd maps a reverse-CSR edge position to its corresponding
 	// forward-CSR edge position. Used by the relationship-uniqueness
@@ -239,7 +239,7 @@ type VarLengthExpand struct {
 	// reverse dst->src slot pairs with the n-th forward src->dst... actually
 	// dst->src slot). The handle path mirrors [Expand.lookupFwdEdgePosByHandle]
 	// (the single-hop #1634 fix); the ordinal fallback mirrors its pre-#1634
-	// behaviour for non-multigraph snapshots.
+	// behaviour for handle-less snapshots.
 	revToFwd []uint64
 
 	// BFS state for the current input row. Two slices are kept and ping-ponged
@@ -768,7 +768,7 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 		// disjunction -[:A|B*]- accepts an edge of EITHER type. Comparing the
 		// looked-up label against the single op.edgeType (= RelTypes[0]) here
 		// silently dropped every edge of a non-first declared type, even on a
-		// simple graph (rmp #1688/D3); the set test mirrors
+		// pair without parallel edges (rmp #1688/D3); the set test mirrors
 		// [Expand.passesFilter]. op.edgeType stays as the "a filter was
 		// requested" gate, set in lockstep with op.admit.
 		if isFwd && op.edgeType != "" {

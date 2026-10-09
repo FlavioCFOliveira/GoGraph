@@ -225,7 +225,7 @@ func TestReplayWAL_RestoresTheMVCCClockFloor(t *testing.T) {
 			t.Errorf("reader Close: %v", cerr)
 		}
 	}()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	res, err := recovery.ReplayWAL[string, float64](
 		context.Background(), r, g,
 		txn.NewStringCodec(), txn.NewFloat64WeightCodec(), txn.DefaultMaxTxnOps)

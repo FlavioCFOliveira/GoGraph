@@ -46,7 +46,7 @@ func (c *flipCtx) Err() error {
 func churnedLabelGraph(t *testing.T, committed, uncommitted int) (*Graph[string, float64], LabelID, *Snapshot) {
 	t.Helper()
 	ctx := context.Background()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	if err := g.ApplyVersioned(func(tx WriteTx) error {
 		for i := range committed {
@@ -208,7 +208,7 @@ func TestDedupSuspects_MatchesSortCompact(t *testing.T) {
 // carry both labels.
 func TestLabelsCountBound_NeverUnderCounts(t *testing.T) {
 	ctx := context.Background()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	mk := func(tx WriteTx, k string, labels ...string) error {
 		if err := g.Writer(tx).AddNode(k); err != nil {

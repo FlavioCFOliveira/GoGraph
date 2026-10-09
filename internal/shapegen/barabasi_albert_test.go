@@ -59,7 +59,6 @@ func TestRandom_BarabasiAlbert_Invariants(t *testing.T) {
 			assertOrder(t, g, uint64(c.n))
 			wantSize := uint64(c.m0*(c.m0-1)/2 + (c.n-c.m0)*c.m0)
 			assertSize(t, g, wantSize)
-			assertDirected(t, g, false)
 			// Simple-graph invariants: no self-loops, no parallel
 			// edges. uniqueUndirectedPairs is defined in
 			// erdos_renyi_test.go and shared across the random family.
@@ -146,7 +145,7 @@ func TestRandom_BarabasiAlbert_Golden_N20(t *testing.T) {
 // other-family contracts.
 func TestRandom_BarabasiAlbert_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	g, err := BarabasiAlbert(10, 2, 42).Build(cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -165,7 +164,7 @@ func TestRandom_BarabasiAlbert_PreservesMaxShardCapacity(t *testing.T) {
 // dags / Erdős-Rényi shard-full tests.
 func TestRandom_BarabasiAlbert_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: false, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	if err := buildBarabasiAlbert(g, 300, 3, 1); err == nil {
 		t.Fatal("buildBarabasiAlbert(g, 300, 3, 1) with MaxShardCapacity=1 returned nil error, want adjlist.ErrShardFull")

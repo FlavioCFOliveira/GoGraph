@@ -84,7 +84,7 @@ func TestLPG_PropertyCommute(t *testing.T) {
 		const nodeKey = 0
 
 		// g1: order A — set k1 then k2.
-		g1 := lpg.New[int, int64](adjlist.Config{Directed: true})
+		g1 := lpg.New[int, int64](adjlist.Config{})
 		if err := g1.AddNode(nodeKey); err != nil {
 			rt.Fatalf("g1 AddNode: %v", err)
 		}
@@ -96,7 +96,7 @@ func TestLPG_PropertyCommute(t *testing.T) {
 		}
 
 		// g2: order B — set k2 then k1.
-		g2 := lpg.New[int, int64](adjlist.Config{Directed: true})
+		g2 := lpg.New[int, int64](adjlist.Config{})
 		if err := g2.AddNode(nodeKey); err != nil {
 			rt.Fatalf("g2 AddNode: %v", err)
 		}

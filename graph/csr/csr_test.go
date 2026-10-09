@@ -11,7 +11,7 @@ import (
 
 func TestCSR_BuildFromAdjList_Empty(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	c := BuildFromAdjList(a)
 	if c.Order() != 0 || c.Size() != 0 {
 		t.Fatalf("empty CSR: Order=%d Size=%d, want 0/0", c.Order(), c.Size())
@@ -23,7 +23,7 @@ func TestCSR_BuildFromAdjList_Empty(t *testing.T) {
 
 func TestCSR_BuildFromAdjList_Directed(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestCSR_BuildFromAdjList_Directed(t *testing.T) {
 
 func TestCSR_RangeBeyondMax(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	if err := a.AddEdge("a", "b", struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestCSR_RangeBeyondMax(t *testing.T) {
 
 func TestCSR_Unweighted_NoWeightsSlice(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	if err := a.AddEdge("a", "b", struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestCSR_Unweighted_NoWeightsSlice(t *testing.T) {
 
 func TestCSR_AdjListParityRandomised(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int](adjlist.Config{})
 	r := rand.New(rand.NewPCG(99, 17)) //nolint:gosec // deterministic test RNG
 	const universe = 256
 	const edges = 4096
@@ -137,7 +137,7 @@ func TestCSR_AdjListParityRandomised(t *testing.T) {
 
 func TestCSR_ConcurrentReaders(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int](adjlist.Config{})
 	r := rand.New(rand.NewPCG(7, 1)) //nolint:gosec // deterministic test RNG
 	const universe = 512
 	for i := 0; i < 4096; i++ {
@@ -200,7 +200,7 @@ func collect[W any](seq func(yield func(graph.NodeID, W) bool)) []nw[W] {
 }
 
 func BenchmarkCSR_NeighboursByID(b *testing.B) {
-	a := adjlist.New[uint32, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[uint32, struct{}](adjlist.Config{})
 	const universe = 1 << 20
 	for i := 0; i < universe; i++ {
 		if err := a.AddNode(uint32(i)); err != nil {
@@ -235,7 +235,7 @@ func BenchmarkCSR_NeighboursByID(b *testing.B) {
 func BenchmarkCSR_Build_TenMillion(b *testing.B) {
 	for n := 0; n < b.N; n++ {
 		b.StopTimer()
-		a := adjlist.New[uint32, struct{}](adjlist.Config{Directed: true})
+		a := adjlist.New[uint32, struct{}](adjlist.Config{})
 		const universe = 1 << 20
 		for i := 0; i < universe; i++ {
 			if err := a.AddNode(uint32(i)); err != nil {
@@ -256,7 +256,7 @@ func BenchmarkCSR_Build_TenMillion(b *testing.B) {
 
 func TestCSR_LiveMask_LiveNodes_LiveCount(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(1, 2, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestCSR_LiveMask_LiveNodes_LiveCount(t *testing.T) {
 
 func TestCSR_LiveMask_Empty(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	c := BuildFromAdjList(a)
 	if mask := c.LiveMask(); mask != nil {
 		t.Fatalf("LiveMask on empty CSR = %v, want nil", mask)
@@ -320,7 +320,7 @@ func TestCSR_LiveMask_Empty(t *testing.T) {
 func TestCSR_LiveMask_DanglingSink(t *testing.T) {
 	t.Parallel()
 	// Sink node (only destination) must be flagged as live.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(1, 0, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestCSR_LiveMask_DanglingSink(t *testing.T) {
 
 func TestCSR_BuildReverse_BasicDirected(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 5); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestCSR_BuildReverse_BasicDirected(t *testing.T) {
 
 func TestCSR_BuildReverse_OnSymmetricGraphPreservesEdges(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestCSR_BuildReverse_OnSymmetricGraphPreservesEdges(t *testing.T) {
 
 func TestCSR_BuildReverse_EmptyGraph(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	c := BuildFromAdjList(a)
 	rev := c.BuildReverse()
 	if rev.Size() != 0 {

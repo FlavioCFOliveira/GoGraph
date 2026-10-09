@@ -96,7 +96,7 @@ var ipParams = map[string]expr.Value{"pk": expr.StringValue("a")}
 
 func ipEngine(t *testing.T, indexed bool) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
 		`CREATE (:O {p: ['a', 'b'], u: 'A', i0: 0, n: 1})`,

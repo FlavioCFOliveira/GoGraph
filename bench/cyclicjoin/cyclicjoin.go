@@ -80,7 +80,7 @@ const AcyclicQuery = `MATCH (a)-[:K]->(b)-[:K]->(c) RETURN count(*) AS n`
 // whatever this measures is the constant-factor and materialisation difference with
 // no skew advantage whatsoever.
 func SeedUniform(n, degree int) (*lpg.Graph[string, float64], error) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	keys := make([]string, n)
 	for i := 0; i < n; i++ {
 		keys[i] = "n" + itoa(i)
@@ -123,7 +123,7 @@ func SeedUniform(n, degree int) (*lpg.Graph[string, float64], error) {
 // every recorded figure unreproducible.
 func SeedPowerLaw(n, mEdges int, triadP float64, seed int64) (*lpg.Graph[string, float64], error) {
 	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // deterministic fixture, not security
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	keys := make([]string, n)
 	for i := 0; i < n; i++ {
 		keys[i] = "n" + itoa(i)

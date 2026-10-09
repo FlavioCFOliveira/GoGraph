@@ -86,7 +86,9 @@ type edgeElement struct {
 // <key>/<node>/<edge> at a time (see streamGraphMLFirstGraph); it never
 // materialises a whole-document DOM, so there is no aggregate document struct.
 // The <graphml> root and <graph> container are handled positionally by the
-// token loop, and edgedefault is read from the <graph> start-element attribute.
+// token loop. The <graph> edgedefault attribute is not consulted: every edge is
+// read as one directed relationship from source to target, whatever the
+// document declares.
 
 // maxKeyDecls bounds the number of <key> declarations a document may carry.
 // Keys are the schema (one per typed property) and, unlike <node>/<edge>, they
@@ -132,7 +134,7 @@ var ErrTooManyData = errors.New("graphml: too many <data> children on a single e
 func streamGraphMLFirstGraph(
 	ctx context.Context,
 	dec *xml.Decoder,
-	onGraph func(keys []keyDecl, directed bool) error,
+	onGraph func(keys []keyDecl) error,
 	onNode func(n *nodeElement) error,
 	onEdge func(e *edgeElement) error,
 ) error {
@@ -164,13 +166,7 @@ func streamGraphMLFirstGraph(
 				}
 				keys = append(keys, k)
 			case "graph":
-				directed := true
-				for _, a := range t.Attr {
-					if a.Name.Local == "edgedefault" {
-						directed = a.Value != "undirected"
-					}
-				}
-				if err := onGraph(keys, directed); err != nil {
+				if err := onGraph(keys); err != nil {
 					return err
 				}
 				// Stream this graph's children (only the first graph is
@@ -318,7 +314,9 @@ func streamGraphChildren(
 
 // ReadInto parses a GraphML document from r into an adjacency list.
 // Returns the loaded list, the number of edges added, and an error
-// on parse failure.
+// on parse failure. Each <edge> becomes one directed relationship from
+// source to target, including in a document whose <graph> declares
+// edgedefault="undirected".
 func ReadInto(r io.Reader) (*adjlist.AdjList[string, int64], int, error) {
 	a, n, err := ReadIntoCtx(context.Background(), r)
 	if err != nil {
@@ -362,9 +360,9 @@ func ReadIntoCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*adjli
 		added     int
 	)
 	err := streamGraphMLFirstGraph(ctx, dec,
-		func(keys []keyDecl, directed bool) error {
+		func(keys []keyDecl) error {
 			weightKey = findWeightKey(keys)
-			a = adjlist.New[string, int64](adjlist.Config{Directed: directed})
+			a = adjlist.New[string, int64](adjlist.Config{})
 			return nil
 		},
 		func(n *nodeElement) error {
@@ -398,7 +396,7 @@ func ReadIntoCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*adjli
 	// No <graph> element: an empty directed graph (matches the prior
 	// len(doc.Graphs) == 0 behaviour).
 	if a == nil {
-		return adjlist.New[string, int64](adjlist.Config{Directed: true}), 0, nil
+		return adjlist.New[string, int64](adjlist.Config{}), 0, nil
 	}
 	return a, added, nil
 }

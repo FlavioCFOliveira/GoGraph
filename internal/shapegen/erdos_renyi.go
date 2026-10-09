@@ -33,7 +33,7 @@ import (
 //
 // Each generator constructs the underlying [adjlist.Config] from the
 // caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, and
-// forces cfg.Directed=false and cfg.Multigraph=false: both Erdős-Rényi
+// stores each undirected edge as ONE directed arc, in the orientation the generator enumerates it: both Erdős-Rényi
 // shapes are undirected simple graphs (no parallel edges, no self-
 // loops) by definition.
 //
@@ -92,8 +92,7 @@ func (s erdosRenyiBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], error
 // random graph: nodes 0..n-1 with every unordered pair {i, j}
 // connected independently by an edge with probability p = pPercent/100.
 // The graph is undirected and simple (no parallel edges, no
-// self-loops); cfg.Directed and cfg.Multigraph are overridden to
-// false.
+// self-loops); each edge is stored as one directed arc.
 //
 // The pPercent knob follows the percent-of-max convention pinned by
 // [Layered] (T58.8): an integer in [0, 100] that maps to the Bernoulli
@@ -144,8 +143,6 @@ func ErdosRenyiNP(n int, pPercent int, seed uint64) Shape[int, int64] {
 			{Name: "p", Min: 0, Max: 100, Default: 10},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildErdosRenyiNP(g, n, pPercent, seed)
 		},
@@ -181,8 +178,7 @@ func buildErdosRenyiNP(g *lpg.Graph[int, int64], n, pPercent int, seed uint64) e
 // ErdosRenyiNM returns a Shape that builds an Erdős-Rényi G(n, m)
 // random graph: nodes 0..n-1 with exactly m edges drawn uniformly
 // without replacement from the C(n, 2) unordered pairs. The graph is
-// undirected and simple (no parallel edges, no self-loops);
-// cfg.Directed and cfg.Multigraph are overridden to false.
+// undirected and simple (no parallel edges, no self-loops); each edge is stored as one directed arc.
 //
 // The PRNG is a deterministically-seeded [math/rand/v2.PCG], so every
 // (n, m, seed) tuple yields the same byte-for-byte adjacency.
@@ -245,8 +241,6 @@ func ErdosRenyiNM(n, m int, seed uint64) Shape[int, int64] {
 			if m > maxEdges {
 				return nil, fmt.Errorf("%w: requested m=%d, C(n=%d, 2)=%d", ErrEdgeCountTooHigh, m, n, maxEdges)
 			}
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildErdosRenyiNM(g, n, m, seed)
 		},

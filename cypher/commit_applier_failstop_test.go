@@ -54,7 +54,7 @@ func TestCommitApplier_PanicFailStopsTheEngine(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			var eng *Engine
 			dir := t.TempDir()
 			var wr *wal.Writer

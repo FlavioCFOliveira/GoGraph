@@ -612,7 +612,7 @@ func BenchmarkWriteContention(b *testing.B) {
 // relationship semantics hold, multigraph so the edge arm can add parallel
 // relationships between one pair without the engine refusing them.
 func contentionAdjConfig() adjlist.Config {
-	return adjlist.Config{Directed: true, Multigraph: true}
+	return adjlist.Config{}
 }
 
 // TestLabelToggle_PerWriterSessionMakesProgress answers the question rmp #2368 was

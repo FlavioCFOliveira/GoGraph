@@ -16,9 +16,9 @@ func collectNeighbours[N comparable, W any](a *AdjList[N, W], src N) []N {
 	return out
 }
 
-func TestAdjList_DirectedSimple(t *testing.T) {
+func TestAdjList_Directed(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 
 	mustAddEdge(t, a, "a", "b", 1)
 	mustAddEdge(t, a, "a", "c", 2)
@@ -37,28 +37,16 @@ func TestAdjList_DirectedSimple(t *testing.T) {
 		t.Fatalf("directed graph: reverse edge b->a should not exist")
 	}
 
-	// Duplicate insert is idempotent in simple-graph mode.
+	// A repeated insert appends a parallel edge.
 	mustAddEdge(t, a, "a", "b", 999)
-	if got := a.Size(); got != 3 {
-		t.Fatalf("duplicate insert changed Size: %d", got)
-	}
-}
-
-func TestAdjList_UndirectedMirror(t *testing.T) {
-	t.Parallel()
-	a := New[string, int](Config{Directed: false})
-	mustAddEdge(t, a, "a", "b", 1)
-	if !a.HasEdge("a", "b") || !a.HasEdge("b", "a") {
-		t.Fatalf("undirected: both a->b and b->a must exist")
-	}
-	if got := a.Size(); got != 1 {
-		t.Fatalf("Size = %d, want 1 (undirected edge counted once)", got)
+	if got := a.Size(); got != 4 {
+		t.Fatalf("repeated insert: Size = %d, want 4", got)
 	}
 }
 
 func TestAdjList_Multigraph(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	mustAddEdge(t, a, "a", "b", 1)
 	mustAddEdge(t, a, "a", "b", 2)
 	mustAddEdge(t, a, "a", "b", 3)
@@ -78,7 +66,7 @@ func TestAdjList_Multigraph(t *testing.T) {
 
 func TestAdjList_SelfLoopDirected(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	mustAddEdge(t, a, "a", "a", 1)
 	if !a.HasEdge("a", "a") {
 		t.Fatalf("self-loop must be present")
@@ -88,21 +76,21 @@ func TestAdjList_SelfLoopDirected(t *testing.T) {
 	}
 }
 
-func TestAdjList_SelfLoopUndirected(t *testing.T) {
+func TestAdjList_SelfLoop(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: false})
+	a := New[string, int](Config{})
 	mustAddEdge(t, a, "a", "a", 1)
 	if !a.HasEdge("a", "a") {
 		t.Fatalf("self-loop must be present")
 	}
 	if got := a.Size(); got != 1 {
-		t.Fatalf("Size = %d, want 1 (self-loop not double-counted in undirected)", got)
+		t.Fatalf("Size = %d, want 1 (a self-loop is one edge)", got)
 	}
 }
 
 func TestAdjList_RemoveEdge(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	mustAddEdge(t, a, "a", "b", 1)
 	mustAddEdge(t, a, "a", "c", 2)
 
@@ -127,22 +115,9 @@ func TestAdjList_RemoveEdge(t *testing.T) {
 	}
 }
 
-func TestAdjList_RemoveEdge_UndirectedMirrored(t *testing.T) {
-	t.Parallel()
-	a := New[string, int](Config{Directed: false})
-	mustAddEdge(t, a, "a", "b", 1)
-	must(t).E(a.RemoveEdge("a", "b"))
-	if a.HasEdge("a", "b") || a.HasEdge("b", "a") {
-		t.Fatalf("undirected RemoveEdge must remove both directions")
-	}
-	if got := a.Size(); got != 0 {
-		t.Fatalf("Size = %d, want 0", got)
-	}
-}
-
 func TestAdjList_RemoveEdge_Unknown(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	mustAddEdge(t, a, "a", "b", 1)
 	must(t).E(a.RemoveEdge("a", "z")) // unknown dst
 	must(t).E(a.RemoveEdge("z", "a")) // unknown src
@@ -154,13 +129,14 @@ func TestAdjList_RemoveEdge_Unknown(t *testing.T) {
 
 func TestAdjList_Compact(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	for i := 0; i < 8; i++ {
 		mustAddEdge(t, a, "a", "b", i)
 	}
-	// Simple graph collapses duplicates → only one edge a->b.
 	mustAddEdge(t, a, "a", "c", 100)
-	must(t).E(a.RemoveEdge("a", "b"))
+	for i := 0; i < 8; i++ { // every parallel a->b edge
+		must(t).E(a.RemoveEdge("a", "b"))
+	}
 	a.Compact(context.Background())
 	if a.HasEdge("a", "b") {
 		t.Fatalf("removed edge must remain removed after Compact")
@@ -175,7 +151,7 @@ func TestAdjList_Compact(t *testing.T) {
 
 func TestAdjList_Neighbours_UnknownSrc(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	got := collectNeighbours(a, "ghost")
 	if len(got) != 0 {
 		t.Fatalf("Neighbours of unknown src must be empty, got %v", got)
@@ -184,7 +160,7 @@ func TestAdjList_Neighbours_UnknownSrc(t *testing.T) {
 
 func TestAdjList_Neighbours_EarlyStop(t *testing.T) {
 	t.Parallel()
-	a := New[int, int](Config{Directed: true})
+	a := New[int, int](Config{})
 	for i := 1; i <= 100; i++ {
 		mustAddEdge(t, a, 0, i, i)
 	}
@@ -202,7 +178,7 @@ func TestAdjList_Neighbours_EarlyStop(t *testing.T) {
 
 func TestAdjList_AddNodeDoesNotCreateEdges(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	mustAddNode(t, a, "solitary")
 	if got := a.Order(); got != 1 {
 		t.Fatalf("Order = %d, want 1", got)
@@ -224,7 +200,7 @@ func TestAdjList_Concurrent_WritersReaders(t *testing.T) {
 		readsEach    = 512
 		nodeUniverse = 4096
 	)
-	a := New[int, int](Config{Directed: true, Multigraph: false})
+	a := New[int, int](Config{})
 
 	var wg sync.WaitGroup
 	var writeErrors atomic.Int64
@@ -284,7 +260,7 @@ func TestAdjList_Concurrent_WritersReaders(t *testing.T) {
 }
 
 func BenchmarkAdjList_AddEdge_Million(b *testing.B) {
-	a := New[uint32, struct{}](Config{Directed: true})
+	a := New[uint32, struct{}](Config{})
 	const universe = 1 << 20 // 1M nodes
 	// Pre-intern the node universe so AddEdge exercises the Mapper
 	// fast path; the AC targets AddEdge on a graph that already has
@@ -310,7 +286,7 @@ func BenchmarkAdjList_AddEdge_Million(b *testing.B) {
 // fits comfortably in L2/L3 cache, isolating data-structure cost from
 // the DRAM latency floor that dominates the million-node variant.
 func BenchmarkAdjList_HasEdge_HotCache(b *testing.B) {
-	a := New[uint32, struct{}](Config{Directed: true})
+	a := New[uint32, struct{}](Config{})
 	const universe = 1 << 10 // 1024 nodes
 	const fill = 1 << 13     // 8192 edges (avg degree 8)
 	for i := 0; i < universe; i++ {
@@ -337,7 +313,7 @@ func BenchmarkAdjList_HasEdge_HotCache(b *testing.B) {
 // small graph that stays resident in cache and grows monotonically,
 // isolating data-structure cost from cache-miss noise.
 func BenchmarkAdjList_AddEdge_HotCache(b *testing.B) {
-	a := New[uint32, struct{}](Config{Directed: true, Multigraph: true})
+	a := New[uint32, struct{}](Config{})
 	const universe = 1 << 10 // 1024 nodes
 	for i := 0; i < universe; i++ {
 		mustAddNode(b, a, uint32(i))
@@ -357,7 +333,7 @@ func BenchmarkAdjList_AddEdge_HotCache(b *testing.B) {
 }
 
 func BenchmarkAdjList_HasEdge_Million(b *testing.B) {
-	a := New[uint32, struct{}](Config{Directed: true})
+	a := New[uint32, struct{}](Config{})
 	const universe = 1 << 20
 	const fill = 1 << 22 // 4M edges
 	for i := 0; i < universe; i++ {

@@ -75,7 +75,7 @@ func (r *recordingFS) ParentDirSync(childPath string) error {
 func TestPublishFS_FsyncsEveryCreatedDirectoryAndItsParent(t *testing.T) {
 	t.Parallel()
 	nodes, edges := pubFixture()
-	opts := bulkimport.Options{Directed: true, Multigraph: true}
+	opts := bulkimport.Options{}
 
 	t.Run("nested absent directory", func(t *testing.T) {
 		root := t.TempDir()

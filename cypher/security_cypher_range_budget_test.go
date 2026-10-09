@@ -76,7 +76,7 @@ func TestSec_Cypher_Range_MultiColumnRejectedButSingleFits(t *testing.T) {
 	// estimateValueSize(range(1,N)) = 16*(N+1). N=100000 -> ~1.6 MB per column.
 	// Budget between one (1.6 MB) and two (3.2 MB) columns.
 	const budget = 2_400_000
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{MaxResultBytes: budget})
 
 	// Positive: a single column fits under the budget and returns its row.

@@ -110,7 +110,7 @@ func TestBFS_StarGraph_LeafStart(t *testing.T) {
 // centre is connected to every leaf by an undirected edge.
 func buildUndirectedStar(tb testing.TB, nLeaves int) *adjlist.AdjList[int, int64] {
 	tb.Helper()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	// Add all nodes first so the mapper is fully populated even for
 	// the leaf-start test (where not all nodes may be reached).
 	if err := a.AddNode(0); err != nil {
@@ -124,6 +124,10 @@ func buildUndirectedStar(tb testing.TB, nLeaves int) *adjlist.AdjList[int, int64
 	for leaf := 1; leaf <= nLeaves; leaf++ {
 		if err := a.AddEdge(0, leaf, 0); err != nil {
 			tb.Fatalf("AddEdge(0, %d): %v", leaf, err)
+		}
+		// Storage is directed: the undirected star holds both arcs.
+		if err := a.AddEdge(leaf, 0, 0); err != nil {
+			tb.Fatalf("AddEdge(%d, 0): %v", leaf, err)
 		}
 	}
 	return a

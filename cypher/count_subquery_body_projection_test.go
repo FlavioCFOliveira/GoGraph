@@ -121,7 +121,7 @@ import (
 // (no rows).
 func bodyProjectionFixture(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 
 	addNode := func(key, label string, props map[string]int64) {
@@ -477,7 +477,7 @@ func TestBodyProjection_CorrelationSurvivesTheProjection(t *testing.T) {
 // distinguishable, which is what makes this a test of the nested evaluation and
 // not only of the projection.
 func TestBodyProjection_NestedSubqueryInsideTheBodysReturn(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for i, key := range []string{"a", "b", "c", "d"} {
 		if err := g.AddNode(key); err != nil {

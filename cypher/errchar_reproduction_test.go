@@ -31,7 +31,7 @@ import (
 // each carrying an integer property v.
 func newErrCharFixture(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	const seed = `CREATE (:A {v: 1}), (:A {v: 2}), (:B {v: 3}), (:B {v: 4}), (:B {v: 5})`

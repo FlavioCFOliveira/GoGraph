@@ -22,7 +22,7 @@ import (
 // It is a multigraph so the engine does not emit its non-multigraph warning,
 // matching bench/mvccwrite's rig.
 func seedGraph(n int) (*lpg.Graph[string, float64], error) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(id); err != nil {

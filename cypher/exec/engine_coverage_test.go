@@ -20,7 +20,7 @@ import (
 
 // newTestGraph creates an empty LPG graph for engine-level tests.
 func newTestGraph() *lpg.Graph[string, float64] {
-	return lpg.New[string, float64](adjlist.Config{Directed: true})
+	return lpg.New[string, float64](adjlist.Config{})
 }
 
 // drainResult collects all records from a Result and returns the record

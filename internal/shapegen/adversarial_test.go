@@ -388,7 +388,7 @@ func TestAdversarial_ApplyStampsExpectedKeys(t *testing.T) {
 // graph with int keys 0..n-1 used by the idempotency property tests.
 func buildAdversarialFixture(t *testing.T, n int) *lpg.Graph[int, int64] {
 	t.Helper()
-	g := lpg.New[int, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int, int64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		if err := g.AddNode(i); err != nil {
 			t.Fatalf("AddNode(%d): %v", i, err)

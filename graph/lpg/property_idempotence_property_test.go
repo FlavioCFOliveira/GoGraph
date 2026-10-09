@@ -65,7 +65,7 @@ func TestLPG_PropertyIdempotence(t *testing.T) {
 		const nodeKey = "n0"
 
 		// g1: apply each operation exactly once.
-		g1 := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g1 := lpg.New[string, int64](adjlist.Config{})
 		if err := g1.AddNode(nodeKey); err != nil {
 			rt.Fatalf("g1 AddNode: %v", err)
 		}
@@ -76,7 +76,7 @@ func TestLPG_PropertyIdempotence(t *testing.T) {
 		}
 
 		// g2: apply each operation twice.
-		g2 := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g2 := lpg.New[string, int64](adjlist.Config{})
 		if err := g2.AddNode(nodeKey); err != nil {
 			rt.Fatalf("g2 AddNode: %v", err)
 		}

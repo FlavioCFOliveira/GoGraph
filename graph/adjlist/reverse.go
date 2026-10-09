@@ -427,9 +427,6 @@ func (a *AdjList[N, W]) arcVisible(c revCandidate, dst graph.NodeID, visible fun
 // excluding dst itself, in [graph.Mapper.Walk] order. The result is a fresh
 // slice the caller owns; a node with no incoming edge returns nil.
 //
-// For an undirected graph every edge is stored in both directions, so the
-// answer is the node's neighbour set.
-//
 // InNeighbourIDs is safe for concurrent use, and takes only the destination's
 // own reverse shard lock: it neither blocks nor is blocked by adjacency
 // operations on other nodes.
@@ -487,8 +484,7 @@ func (a *AdjList[N, W]) InNeighbours(dst N) []N {
 
 // RecordedInEdges reports how many in-edge slots the reverse index currently
 // holds, counted on demand across every shard. On a consistent graph it equals
-// [AdjList.Size] for a directed graph, and twice it for an undirected one,
-// since an undirected edge is stored in both directions.
+// [AdjList.Size].
 //
 // It exists so tests can assert the index has not drifted from the forward
 // adjacency — the failure mode that would matter, because an index missing an

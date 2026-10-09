@@ -21,7 +21,7 @@ import (
 // directed edges.
 func buildK4(tb testing.TB) (*lpg.Graph[string, float64], *cypher.Engine) {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	nodes := []string{"a", "b", "c", "d"}
 	for _, n := range nodes {

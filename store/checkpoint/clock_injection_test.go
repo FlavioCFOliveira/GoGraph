@@ -42,7 +42,7 @@ func TestCheckpoint_FakeClockDrivesCadence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestCheckpoint_DefaultClockIsReal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestCheckpoint_NilClockIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 
 	var mu sync.Mutex
 	cp := New(Config{Dir: dir}, g, w, &mu, WithClock[string, int64](nil))

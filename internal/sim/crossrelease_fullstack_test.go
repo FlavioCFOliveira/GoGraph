@@ -49,7 +49,7 @@ func writeCheckpointedImage(ctx context.Context, dir string, nNodes int) (checkp
 
 	// The same shape the helper uses: a directed SIMPLE graph over string keys
 	// and float64 weights.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: false})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions(g, wlog, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

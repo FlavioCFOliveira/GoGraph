@@ -33,7 +33,7 @@ import (
 // Total: -3 + (-1) + (-1) + 0 = -5
 func TestMST_NegativeWeights(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	type wEdge struct {
 		u, v int
 		w    float64
@@ -53,7 +53,7 @@ func TestMST_NegativeWeights(t *testing.T) {
 			t.Fatalf("AddEdge(%d,%d,%.0f): %v", e.u, e.v, e.w, err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	const n = 5
 	const wantTotal = -5.0
 

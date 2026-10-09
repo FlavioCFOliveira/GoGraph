@@ -116,7 +116,7 @@ func TestEdgePropertyByHandle_Txn_ValidatorRejection_RefusesBeforeTheWAL(t *test
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	defer g.SetValidator(nil)
 
 	s := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
@@ -166,7 +166,7 @@ func TestEdgePropertyByHandle_Recovery_ValidatorRejection_IsFailStop(t *testing.
 
 	const propKey = "classified"
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode a: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestEdgePropertyByHandle_Recovery_ConsistentWithSetNodeProperty(t *testing.
 	// Sub-test A: SetEdgePropertyByHandle returns error on validator rejection.
 	t.Run("SetEdgePropertyByHandle_returns_error", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		if err := g.AddNode("a"); err != nil {
 			t.Fatalf("AddNode: %v", err)
 		}
@@ -222,7 +222,7 @@ func TestEdgePropertyByHandle_Recovery_ConsistentWithSetNodeProperty(t *testing.
 	// Sub-test B: SetNodeProperty returns error on validator rejection (sibling).
 	t.Run("SetNodeProperty_returns_error", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		if err := g.AddNode("n"); err != nil {
 			t.Fatalf("AddNode: %v", err)
 		}
@@ -304,7 +304,7 @@ func TestEdgeProperty_ReplayWAL_ValidatorRejection_IsFailStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	producer := lpg.New[string, float64](adjlist.Config{Directed: true})
+	producer := lpg.New[string, float64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, float64](producer, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -329,7 +329,7 @@ func TestEdgeProperty_ReplayWAL_ValidatorRejection_IsFailStop(t *testing.T) {
 
 	// --- Consumer: replay into a DIFFERENT, caller-supplied graph that carries a
 	// validator rejecting propKey.
-	recovered := lpg.New[string, float64](adjlist.Config{Directed: true})
+	recovered := lpg.New[string, float64](adjlist.Config{})
 	recovered.SetValidator(&rejectingValidator{key: propKey})
 	defer recovered.SetValidator(nil)
 

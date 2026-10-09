@@ -55,7 +55,7 @@ func TestOpen_EmptyManifest(t *testing.T) {
 
 func TestOpen_TruncatedCSRFile(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

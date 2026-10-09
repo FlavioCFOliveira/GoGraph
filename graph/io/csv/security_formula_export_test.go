@@ -114,7 +114,7 @@ func TestSec_IO_CSVExportFormulaInjection(t *testing.T) {
 func writeOneEdge(t *testing.T, src, dst string, opts csv.Options) string {
 	t.Helper()
 
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge(src, dst, 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestSec_IO_CSVExportFormulaInNodeID(t *testing.T) {
 func writeNodeIDExport(t *testing.T, payload string, opts csv.Options) string {
 	t.Helper()
 
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge(payload, "target", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -193,7 +193,7 @@ func writeNodeIDExport(t *testing.T, payload string, opts csv.Options) string {
 func TestSec_IO_CSVSanitiseRoundtripUnaffected(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for _, e := range []struct {
 		src, dst string
 		w        int64

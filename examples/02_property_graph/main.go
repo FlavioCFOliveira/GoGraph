@@ -201,7 +201,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 
 	base := readMem()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 
 	// Optional schema: declare the labels and the typed property keys, then
 	// install it as the graph's validator so every property write is

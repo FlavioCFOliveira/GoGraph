@@ -15,7 +15,7 @@ import (
 // full snapshot to a fresh directory, returning that directory.
 func writeValidFullSnapshot(t *testing.T) string {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

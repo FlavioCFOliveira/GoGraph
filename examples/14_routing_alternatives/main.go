@@ -15,10 +15,11 @@
 // # Generator
 //
 // The dataset is a seeded k-nearest-neighbour (k-NN) spatial graph over
-// uniformly random 2D coordinates, made symmetric (each undirected road
-// is stored as two opposite directed arcs), with a deterministic
-// component-merge repair pass that guarantees a single connected
-// component for ANY seed. Fixing -seed fixes the coordinates, the
+// uniformly random 2D coordinates. Each two-way road is stored once, as one
+// directed relationship, and the routing algorithms read the symmetric
+// projection built by [csr.CSR.BuildSymmetric], where every road is
+// traversable in both directions. A deterministic component-merge repair
+// pass guarantees a single connected component for ANY seed. Fixing -seed fixes the coordinates, the
 // neighbour edges, and therefore every shortest path exactly.
 //
 // Parameters: -nodes points, -neighbours nearest neighbours each, coords
@@ -202,7 +203,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 		return err
 	}
 	net.adj.Compact(ctx)
-	c := csr.BuildFromAdjList(net.adj)
+	// One stored relationship per road; BuildSymmetric projects it to the
+	// two-way network every routing algorithm reads.
+	c := csr.BuildFromAdjList(net.adj).BuildSymmetric()
 
 	fmt.Fprintf(w, "graph.nodes=%d\n", c.Order())
 	fmt.Fprintf(w, "graph.edges=%d\n", c.Size())
@@ -253,8 +256,8 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 // the cheapest-by-cost path (the fewest-hops route is a lower bound on any
 // route's hop count).
 func reportBidirectional(ctx context.Context, w io.Writer, c *csr.CSR[int64], src, dst graph.NodeID, dijkstraCost int64) error {
-	// The k-NN network is symmetric (addArc stores both directions), so its
-	// transpose equals the forward CSR; pass c as the reverse graph.
+	// c is the symmetric projection of the road network, so its transpose
+	// equals the forward CSR; pass c as the reverse graph.
 	start := time.Now()
 	biPath, biCost, err := search.BidirectionalDijkstraOnCtx(ctx, c, c, src, dst)
 	biElapsed := time.Since(start)
@@ -453,8 +456,8 @@ const checkEvery = 256
 // buildNetwork materialises the seeded k-NN coordinate routing graph
 // described by cfg and returns it alongside the wall-clock build time.
 // It draws coordinates from the seeded RNG, links each node to its k
-// nearest neighbours with symmetric (both-direction) Euclidean-weighted
-// arcs, repairs the graph into a single connected component, and picks
+// nearest neighbours with Euclidean-weighted two-way roads (one stored
+// relationship each), repairs the graph into a single connected component, and picks
 // the source and destination nearest opposite corners. The build honours
 // ctx cancellation on a periodic check.
 func buildNetwork(ctx context.Context, cfg config) (*network, time.Duration, error) {
@@ -462,13 +465,12 @@ func buildNetwork(ctx context.Context, cfg config) (*network, time.Duration, err
 
 	coords := randomCoords(cfg)
 
-	adj := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	adj := adjlist.New[int, int64](adjlist.Config{})
 	uf := newUnionFind(cfg.nodes)
 
-	// k-NN edges, made symmetric. For each node, link to its k nearest
-	// neighbours; addArc stores the reverse arc too, so the graph models a
-	// two-way road network. Duplicate (u,v) arcs from the symmetric pass
-	// collapse because the adjacency list is a simple graph.
+	// k-NN roads. For each node, link to its k nearest neighbours. When i
+	// and j are each other's neighbours the pair is offered twice; addRoad
+	// stores it once, so every road is exactly one relationship.
 	for i := 0; i < cfg.nodes; i++ {
 		if i%checkEvery == 0 {
 			if err := ctx.Err(); err != nil {
@@ -476,7 +478,7 @@ func buildNetwork(ctx context.Context, cfg config) (*network, time.Duration, err
 			}
 		}
 		for _, j := range kNearest(coords, i, cfg.neighbours) {
-			if err := addArc(adj, coords, i, j); err != nil {
+			if err := addRoad(adj, coords, i, j); err != nil {
 				return nil, 0, err
 			}
 			uf.union(i, j)
@@ -487,7 +489,7 @@ func buildNetwork(ctx context.Context, cfg config) (*network, time.Duration, err
 	// high probability but not with certainty for an arbitrary seed; this
 	// component-merge pass turns "w.h.p." into a guarantee. While more than
 	// one component remains, find the globally shortest edge between two
-	// distinct components and add it (both directions). Every repair edge is
+	// distinct components and add it as a two-way road. Every repair edge is
 	// a genuine Euclidean edge, so the admissibility/consistency argument is
 	// preserved unchanged.
 	if err := repairConnectivity(ctx, adj, coords, uf); err != nil {
@@ -569,19 +571,19 @@ func kNearest(coords []point, i, k int) []int {
 	return out
 }
 
-// addArc adds a directed edge i->j and its reverse j->i, both weighted
-// by the integer Euclidean cost w = max(1, ceil(D(i,j))). The clamp to 1
-// keeps the cost positive on coincident coordinates without breaking
-// admissibility or consistency (it only raises w). The adjacency list is
-// a simple graph, so a repeated (i,j) pair from the symmetric k-NN pass
-// is idempotent.
-func addArc(adj *adjlist.AdjList[int, int64], coords []point, i, j int) error {
-	w := edgeWeight(coords, i, j)
-	if err := adj.AddEdge(i, j, w); err != nil {
-		return fmt.Errorf("AddEdge %d->%d: %w", i, j, err)
+// addRoad stores the two-way road between i and j as one directed
+// relationship i->j weighted by the integer Euclidean cost
+// w = max(1, ceil(D(i,j))); the symmetric projection makes it traversable
+// both ways. The clamp to 1 keeps the cost positive on coincident
+// coordinates without breaking admissibility or consistency (it only raises
+// w). Every AddEdge stores a new relationship, so a pair that is already a
+// road in either direction (a mutual k-NN pair offered twice) is skipped.
+func addRoad(adj *adjlist.AdjList[int, int64], coords []point, i, j int) error {
+	if adj.HasEdge(i, j) || adj.HasEdge(j, i) {
+		return nil
 	}
-	if err := adj.AddEdge(j, i, w); err != nil {
-		return fmt.Errorf("AddEdge %d->%d: %w", j, i, err)
+	if err := adj.AddEdge(i, j, edgeWeight(coords, i, j)); err != nil {
+		return fmt.Errorf("AddEdge %d->%d: %w", i, j, err)
 	}
 	return nil
 }
@@ -600,7 +602,7 @@ func edgeWeight(coords []point, i, j int) int64 {
 // repairConnectivity adds the fewest Euclidean edges needed to merge the
 // k-NN graph into a single connected component. It repeatedly finds the
 // globally shortest edge joining two distinct components (per the
-// union-find uf) and adds it in both directions, until one component
+// union-find uf) and adds it as one two-way road, until one component
 // remains. It honours ctx cancellation between merges.
 func repairConnectivity(ctx context.Context, adj *adjlist.AdjList[int, int64], coords []point, uf *unionFind) error {
 	for uf.components > 1 {
@@ -613,7 +615,7 @@ func repairConnectivity(ctx context.Context, adj *adjlist.AdjList[int, int64], c
 			// distinct components while components > 1. Guard defensively.
 			return fmt.Errorf("connectivity repair found no cross-component edge with %d components", uf.components)
 		}
-		if err := addArc(adj, coords, bi, bj); err != nil {
+		if err := addRoad(adj, coords, bi, bj); err != nil {
 			return fmt.Errorf("repair edge: %w", err)
 		}
 		uf.union(bi, bj)

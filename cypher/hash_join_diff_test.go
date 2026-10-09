@@ -35,7 +35,7 @@ type hjProp struct {
 // join properties a.x / b.y. as and bs index by position.
 func buildHJTestGraph(t *testing.T, as, bs []hjProp) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i, p := range as {
 		k := fmt.Sprintf("a%d", i)
 		if err := g.AddNode(k); err != nil {

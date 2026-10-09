@@ -20,7 +20,7 @@ import (
 // {since: 2020} property and verifies the property is stored on the edge.
 func TestCreate_RelationshipWithProperties(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -61,7 +61,7 @@ func TestCreate_RelationshipWithProperties(t *testing.T) {
 // relationship, then confirms both endpoint-label indexes are non-empty.
 func TestCreate_RelationshipThenVerifyEndpoints(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -88,7 +88,7 @@ func TestCreate_RelationshipThenVerifyEndpoints(t *testing.T) {
 // edge after CREATE and the engine reports the correct count via MATCH.
 func TestCreate_RelationshipType(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

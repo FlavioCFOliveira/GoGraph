@@ -69,7 +69,7 @@ const gateNodes = 4096
 // seedGateGraph builds n :P nodes with an int64 v property.
 func seedGateGraph(t *testing.T, n int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range n {
 		k := "n" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

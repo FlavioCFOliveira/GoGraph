@@ -22,7 +22,7 @@ func entryFor[N comparable, W any](a *AdjList[N, W], src N) *adjEntry[W] {
 // handles, labels) and their alignment unchanged.
 func TestCompact_TrimsSlack(t *testing.T) {
 	t.Parallel()
-	a := New[int, int](Config{Directed: true, Multigraph: true})
+	a := New[int, int](Config{})
 
 	// 6 parallel edges from 0 forces geometric growth (cap 4 -> 8), leaving
 	// slack (len 6, cap 8). Each slot carries a distinct handle and label so
@@ -98,7 +98,7 @@ func TestCompact_TrimsSlack(t *testing.T) {
 // shifts ordinals, which is why a position could never be an identity.
 func TestCompact_PreservesNilColumns(t *testing.T) {
 	t.Parallel()
-	a := New[int, int](Config{Directed: true, Multigraph: true})
+	a := New[int, int](Config{})
 	for i := 0; i < 6; i++ {
 		mustAddEdge(t, a, 0, i+1, i)
 	}
@@ -129,7 +129,7 @@ func TestCompact_PreservesNilColumns(t *testing.T) {
 // left untouched (same pointer), avoiding useless re-publication churn.
 func TestCompact_SkipsTightEntries(t *testing.T) {
 	t.Parallel()
-	a := New[int, int](Config{Directed: true, Multigraph: true})
+	a := New[int, int](Config{})
 	// 4 edges land exactly at the initial capacity (growCap(0) == 4), so the
 	// entry has cap == len == 4 and no slack.
 	for i := 0; i < 4; i++ {
@@ -154,7 +154,7 @@ func TestCompact_SkipsTightEntries(t *testing.T) {
 // edge set unchanged.
 func TestCompact_ReclaimsCapacity(t *testing.T) {
 	t.Parallel()
-	a := New[int, int](Config{Directed: true, Multigraph: true})
+	a := New[int, int](Config{})
 	const nodes, degree = 200, 5 // degree 5 -> cap 8, ~37% slack per node
 	for src := 0; src < nodes; src++ {
 		for d := 0; d < degree; d++ {
@@ -194,7 +194,7 @@ func TestCompact_ReclaimsCapacity(t *testing.T) {
 // or partial one.
 func TestCompact_ConcurrentReadersSeeConsistentSnapshot(t *testing.T) {
 	t.Parallel()
-	a := New[int, int](Config{Directed: true, Multigraph: true})
+	a := New[int, int](Config{})
 	const nodes, degree = 64, 6
 	for src := 0; src < nodes; src++ {
 		for d := 0; d < degree; d++ {
@@ -237,7 +237,7 @@ func TestCompact_ConcurrentReadersSeeConsistentSnapshot(t *testing.T) {
 // without corrupting state (whatever shards were processed stay consistent).
 func TestCompact_HonoursCancellation(t *testing.T) {
 	t.Parallel()
-	a := New[int, int](Config{Directed: true, Multigraph: true})
+	a := New[int, int](Config{})
 	for i := 0; i < 6; i++ {
 		mustAddEdge(t, a, 0, i+1, i)
 	}

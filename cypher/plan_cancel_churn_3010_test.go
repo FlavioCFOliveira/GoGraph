@@ -45,7 +45,7 @@ func (c *cancelAfterFirstCheck) Err() error {
 func churnedEngine(t *testing.T, committed, holders, perHolder int) *cypher.Engine {
 	t.Helper()
 	ctx := context.Background()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	e := cypher.NewEngine(g)
 	if _, err := e.RunAny(ctx, "UNWIND range(1, $n) AS i CREATE (:P {i: i})", map[string]any{"n": committed}); err != nil {
 		t.Fatalf("seed: %v", err)

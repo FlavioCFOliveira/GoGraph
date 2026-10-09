@@ -475,7 +475,7 @@ func TestCPUModel_FixedAndMarginal(t *testing.T) {
 
 	// A tiny graph: these shapes must not touch it, and a large fixture
 	// would only add GC pressure to a measurement about query overhead.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	must(g.AddNode("seed"))
 	must(g.SetNodeLabel("seed", "Seed"))
 	engine := cypher.NewEngine(g)
@@ -535,7 +535,7 @@ func TestCPUModel_ScanShapes(t *testing.T) {
 	for _, n := range []int{5000, 50000} {
 		n := n
 		t.Run(fmt.Sprintf("nodes=%d", n), func(t *testing.T) {
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			for i := 0; i < n; i++ {
 				k := fmt.Sprintf("p%d", i)
 				must(g.AddNode(k))

@@ -29,7 +29,7 @@ func quiesceStack(t *testing.T) (dir string, st *txn.Store[string, int64], db *s
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	st = txn.NewStoreWithCodec(g, wlog, txn.NewStringCodec())
 	db = store.New(wlog, store.WithQuiesce(st.RunUnderCommitLock))
 	return dir, st, db

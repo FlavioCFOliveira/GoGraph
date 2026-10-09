@@ -86,7 +86,7 @@ func inljExactAge(i int) any {
 // seek and the test would prove nothing.
 func inljExactFixtureGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for i := 0; i < inljExactFixtureSize; i++ {
 		key := fmt.Sprintf("n%d", i)

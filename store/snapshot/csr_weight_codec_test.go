@@ -78,7 +78,7 @@ func (moneyCodec) Decode(buf []byte) (money, []byte, error) {
 
 func buildWeightedCSR[W any](t *testing.T, edges map[[2]string]W) *csr.CSR[W] {
 	t.Helper()
-	a := adjlist.New[string, W](adjlist.Config{Directed: true})
+	a := adjlist.New[string, W](adjlist.Config{})
 	for k, w := range edges {
 		if err := a.AddEdge(k[0], k[1], w); err != nil {
 			t.Fatalf("AddEdge %v: %v", k, err)
@@ -222,7 +222,7 @@ func assertWeightRoundTrip[W comparable](
 
 	// Apply into a graph whose mapper already holds the same keys, so every
 	// edge resolves and the weights land where they can be read back by key.
-	g := lpg.New[string, W](adjlist.Config{Directed: true})
+	g := lpg.New[string, W](adjlist.Config{})
 	if err := ApplyMapperToGraph(g, mapperReadbackFor(t, c, edges)); err != nil {
 		t.Fatalf("ApplyMapperToGraph: %v", err)
 	}
@@ -249,7 +249,7 @@ func mapperReadbackFor[W any](t *testing.T, _ *csr.CSR[W], edges map[[2]string]W
 	// CSR was built from; the mapper assigns ids by first-touch, and both
 	// graphs touch the same keys in the same map-iteration-independent order
 	// because AddEdge interns src then dst per edge.
-	a := adjlist.New[string, W](adjlist.Config{Directed: true})
+	a := adjlist.New[string, W](adjlist.Config{})
 	for k, w := range edges {
 		if err := a.AddEdge(k[0], k[1], w); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -279,7 +279,7 @@ func TestCSRWeights_ApplyWithoutCodecRefuses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadCSR: %v", err)
 	}
-	g := lpg.New[string, money](adjlist.Config{Directed: true})
+	g := lpg.New[string, money](adjlist.Config{})
 	err = ApplyCSRToGraph(g, &rb)
 	if !errors.Is(err, ErrWeightCodecRequired) {
 		t.Fatalf("ApplyCSRToGraph on a codec-encoded snapshot without a codec returned %v,"+
@@ -432,7 +432,7 @@ func TestCSRWeights_DecoderLeavingATailIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadCSR: %v", err)
 	}
-	g := lpg.New[string, money](adjlist.Config{Directed: true})
+	g := lpg.New[string, money](adjlist.Config{})
 	if err := ApplyMapperToGraph(g, mapperReadbackFor(t, c, edges)); err != nil {
 		t.Fatalf("ApplyMapperToGraph: %v", err)
 	}

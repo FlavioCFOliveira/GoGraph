@@ -53,7 +53,7 @@ import (
 // label or a property can be checked.
 func pcHubGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "c", "d"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%s): %v", n, err)
@@ -194,7 +194,7 @@ func TestPatternComp_InlineWhere_IsApplied(t *testing.T) {
 // because the danger in making the rewrite reachable is that it claims a shape
 // it cannot answer and returns a plausible wrong number.
 func TestPatternComp_Projection_MatchesSubqueryOracle(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "c", "d", "e", "z"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -253,7 +253,7 @@ func TestPatternComp_Projection_MatchesSubqueryOracle(t *testing.T) {
 // list-building path and fails by two orders of magnitude.
 func TestPatternComp_Projection_UsesDegreeRewrite(t *testing.T) {
 	const deg = 200000
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

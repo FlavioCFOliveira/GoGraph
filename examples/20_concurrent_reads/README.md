@@ -145,9 +145,9 @@ concurrent readers compute exactly what one reader computes.
 
 ## Key APIs
 
-- `graph/adjlist.New` / `AdjList.AddEdge` — build the mutable weighted undirected graph.
+- `graph/adjlist.New` / `AdjList.AddEdge` — build the mutable weighted graph, one directed relationship per edge.
 - `graph/adjlist.AdjList.Mapper` — resolve node values to stable `NodeID`s for the fixed source/target.
-- `graph/csr.BuildFromAdjList` — freeze the builder into an immutable CSR snapshot, the shared read surface for all goroutines.
+- `graph/csr.BuildFromAdjList` / `CSR.BuildSymmetric` — freeze the builder into an immutable CSR snapshot and project it to the symmetric (undirected) snapshot, the shared read surface for all goroutines.
 - `search.Dijkstra` — single-source shortest paths; safe to call concurrently on a snapshot CSR.
 - `search.BFS` — breadth-first traversal with a visit callback; allocation-free on the hot path after the first call.
 - `search/centrality.PageRank` / `DefaultPageRankOptions` — power-iteration PageRank, safe to invoke from any number of goroutines on a snapshot CSR.

@@ -49,7 +49,7 @@ func TestBoltSoak_60s(t *testing.T) {
 	}
 
 	// ── Build graph and engine ────────────────────────────────────────────────
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// Pre-seed the graph with two Person nodes via explicit transactions.

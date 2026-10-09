@@ -31,7 +31,7 @@ import (
 // 4 :City nodes, and a KNOWS chain over the people.
 func tableGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range 20 {
 		k := "p" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

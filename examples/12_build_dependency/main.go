@@ -328,7 +328,7 @@ func generate(ctx context.Context, cfg config) (*buildDAG, error) {
 	}
 	firstOfLayer[cfg.layers] = idx
 
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 
 	// Intern every module up front so dependency targets always exist
 	// before an edge references them, and so isolated leaves still appear.

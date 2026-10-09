@@ -21,7 +21,7 @@ import (
 type staticCSR struct {
 	vertices []uint64
 	edges    []graph.NodeID
-	handles  []uint64 // optional per-slot stable handles (nil = non-multigraph)
+	handles  []uint64 // optional per-slot stable handles (nil = handle-less snapshot)
 }
 
 func buildCSR(maxNode int, edgeList [][2]int) *staticCSR {

@@ -50,7 +50,7 @@ var populations = []int{5000, 10000, 20000}
 // warning interleaves with benchmark output.
 func newEngine(tb testing.TB, n int) *cypher.Engine {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
 		fmt.Sprintf(`UNWIND range(1, %d) AS i CREATE (:P {id: i, name: 'name-' + toString(i)})`, n),

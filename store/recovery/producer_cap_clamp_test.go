@@ -258,7 +258,7 @@ func TestProducerCapAboveReplayCap_HazardIsReal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	// Producer bound deliberately looser than the replay bound.
 	st := txn.NewStoreWithOptionsCapped(g, w, clampTestOpts(), txn.MaxTxnOpsUnlimited)
 

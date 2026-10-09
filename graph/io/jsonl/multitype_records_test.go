@@ -16,7 +16,7 @@ func TestJSONL_MultiTypeRecords(t *testing.T) {
 	t.Parallel()
 
 	// Build the source graph.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 
 	for _, node := range []string{"alice", "bob", "carol"} {
 		if err := g.AddNode(node); err != nil {
@@ -65,7 +65,7 @@ func TestJSONL_MultiTypeRecords(t *testing.T) {
 	}
 
 	// Read back.
-	g2, rows, err := jsonl.ReadWithProps(strings.NewReader(buf.String()), adjlist.Config{Directed: true})
+	g2, rows, err := jsonl.ReadWithProps(strings.NewReader(buf.String()), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadWithProps: %v", err)
 	}

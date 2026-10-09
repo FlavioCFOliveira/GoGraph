@@ -66,7 +66,7 @@ import (
 // commit instant — which may precede A's — and a reader that still needs the entry
 // loses a row.
 func TestDeferredIndexRemoval_IsChargedToTheRemovingTransaction_NotAConcurrentOne(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.SetNodeLabel("n", "L"); err != nil {
 		t.Fatalf("seed label: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestDeferredIndexRemoval_MisChargingWouldMoveTheSweepInstantBothWays(t *tes
 		{name: "concurrent_writer_commits_second", bFirst: false, wantSign: "later"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g := New[string, float64](adjlist.Config{Directed: true})
+			g := New[string, float64](adjlist.Config{})
 			if err := g.SetNodeLabel("n", "L"); err != nil {
 				t.Fatalf("seed label: %v", err)
 			}

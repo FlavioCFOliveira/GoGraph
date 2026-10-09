@@ -52,7 +52,7 @@ type diffCase struct {
 // pendant legs, an isolated node, and typed/untyped and labelled/unlabelled nodes.
 func richGraph(t testing.TB) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	add := func(k, label string, x int64) {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode(%s): %v", k, err)
@@ -306,7 +306,7 @@ func TestCyclicDiff_Rapid(t *testing.T) {
 		n := rapid.IntRange(3, 7).Draw(rt, "nodes")
 		nEdges := rapid.IntRange(2, 14).Draw(rt, "edges")
 
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		keys := make([]string, n)
 		for i := 0; i < n; i++ {
 			keys[i] = fmt.Sprintf("n%d", i)

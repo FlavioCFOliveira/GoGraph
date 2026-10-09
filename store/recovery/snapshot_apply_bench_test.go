@@ -74,7 +74,7 @@ func buildRecoveryFixture(tb testing.TB, checkpointed bool) string {
 		tb.Fatalf("wal.Open: %v", err)
 	}
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

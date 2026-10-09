@@ -23,7 +23,7 @@ import (
 // has no "age" property succeeds silently (no error, existing props intact).
 func TestRemove_NonExistentProperty(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Person {name: "Alice"})`)
@@ -50,7 +50,7 @@ func TestRemove_NonExistentProperty(t *testing.T) {
 // carries two properties and verifies the other property is not disturbed.
 func TestRemove_OneOfMultipleProperties(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Person {name: "Bob", score: 42})`)
@@ -85,7 +85,7 @@ func TestRemove_OneOfMultipleProperties(t *testing.T) {
 // in a single query and verifies that the returned score value is intact.
 func TestRemove_ReturnSurvivingProperty(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Player {age: 30, score: 99})`)

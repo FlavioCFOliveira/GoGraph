@@ -44,7 +44,7 @@ func writeAndClose(t *testing.T, dir string, n, keyBase int) (walPath string, la
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, wr, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -155,7 +155,7 @@ func TestClockRestore_NextCommitExceedsEveryPreviouslyPublishedInstant(t *testin
 // clock must not pull it back — PostgreSQL ratchets per record during replay for
 // exactly this reason, rather than assigning.
 func TestClockRestore_IsARatchetNotAnAssignment(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	// MVCC is armed by lpg.New and cannot be disarmed (rmp #2311); nothing to do here.
 	if err := g.ApplyVersioned(func(tx lpg.WriteTx) error {
 		return g.Writer(tx).AddNode("a")
@@ -189,7 +189,7 @@ func TestClockRestore_AWALWithNoTimestampsLeavesTheClockAlone(t *testing.T) {
 	}
 	// The store's OWN commit path writes commitTS 0 — "no MVCC timestamp" — which
 	// is the same thing recovery sees in a pre-#2309 file.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, wr, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

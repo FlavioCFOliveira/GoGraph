@@ -71,7 +71,7 @@ func syncSweepIfDue[N comparable, W any](g *Graph[N, W]) {
 
 func benchVacuumCommitLatency(b *testing.B, onCommit bool) {
 	b.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	b.Cleanup(func() { _ = g.Close() })
 	if err := g.AddNode("a"); err != nil {
 		b.Fatalf("AddNode: %v", err)
@@ -133,7 +133,7 @@ func BenchmarkVacuumCommitLatency(b *testing.B) {
 // comparison stands even though the absolute numbers carry that overhead.
 func benchVacuumCommitTail(b *testing.B, onCommit bool, nodes, writers int) {
 	b.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	b.Cleanup(func() { _ = g.Close() })
 	keys := make([]string, nodes)
 	for i := range keys {

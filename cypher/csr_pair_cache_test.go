@@ -35,7 +35,7 @@ import (
 // cache is genuinely exercised across queries.
 func cacheTestEngine(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64]) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	mustRunWrite(t, eng, `CREATE (a:N {key:'a'})`)
 	for i := 0; i < 5; i++ {
@@ -290,7 +290,7 @@ func TestCSRPairCache_NodeOnlyCreateStaysSafe(t *testing.T) {
 // test fails on the pre-fix tree: warm returns 1 where the truth is 2.
 func TestCSRPairCache_DirectGraphMutationInvalidates(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatal(err)
 	}

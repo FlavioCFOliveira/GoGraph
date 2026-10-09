@@ -53,13 +53,13 @@ func TestCtxCancel_Leiden_MidRun(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	shape := shapegen.LFR(nodes, gammaPercent, betaPercent, avgDeg, maxDeg, minCom, maxCom, muPercent, 42)
-	g, err := shape.Build(adjlist.Config{Directed: false})
+	g, err := shape.Build(adjlist.Config{})
 	if err != nil {
 		// LFR can fail with ErrLFRAssignmentFailed on tight parameter combos;
 		// skip rather than fail — this test exercises cancellation, not topology.
 		t.Skipf("LFR.Build: %v (skipping)", err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 
 	var ctx context.Context
 	var cancel context.CancelFunc

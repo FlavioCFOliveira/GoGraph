@@ -29,7 +29,7 @@ type directGraph = lpg.Graph[string, float64]
 // directFixture builds n1:L {id:'1', k:'v'} and an unconnected n2.
 func directFixture(t *testing.T) (*directGraph, *cypher.Engine) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	for _, err := range []error{
 		g.AddNode("n1"),
@@ -262,10 +262,10 @@ func TestDirectWrite_UntouchedObjectIsNotCapturedByAnOpenTransaction(t *testing.
 }
 
 // edgeFixture builds n1 {id:'1'} -[:R {k:'v'}]-> n2 {id:'2'} through the
-// direct API, on a directed (reverse-indexed) or an undirected graph.
-func edgeFixture(t *testing.T, directed bool) (*directGraph, *cypher.Engine) {
+// direct API.
+func edgeFixture(t *testing.T) (*directGraph, *cypher.Engine) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: directed, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	for _, err := range []error{
 		g.AddNode("n1"),
@@ -292,8 +292,7 @@ func edgeState(g *directGraph) string {
 
 // TestDirectWrite_EdgeRefusesAPendingPeerWrite is the probe14 edge matrix
 // (rmp #2947): property set and delete and edge removal, against a peer
-// transaction's pending write on the same relationship, on a directed and an
-// undirected graph. Each refuses while the peer is in flight, changes nothing,
+// transaction's pending write on the same relationship. Each refuses while the peer is in flight, changes nothing,
 // and succeeds once the peer commits or rolls back.
 func TestDirectWrite_EdgeRefusesAPendingPeerWrite(t *testing.T) {
 	cases := []struct {
@@ -327,58 +326,52 @@ func TestDirectWrite_EdgeRefusesAPendingPeerWrite(t *testing.T) {
 			wantRollback: "edge=false k=/false",
 		},
 	}
-	for _, directed := range []bool{true, false} {
-		shape := "undirected"
-		if directed {
-			shape = "directed"
-		}
-		for _, c := range cases {
-			for _, commit := range []bool{true, false} {
-				outcome := "rollback"
-				if commit {
-					outcome = "commit"
-				}
-				t.Run(shape+"/"+c.name+"/"+outcome, func(t *testing.T) {
-					g, eng := edgeFixture(t, directed)
-					for _, err := range []error{g.SetNodeLabel("n1", "N1"), g.SetNodeLabel("n2", "N2")} {
-						if err != nil {
-							t.Fatal(err)
-						}
-					}
-					tx, err := eng.BeginTx(context.Background())
+	for _, c := range cases {
+		for _, commit := range []bool{true, false} {
+			outcome := "rollback"
+			if commit {
+				outcome = "commit"
+			}
+			t.Run(c.name+"/"+outcome, func(t *testing.T) {
+				g, eng := edgeFixture(t)
+				for _, err := range []error{g.SetNodeLabel("n1", "N1"), g.SetNodeLabel("n2", "N2")} {
 					if err != nil {
 						t.Fatal(err)
 					}
-					execTx(t, tx, c.peer)
-					before := edgeState(g)
+				}
+				tx, err := eng.BeginTx(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				execTx(t, tx, c.peer)
+				before := edgeState(g)
 
-					requireDirectConflict(t, c.direct(g))
-					if got := edgeState(g); got != before {
-						t.Fatalf("the refused direct write changed state: %s -> %s", before, got)
-					}
+				requireDirectConflict(t, c.direct(g))
+				if got := edgeState(g); got != before {
+					t.Fatalf("the refused direct write changed state: %s -> %s", before, got)
+				}
 
-					if commit {
-						err = tx.Commit()
-					} else {
-						err = tx.Rollback()
-					}
-					if err != nil {
-						t.Fatalf("peer %s: %v", outcome, err)
-					}
-					g.ReclaimNow()
-					if err := c.direct(g); err != nil {
-						t.Fatalf("retry after the peer's %s: %v", outcome, err)
-					}
-					want := c.wantRollback
-					if commit {
-						want = c.wantCommit
-					}
-					if got := edgeState(g); got != want {
-						t.Fatalf("final state after peer %s and the retried direct write = %s, want %s",
-							outcome, got, want)
-					}
-				})
-			}
+				if commit {
+					err = tx.Commit()
+				} else {
+					err = tx.Rollback()
+				}
+				if err != nil {
+					t.Fatalf("peer %s: %v", outcome, err)
+				}
+				g.ReclaimNow()
+				if err := c.direct(g); err != nil {
+					t.Fatalf("retry after the peer's %s: %v", outcome, err)
+				}
+				want := c.wantRollback
+				if commit {
+					want = c.wantCommit
+				}
+				if got := edgeState(g); got != want {
+					t.Fatalf("final state after peer %s and the retried direct write = %s, want %s",
+						outcome, got, want)
+				}
+			})
 		}
 	}
 }

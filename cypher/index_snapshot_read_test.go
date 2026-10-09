@@ -52,7 +52,7 @@ var snapReadWirings = []struct {
 // any index exists, wraps it in an engine on the chosen wiring, and runs ddl.
 func newSnapReadEngine(t *testing.T, walBacked bool, seed func(g *lpg.Graph[string, float64]), ddl ...string) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	seed(g)
 	var eng *Engine
 	if walBacked {

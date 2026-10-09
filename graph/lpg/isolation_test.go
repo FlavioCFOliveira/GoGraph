@@ -22,7 +22,7 @@ import (
 func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 	t.Parallel()
 
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	// Intern u, v up front so the toggling only adds/removes the edge + labels.
 	if err := g.AddNode("u"); err != nil {
 		t.Fatalf("AddNode u: %v", err)
@@ -196,7 +196,7 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 	t.Parallel()
 
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 
 	// Seed both nodes.
 	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
@@ -673,7 +673,7 @@ func tearDirection(ia, ib int64) string {
 func TestIsolation_DirectReadDoesNotObservePartialTransaction(t *testing.T) {
 	t.Parallel()
 
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("u"); err != nil {
 		t.Fatalf("AddNode u: %v", err)
 	}

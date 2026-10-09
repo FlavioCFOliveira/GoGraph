@@ -298,8 +298,7 @@ type EdgeHandleTriple struct {
 
 // WalkEdgeHandles calls fn once for every live directed edge slot that
 // carries a non-zero stable handle. It returns early if fn returns false.
-// Slots with a 0 handle (the no-handle sentinel, e.g. a simple-graph edge
-// or a pre-Stage-2 edge) are skipped: there is no durable identity to
+// Slots with a 0 handle (the no-handle sentinel, e.g. a pre-Stage-2 edge) are skipped: there is no durable identity to
 // persist for them.
 //
 // The walk is the snapshot writer's enumeration of the adjacency handle

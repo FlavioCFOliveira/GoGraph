@@ -396,7 +396,7 @@ func TestRowBindPlan_ConcurrentResolutionIsSafe(t *testing.T) {
 // observable rather than merely present.
 func rowBindCollisionGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	ctx := context.Background()
 	for _, q := range []string{

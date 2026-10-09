@@ -26,7 +26,7 @@ import (
 // Out() expansion can observe the tombstoned node through the CSR.
 func setupTriangleGraph(tb testing.TB) (*lpg.Graph[string, int64], *csr.CSR[int64]) {
 	tb.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, n := range []string{"alice", "bob", "dead"} {
 		if err := g.SetNodeLabel(n, "Person"); err != nil {
 			tb.Fatalf("SetNodeLabel(%q): %v", n, err)
@@ -128,7 +128,7 @@ func TestQuery_DeleteThenRecreateAppearsOnce(t *testing.T) {
 
 func TestQuery_EmptyGraph(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	e := New(g, csr.BuildFromAdjList(g.AdjList()))
 
 	if got := e.Match().Vertex().Cardinality(); got != 0 {

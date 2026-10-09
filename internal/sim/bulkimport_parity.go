@@ -54,6 +54,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/bulkimport"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
 
@@ -571,7 +572,7 @@ func runBulkImportParityWith(
 	// --- Arm 1: build and publish. ---
 	storeDir := filepath.Join(root, "store")
 	b := bulkimport.New[int64](bulkimport.Options{
-		Directed: true, Multigraph: true, ExpectNodes: bulkImportNodes,
+		ExpectNodes: bulkImportNodes,
 	})
 	ev.lifecycle.graphNilBeforeFinish = b.Graph() == nil
 	ev.lifecycle.publishRefusesUnfinished = bulkImportPublishErrIs(ctx, filepath.Join(root, "never"), b, bulkimport.ErrNotFinished)
@@ -623,7 +624,7 @@ func runBulkImportParityWith(
 	ev.schemaVersion, ev.liveOrder = first.SnapshotSchemaVersion, first.Graph.LiveOrderStored()
 
 	v := bulkImportCheckParity(model, first.Graph, ev)
-	v = append(v, bulkImportCheckDurableShape(first, "first reopen")...)
+	v = append(v, bulkImportCheckDurableShape(first, res.SnapshotDir, "first reopen")...)
 
 	second, err := bulkImportOpen(storeDir)
 	if err != nil {
@@ -636,7 +637,7 @@ func runBulkImportParityWith(
 	// counters the non-vacuity test reads describe ONE pass rather than two.
 	var again bulkImportEvidence
 	v = append(v, bulkImportCheckParity(model, second.Graph, &again)...)
-	v = append(v, bulkImportCheckDurableShape(second, "second reopen")...)
+	v = append(v, bulkImportCheckDurableShape(second, res.SnapshotDir, "second reopen")...)
 
 	// --- Arm 3: the crashed-import outcome state. ---
 	crashViolations, err := bulkImportCheckCrashedImport(ctx, root, nodes, edges, ev)
@@ -772,7 +773,7 @@ func bulkImportPublishAndMeasure(
 	defer func() { _ = os.RemoveAll(root) }()
 
 	res, err := bulkimport.ImportInto[int64](ctx, filepath.Join(root, "store"),
-		bulkimport.Options{Directed: true, Multigraph: true}, nodes, edges)
+		bulkimport.Options{}, nodes, edges)
 	if err != nil {
 		return img, fmt.Errorf("sim: bulkimport-parity image publish: %w", err)
 	}
@@ -839,7 +840,7 @@ func bulkImportMeasureLifecycle(
 	}
 	lc.publishRefusesNonEmpty = bulkImportPublishErrIs(ctx, occupied, finished, bulkimport.ErrStoreNotEmpty)
 	_, ierr := bulkimport.ImportInto[int64](ctx, occupied,
-		bulkimport.Options{Directed: true, Multigraph: true}, nodes, edges)
+		bulkimport.Options{}, nodes, edges)
 	lc.importIntoRefusesNonEmpty = errors.Is(ierr, bulkimport.ErrStoreNotEmpty)
 
 	// A nil builder is refused, but NOT with either sentinel.
@@ -851,7 +852,7 @@ func bulkImportMeasureLifecycle(
 	// Precedence: which check runs first when two would fire.
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	open := bulkimport.New[int64](bulkimport.Options{Directed: true})
+	open := bulkimport.New[int64](bulkimport.Options{})
 	_, uerr := bulkimport.Publish[int64](cancelled, filepath.Join(root, "unfinished"), open)
 	lc.unfinishedBeatsCancelledCtx = errors.Is(uerr, bulkimport.ErrNotFinished)
 	if _, err := open.Finish(); err != nil {
@@ -865,7 +866,7 @@ func bulkImportMeasureLifecycle(
 	// directory, not the build failure.
 	badEdges := []bulkimport.Edge[int64]{{Src: "absent-src", Dst: "absent-dst"}}
 	_, berr := bulkimport.ImportInto[int64](ctx, occupied,
-		bulkimport.Options{Directed: true}, nil, badEdges)
+		bulkimport.Options{}, nil, badEdges)
 	lc.importIntoDirCheckBeatsBuild = errors.Is(berr, bulkimport.ErrStoreNotEmpty)
 
 	return nil
@@ -910,8 +911,9 @@ func bulkImportCheckLifecycle(lc *bulkImportLifecycle) []Violation {
 
 // bulkImportCheckDurableShape asserts the recovered image is the one the publish
 // promised: the snapshot was found, it was self-sufficient (no WAL op
-// contributed a byte), and it is a v2-or-later manifest.
-func bulkImportCheckDurableShape(res recovery.Result[string, int64], which string) []Violation {
+// contributed a byte), and its manifest at snapDir lists labels.bin and
+// properties.bin (see [bulkImportCheckManifestComponents]).
+func bulkImportCheckDurableShape(res recovery.Result[string, int64], snapDir, which string) []Violation {
 	var v []Violation
 	if !res.SnapshotHit {
 		v = append(v, Violation{
@@ -926,12 +928,35 @@ func bulkImportCheckDurableShape(res recovery.Result[string, int64], which strin
 				which, res.WALOps),
 		})
 	}
-	if res.SnapshotSchemaVersion < 2 {
-		v = append(v, Violation{
+	m, err := snapshot.ReadManifestFile(filepath.Join(snapDir, bulkImportManifestName))
+	if err != nil {
+		return append(v, Violation{
 			Kind: ViolationACIDDurability, Op: "<bulk import publish>",
-			Message: fmt.Sprintf("%s: snapshot manifest version %d; labels and properties need v2 or later",
-				which, res.SnapshotSchemaVersion),
+			Message: fmt.Sprintf("%s: read the published manifest: %v", which, err),
 		})
+	}
+	return append(v, bulkImportCheckManifestComponents(m.Files, which)...)
+}
+
+// bulkImportCheckManifestComponents reports a violation for each of labels.bin
+// and properties.bin that a manifest's file list does not name. The loader reads only the components
+// a manifest lists, so a file on disk that the manifest omits restores nothing.
+// The manifest version cannot answer this: every manifest the current build
+// writes carries [snapshot.ManifestVersion], whatever components it lists.
+func bulkImportCheckManifestComponents(files []snapshot.FileEntry, which string) []Violation {
+	listed := make(map[string]bool, len(files))
+	for _, f := range files {
+		listed[f.Name] = true
+	}
+	var v []Violation
+	for _, name := range []string{snapshot.LabelsFile, snapshot.PropertiesFile} {
+		if !listed[name] {
+			v = append(v, Violation{
+				Kind: ViolationACIDDurability, Op: "<bulk import publish>",
+				Message: fmt.Sprintf("%s: the published manifest does not list %s; labels and properties would not be restored",
+					which, name),
+			})
+		}
 	}
 	return v
 }
@@ -1291,7 +1316,7 @@ func bulkImportCheckCrashedImport(
 ) ([]Violation, error) {
 	scratch := filepath.Join(root, "scratch")
 	res, err := bulkimport.ImportInto[int64](ctx, scratch,
-		bulkimport.Options{Directed: true, Multigraph: true}, nodes, edges)
+		bulkimport.Options{}, nodes, edges)
 	if err != nil {
 		return nil, fmt.Errorf("sim: bulkimport-parity crashed-import publish: %w", err)
 	}

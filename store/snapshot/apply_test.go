@@ -22,7 +22,7 @@ import (
 // when the readback carries zero pairs.
 func TestApplyMapperToGraph_EmptyReadback(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := ApplyMapperToGraph(g, MapperReadback{}); err != nil {
 		t.Fatalf("ApplyMapperToGraph(empty): %v", err)
 	}
@@ -36,7 +36,7 @@ func TestApplyMapperToGraph_EmptyReadback(t *testing.T) {
 // have produced a v3 mapper.bin Pairs readback).
 func TestApplyMapperToGraph_NonStringKeyType(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[int64, float64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, float64](adjlist.Config{})
 	rb := MapperReadback{
 		Pairs: []MapperPair{{ID: 0, Key: "x"}}, // non-empty to skip the early return
 	}
@@ -66,7 +66,7 @@ func TestApplyMapperToGraph_RoundTrip(t *testing.T) {
 	}
 
 	// Apply to a fresh graph.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := ApplyMapperToGraph(g, rb); err != nil {
 		t.Fatalf("ApplyMapperToGraph: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestApplyMapperToGraph_RoundTrip(t *testing.T) {
 // no-op for an empty RawPairs slice.
 func TestApplyMapperToGraphWithCodec_EmptyReadback(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[int64, float64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, float64](adjlist.Config{})
 	if err := ApplyMapperToGraphWithCodec(g, MapperReadback{}, txn.NewInt64Codec()); err != nil {
 		t.Fatalf("ApplyMapperToGraphWithCodec(empty): %v", err)
 	}
@@ -104,7 +104,7 @@ func TestApplyMapperToGraphWithCodec_EmptyReadback(t *testing.T) {
 // ErrMapperApply immediately (even when RawPairs is non-empty).
 func TestApplyMapperToGraphWithCodec_NilCodecErrors(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[int64, float64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, float64](adjlist.Config{})
 	rb := MapperReadback{
 		RawPairs: []MapperRawPair{{ID: 0, Key: []byte{0x01}}},
 	}
@@ -135,7 +135,7 @@ func TestApplyMapperToGraphWithCodec_RoundTrip(t *testing.T) {
 		},
 	}
 
-	g := lpg.New[int64, float64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, float64](adjlist.Config{})
 	if err := ApplyMapperToGraphWithCodec(g, rb, codec); err != nil {
 		t.Fatalf("ApplyMapperToGraphWithCodec: %v", err)
 	}
@@ -173,7 +173,7 @@ func encodeInt64(t *testing.T, codec txn.Codec[int64], v int64) []byte {
 // edges are applied and the function returns nil immediately.
 func TestApplyCSRToGraph_EmptyVertices(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	rb := &CSRReadback{}
 	if err := ApplyCSRToGraph(g, rb); err != nil {
 		t.Fatalf("ApplyCSRToGraph(empty): %v", err)
@@ -186,7 +186,7 @@ func TestApplyCSRToGraph_EmptyVertices(t *testing.T) {
 func TestApplyCSRToGraph_RoundTrip(t *testing.T) {
 	t.Parallel()
 	// Build the original graph.
-	orig := lpg.New[string, int64](adjlist.Config{Directed: true})
+	orig := lpg.New[string, int64](adjlist.Config{})
 	if err := orig.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestApplyCSRToGraph_RoundTrip(t *testing.T) {
 	})
 
 	// Apply to a fresh graph.
-	g2 := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g2 := lpg.New[string, int64](adjlist.Config{})
 	if err := ApplyMapperToGraph(g2, MapperReadback{Pairs: pairs}); err != nil {
 		t.Fatalf("ApplyMapperToGraph: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestApplyCSRToGraph_RoundTrip(t *testing.T) {
 // the mapper are silently skipped without an error.
 func TestApplyCSRToGraph_UnresolvedSrc(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	// Provide a readback where vertex 0 has 1 edge, but the mapper is empty
 	// so neither endpoint can be resolved.
 	rb := &CSRReadback{
@@ -253,7 +253,7 @@ func TestApplyCSRToGraph_UnresolvedSrc(t *testing.T) {
 // underflow or an out-of-bounds index. Finding H4.
 func TestApplyCSRToGraph_NonMonotonicOffsets(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	// vertices[0]=5 > vertices[1]=0 — a decreasing offset. The legacy
 	// code would compute end-start = 0-5 as a huge uint64 and index
 	// rb.Edges past its end.
@@ -276,7 +276,7 @@ func TestApplyCSRToGraph_NonMonotonicOffsets(t *testing.T) {
 // Finding H4.
 func TestApplyCSRToGraph_OffsetOverflowsEdges(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	rb := &CSRReadback{
 		Vertices: []uint64{0, 1 << 40}, // far beyond the single edge below
 		Edges:    []graph.NodeID{graph.NodeID(1)},
@@ -301,7 +301,7 @@ func TestApplyCSRToGraph_OffsetOverflowsEdges(t *testing.T) {
 // actually reached.
 func TestApplyCSRToGraph_MismatchedWeightWidthRejected(t *testing.T) {
 	t.Parallel()
-	orig := lpg.New[string, int64](adjlist.Config{Directed: true})
+	orig := lpg.New[string, int64](adjlist.Config{})
 	if err := orig.AddEdge("a", "b", 7); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestApplyCSRToGraph_MismatchedWeightWidthRejected(t *testing.T) {
 		pairs = append(pairs, MapperPair{ID: id, Key: k})
 		return true
 	})
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := ApplyMapperToGraph(g, MapperReadback{Pairs: pairs}); err != nil {
 		t.Fatalf("ApplyMapperToGraph: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestApplyCSRToGraph_MismatchedWeightWidthRejected(t *testing.T) {
 // CSR: the round-trip edge set is preserved exactly. Finding H4.
 func TestApplyCSRToGraph_ValidUnaffectedByGuard(t *testing.T) {
 	t.Parallel()
-	orig := lpg.New[string, int64](adjlist.Config{Directed: true})
+	orig := lpg.New[string, int64](adjlist.Config{})
 	if err := orig.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestApplyCSRToGraph_ValidUnaffectedByGuard(t *testing.T) {
 		return true
 	})
 
-	g2 := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g2 := lpg.New[string, int64](adjlist.Config{})
 	if err := ApplyMapperToGraph(g2, MapperReadback{Pairs: pairs}); err != nil {
 		t.Fatalf("ApplyMapperToGraph: %v", err)
 	}

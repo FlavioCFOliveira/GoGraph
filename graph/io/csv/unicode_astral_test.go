@@ -27,7 +27,7 @@ func TestCSVRead_UnicodeAstralPlane(t *testing.T) {
 		t.Run(p.src+"→"+p.dst, func(t *testing.T) {
 			t.Parallel()
 
-			a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+			a := adjlist.New[string, int64](adjlist.Config{})
 			if err := a.AddEdge(p.src, p.dst, 1); err != nil {
 				t.Fatalf("AddEdge: %v", err)
 			}

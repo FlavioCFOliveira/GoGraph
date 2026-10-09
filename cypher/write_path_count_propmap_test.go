@@ -66,7 +66,7 @@ import (
 // shape is what makes the counted answer differ per row.
 func newWPCFixture(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	e := cypher.NewEngine(g)
 	for i := range wpsNodes {
 		if _, err := e.RunAny(context.Background(), fmt.Sprintf(`CREATE (:P {sid:%d})`, wpsBaseSID+i), nil); err != nil {

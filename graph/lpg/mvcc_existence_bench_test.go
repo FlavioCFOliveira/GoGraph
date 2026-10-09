@@ -27,7 +27,7 @@ import (
 // benchExistenceGraph builds size nodes and removes every removeEvery-th one.
 func benchExistenceGraph(b *testing.B, size, removeEvery int) (*Graph[string, float64], []graph.NodeID) {
 	b.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	ids := make([]graph.NodeID, 0, size)
 	for i := 0; i < size; i++ {
 		k := fmt.Sprintf("n%07d", i)

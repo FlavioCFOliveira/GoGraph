@@ -26,11 +26,11 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
-// inMemMultigraphEngine builds a store-less (in-memory) engine over a fresh
+// inMemParallelEdgeEngine builds a store-less (in-memory) engine over a fresh
 // directed multigraph, exercising the lpgMutatorAdapter write path.
-func inMemMultigraphEngine(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64]) {
+func inMemParallelEdgeEngine(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64]) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return cypher.NewEngine(g), g
 }
 
@@ -69,7 +69,7 @@ func mustRunWrite(t *testing.T, eng *cypher.Engine, q string) {
 // by-handle properties of the parallel CALLS instance.
 func TestByHandle_InMemory_SetOnOneParallelEdge_SiblingUntouched(t *testing.T) {
 	t.Parallel()
-	eng, g := inMemMultigraphEngine(t)
+	eng, g := inMemParallelEdgeEngine(t)
 	mustRunWrite(t, eng, `CREATE (a:N {key:'x'})`)
 	mustRunWrite(t, eng, `CREATE (b:N {key:'y'})`)
 	mustRunWrite(t, eng, `MATCH (a:N {key:'x'}),(b:N {key:'y'}) CREATE (a)-[:USES {w:1}]->(b)`)
@@ -111,7 +111,7 @@ func TestByHandle_InMemory_SetOnOneParallelEdge_SiblingUntouched(t *testing.T) {
 // test for REMOVE r.x.
 func TestByHandle_InMemory_RemoveOnOneParallelEdge_SiblingUntouched(t *testing.T) {
 	t.Parallel()
-	eng, g := inMemMultigraphEngine(t)
+	eng, g := inMemParallelEdgeEngine(t)
 	mustRunWrite(t, eng, `CREATE (a:N {key:'x'})`)
 	mustRunWrite(t, eng, `CREATE (b:N {key:'y'})`)
 	mustRunWrite(t, eng, `MATCH (a:N {key:'x'}),(b:N {key:'y'}) CREATE (a)-[:USES {w:1, tag:'keep'}]->(b)`)
@@ -142,7 +142,7 @@ func TestByHandle_InMemory_RemoveOnOneParallelEdge_SiblingUntouched(t *testing.T
 // to the first matched parallel edge (its by-handle write included) must be
 // undone when the statement errors.
 func TestByHandle_RollbackRevertsByHandle(t *testing.T) {
-	eng, g, w, _ := walMultigraphEngineWithGraph(t)
+	eng, g, w, _ := walEngineWithGraph(t)
 	defer w.Close()
 
 	mustRunWrite(t, eng, `CREATE (a:N {key:'x'})`)
@@ -182,7 +182,7 @@ func TestByHandle_RollbackRevertsByHandle(t *testing.T) {
 // statement that already removed a by-handle property on an earlier instance
 // must restore it.
 func TestByHandle_RollbackRevertsByHandle_Remove(t *testing.T) {
-	eng, g, w, _ := walMultigraphEngineWithGraph(t)
+	eng, g, w, _ := walEngineWithGraph(t)
 	defer w.Close()
 
 	mustRunWrite(t, eng, `CREATE (a:N {key:'x'})`)
@@ -248,7 +248,7 @@ func sameByHandle(a, b map[uint64]map[string]lpg.PropertyValue) bool {
 func TestByHandle_ConcurrentViewReaders_NoRace(t *testing.T) {
 	testlayers.RequireSoak(t)
 	t.Parallel()
-	eng, g := inMemMultigraphEngine(t)
+	eng, g := inMemParallelEdgeEngine(t)
 	mustRunWrite(t, eng, `CREATE (a:N {key:'x'})`)
 	mustRunWrite(t, eng, `CREATE (b:N {key:'y'})`)
 	mustRunWrite(t, eng, `MATCH (a:N {key:'x'}),(b:N {key:'y'}) CREATE (a)-[:USES {w:1}]->(b)`)

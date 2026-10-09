@@ -1,23 +1,14 @@
 package recovery
 
 // config_roundtrip_test.go — regression coverage for rmp task #1290:
-// "Persist adjlist Config (directed/multigraph) in the snapshot manifest
-// and reconstruct from it on recovery."
+// "Persist adjlist Config in the snapshot manifest and reconstruct from it
+// on recovery."
 //
-// Before the fix, recovery.Open hardcoded adjlist.Config{Directed: true,
-// Multigraph: true}. A graph created SIMPLE (Multigraph: false) — where
-// repeated AddEdge(a,b) collapses to one edge — silently became a
-// MULTIGRAPH after a snapshot+reopen: the same AddEdge(a,b) call then
-// appended a parallel edge. The recovered graph had divergent edge-
-// insertion semantics from the in-process graph for the same public API.
-//
-// The fix persists the originating graph's directed/multigraph shape in
-// the snapshot manifest (snapshot.Manifest.GraphConfig) and rebuilds the
-// graph with it. A snapshot written without the field (older snapshots,
-// or the CSR-only legacy writer) defaults to the historical
-// {Directed: true, Multigraph: true} so the additive-CREATE openCypher
-// engine snapshots — and every other pre-fix snapshot — replay exactly
-// as before.
+// Every graph is a directed multigraph (rmp #3072), so the persisted shape
+// is the weightless flag alone. A snapshot written without the field (older
+// snapshots, or the CSR-only legacy writer) defaults to the zero Config, and
+// a legacy manifest's "directed"/"multigraph" keys select nothing: parallel
+// edges survive a snapshot round trip, and AddEdge after recovery appends.
 //
 // Layer: short. White-box (package recovery) so the tests can assert the
 // recovered graph's Config() directly and exercise recoveryGraphConfig.
@@ -25,6 +16,7 @@ package recovery
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -73,59 +65,6 @@ func writeSelfSufficientSnapshot(t *testing.T, dir string, g *lpg.Graph[string, 
 	return snapDir
 }
 
-// TestRecovery_SimpleGraphConfigSurvivesSnapshot is the task-#1290
-// acceptance criterion. A SIMPLE (Multigraph: false) graph collapses two
-// AddEdge(a,b) calls to one edge; after snapshot + recovery.Open it must
-// STILL be simple, so a third AddEdge(a,b) on the recovered graph is also
-// a no-op and the edge count stays one.
-//
-// Pre-fix this FAILS: recovery rebuilt the graph as a multigraph, so the
-// post-recovery AddEdge(a,b) appended a parallel edge and Size became 2.
-func TestRecovery_SimpleGraphConfigSurvivesSnapshot(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	// Build a SIMPLE graph and add the same edge twice — it collapses to
-	// one edge under simple-graph semantics.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: false})
-	if err := g.AddEdge("a", "b", 1); err != nil {
-		t.Fatalf("AddEdge #1: %v", err)
-	}
-	if err := g.AddEdge("a", "b", 2); err != nil {
-		t.Fatalf("AddEdge #2: %v", err)
-	}
-	if got := g.AdjList().Size(); got != 1 {
-		t.Fatalf("pre-snapshot Size = %d, want 1 (simple-graph collapse)", got)
-	}
-
-	writeSelfSufficientSnapshot(t, dir, g)
-
-	res, err := Open[string, int64](dir, cfgRoundTripOpts())
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if !res.SnapshotHit {
-		t.Fatal("SnapshotHit = false")
-	}
-
-	// The recovered graph must have been reconstructed SIMPLE.
-	if cfg := res.Graph.Config(); cfg.Multigraph {
-		t.Fatalf("recovered Config.Multigraph = true, want false (simple-graph shape must survive the snapshot)")
-	}
-	if got := res.Graph.AdjList().Size(); got != 1 {
-		t.Fatalf("post-recovery Size = %d, want 1 (the single collapsed edge)", got)
-	}
-
-	// The crux of the AC: the same AddEdge(a,b) on the recovered graph must
-	// be a no-op (simple-graph idempotence), not append a parallel edge.
-	if err := res.Graph.AddEdge("a", "b", 3); err != nil {
-		t.Fatalf("post-recovery AddEdge: %v", err)
-	}
-	if got := res.Graph.AdjList().Size(); got != 1 {
-		t.Fatalf("post-recovery Size after re-AddEdge = %d, want 1 — recovered graph diverged to multigraph semantics", got)
-	}
-}
-
 // TestRecovery_MultigraphConfigSurvivesSnapshot is the symmetric guard: a
 // MULTIGRAPH graph's parallel edges must survive snapshot + recovery.Open
 // as parallel edges, and the recovered graph must remain a multigraph so a
@@ -136,7 +75,7 @@ func TestRecovery_MultigraphConfigSurvivesSnapshot(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge #1: %v", err)
 	}
@@ -152,9 +91,6 @@ func TestRecovery_MultigraphConfigSurvivesSnapshot(t *testing.T) {
 	res, err := Open[string, int64](dir, cfgRoundTripOpts())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
-	}
-	if cfg := res.Graph.Config(); !cfg.Multigraph {
-		t.Fatalf("recovered Config.Multigraph = false, want true (multigraph shape must survive the snapshot)")
 	}
 	// Both parallel edges must have survived the CSR round-trip.
 	if got := res.Graph.AdjList().Size(); got != 2 {
@@ -174,7 +110,7 @@ func TestRecovery_MultigraphConfigSurvivesSnapshot(t *testing.T) {
 // compatibility guard. A snapshot whose manifest carries no graph_config
 // field — every snapshot written before this field existed, and any
 // CSR-only legacy snapshot — must reconstruct as the historical default
-// {Directed: true, Multigraph: true}, so pre-fix snapshots (especially the
+// {}, so pre-fix snapshots (especially the
 // openCypher engine's additive-CREATE snapshots) replay exactly as before.
 //
 // The test writes a normal v3 snapshot (which now DOES carry graph_config),
@@ -188,7 +124,7 @@ func TestRecovery_AbsentGraphConfigDefaultsToMultigraph(t *testing.T) {
 	// persisted config it would rebuild simple. The point of the test is
 	// that with the field stripped, recovery instead falls back to the
 	// multigraph default regardless of the originating shape.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: false})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -200,9 +136,9 @@ func TestRecovery_AbsentGraphConfigDefaultsToMultigraph(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	// A manifest without graph_config must default to multigraph.
-	if cfg := res.Graph.Config(); !cfg.Multigraph || !cfg.Directed {
-		t.Fatalf("recovered Config = %+v, want {Directed:true Multigraph:true} for a manifest without graph_config", cfg)
+	// A manifest without graph_config must default to the zero Config.
+	if cfg := res.Graph.Config(); cfg != (adjlist.Config{}) {
+		t.Fatalf("recovered Config = %+v, want {} for a manifest without graph_config", cfg)
 	}
 	// And the default behaviour must be observable: AddEdge(a,b) appends.
 	if err := res.Graph.AddEdge("a", "b", 2); err != nil {
@@ -220,23 +156,31 @@ func TestRecoveryGraphConfig_DefaultAndPersisted(t *testing.T) {
 	t.Parallel()
 
 	// Absent field (nil) -> historical default.
-	if got := recoveryGraphConfig(nil); got != (adjlist.Config{Directed: true, Multigraph: true}) {
-		t.Fatalf("recoveryGraphConfig(nil) = %+v, want {Directed:true Multigraph:true}", got)
+	if got := recoveryGraphConfig(nil); got != (adjlist.Config{}) {
+		t.Fatalf("recoveryGraphConfig(nil) = %+v, want {}", got)
 	}
 
-	// Present field -> honoured verbatim, including a simple graph.
+	// Present field -> honoured verbatim. The legacy "directed" and
+	// "multigraph" keys select nothing: a simple graph is a valid multigraph,
+	// and an undirected snapshot is migrated by the loader (see
+	// legacy_undirected_test.go).
 	for _, tc := range []struct {
 		name string
-		in   snapshot.GraphConfig
+		in   string
 		want adjlist.Config
 	}{
-		{"simple-directed", snapshot.GraphConfig{Directed: true, Multigraph: false}, adjlist.Config{Directed: true, Multigraph: false}},
-		{"multi-directed", snapshot.GraphConfig{Directed: true, Multigraph: true}, adjlist.Config{Directed: true, Multigraph: true}},
-		{"simple-undirected", snapshot.GraphConfig{Directed: false, Multigraph: false}, adjlist.Config{Directed: false, Multigraph: false}},
+		{"weighted", `{}`, adjlist.Config{}},
+		{"weightless", `{"weightless": true}`, adjlist.Config{Weightless: true}},
+		{"legacy-simple-directed", `{"directed": true, "multigraph": false}`, adjlist.Config{}},
+		{"legacy-multi-directed", `{"directed": true, "multigraph": true}`, adjlist.Config{}},
+		{"legacy-simple-undirected", `{"directed": false, "multigraph": false}`, adjlist.Config{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			gc := tc.in
+			var gc snapshot.GraphConfig
+			if err := json.Unmarshal([]byte(tc.in), &gc); err != nil {
+				t.Fatalf("decode %s: %v", tc.in, err)
+			}
 			got := recoveryGraphConfig(&gc)
 			if got != tc.want {
 				t.Fatalf("recoveryGraphConfig(%+v) = %+v, want %+v", tc.in, got, tc.want)

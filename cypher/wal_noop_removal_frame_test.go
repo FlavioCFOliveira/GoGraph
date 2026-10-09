@@ -18,20 +18,15 @@ package cypher_test
 //     of the by-handle one; an UNWIND that doubles the rows took it to four
 //     frames for one relationship removed.
 //
-// The gate is NOT unconditional, and that is the load-bearing part of this file.
-// It applies only where the WAL faithfully describes the graph's adjacency —
-// i.e. on a DIRECTED graph. On an undirected one, RemoveAllEdgesFrom retires
-// each mirror arc while emitting a frame only for the forward arc, so the
-// in-memory presence probe stops predicting what a replay will find and a
-// removal that is a no-op in memory can be the frame that performs the deletion
-// on replay. TestUndirectedEngine_KeepsDescribingRemovalsThatTookNothing pins
-// that, because suppressing those frames LOSES deletions.
+// The gate is sound because the WAL faithfully describes the graph's adjacency:
+// every arc an adapter changes is described by exactly one frame, so the
+// in-memory presence probe predicts what a replay will find.
+// TestDetachDeleteInboundHub_RecoversEdgeless pins that a frame the gate keeps
+// is never one a replay needs to drop.
 
 import (
 	"context"
 	"fmt"
-	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -46,22 +41,16 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
-// noopFrameEngine builds a WAL-backed engine over a multigraph with the
-// requested directedness, returning the engine, the WAL writer and the store
-// directory. The engine's construction warnings are silenced for the whole test
-// (the undirected case emits one by design, #1892).
-func noopFrameEngine(t *testing.T, directed bool) (*cypher.Engine, *wal.Writer, string) {
+// noopFrameEngine builds a WAL-backed engine over a fresh graph, returning the
+// engine, the WAL writer and the store directory.
+func noopFrameEngine(t *testing.T) (*cypher.Engine, *wal.Writer, string) {
 	t.Helper()
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: directed, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -221,7 +210,7 @@ func noopFrameRecoverEdges(t *testing.T, dir string, dropFrame int) []string {
 // it removed — three of them removing nothing, 64.7% of the delete transaction's
 // WAL bytes.
 func TestDeleteRelationship_PerPairRemovalThatTookNothingWritesNoWALFrame(t *testing.T) {
-	eng, w, dir := noopFrameEngine(t, true)
+	eng, w, dir := noopFrameEngine(t)
 
 	noopFrameRun(t, eng, `CREATE (a:A {n:'a'})-[:R]->(b:B {n:'b'})`)
 	if err := w.Sync(); err != nil {
@@ -257,7 +246,7 @@ func TestDeleteRelationship_PerPairRemovalThatTookNothingWritesNoWALFrame(t *tes
 // Before rmp #2734 this wrote TWO OpRemoveEdgeByHandle frames for the one
 // relationship it removed — 39.2% of the delete transaction's WAL bytes.
 func TestDeleteRelationship_ByHandleRemovalThatTookNothingWritesNoWALFrame(t *testing.T) {
-	eng, w, dir := noopFrameEngine(t, true)
+	eng, w, dir := noopFrameEngine(t)
 
 	noopFrameRun(t, eng, `CREATE (a:A {n:'a'})-[:R]->(b:B {n:'b'})`)
 	res := noopFrameRun(t, eng, `MATCH (a)-[r:R]-(b) DELETE r`)
@@ -284,7 +273,7 @@ func TestDeleteRelationship_ByHandleRemovalThatTookNothingWritesNoWALFrame(t *te
 // "recovery finds no edges" would pass even on a WAL that never described the
 // deletion at all, and the oracle would prove nothing.
 func TestDeleteRelationship_SuppressedFramesReplayToTheSameGraph(t *testing.T) {
-	eng, w, dir := noopFrameEngine(t, true)
+	eng, w, dir := noopFrameEngine(t)
 
 	noopFrameRun(t, eng, `CREATE (a:A {n:'a'})-[:R]->(b:B {n:'b'})`)
 	noopFrameRun(t, eng, `MATCH (a)-[r:R]-(b) WITH r UNWIND [1, 2] AS i DELETE r`)
@@ -326,22 +315,13 @@ func TestDeleteRelationship_SuppressedFramesReplayToTheSameGraph(t *testing.T) {
 	}
 }
 
-// TestUndirectedEngine_KeepsDescribingRemovalsThatTookNothing guards the trap the
-// rmp #2734 investigation walked into, and is the reason its gate is conditional.
-//
-// Cypher over an UNDIRECTED LPG is NOT a supported configuration: docs/cypher.md
-// states Directed: true is required for openCypher semantics, cypher.NewEngine
-// warns at construction (#1892), and the engine measurably miscounts there
-// (one CREATE of one relationship makes `MATCH ()-[r]->() RETURN count(r)`
-// report 2). This test does not bless it. It exists because the module still
-// CONSTRUCTS it, and because gating the removal frame unconditionally on the
-// in-memory presence probe silently turns it into DATA LOSS: RemoveAllEdgesFrom
-// retires each mirror arc while emitting a frame only for the forward arc, so
-// the frame that looks redundant in memory is the one that performs the deletion
-// on replay. With the gate applied unconditionally this recovered a hub still
-// holding all eight of its relationships.
-func TestUndirectedEngine_KeepsDescribingRemovalsThatTookNothing(t *testing.T) {
-	eng, w, dir := noopFrameEngine(t, false)
+// TestDetachDeleteInboundHub_RecoversEdgeless guards the trap the rmp #2734
+// investigation walked into on undirected storage, now removed (rmp #3072):
+// a removal frame suppressed as redundant in memory must never be one a replay
+// needs. DETACH DELETE of a hub holding eight INBOUND relationships removes
+// them all, and recovery must reconstruct an edgeless graph.
+func TestDetachDeleteInboundHub_RecoversEdgeless(t *testing.T) {
+	eng, w, dir := noopFrameEngine(t)
 
 	noopFrameRun(t, eng, `CREATE (h:Hub {n:'hub'})`)
 	for i := range 8 {
@@ -357,7 +337,7 @@ func TestUndirectedEngine_KeepsDescribingRemovalsThatTookNothing(t *testing.T) {
 
 	if edges := noopFrameRecoverEdges(t, dir, -1); len(edges) != 0 {
 		t.Fatalf("recovery reconstructed %d edges (%v) after a DETACH DELETE that removed all 8: "+
-			"a removal frame the undirected engine needs was suppressed — that is data loss, not a saving",
+			"a removal frame a replay needs was suppressed — that is data loss, not a saving",
 			len(edges), edges)
 	}
 }

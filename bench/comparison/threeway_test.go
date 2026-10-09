@@ -499,7 +499,7 @@ type embeddedTarget struct {
 // durability axis back, exactly as gograph-embedded versus gograph-bolt separates
 // transport cost. Report both or neither (rmp #2223).
 func newEmbeddedTarget(edgeKey string) *embeddedTarget {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	return &embeddedTarget{eng: cypher.NewEngine(g), name: "gograph-embedded", edgeKey: edgeKey}
 }
@@ -512,7 +512,7 @@ func newEmbeddedDurableTarget(dir, edgeKey string) (*embeddedTarget, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wal.Open: %w", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	st := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
@@ -666,7 +666,7 @@ func (e *embeddedTarget) Close(context.Context) {
 // newGoGraphBoltTarget starts an in-process Bolt server over a fresh engine so
 // the same driver path used for Neo4j and Memgraph also measures GoGraph.
 func newGoGraphBoltTarget(ctx context.Context) (*boltTarget, error) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := cypher.NewEngine(g)
 

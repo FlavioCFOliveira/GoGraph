@@ -37,7 +37,7 @@ func reportConnectivity(ctx context.Context, w io.Writer, net *network, bridges 
 
 	// Intact backbone: one connected component.
 	start := time.Now()
-	_, kIntact, err := search.WCCCtx(ctx, csr.BuildFromAdjList(net.adj))
+	_, kIntact, err := search.WCCCtx(ctx, csr.BuildFromAdjList(net.adj).BuildSymmetric())
 	if err != nil {
 		return fmt.Errorf("WCC (intact): %w", err)
 	}
@@ -49,7 +49,7 @@ func reportConnectivity(ctx context.Context, w io.Writer, net *network, bridges 
 	if err != nil {
 		return err
 	}
-	severedCSR := csr.BuildFromAdjList(severed)
+	severedCSR := csr.BuildFromAdjList(severed).BuildSymmetric()
 
 	start = time.Now()
 	comp, kSevered, err := search.WCCCtx(ctx, severedCSR)
@@ -78,13 +78,14 @@ func reportConnectivity(ctx context.Context, w io.Writer, net *network, bridges 
 	return nil
 }
 
-// adjExcludingBridge builds a fresh undirected adjacency over the SAME site
-// names as the backbone but omits the one bridge link. Every site still
+// adjExcludingBridge builds a fresh adjacency over the SAME site names as the
+// backbone, one directed relationship per link, but omits the one bridge
+// link; the caller reads it through its symmetric projection. Every site still
 // appears — each is part of its cluster's Hamiltonian cycle, none of which is
 // the bridge — so the resulting CSR covers the full node set and the WCC
 // component count reflects the true partition, not a dropped-node artefact.
 func (net *network) adjExcludingBridge(bridge [2]graph.NodeID) (*adjlist.AdjList[string, int64], error) {
-	adj := adjlist.New[string, int64](adjlist.Config{Directed: false})
+	adj := adjlist.New[string, int64](adjlist.Config{})
 	for _, l := range net.links {
 		ua, ub := net.idOf[l.a], net.idOf[l.b]
 		if (ua == bridge[0] && ub == bridge[1]) || (ua == bridge[1] && ub == bridge[0]) {

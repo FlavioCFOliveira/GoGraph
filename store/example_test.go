@@ -34,7 +34,7 @@ func ExampleDB() {
 		panic(err)
 	}
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	st := txn.NewStoreWithCodec(g, wlog, txn.NewStringCodec())
 
 	// Background checkpointer, wired the production way: the commit serialiser

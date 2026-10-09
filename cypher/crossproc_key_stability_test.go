@@ -67,7 +67,7 @@ func init() {
 	// across the cypher package test binary so that subproc.Dispatch routes
 	// to the correct handler when the binary is re-executed as a child.
 	subproc.Register("cypher-plan-cache-key-child", func(_ []string) int {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 		for _, q := range canonicalQueries {
 			explain, err := eng.Explain(q, nil)
@@ -125,7 +125,7 @@ func TestCrossProc_PlanCacheKeyStability(t *testing.T) {
 	}
 
 	// Proc B: build a local engine with the same trivial schema and compare.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	for _, q := range canonicalQueries {

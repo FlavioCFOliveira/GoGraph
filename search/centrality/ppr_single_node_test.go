@@ -29,11 +29,11 @@ import (
 func TestPPR_Path(t *testing.T) {
 	t.Parallel()
 
-	g, err := shapegen.Path(100, false).Build(adjlist.Config{Directed: false})
+	g, err := shapegen.Path(100).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Path.Build: %v", err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 
 	// Source is vertex 0; shapegen.Path interns nodes 0..99 in order.
 	src := graph.NodeID(0)

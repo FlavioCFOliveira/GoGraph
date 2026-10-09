@@ -35,7 +35,7 @@ func operatorTypes(op exec.Operator) []string {
 }
 
 func TestProfileWrite_WrapperIsAbsentFromAnUnprofiledWriteBuild(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 	if r, err := eng.RunInTx(context.Background(), "CREATE (:P {v: 1})", nil); err != nil {

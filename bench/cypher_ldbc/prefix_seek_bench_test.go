@@ -76,7 +76,7 @@ func buildPrefixSeekBenchEngine(tb testing.TB, disablePrefix bool) *cypher.Engin
 	// the engine from logging its non-directed / non-multigraph warnings, which
 	// would interleave with the benchmark output and make benchstat silently
 	// discard the affected samples.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < pfxBenchPop; i++ {
 		key := fmt.Sprintf("p%05d", i)
 		_ = g.AddNode(key)

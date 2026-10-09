@@ -29,7 +29,7 @@ func cappedStore(t *testing.T, dir string, maxTxnOps int) (*txn.Store[string, in
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptionsCapped[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -216,7 +216,7 @@ func cappedStoreUncapped(t *testing.T, dir string) (*txn.Store[string, int64], *
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

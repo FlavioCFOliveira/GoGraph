@@ -290,7 +290,7 @@ func parseLevels(s string) ([]int, error) {
 
 // newGraph builds an in-memory graph for one phase.
 func newGraph() *lpg.Graph[string, float64] {
-	return lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	return lpg.New[string, float64](adjlist.Config{})
 }
 
 func customerKey(i int) string  { return fmt.Sprintf("cust-%06d", i) }

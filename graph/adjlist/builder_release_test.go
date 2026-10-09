@@ -21,7 +21,7 @@ func retainedBuilders[W any](a *AdjList[int, W]) int {
 
 func buildBracketed(t *testing.T) *AdjList[int, float64] {
 	t.Helper()
-	a := New[int, float64](Config{Directed: true, Multigraph: true})
+	a := New[int, float64](Config{})
 	const nodes = 512
 	for i := 0; i < nodes; i++ {
 		if err := a.AddNode(i); err != nil {

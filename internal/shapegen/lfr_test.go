@@ -52,7 +52,6 @@ func TestRandom_LFR_Invariants(t *testing.T) {
 				t.Fatalf("Build: %v", err)
 			}
 			assertOrder(t, g, uint64(c.n))
-			assertDirected(t, g, false)
 			if hasSelfLoop(g) {
 				t.Fatal("graph contains a self-loop, violating the simple-graph contract")
 			}
@@ -193,7 +192,7 @@ func TestRandom_LFR_Golden(t *testing.T) {
 // contracts.
 func TestRandom_LFR_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	g, err := LFR(60, 300, 150, 5, 15, 5, 15, 30, 42).Build(cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -212,7 +211,7 @@ func TestRandom_LFR_PreservesMaxShardCapacity(t *testing.T) {
 // full tests.
 func TestRandom_LFR_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: false, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	const (
 		n            = 300

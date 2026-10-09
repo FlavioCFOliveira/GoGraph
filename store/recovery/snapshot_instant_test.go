@@ -54,7 +54,7 @@ func TestSnapshotInstant_IsRecordedAndConsistentWithTheData(t *testing.T) {
 	}
 	defer func() { _ = wr.Close() }()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, wr, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -128,7 +128,7 @@ func TestSnapshotInstant_RecoveryDerivesTheFloorFromTheImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, wr, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -200,7 +200,7 @@ func TestSnapshotInstant_AnEmptyWALDoesNotEraseTheImagesInstant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, wr, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

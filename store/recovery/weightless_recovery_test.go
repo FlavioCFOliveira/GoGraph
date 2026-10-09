@@ -27,7 +27,7 @@ func TestCheckpointRecovery_WeightlessSurvives(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Weightless: true})
+	g := lpg.New[string, int64](adjlist.Config{Weightless: true})
 	if !g.AdjList().Weightless() {
 		t.Fatal("precondition: source graph is not weightless")
 	}

@@ -20,7 +20,7 @@ import (
 // so the verified answers really are index-served.
 func newSeekResultsEngine(t *testing.T, nodes int) *EngineAdapter {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -193,7 +193,7 @@ func TestIndexSeekResults_FiresOnReferenceDivergence(t *testing.T) {
 // nothing, Finish must report the run as vacuous.
 func TestIndexSeekResults_FinishFiresOnVacuousRun(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	empty := NewEngineAdapter(cypher.NewEngine(g))
 	k := fixedSeekResults()
 	if v := k.Check(1, empty); len(v) != 0 {

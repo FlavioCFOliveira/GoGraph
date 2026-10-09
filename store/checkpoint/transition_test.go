@@ -38,7 +38,7 @@ func TestCheckpoint_TransitionRecovery(t *testing.T) {
 	// Build a small graph with 5 edges directly in memory.
 	// Edges are NOT committed via txn: the checkpoint reads the live
 	// in-memory AdjList and writes a CSR snapshot of it.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	edges := [][2]string{
 		{"a", "b"}, {"b", "c"}, {"c", "d"}, {"d", "e"}, {"e", "a"},
 	}

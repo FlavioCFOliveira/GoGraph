@@ -575,10 +575,8 @@ func clipEntry[W any](e *adjEntry[W]) *adjEntry[W] {
 }
 
 // reindexWithdrawnLocked corrects the reverse index for src's entry going back
-// from cur to pre, and returns the change in the edge count. An undirected edge
-// lives in both endpoints' entries and is counted once, from the entry of the
-// lower node id; a self-loop has one slot and is counted from it. The caller
-// holds src's shard lock; the reverse index is a leaf below it.
+// from cur to pre, and returns the change in the edge count: one per slot. The
+// caller holds src's shard lock; the reverse index is a leaf below it.
 func (a *AdjList[N, W]) reindexWithdrawnLocked(src graph.NodeID, cur, pre *adjEntry[W]) int64 {
 	var delta map[graph.NodeID]int
 	note := func(e *adjEntry[W], d int) {
@@ -596,18 +594,13 @@ func (a *AdjList[N, W]) reindexWithdrawnLocked(src graph.NodeID, cur, pre *adjEn
 	note(cur, -1)
 	var size int64
 	for nb, d := range delta {
-		counted := a.cfg.Directed || src <= nb
 		for ; d > 0; d-- {
 			a.rev.add(nb, src)
-			if counted {
-				size++
-			}
+			size++
 		}
 		for ; d < 0; d++ {
 			a.rev.remove(nb, src, nil, 0)
-			if counted {
-				size--
-			}
+			size--
 		}
 	}
 	return size
@@ -636,8 +629,7 @@ func restoreSlotLocked[W any](s *adjShard[W], intraIdx uint64, e *adjEntry[W]) {
 // CheckInvariants verifies the adjacency's derived structures against its
 // forward entries and returns a description of every disagreement, or nil: the
 // reverse index must be exactly the multiset transpose of the forward entries,
-// the edge count must equal the arcs the entries hold (an undirected edge
-// counted once), and an undirected graph's entries must be symmetric.
+// and the edge count must equal the arcs the entries hold.
 //
 // It is a diagnostic for tests and for an operator who suspects corruption. It
 // takes every shard's lock in turn, so the answer is meaningful only while no
@@ -657,9 +649,7 @@ func (a *AdjList[N, W]) CheckInvariants() error {
 				src := graph.NodeID(uint64(intra)<<shardBits | uint64(si))
 				for _, nb := range e.neighbours {
 					fwd[[2]graph.NodeID{src, nb}]++
-					if a.cfg.Directed || src <= nb {
-						arcs++
-					}
+					arcs++
 				}
 			}
 		}
@@ -681,11 +671,6 @@ func (a *AdjList[N, W]) CheckInvariants() error {
 	for k, n := range fwd {
 		if rev[k] != n {
 			errs = append(errs, fmt.Sprintf("arc %v: forward %d, reverse %d", k, n, rev[k]))
-		}
-		if !a.cfg.Directed {
-			if m := fwd[[2]graph.NodeID{k[1], k[0]}]; m != n {
-				errs = append(errs, fmt.Sprintf("asymmetric %v: %d against %d", k, n, m))
-			}
 		}
 	}
 	for k, n := range rev {

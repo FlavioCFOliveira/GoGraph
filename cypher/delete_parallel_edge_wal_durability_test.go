@@ -38,7 +38,7 @@ func TestCypher_DeleteParallelEdgeInstance_WALDurability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
-	g1 := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g1 := lpg.New[string, float64](adjlist.Config{})
 	deleteWALEngineRun(t, g1, w1,
 		`CREATE (a:N {key:'x'})`,
 		`CREATE (b:N {key:'y'})`,

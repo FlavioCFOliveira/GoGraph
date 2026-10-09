@@ -175,7 +175,7 @@ func TestBuildPlanWithMutator_WriteOnlyRoot(t *testing.T) {
 
 func TestLpgMutatorAdapter_HasAndRemoveEdge(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("S"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestLpgMutatorAdapter_HasAndRemoveEdge(t *testing.T) {
 
 func TestLpgMutatorAdapter_DelEdgeProperty(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("S"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

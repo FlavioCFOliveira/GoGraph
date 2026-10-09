@@ -17,7 +17,7 @@ import (
 // EMPTY — which is the whole point, see the file-level note on priming below.
 func newConcurrentSubqueryEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:Person {name:'A', age:30})-[:KNOWS {since:2020}]->(:Person {name:'B', age:40})`)
 	runSetup(t, eng, `MATCH (a:Person {name:'A'}) CREATE (a)-[:KNOWS {since:1999}]->(:Person {name:'C', age:50})`)

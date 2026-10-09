@@ -56,7 +56,7 @@ import (
 // direction would produce visibly wrong counts rather than merely slow ones.
 func degreeFixture(t *testing.T, n int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("n%d", i)
@@ -564,7 +564,7 @@ func TestDisableAdjacencyCountRewrites_GatesEveryDispatchSite(t *testing.T) {
 // and blur the very thing being measured.
 func TestDegreeRewrite_ShortCircuits(t *testing.T) {
 	const degree = 20000
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	if err := g.AddNode("hub"); err != nil {
 		t.Fatalf("AddNode: %v", err)

@@ -166,13 +166,19 @@ type GraphOracle struct {
 	// crash/recovery, so the oracle keeps modelling it across a crash (#1754).
 	// See [GraphOracle.SetExistenceOnEmail].
 	existenceOnEmail bool
+	// lastInst mints the synthetic instance discriminators of edges a CREATE
+	// template adds without an eid property; see [edgeKey].
+	lastInst int64
 }
 
-// edgeKey identifies an edge by source, destination, label, and — for
-// scenarios that model parallel-edge instances (the edge-properties scenario,
-// rmp #2449) — the instance's unique eid property. eid 0 is the simple-graph
-// case: every template that predates instance modelling leaves it zero, so one
-// (src,dst,label) triple maps to at most one modelled edge exactly as before.
+// edgeKey identifies an edge by source, destination, label, and an instance
+// discriminator eid. Every graph is a multigraph (rmp #3072), so each CREATE
+// adds its own relationship even between a pair that already has one. A
+// scenario that models instances by their eid property (edge-properties,
+// rmp #2449) keys them by that positive value; every other CREATE is keyed by
+// a negative synthetic discriminator from [GraphOracle.newInstKey]; 0 is left
+// for the relationships a MERGE-only template creates, of which a pair has at
+// most one.
 type edgeKey struct {
 	label    string
 	src, dst uint64
@@ -385,17 +391,34 @@ func (o *GraphOracle) createKnows(params map[string]any) OracleResult {
 	if !srcOK || !dstOK {
 		return OracleResult{Committed: true} // MATCH found nothing; no edge created.
 	}
-	k := edgeKey{src: srcID, dst: dstID, label: "KNOWS"}
-	o.edges[k] = &EdgeState{SrcID: srcID, DstID: dstID, Label: "KNOWS", Properties: map[string]any{}}
+	o.edges[o.newInstKey(srcID, dstID, "KNOWS")] = &EdgeState{SrcID: srcID, DstID: dstID, Label: "KNOWS", Properties: map[string]any{}}
 	return OracleResult{Committed: true, EdgesCreated: 1}
+}
+
+// newInstKey returns the key of a new relationship instance of label from src
+// to dst, with a fresh negative synthetic discriminator.
+func (o *GraphOracle) newInstKey(src, dst uint64, label string) edgeKey {
+	o.lastInst++
+	return edgeKey{src: src, dst: dst, label: label, eid: -o.lastInst}
+}
+
+// edgeInstances returns the keys of every modelled label relationship from src
+// to dst, in a deterministic order.
+func (o *GraphOracle) edgeInstances(src, dst uint64, label string) []edgeKey {
+	var out []edgeKey
+	for k := range o.edges {
+		if k.src == src && k.dst == dst && k.label == label {
+			out = append(out, k)
+		}
+	}
+	slices.SortFunc(out, func(a, b edgeKey) int { return cmp.Compare(a.eid, b.eid) })
+	return out
 }
 
 // createKnowsProps adds a KNOWS edge carrying `since` and `weight` properties
 // between the Person nodes named $a and $b. Like createKnows it is a committed
-// no-effect result when either endpoint is missing. The caller guarantees the
-// pair has no existing KNOWS edge (so this never overwrites an edge's properties
-// — a simple-graph re-CREATE of an existing edge is a no-op the engine would not
-// re-propertise).
+// no-effect result when either endpoint is missing; otherwise it adds a new
+// relationship even when the pair already has one.
 func (o *GraphOracle) createKnowsProps(params map[string]any) OracleResult {
 	a, okA := paramString(params, "a")
 	b, okB := paramString(params, "b")
@@ -407,13 +430,8 @@ func (o *GraphOracle) createKnowsProps(params map[string]any) OracleResult {
 	if !srcOK || !dstOK {
 		return OracleResult{Committed: true} // MATCH found nothing; no edge created.
 	}
-	k := edgeKey{src: srcID, dst: dstID, label: "KNOWS"}
-	if _, exists := o.edges[k]; exists {
-		// A simple-graph re-CREATE of an existing edge is a no-op; do not mutate.
-		return OracleResult{Committed: true}
-	}
 	props := map[string]any{"since": params["since"], "weight": params["weight"]}
-	o.edges[k] = &EdgeState{SrcID: srcID, DstID: dstID, Label: "KNOWS", Properties: props}
+	o.edges[o.newInstKey(srcID, dstID, "KNOWS")] = &EdgeState{SrcID: srcID, DstID: dstID, Label: "KNOWS", Properties: props}
 	return OracleResult{Committed: true, EdgesCreated: 1}
 }
 
@@ -629,11 +647,15 @@ func (o *GraphOracle) HasNode(id uint64) bool {
 	return ok
 }
 
-// HasEdge reports whether the oracle models a directed edge of the given label
-// between src and dst.
+// HasEdge reports whether the oracle models at least one directed edge of the
+// given label between src and dst.
 func (o *GraphOracle) HasEdge(src, dst uint64, label string) bool {
-	_, ok := o.edges[edgeKey{src: src, dst: dst, label: label}]
-	return ok
+	for k := range o.edges {
+		if k.src == src && k.dst == dst && k.label == label {
+			return true
+		}
+	}
+	return false
 }
 
 // Ops returns the recorded operation history (for replay and Phase-4

@@ -36,7 +36,7 @@ import (
 // or raised ErrDeleteNodeHasRelationships.
 func TestDelete_RelationshipPlannerGap(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -82,7 +82,7 @@ func TestDelete_RelationshipPlannerGap(t *testing.T) {
 // and its incident edges.
 func TestDelete_RelationshipViaDetachDelete(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (:SrcDel {name: "src"})`)

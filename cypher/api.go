@@ -3,12 +3,11 @@
 //
 // # Usage
 //
-// Directed and Multigraph are required for openCypher semantics: relationships
-// are directed, and the data model is a multigraph, so a CREATE always adds a
-// relationship — including a parallel edge between an existing node pair, which
-// on a simple graph fails with [ErrParallelEdgeInSimpleGraph] instead. The zero
-// adjlist.Config is neither directed nor a multigraph, so it is the wrong
-// graph for this engine. Weightless is the right choice because Cypher has no
+// Storage is a directed multigraph, as openCypher's data model requires: every
+// relationship has a stored direction, and a CREATE always adds a relationship,
+// including a parallel edge between an existing node pair. An undirected
+// pattern is resolved by traversing both directions. Weightless is the right
+// choice because Cypher has no
 // edge-weight concept: the engine records the zero weight for every
 // relationship, and the one path that reads a weight back (transaction undo)
 // only ever reads that same zero, so the per-node weight column carries no
@@ -17,8 +16,6 @@
 // adjlist.Config.Weightless for that contract.
 //
 //	g := lpg.New[string, float64](adjlist.Config{
-//		Directed:   true,
-//		Multigraph: true,
 //		Weightless: true,
 //	})
 //	// ... populate graph ...
@@ -1831,30 +1828,6 @@ func resolveMaxResultBytes(opt int64) int64 {
 //nolint:gocritic // public API: EngineOptions is passed by value to preserve every existing call site; the constructor only reads from it.
 func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *Engine {
 	ensureIndexManager(g)
-	// openCypher's data model is a multigraph: every CREATE adds a relationship,
-	// including a second relationship between an existing ordered node pair. A
-	// non-multigraph adjacency cannot store such a parallel edge, so any write
-	// that would create one fails fast with [ErrParallelEdgeInSimpleGraph]. Warn
-	// once at construction so the misconfiguration surfaces before the first
-	// write rather than only when a parallel-edge CREATE is attempted.
-	if !g.AdjList().Multigraph() {
-		slog.Default().Warn("cypher: engine constructed over a non-multigraph graph; "+
-			"a CREATE or MERGE that adds a parallel relationship between an existing node pair "+
-			"will fail because openCypher requires multigraph semantics",
-			slog.String("hint", "construct the graph with adjlist.Config{Multigraph: true}"))
-	}
-	// openCypher relationships are directed: MATCH/CREATE/MERGE and functions
-	// like type()/startNode()/endNode() assume a stored direction. A
-	// non-directed (undirected) backend stores each edge symmetrically, so
-	// directed pattern matching and traversal silently produce incorrect edge
-	// results. Warn once at construction so the misconfiguration surfaces before
-	// the first query rather than as silently wrong output (#1892).
-	if !g.AdjList().Directed() {
-		slog.Default().Warn("cypher: engine constructed over a non-directed (undirected) graph; "+
-			"openCypher requires directed relationships, so directed pattern matching and "+
-			"traversal will produce incorrect edge results",
-			slog.String("hint", "construct the graph with adjlist.Config{Directed: true}"))
-	}
 	reg := opts.Registry
 	if reg == nil {
 		reg = funcs.DefaultRegistry
@@ -15140,7 +15113,7 @@ func edgePropsToExprMap(g *lpg.ReadView[string, float64], srcKey, dstKey string)
 // by-handle label and an empty property bag correctly reports keys(r) = [] and
 // r.k IS NULL, instead of inheriting a propertied parallel sibling's keys from
 // the per-pair union. The per-pair store is reached only when the membership
-// signal is absent altogether (a 0-handle simple-graph or pre-handle edge, or a
+// signal is absent altogether (a 0-handle or pre-handle edge, or a
 // Go-API edge that stamped a handle but wrote the per-pair store only). See
 // [lazyRelResolver] and [expr.RelSource], which state the same exclusivity.
 //
@@ -16701,8 +16674,8 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 			}
 			ets := g.EdgeLabels(stKey, enKey)
 			// Per-instance label override: when the CSR slot at
-			// edgeIDVal corresponds to a specific parallel CREATE
-			// (multigraph mode), narrow the edge's type to that
+			// edgeIDVal corresponds to a specific parallel CREATE,
+			// narrow the edge's type to that
 			// CREATE's label set. The per-pair property union is
 			// kept so SET / REMOVE / `r.foo` reflect the live edge
 			// state — only the type label benefits from
@@ -16825,7 +16798,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 //     edge) resolve the type from [lpg.Graph.EdgeLabelsByHandle] and the
 //     properties from that ONE edge's by-handle store via [buildEdgeProps]. This
 //     is the same membership predicate and the same fallback ladder the
-//     single-hop path uses: a non-multigraph / legacy / 0-handle edge, and a
+//     single-hop path uses: a legacy / 0-handle edge, and a
 //     Go-API edge that stamped a handle but wrote only the per-pair store, both
 //     fall back to the coalesced per-pair surfaces, byte-identical to the
 //     pre-#1685 build.
@@ -16981,8 +16954,8 @@ var relPresencePlaceholder = expr.BoolValue(true)
 // propertied sibling's keys.
 //
 // Otherwise every branch falls back to the per-pair coalesced surfaces,
-// byte-identical to the original build. The fallback covers (a) a non-multigraph
-// / legacy / 0-sentinel edge (fwdHandle == 0), AND (b) an edge created through
+// byte-identical to the original build. The fallback covers (a) a legacy /
+// 0-sentinel edge (fwdHandle == 0), AND (b) an edge created through
 // the public Go API (Graph.AddEdge[H] + Graph.SetEdgeProperty), which stamps a
 // handle but writes the per-pair store ONLY, so it has NO by-handle entry and
 // per-pair is its sole materialised property mapping (hasByHandleEntry false). It
@@ -17133,11 +17106,11 @@ func relPresentByHandleOrPair(g *lpg.ReadView[string, float64], stKey, enKey str
 // entries for that pair. Returns 0 / 0 / 0 when the position is out of
 // range or either endpoint is unknown to the mapper.
 //
-// Multigraph storage records one parallel CSR slot per CREATE, so
-// counting how many earlier entries (in the src's adjacency range)
-// share the same dst — up to and including edgePos — yields the
-// CREATE-time instance idx. Simple-graph storage collapses every
-// parallel CREATE onto one slot, so parallelCount stays at 1 and
+// Storage records one parallel CSR slot per CREATE, so counting how
+// many earlier entries (in the src's adjacency range) share the same
+// dst — up to and including edgePos — yields the CREATE-time instance
+// idx. When the pair's slot count and CREATE count disagree (slots
+// written through the Go API, or a counter recovery did not rebuild),
 // callers fall back to the per-pair union surfaces.
 func edgeInstanceIdxFor(bopts *buildOpts, g *lpg.ReadView[string, float64], srcKey, dstKey string, edgePos uint64) (instanceIdx, totalCreates, parallelCount int64) {
 	totalCreates = g.EdgeCreateCount(srcKey, dstKey)
@@ -21477,7 +21450,7 @@ func (a *lpgMutatorAdapter) cs() *count.Store {
 //
 // Binding the two together is the point: every existing call site already sat behind the
 // audited "was this a real change" discriminator (a re-intern is not a creation, but
-// re-creating a tombstoned key is; a non-multigraph duplicate edge is not an addition).
+// re-creating a tombstoned key is).
 // Routing both counter families through one helper per effect means the per-statement
 // counts cannot drift from the counts the TCK already verifies, and no site can be
 // missed by omission.
@@ -21651,16 +21624,6 @@ func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	return id, nil
 }
 
-// ErrParallelEdgeInSimpleGraph is returned by a Cypher write that would add a
-// second relationship between an ordered node pair that already has one when the
-// backing graph is not a multigraph and therefore cannot store the parallel
-// edge. openCypher's data model is a multigraph in which every CREATE adds a
-// relationship, so the Cypher engine must be constructed over a graph built with
-// adjlist.Config{Multigraph: true}. The write fails fast and aborts the
-// transaction rather than silently discarding the edge, upholding the module's
-// fail-stop, never-fail-silent contract.
-var ErrParallelEdgeInSimpleGraph = errors.New("cypher: cannot create a parallel edge on a non-multigraph graph; construct the engine over a graph created with adjlist.Config{Multigraph: true}")
-
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
 func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
 	// rmp #2883: journal both endpoints' liveness and src's run before the write.
@@ -21669,10 +21632,6 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
-	if !a.g.AdjList().Multigraph() && edgeExisted {
-		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
-	}
 	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
@@ -21684,14 +21643,8 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if !dstExisted && src != dst {
 		a.countNodeCreated()
 	}
-	// edgeAdded is always true here: the non-multigraph duplicate-pair case that
-	// used to be a silent no-op is now rejected above, before any mutation, so
-	// this branch is never skipped. Kept explicit for symmetry with
-	// [walMutatorAdapter.AddEdge].
-	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
-	}
+	a.countRelCreated()
+	a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, nil
 }
@@ -21705,10 +21658,6 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
-	if !a.g.AdjList().Multigraph() && edgeExisted {
-		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
-	}
 	handle, err := a.w().AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
@@ -21721,14 +21670,8 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if !dstExisted && src != dst {
 		a.countNodeCreated()
 	}
-	// edgeAdded is always true here: the non-multigraph duplicate-pair case that
-	// used to be a silent no-op is now rejected above, before any mutation, so
-	// this branch is never skipped. Kept explicit for symmetry with
-	// [walMutatorAdapter.AddEdge].
-	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
-	}
+	a.countRelCreated()
+	a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, handle, nil
 }
@@ -23001,10 +22944,6 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
-	if !a.g.AdjList().Multigraph() && edgeExisted {
-		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
-	}
 	mark, counted := a.effectMark()
 	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
@@ -23030,18 +22969,11 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if !dstExisted && src != dst {
 		a.countNodeCreated()
 	}
-	// A duplicate (src,dst) AddEdge on a non-multigraph graph used to be treated
-	// as a storage no-op; counting it and recording a RemoveEdge undo inverse
-	// let a rolled-back transaction DELETE the pre-existing committed edge — an
-	// Atomicity breach the DST disk-full scenario found (#1751). The guard above
-	// now rejects that case before any mutation (rmp #1856: openCypher CREATE
-	// never deduplicates), so edgeAdded is always true here: on a multigraph
-	// every AddEdge adds a parallel edge, and on a simple graph reaching this
-	// line already implies !edgeExisted.
-	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
-	}
+	// Storage is a multigraph, so every AddEdge that returns here added a
+	// parallel edge: the counter and the RemoveEdge undo inverse always describe
+	// a real addition (#1751, rmp #1856, rmp #3072).
+	a.countRelCreated()
+	a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	if txErr != nil {
 		return 0, 0, txErr
@@ -23064,10 +22996,6 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
-	if !a.g.AdjList().Multigraph() && edgeExisted {
-		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
-	}
 	mark, counted := a.effectMark()
 	handle, err := a.w().AddEdgeH(src, dst, w)
 	if err != nil {
@@ -23097,14 +23025,8 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if !dstExisted && src != dst {
 		a.countNodeCreated()
 	}
-	// edgeAdded is always true here: the non-multigraph duplicate-pair case that
-	// used to be a silent no-op is now rejected above, before any mutation, so
-	// this branch is never skipped. Kept explicit for symmetry with
-	// [lpgMutatorAdapter.AddEdge].
-	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
-	}
+	a.countRelCreated()
+	a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	if txErr != nil {
 		return 0, 0, 0, txErr
@@ -23141,25 +23063,14 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	// false — so a shape whose arc is already gone reaches this line with
 	// present == false.
 	//
-	// The frame waits on it too, but only where the WAL is a FAITHFUL description
-	// of this graph's adjacency, which is what [walMutatorAdapter.mustDescribeNoOpRemoval]
-	// answers. A frame may be dropped as redundant only if the presence probe above
-	// — which reads the IN-MEMORY adjacency — predicts what a replay will find. On a
-	// directed graph it does: every arc this adapter changes is described by exactly
-	// one frame, so memory and replay stay in step by induction. On an UNDIRECTED
-	// graph it does not, because [walMutatorAdapter.RemoveAllEdgesFrom] retires each
-	// mirror arc while emitting a frame only for the forward one — so there the
-	// "redundant" frame is the one that actually performs the removal on replay, and
-	// dropping it LOSES the deletion. Measured, not reasoned: gating unconditionally
-	// on `present` left deleted edges alive in the recovered graph on 7 of 16
-	// undirected shapes (fan-in-64, mixed-in-and-out, clique-4, detach-all,
-	// reciprocal-pair, detach-path-2cycle, del-r-bothdir), which refutes the claim
-	// rmp #2706 recorded here that the gate "was shown to recover an identical
-	// graph". A smaller WAL that replays to a different graph is data loss, not a
-	// saving (rmp #2734).
+	// The frame waits on it too. A frame may be dropped as redundant only because
+	// the presence probe above — which reads the IN-MEMORY adjacency — predicts
+	// what a replay will find: every arc this adapter changes is described by
+	// exactly one frame, so memory and replay stay in step by induction. A smaller
+	// WAL that replays to a different graph would be data loss, not a saving
+	// (rmp #2734).
 	//
-	// On the directed shapes the gate is worth having, and it is reachable there —
-	// this is NOT only the undirected engine's problem.
+	// The gate is reachable:
 	// `MATCH (a)-[r:R]-(b) WITH r DELETE r` binds one stored relationship in both
 	// traversal directions, so [exec] reaches this method twice for it: before the
 	// gate that wrote 2 frames for 1 relationship removed (37.9% of the delete
@@ -23184,7 +23095,7 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	if present {
 		a.countRelDeleted()
 	}
-	if (present && a.tookEffect(mark, counted)) || a.mustDescribeNoOpRemoval() {
+	if present && a.tookEffect(mark, counted) {
 		_ = a.tx.RemoveEdge(src, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, and this adapter is never reached on a finished transaction. Discarded because [exec.GraphMutator.RemoveEdge] returns nothing — see the discard note on [walMutatorAdapter].
 	}
 	r.recordRemoveEdge(&pre, present)
@@ -23221,44 +23132,17 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	// that comment first; it carries the evidence for both.
 	// [WriteView.RemoveEdgeByHandle] folds BOTH "refused" and "nothing matched" into
 	// its false (its godoc says so, and that is where it differs from the
-	// [WriteView.RemoveEdge] sibling), and neither case warrants a frame on a graph
-	// whose WAL faithfully describes its adjacency: a refused removal must not be
-	// described durably (rmp #2694/#2725), and a removal that matched nothing removed
-	// nothing. On an undirected graph that faithfulness does not hold, so the frame
-	// is emitted regardless — see [walMutatorAdapter.mustDescribeNoOpRemoval].
-	// Reachable on the supported directed configuration: `MATCH (a)-[r:R]-(b) DELETE r`
+	// [WriteView.RemoveEdge] sibling), and neither case warrants a frame: a refused
+	// removal must not be described durably (rmp #2694/#2725), and a removal that
+	// matched nothing removed nothing. Reachable: `MATCH (a)-[r:R]-(b) DELETE r`
 	// binds one stored relationship in both traversal directions and therefore deletes
 	// it twice, which before the gate wrote 2 frames for 1 relationship removed —
 	// 39.2% of that delete transaction's WAL bytes (rmp #2734).
 	if removed {
 		a.countRelDeleted()
-	}
-	if removed || a.mustDescribeNoOpRemoval() {
 		_ = a.tx.RemoveEdgeByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeByHandle] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveEdgeByHandle] returns nothing.
 	}
 	r.recordRemoveEdge(&pre, removed)
-}
-
-// mustDescribeNoOpRemoval reports whether a removal that provably took NOTHING out
-// of the in-memory adjacency must still be written to the WAL.
-//
-// It is true exactly when the WAL is not a faithful description of this graph's
-// adjacency, which on this adapter means an UNDIRECTED backing graph.
-// [walMutatorAdapter.RemoveAllEdgesFrom] emits one frame per OUTGOING neighbour,
-// but on an undirected adjacency the removal also retires each mirror arc, which
-// no frame describes. Recovery therefore reconstructs a different adjacency from
-// the one in memory, and the in-memory presence probe stops predicting what a
-// replay will find: a removal that is a no-op in memory can still be the frame
-// that performs the deletion on replay. Suppressing it there loses the deletion —
-// measured on 7 of 16 undirected shapes (rmp #2734).
-//
-// Cypher over an undirected LPG is not a supported configuration in the first
-// place (docs/cypher.md states `Directed: true` is required for openCypher
-// semantics, and [NewEngineWithOptions] warns at construction, #1892), so this is
-// a guard against regressing a configuration the module still constructs, not a
-// commitment to its durability. It costs one already-cached bool read.
-func (a *walMutatorAdapter) mustDescribeNoOpRemoval() bool {
-	return !a.g.AdjList().Directed()
 }
 
 // SetNodeLabel attaches label to n.
@@ -24051,9 +23935,8 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// cannot commit, but the frames must not be written on the strength of that
 	// alone — the WAL is the durable truth and it may only describe work done.
 	// Only a removal that took effect is described (see
-	// [walMutatorAdapter.effectMark]); on an undirected graph every frame is
-	// kept, as [walMutatorAdapter.mustDescribeNoOpRemoval] explains.
-	if a.tookEffect(mark, counted) || a.mustDescribeNoOpRemoval() {
+	// [walMutatorAdapter.effectMark]).
+	if a.tookEffect(mark, counted) {
 		for _, dst := range outgoing {
 			_ = a.tx.RemoveEdge(n, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveAllEdgesFrom] returns nothing.
 		}
@@ -24302,9 +24185,9 @@ func forEachResolvedSlotType(
 	verts := fwdCSR.VerticesSlice()
 	edges := fwdCSR.EdgesSlice()
 	// handles aligns slot-for-slot with edges when the graph carries
-	// stable per-edge handles (multigraph CREATEs). It is nil for a graph
-	// that never stamped a handle (simple-graph / MERGE-only), in which
-	// case every slot takes the positional fallback below.
+	// stable per-edge handles (Cypher CREATEs). It is nil for a graph
+	// that never stamped a handle, in which case every slot takes the
+	// positional fallback below.
 	handles := fwdCSR.HandlesSlice()
 	mapper := adj.Mapper()
 
@@ -24443,8 +24326,9 @@ func resolveSourceSlotTypes(
 	// MERGE slots): it counts parallel CSR occurrences per dst so a
 	// fallback slot maps to its CREATE-instance idx. The
 	// handle-driven path below ignores it entirely. sc.dstParallelTotal
-	// lets the fallback tell multigraph (N_csr == N_create) from
-	// simple-graph (N_csr < N_create) storage for each pair. Both are
+	// lets the fallback tell a pair with one slot per CREATE
+	// (N_csr == N_create) from one with fewer slots (N_csr < N_create).
+	// Both are
 	// built only once a slot of this source reaches that fallback; see
 	// [slotTypeScratch.startPositionalCounts].
 	positionalReady := false
@@ -24544,7 +24428,7 @@ func resolveSourceSlotTypes(
 			// A position that WAS matched to such a slot never gets here, and that
 			// is the point: the slot's own emptiness means the relationship has no
 			// type, and the per-PAIR ordinal would answer with a sibling CREATE's
-			// type instead. On a multigraph pair mixing a Cypher-created :K slot
+			// type instead. On a pair mixing a Cypher-created :K slot
 			// with an untyped Go-API slot that made the untyped edge match
 			// `[r:K]`, so a bare MATCH counted two where one was correct.
 			if !positionalReady {
@@ -24554,13 +24438,14 @@ func resolveSourceSlotTypes(
 			totalCreates := g.EdgeCreateCount(srcStr, dstStr)
 			parallel := sc.dstParallelTotal[dst]
 			if parallel >= totalCreates && totalCreates > 0 {
-				// Multigraph: one CSR slot per CREATE. Use the
-				// per-instance label set for this specific slot.
+				// One CSR slot per CREATE. Use the per-instance
+				// label set for this specific slot.
 				labels = g.EdgeLabelsAt(srcStr, dstStr, sc.dstSeen[dst])
 			} else {
-				// Simple-graph (or no per-instance store): merge every
-				// instance's labels with the per-pair union so a
-				// filter targeting any CREATE's label still matches.
+				// Fewer slots than CREATEs (or no per-instance store):
+				// merge every instance's labels with the per-pair
+				// union so a filter targeting any CREATE's label still
+				// matches.
 				labels = collectAllInstanceLabels(g, srcStr, dstStr, totalCreates)
 			}
 		}
@@ -24646,8 +24531,8 @@ func fillSlotLabs(
 
 // collectAllInstanceLabels returns the union of every per-CREATE label
 // recorded for (srcStr, dstStr) over instance indices 1..totalCreates.
-// Used by simple-graph filter construction, where one CSR slot must
-// service every collapsed CREATE.
+// Used by filter construction when a pair has fewer CSR slots than
+// CREATEs, so one slot must service every CREATE.
 func collectAllInstanceLabels(g *lpg.ReadView[string, float64], srcStr, dstStr string, totalCreates int64) []string {
 	if totalCreates <= 0 {
 		return nil

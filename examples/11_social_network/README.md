@@ -6,15 +6,17 @@ An end-to-end social-network workload over a labelled property graph (LPG):
 four analytics run over **one** seeded social graph — PageRank influence
 ranking ([`search/centrality.PageRank`](../../search/centrality)), Leiden
 community detection ([`search/community.Leiden`](../../search/community)),
-a manual friend-of-friend recommendation walk over the live adjacency list,
+a friend-of-friend recommendation expressed as an undirected Cypher query,
 and a structural-analytics pass over the [`search`](../../search) package:
 k-core decomposition ([`search.KCore`](../../search)), the global triangle
 count and clustering coefficient ([`search.CountTriangles`](../../search)),
 the diameter ([`search.Diameter`](../../search)), and the reachable set from
 the seed user ([`search.TransitiveClosure`](../../search)). The graph is
-frozen into an immutable CSR snapshot for the centrality, community, and
-structural algorithms, while the recommendation walk reads the mutable
-adjacency list directly.
+frozen into an immutable CSR snapshot and projected to its symmetric
+(undirected) view with `csr.CSR.BuildSymmetric` for the centrality,
+community, and structural algorithms, while the recommendation runs the
+Cypher pattern `(s)-[:FRIEND]-(f)-[:FRIEND]-(c)` over the live graph and is
+cross-checked against a manual two-hop walk over the symmetric snapshot.
 
 ## Domain / scenario
 
@@ -33,7 +35,12 @@ analytics meaningfully:
   non-trivial, intra-community recommendation set.
 
 Each `User` node carries an `id`, a realistic `name`, and its planted
-`community` label. Friendships are undirected, unweighted `FRIEND` edges.
+`community` label. Each friendship is one unweighted `FRIEND` relationship,
+stored once in one direction and always read without regard to direction:
+the recommendation queries `-[:FRIEND]-`, and the analytics read the
+symmetric projection, where a stored relationship is reachable from both
+endpoints. A bridge whose two endpoints are already friends is skipped, so
+no friendship is stored twice.
 The fixed friend-of-friend seed user is node `u0000000` (the first-born hub
 of community 0); the bridge layer is laid down so neither it nor its direct
 friends is a bridge endpoint, which makes *"every recommendation is in the
@@ -153,12 +160,14 @@ grows with the edge count (≈ `users × m`).
 ## Key APIs
 
 - `graph/lpg.New` / `Graph.AddNode` / `Graph.SetNodeLabel` / `Graph.SetNodeProperty` — build the labelled property graph (`User` nodes with `id`, `name`, `community`).
-- `graph/lpg.Graph.AddEdge` — add the undirected, unweighted `FRIEND` edges (mirrored internally).
+- `graph/lpg.Graph.AddEdgeLabeled` — add each unweighted `FRIEND` relationship once, in one direction.
 - `graph/adjlist.AdjList.Compact` — right-size the adjacency arrays after the bulk build, before the read phase.
-- `graph/csr.BuildFromAdjList` — freeze the live adjacency list into an immutable CSR snapshot for the analytics.
+- `graph/csr.BuildFromAdjList` / `CSR.BuildSymmetric` — freeze the live adjacency list into an immutable CSR snapshot and project it to the symmetric (undirected) snapshot the analytics read.
 - `search/centrality.PageRankCtx` / `DefaultPageRankOptions` — rank users by influence; context-aware, NodeID-indexed result.
 - `search/community.LeidenCtx` / `DefaultLeidenOptions` — detect communities; the result's `Community` slice maps each `NodeID` to a cluster id.
-- `graph/adjlist.AdjList.Mapper` (`Resolve`, `Lookup`) / `AdjList.Neighbours` — translate `NodeID`s back to ids and walk the live adjacency list for the friend-of-friend recommendation.
+- `cypher.NewEngine` / `Engine.Run` — run the undirected friend-of-friend query `MATCH (s:User {id: $id})-[:FRIEND]-(f:User)-[:FRIEND]-(c:User) WHERE c <> s AND NOT (s)-[:FRIEND]-(c) RETURN c.id AS id, count(*) AS shared`.
+- `graph/adjlist.AdjList.Mapper` (`Resolve`, `Lookup`) / `CSR.NeighboursByID` — translate between ids and `NodeID`s and walk the symmetric snapshot for the independent friend-of-friend cross-check.
+- `graph/adjlist.AdjList.Neighbours` / `InNeighbours` / `HasEdge` — find the seed user's friends in both directions and skip a bridge between existing friends while building.
 - `search.KCoreCtx` — k-core decomposition; the graph degeneracy and the size of the densest core.
 - `search.CountTrianglesCtx` — the global triangle total, from which the clustering coefficient (transitivity) is derived.
 - `search.DiameterCtx` — the exact diameter (2-sweep lower bound + iFUB upper bound) that underwrites the small-world claim.

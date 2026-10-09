@@ -15,7 +15,7 @@ import (
 // "R%d" (0..n-1). Left nodes are pre-interned so they occupy the low
 // NodeID range. edges is a list of (leftIdx, rightIdx) pairs.
 func buildBipartiteCSR(m, n int, edges [][2]int) *csr.CSR[struct{}] {
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	for i := 0; i < m; i++ {
 		if err := a.AddNode(fmt.Sprintf("L%05d", i)); err != nil {
 			panic(fmt.Sprintf("AddNode L%05d: %v", i, err))

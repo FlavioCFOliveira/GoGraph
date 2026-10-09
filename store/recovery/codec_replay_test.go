@@ -19,7 +19,7 @@ func writeV2Workload(t *testing.T, dir string, codec txn.Codec[string]) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec[string, int64](g, w, codec)
 	for _, name := range []string{"alice", "bob", "carol"} {
 		tx := store.Begin()
@@ -107,7 +107,7 @@ func TestTxn_V2Replay_BinaryMarshaler(t *testing.T) {
 		t.Fatal(err)
 	}
 	codec := txn.NewBinaryMarshalerCodec[textKey, *textKey]()
-	g := lpg.New[textKey, int64](adjlist.Config{Directed: true})
+	g := lpg.New[textKey, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec[textKey, int64](g, w, codec)
 	a := textKey{prefix: "node", n: 1}
 	b := textKey{prefix: "node", n: 2}

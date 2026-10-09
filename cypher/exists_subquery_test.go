@@ -57,7 +57,7 @@ import (
 // alice and attaching new nodes via a separate CREATE.
 func newExistsGraph(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:Person {name: 'alice', age: 30})-[:KNOWS]->(:Person {name: 'bob', age: 20})`)
 	runSetup(t, eng, `MATCH (a:Person {name: 'alice'}) CREATE (a)-[:LIKES]->(:Person {name: 'dave', age: 35})`)
@@ -189,7 +189,7 @@ func TestExists_ReturnExpression(t *testing.T) {
 // rows regardless of the subquery form used.
 func TestExists_OnEmptyGraph(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	queries := []string{

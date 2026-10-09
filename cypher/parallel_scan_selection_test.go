@@ -62,7 +62,7 @@ const parallelSelectionNodes = 4096
 // out-degree 2, which makes every count below hand-computable.
 func parallelSelectionFixture(t *testing.T) (*lpg.Graph[string, float64], *Engine) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for i := 0; i < parallelSelectionNodes; i++ {
 		k := fmt.Sprintf("n%d", i)

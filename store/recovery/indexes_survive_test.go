@@ -43,7 +43,7 @@ func TestRecovery_IndexesSurvive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
 

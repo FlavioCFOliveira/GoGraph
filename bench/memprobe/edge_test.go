@@ -39,7 +39,7 @@ func probeEnvInt(k string, def int) int {
 // measured is the storage structure's and not the query pipeline's.
 func buildEdges(t *testing.T, multigraph, labelled bool, propKey string) any {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: multigraph})
+	g := lpg.New[string, float64](adjlist.Config{})
 	key := func(i int) string { return "__cx_" + strconv.FormatUint(uint64(i), 16) }
 	for i := range probeEdgeNodes {
 		if err := g.AddNode(key(i)); err != nil {
@@ -72,7 +72,7 @@ func buildEdges(t *testing.T, multigraph, labelled bool, propKey string) any {
 // population with no edges at all.
 func TestProbe_EdgeNodesOnly(t *testing.T) {
 	measure(t, "edgebase/nodes-only", probeEdgeNodes, func() any {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		for i := range probeEdgeNodes {
 			if err := g.AddNode("__cx_" + strconv.FormatUint(uint64(i), 16)); err != nil {
 				t.Fatalf("AddNode: %v", err)
@@ -84,7 +84,7 @@ func TestProbe_EdgeNodesOnly(t *testing.T) {
 
 // TestProbe_EdgesMultigraph measures the untyped adjacency in the shape the
 // Bolt server runs (bench/comparison/ggserver constructs its graph with
-// Multigraph: true, because openCypher requires two CREATEs between the same
+// because openCypher requires two CREATEs between the same
 // pair to produce two distinct relationships).
 func TestProbe_EdgesMultigraph(t *testing.T) {
 	measure(t, "edges/multigraph-untyped", probeEdges, func() any {
@@ -131,7 +131,7 @@ func TestProbe_EdgesTypedWithProp(t *testing.T) {
 // also changes the RESIDENT result, not merely the time to reach it.
 func TestProbe_EdgesFusedTypedWithProp(t *testing.T) {
 	measure(t, "edges/fused-typed+int-prop", probeEdges, func() any {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		key := func(i int) string { return "__cx_" + strconv.FormatUint(uint64(i), 16) }
 		for i := range probeEdgeNodes {
 			if err := g.AddNode(key(i)); err != nil {

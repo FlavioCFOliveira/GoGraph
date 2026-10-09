@@ -27,7 +27,7 @@ import (
 // Node keys are globally unique across labels so every node is distinct.
 func buildReorderGraph(t *testing.T, spec map[string]int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	// Deterministic label order so label-id interning is reproducible.
 	labels := make([]string, 0, len(spec))
 	for l := range spec {

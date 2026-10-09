@@ -37,8 +37,8 @@ import (
 )
 
 // silenceBenchLogs discards the engine's slog output for the benchmark's duration
-// so the per-construction "non-multigraph" WARN does not interleave into stdout and
-// corrupt the benchmark lines benchstat parses. Restored via b.Cleanup.
+// so an engine WARN does not interleave into stdout and corrupt the benchmark lines
+// benchstat parses. Restored via b.Cleanup.
 func silenceBenchLogs(b *testing.B) {
 	b.Helper()
 	prev := slog.Default()

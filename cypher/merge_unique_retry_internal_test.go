@@ -24,7 +24,7 @@ import (
 // (K).k and a retry seam counting every re-run.
 func mergeRetryEngine(t *testing.T, retries *atomic.Int64) *Engine {
 	t.Helper()
-	e := NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+	e := NewEngine(lpg.New[string, float64](adjlist.Config{}))
 	t.Cleanup(func() { _ = e.Close() })
 	e.mergeRaceRetryHookForTest = func(int) { retries.Add(1) }
 	if err := mergeRetryRun(context.Background(), e, "CREATE CONSTRAINT k_u FOR (n:K) REQUIRE n.k IS UNIQUE"); err != nil {

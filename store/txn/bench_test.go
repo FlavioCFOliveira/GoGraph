@@ -25,7 +25,7 @@ func openBenchStore(b *testing.B) *Store[string, int64] {
 	if err != nil {
 		b.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := NewStoreWithCodec(g, w, NewStringCodec())
 	b.Cleanup(func() {
 		_ = w.Close()

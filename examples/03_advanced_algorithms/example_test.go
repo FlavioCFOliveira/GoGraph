@@ -252,3 +252,32 @@ func factLines(out string) string {
 	}
 	return strings.Join(keep, "\n")
 }
+
+// TestTwoCommunityRingStoresOneBridgeEdge guards the directed-multigraph
+// storage model: with two communities the bridge "ring" is a single edge, so
+// it must be stored once. Storing both bridge(0)->bridge(1) and
+// bridge(1)->bridge(0) would create two relationships for one edge, which
+// the symmetric projection would read as a parallel pair.
+func TestTwoCommunityRingStoresOneBridgeEdge(t *testing.T) {
+	cfg := testConfig()
+	cfg.communities = 2
+	a, _, err := build(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	b0, b1 := cfg.bridgeID(0), cfg.bridgeID(1)
+	n := 0
+	for v := range a.Neighbours(b0) {
+		if v == b1 {
+			n++
+		}
+	}
+	for v := range a.Neighbours(b1) {
+		if v == b0 {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("bridge edge %d-%d stored %d times, want 1", b0, b1, n)
+	}
+}

@@ -16,7 +16,7 @@ import (
 // two paths must agree for every edge — including the multi-label overflow path
 // and a parallel-edge (multigraph) pair whose properties coalesce latest-wins.
 func TestEdgeByID_EquivalentToKeyed(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 
 	// a->b: two labels (exercises the inline slot + overflow store) and two
 	// properties.
@@ -89,7 +89,7 @@ func TestEdgeByID_EquivalentToKeyed(t *testing.T) {
 // single-property, multi-property, parallel-edge-coalescing, and cross-kind
 // same-key cases that exercise every coalescing branch.
 func TestForEachEdgeProperty_MatchesMap(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 
 	// a->b: two distinct properties of different kinds.
 	if err := g.AddEdge("a", "b", 1); err != nil {

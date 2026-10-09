@@ -34,7 +34,7 @@ import (
 func TestYen_MultiPath_FivePaths(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 
 	type fe struct {
 		u, v int

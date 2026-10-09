@@ -16,7 +16,7 @@ import (
 // the shape that makes an equi-join on age worth substituting a hash join for.
 func seedPeople(t *testing.T, n, buckets int) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	for i := 0; i < n; i++ {
 		r, err := eng.RunInTx(context.Background(),

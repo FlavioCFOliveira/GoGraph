@@ -13,7 +13,7 @@ import (
 
 func buildWeightedCSR(tb testing.TB, edges []weightedEdge) (*csr.CSR[int64], *adjlist.AdjList[int, int64]) {
 	tb.Helper()
-	return buildWeightedCSRCfg(tb, edges, adjlist.Config{Directed: true})
+	return buildWeightedCSRCfg(tb, edges, adjlist.Config{})
 }
 
 func buildWeightedCSRCfg(tb testing.TB, edges []weightedEdge, cfg adjlist.Config) (*csr.CSR[int64], *adjlist.AdjList[int, int64]) {
@@ -159,7 +159,7 @@ func TestDijkstra_RandomisedAgainstNaive(t *testing.T) {
 				w:    int64(r.IntN(50) + 1),
 			})
 		}
-		c, a := buildWeightedCSRCfg(t, edges, adjlist.Config{Directed: true, Multigraph: true})
+		c, a := buildWeightedCSRCfg(t, edges, adjlist.Config{})
 		src := r.IntN(n)
 		srcID, _ := a.Mapper().Lookup(src)
 		gotDist, err := Dijkstra(c, srcID)
@@ -248,7 +248,7 @@ func BenchmarkDijkstraPoolDispatch(b *testing.B) {
 // constant per-call overhead is amplified to a visible fraction of
 // ns/op.
 func BenchmarkDijkstra_Small(b *testing.B) {
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	const n = 100
 	// Build connected subgraph among nodes 1..n-1, leave 0 isolated.
 	r := rand.New(rand.NewPCG(11, 17)) //nolint:gosec // deterministic benchmark RNG
@@ -275,7 +275,7 @@ func BenchmarkDijkstra_Small(b *testing.B) {
 // across pool dispatch changes; dispatch is a sub-percent fraction of
 // total time on this size and should remain within measurement noise.
 func BenchmarkDijkstra_Large(b *testing.B) {
-	a := adjlist.New[uint32, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[uint32, int64](adjlist.Config{})
 	const universe = 1 << 16 // 64k nodes
 	for i := uint32(0); i < uint32(universe); i++ {
 		if err := a.AddNode(i); err != nil {
@@ -299,7 +299,7 @@ func BenchmarkDijkstra_Large(b *testing.B) {
 }
 
 func BenchmarkDijkstra_RandomGraph(b *testing.B) {
-	a := adjlist.New[uint32, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[uint32, int64](adjlist.Config{})
 	const universe = 1 << 20 // 1M nodes
 	for i := uint32(0); i < uint32(universe); i++ {
 		if err := a.AddNode(i); err != nil {
@@ -327,7 +327,7 @@ func BenchmarkDijkstra_RandomGraph(b *testing.B) {
 // internal heap pool is hot and allocs/op must be 0 — this is the
 // acceptance gate for the zero-alloc primitive contract.
 func BenchmarkDijkstra_PostWarmup(b *testing.B) {
-	a := adjlist.New[uint32, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[uint32, int64](adjlist.Config{})
 	const universe = 1 << 16 // 64k nodes
 	for i := uint32(0); i < uint32(universe); i++ {
 		if err := a.AddNode(i); err != nil {

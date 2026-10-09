@@ -26,7 +26,7 @@ import (
 
 func buildScaleGraph(tb testing.TB, nNodes int) (*Graph[string, float64], []graph.NodeID) {
 	tb.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	ids := make([]graph.NodeID, nNodes)
 	for i := 0; i < nNodes; i++ {
 		key := "n" + strconv.Itoa(i)

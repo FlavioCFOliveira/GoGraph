@@ -100,7 +100,7 @@ func newRig(tb testing.TB, opts rigOptions) *rig {
 		metrics.SetBackend(prometheus.New())
 	}
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range opts.seedNodes {
 		id := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(id); err != nil {

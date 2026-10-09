@@ -35,7 +35,7 @@ func TestCheckpoint_Phase2IndexDDL_RetainsWAL(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

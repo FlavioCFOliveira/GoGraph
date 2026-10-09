@@ -16,7 +16,7 @@ import (
 // interns `absent` on b so the removal reaches the bag. It returns the handle.
 func absentHandleGraph(t *testing.T) (*Graph[string, int64], uint64) {
 	t.Helper()
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	h, err := g.AddEdgeH("a", "b", 1)
 	if err != nil {
 		t.Fatal(err)

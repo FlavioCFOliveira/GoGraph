@@ -315,7 +315,7 @@ func typedOutDegree(g *lpg.Graph[string, int64], src, relType string) int {
 
 // newMultigraph returns the directed multigraph every shape is built on.
 func newMultigraph() *lpg.Graph[string, int64] {
-	return lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	return lpg.New[string, int64](adjlist.Config{})
 }
 
 func mustAddEdge(t *testing.T, g *lpg.Graph[string, int64], src, dst string) {

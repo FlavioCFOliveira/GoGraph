@@ -40,7 +40,7 @@ const hjBenchMod = 100
 // buildHashJoinBenchGraph seeds two disconnected labelled node sets joined by an
 // integer key property.
 func buildHashJoinBenchGraph() *lpg.Graph[string, float64] {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < hjBenchSide; i++ {
 		k := fmt.Sprintf("hja%d", i)
 		_ = g.AddNode(k)

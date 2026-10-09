@@ -13,7 +13,7 @@ import (
 // buildPathCSR builds a directed path P_n via shapegen and returns the CSR.
 func buildPathCSR(tb testing.TB, n int) (*csr.CSR[int64], *adjlist.AdjList[int, int64]) {
 	tb.Helper()
-	g, err := shapegen.Path(n, true).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.Path(n).Build(adjlist.Config{})
 	if err != nil {
 		tb.Fatalf("shapegen.Path(%d): %v", n, err)
 	}

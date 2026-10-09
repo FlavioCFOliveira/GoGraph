@@ -255,7 +255,7 @@ func newEngine(t *testing.T, name string) (*cypher.Engine, map[string]any) {
 	if !ok {
 		t.Fatalf("unknown fixture %q; add it to fixtures or correct the gate:fixture directive", name)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, s := range f.setup {
 		res, err := eng.RunInTxAny(context.Background(), s, nil)

@@ -15,11 +15,11 @@ import (
 func TestPageRank_Hypercube(t *testing.T) {
 	t.Parallel()
 
-	g, err := shapegen.Hypercube(8).Build(adjlist.Config{Directed: false})
+	g, err := shapegen.Hypercube(8).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Hypercube.Build: %v", err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 
 	opts := PageRankOptions{
 		Damping:       0.85,

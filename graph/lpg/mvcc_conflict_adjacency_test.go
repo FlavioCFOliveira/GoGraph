@@ -59,7 +59,7 @@ import (
 // the refusal firing vacuously — and a removal concurrent with an in-flight
 // append stays refused, as before.
 func TestConflict_AdjacencyAppendsConflictPerNode(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "c", "d"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%s): %v", n, err)
@@ -130,7 +130,7 @@ func TestConflict_AdjacencyAppendsConflictPerNode(t *testing.T) {
 // while a removal consults both. Testing one order and assuming the other is how
 // an asymmetric rule ships half-implemented.
 func TestConflict_AdjacencyAppendRefusedByConcurrentRemoval(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestConflict_AdjacencyAppendRefusedByConcurrentRemoval(t *testing.T) {
 // TestConflict_AdjacencyConcurrentRemovals is the third row: two removals from
 // the same source are not commutative with each other either.
 func TestConflict_AdjacencyConcurrentRemovals(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, e := range [][2]string{{"a", "b"}, {"a", "c"}} {
 		if err := g.AddEdge(e[0], e[1], 1); err != nil {
 			t.Fatalf("AddEdge(%s,%s): %v", e[0], e[1], err)
@@ -192,7 +192,7 @@ func TestConflict_AdjacencyConcurrentRemovals(t *testing.T) {
 // everything, which would be the naive port and would cost the sprint its
 // objective.
 func TestConflict_AdjacencyDisjointSourcesDoNotConflict(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, e := range [][2]string{{"a", "x"}, {"b", "y"}} {
 		if err := g.AddEdge(e[0], e[1], 1); err != nil {
 			t.Fatalf("AddEdge(%s,%s): %v", e[0], e[1], err)
@@ -223,7 +223,7 @@ func TestConflict_AdjacencyDisjointSourcesDoNotConflict(t *testing.T) {
 // node. Both land on one delta chain, so without detection B's version is
 // prepended over A's and A's label is lost while both transactions commit.
 func TestConflict_NodeLabels(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestConflict_NodeLabels(t *testing.T) {
 // footing, and for the same reason: instrumented since the first draft, never
 // named by a test.
 func TestConflict_NodeProperties(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestConflict_NodeProperties(t *testing.T) {
 // sources, confirms the stamps accumulated, then sweeps with no reader open and
 // requires them gone.
 func TestConflict_AdjacencyStampsAreReclaimed(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 
 	// HOLD THE WATERMARK WHILE THE STAMPS ACCUMULATE (rmp #2424).
 	//

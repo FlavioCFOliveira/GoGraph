@@ -206,12 +206,12 @@ func TestExpandColumnar_EdgeTypeFilter_Reverse(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Multigraph parallel edges — per-instance relationship typing on a reverse hop
+// Parallel edges — per-instance relationship typing on a reverse hop
 // (rmp #1634/#1685): the reverse traversal must recover the SPECIFIC forward edge
 // position for each parallel edge via its stable handle, not collapse them.
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestExpandColumnar_Multigraph_ParallelEdges_ReverseHop(t *testing.T) {
+func TestExpandColumnar_ParallelEdges_ReverseHop(t *testing.T) {
 	// Node 0 has THREE parallel edges to node 1, forward positions 0,1,2 with
 	// distinct handles. DirIn from node 1 must emit three rows whose edgeIDs are
 	// exactly {0,1,2}. buildRevFromFwd is not enough here (handles are the point),
@@ -243,7 +243,7 @@ func TestExpandColumnar_Multigraph_ParallelEdges_ReverseHop(t *testing.T) {
 	}
 }
 
-func TestExpandColumnar_Multigraph_DirBoth(t *testing.T) {
+func TestExpandColumnar_ParallelEdges_DirBoth(t *testing.T) {
 	// Parallel edges both directions with handles; DirBoth exercises forward
 	// multiplicity + reverse per-instance recovery together.
 	fwd := &staticCSR{

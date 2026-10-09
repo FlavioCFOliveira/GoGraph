@@ -478,7 +478,7 @@ func (r *straddleReport) summary() string {
 // straddleCaseEngine is straddleEngine for one enumeration case: the caller
 // closes it when the case ends.
 func straddleCaseEngine(t *testing.T, walBacked bool) (*Engine, func()) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if !walBacked {
 		return NewEngine(g), func() {}
 	}

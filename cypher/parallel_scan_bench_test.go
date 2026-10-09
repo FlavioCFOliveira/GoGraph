@@ -35,7 +35,7 @@ import (
 // engine write path), so a large benchmark fixture builds quickly.
 func seedGraphDirect(b *testing.B, n int) *lpg.Graph[string, float64] {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := "n" + itoaBench(i)
 		if err := g.AddNode(k); err != nil {
@@ -135,7 +135,7 @@ func BenchmarkParallelScan_CountSmall_Disabled(b *testing.B) {
 // scan+filter benchmarks have a property to project and filter on.
 func seedGraphWithProp(b *testing.B, n int) *lpg.Graph[string, float64] {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := "n" + itoaBench(i)
 		if err := g.AddNode(k); err != nil {

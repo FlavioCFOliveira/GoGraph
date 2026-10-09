@@ -85,7 +85,7 @@ func (c *nopRelCounter) countRelDeleted() { c.n++ }
 // Before the fix every occurrence of b was captured under the first slot's
 // handle, so the replay re-added one instance to b and dropped the other two.
 func TestUndo_BulkOutEdgeRemoval_RestoresEveryParallelInstance_2885(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	addTyped(t, g, "a", "b", 1, "T")
 	addTyped(t, g, "a", "b", 2, "U")
 	addTyped(t, g, "a", "c", 3, "T")
@@ -121,7 +121,7 @@ func TestUndo_BulkOutEdgeRemoval_RestoresEveryParallelInstance_2885(t *testing.T
 // pair's first slot — the committed sibling — and kept the appended one, so the
 // surviving edge carried the rolled-back type.
 func TestUndo_AddEdge_RemovesTheCreatedInstance_2885(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	addTyped(t, g, "a", "b", 1, "T")
 	want := slotsFrom(t, g, "a")
 

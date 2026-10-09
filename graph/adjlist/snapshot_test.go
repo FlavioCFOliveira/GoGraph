@@ -25,7 +25,7 @@ import (
 func TestSnapshot_PinIsStableAcrossWrites(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	// Seed three edges out of node 0 across two shards' worth of dst ids.
 	for _, dst := range []int{1, 2, 3} {
 		if err := a.AddEdge(0, dst, int64(dst)); err != nil {
@@ -89,7 +89,7 @@ func TestSnapshot_PinIsStableAcrossWrites(t *testing.T) {
 func TestSnapshot_ReadsMatchLiveAtPinTime(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	// Edge with a handle and a label, plus a plain weighted edge.
 	if err := a.AddEdgeLabeledH(0, 1, 10, 7, 99); err != nil {
 		t.Fatalf("AddEdgeLabeledH: %v", err)
@@ -144,7 +144,7 @@ func TestSnapshot_ReadsMatchLiveAtPinTime(t *testing.T) {
 func TestSnapshot_EmptyGraphNilSafe(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	snap := a.PinSnapshot()
 
 	// Any NodeID reads back empty; HasEdge on never-interned nodes is false.
@@ -179,7 +179,7 @@ func TestSnapshot_ConcurrentPinUnderWrites(t *testing.T) {
 	const N = 5_000
 	numReaders := max(2, runtime.GOMAXPROCS(0)-1)
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	srcID, _ := a.Mapper().Lookup(0)
 	_ = a.AddEdge(0, 1, 1) // ensure node 0 interned with id 0's shard
 	srcID, _ = a.Mapper().Lookup(0)
@@ -264,7 +264,7 @@ func TestSnapshot_WindowedInPlace_ConcurrentLockFreeReader(t *testing.T) {
 	const N = 5_000
 	numReaders := max(2, runtime.GOMAXPROCS(0)-1)
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	// Intern the hub so its NodeID/shard is fixed before the readers start.
 	if err := a.AddEdge(0, 1, 1); err != nil {
 		t.Fatalf("seed: %v", err)

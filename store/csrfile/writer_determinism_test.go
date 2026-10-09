@@ -22,7 +22,7 @@ func init() {
 			return 1
 		}
 		outPath := args[0]
-		a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+		a := adjlist.New[int, int64](adjlist.Config{})
 		for i := 0; i < 19; i++ {
 			if err := a.AddEdge(i, i+1, int64(i)); err != nil {
 				fmt.Fprintf(os.Stderr, "AddEdge: %v\n", err)
@@ -61,7 +61,7 @@ func sha256File(path string) (string, error) {
 // buildPathCSR builds the canonical 20-node directed path (0→1→…→19)
 // with edge weights equal to the source index and returns the CSR.
 func buildPathCSR() *csr.CSR[int64] {
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < 19; i++ {
 		if err := a.AddEdge(i, i+1, int64(i)); err != nil {
 			panic(fmt.Sprintf("buildPathCSR AddEdge: %v", err))

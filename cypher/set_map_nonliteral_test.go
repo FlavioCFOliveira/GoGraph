@@ -26,7 +26,7 @@ import (
 
 func setMapEng(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return cypher.NewEngine(g)
 }
 

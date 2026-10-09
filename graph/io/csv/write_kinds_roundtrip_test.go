@@ -69,7 +69,7 @@ func TestCSVWrite_SpecialStringRoundtrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+			a := adjlist.New[string, int64](adjlist.Config{})
 			if err := a.AddEdge(tc.src, tc.dst, tc.weight); err != nil {
 				t.Fatalf("AddEdge: %v", err)
 			}

@@ -88,7 +88,7 @@ func TestParallelAggregate_ScalarTie_Differential(t *testing.T) {
 	isTieForm := func(s string) bool { return s == intForm || s == floatForm }
 
 	// --- min tie: int and float 2^53 tie at the minimum; fillers strictly above. ---
-	gMin := lpg.New[string, float64](adjlist.Config{Directed: true})
+	gMin := lpg.New[string, float64](adjlist.Config{})
 	addAggNode(t, gMin, "min_float", lpg.Float64Value(float64(pow2_53)), 0)
 	for i := 1; i <= 118; i++ { // fillers above the tie
 		addAggNode(t, gMin, fmt.Sprintf("fill%d", i), lpg.Int64Value(pow2_53+int64(i)), int64(i%3))
@@ -102,7 +102,7 @@ func TestParallelAggregate_ScalarTie_Differential(t *testing.T) {
 	}
 
 	// --- max tie: int and float 2^53 tie at the maximum; fillers strictly below. ---
-	gMax := lpg.New[string, float64](adjlist.Config{Directed: true})
+	gMax := lpg.New[string, float64](adjlist.Config{})
 	addAggNode(t, gMax, "max_int", lpg.Int64Value(pow2_53), 0)
 	for i := 1; i <= 118; i++ {
 		addAggNode(t, gMax, fmt.Sprintf("fill%d", i), lpg.Int64Value(pow2_53-int64(i)), int64(i%3))
@@ -119,7 +119,7 @@ func TestParallelAggregate_ScalarTie_Differential(t *testing.T) {
 // TestParallelAggregate_SignedZeroTie_Differential proves a ±0.0 minimum tie keeps
 // the first-seen signed zero byte-identically to serial.
 func TestParallelAggregate_SignedZeroTie_Differential(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	addAggNode(t, g, "neg_zero", lpg.Float64Value(math.Copysign(0, -1)), 0) // first-seen -0.0
 	for i := 1; i <= 118; i++ {
 		addAggNode(t, g, fmt.Sprintf("fill%d", i), lpg.Float64Value(float64(i)), int64(i%3))
@@ -136,7 +136,7 @@ func TestParallelAggregate_SignedZeroTie_Differential(t *testing.T) {
 func TestParallelAggregate_GroupBy_Differential(t *testing.T) {
 	// Two groups, each with a mixed int/float tie at its min and max. Interleave so
 	// the first-seen order of the groups (and of each tie member) is fixed.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	addAggNode(t, g, "a_min_f", lpg.Float64Value(float64(pow2_53)), 0) // group 0 min, float first
 	addAggNode(t, g, "b_max_i", lpg.Int64Value(pow2_53), 1)            // group 1 max, int first
 	for i := 1; i <= 60; i++ {
@@ -171,7 +171,7 @@ func TestParallelAggregate_GroupBy_Differential(t *testing.T) {
 // worker-count sweep (GOMAXPROCS 1 .. 2×default) at the engine level, exercising
 // the governor's worker-budget path end-to-end.
 func TestParallelAggregate_WorkerSweep_Differential(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	addAggNode(t, g, "min_float", lpg.Float64Value(float64(pow2_53)), 0)
 	for i := 1; i <= 200; i++ {
 		addAggNode(t, g, fmt.Sprintf("fill%d", i), lpg.Int64Value(pow2_53+int64(i)), int64(i%4))

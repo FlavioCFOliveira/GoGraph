@@ -37,7 +37,7 @@ import (
 // then creates the named index with the given type.
 func hashCompanionEngine(t *testing.T, n int, ddl string) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(key); err != nil {
@@ -125,7 +125,7 @@ func TestHashIndexNumericLookupIsIndexed(t *testing.T) {
 func TestHashIndexNumericCrossTypeEquality(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:N {v: 7, tag: 'int'})`)
 	runSetup(t, eng, `CREATE (:N {v: 7.0, tag: 'float'})`)

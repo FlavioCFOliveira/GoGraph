@@ -37,7 +37,7 @@ import (
 func noopStampEngines() map[string]func(t *testing.T) (*cypher.Engine, string, func()) {
 	return map[string]func(t *testing.T) (*cypher.Engine, string, func()){
 		"memory": func(t *testing.T) (*cypher.Engine, string, func()) {
-			eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+			eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 			closed := false
 			closeFn := func() {
 				if !closed {

@@ -54,7 +54,7 @@ func TestDOTWrite_SpecialCharIDs(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+			a := adjlist.New[string, int64](adjlist.Config{})
 			if err := a.AddEdge(tc.src, tc.dst, 0); err != nil {
 				t.Fatalf("AddEdge: %v", err)
 			}

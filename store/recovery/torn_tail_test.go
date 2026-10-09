@@ -40,7 +40,7 @@ func TestRecovery_TornTailDropsLastOp_WithSnapshot(t *testing.T) {
 	// "base" must survive regardless of WAL truncation.
 	// A single-file log: this test damages or erases it as one file.
 	w := openSingleFileWAL(t, walPath)
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

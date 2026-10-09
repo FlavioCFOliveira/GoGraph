@@ -15,7 +15,7 @@ import (
 func TestPrimMST_EqualWeight(t *testing.T) {
 	t.Parallel()
 	const n = 6
-	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
 			if err := a.AddEdge(i, j, 1.0); err != nil {
@@ -23,7 +23,7 @@ func TestPrimMST_EqualWeight(t *testing.T) {
 			}
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 
 	src, ok := a.Mapper().Lookup(0)
 	if !ok {

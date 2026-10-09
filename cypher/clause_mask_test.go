@@ -206,7 +206,7 @@ func TestRunAnyDispatch_CommentDoesNotForceTheWritePath(t *testing.T) {
 // newMaskTestGraph builds a small labelled graph for the dispatch test.
 func newMaskTestGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := NewEngine(g)
 	for _, cy := range []string{

@@ -52,7 +52,7 @@ import (
 // make the comparison vacuous.
 func procParityEngine(t *testing.T) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {

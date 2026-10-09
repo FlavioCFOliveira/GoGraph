@@ -49,7 +49,7 @@ func TestGraph_EdgeHasProperty_PresenceAndKindGate(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			g := New[string, int64](adjlist.Config{Directed: true})
+			g := New[string, int64](adjlist.Config{})
 			if err := g.AddEdge("a", "b", 0); err != nil {
 				t.Fatalf("AddEdge: %v", err)
 			}
@@ -69,7 +69,7 @@ func TestGraph_EdgeHasProperty_PresenceAndKindGate(t *testing.T) {
 
 func TestGraph_EdgeHasProperty_Absent(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestGraph_EdgeHasProperty_Absent(t *testing.T) {
 // correct stored direction.
 func TestGraph_EdgeHasProperty_Directed(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestGraph_EdgeHasProperty_Directed(t *testing.T) {
 // prior different-kind column).
 func TestGraph_EdgeHasProperty_LatestKindWins(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestGraph_EdgeHasProperty_LatestKindWins(t *testing.T) {
 // nothing on the hot path (it reads only validity bits and kind tags, never the
 // value cell). NOT parallel so testing.AllocsPerRun is meaningful.
 func TestGraph_EdgeHasProperty_ZeroAlloc(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

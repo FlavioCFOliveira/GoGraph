@@ -79,7 +79,7 @@ import (
 // comment above; it is a guard on the property rmp #2304 depends on, not a
 // discriminator.
 func TestDeferredIndexRemoval_IsStampedWithItsOwnTransaction(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestDeferredIndexRemoval_IsStampedWithItsOwnTransaction(t *testing.T) {
 // a deferral that never swept would leak an over-reporting bitmap entry for the
 // life of the process.
 func TestDeferredIndexRemoval_UntransactedWriteStillSweeps(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestDeferredIndexRemoval_UntransactedWriteStillSweeps(t *testing.T) {
 // Verified: with `g.stamp.Stamp()` restored in deferLabelIndexRemoval, this test
 // fails with one untracked write per deferred removal.
 func TestDeferredIndexRemoval_ChargesNoUntrackedWrite(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "c"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%s): %v", n, err)

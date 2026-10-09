@@ -18,7 +18,7 @@ import (
 // twice results in the same final value as setting it once.
 func TestSet_TwiceEqualsOnce(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -43,7 +43,7 @@ func TestSet_TwiceEqualsOnce(t *testing.T) {
 // property.
 func TestSet_FloatTwiceEqualsOnce(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -69,7 +69,7 @@ func TestSet_FloatTwiceEqualsOnce(t *testing.T) {
 // replaces the previous one (ruling out an append-rather-than-replace bug).
 func TestSet_OverwriteChangesValue(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

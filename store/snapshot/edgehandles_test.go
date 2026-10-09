@@ -21,7 +21,7 @@ import (
 
 func newHandleGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	return lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	return lpg.New[string, float64](adjlist.Config{})
 }
 
 // TestEdgeHandles_RoundTrip writes the per-handle metadata of two distinctly

@@ -26,7 +26,7 @@ func TestLoader_Throughput_1M_Edges(t *testing.T) {
 	)
 
 	out := filepath.Join(t.TempDir(), "graph.csr")
-	l := New(Options{OutputPath: out, Directed: true})
+	l := New(Options{OutputPath: out})
 
 	rng := rand.New(rand.NewPCG(42, 7)) //nolint:gosec // deterministic test RNG
 	for i := 0; i < nEdges; i++ {

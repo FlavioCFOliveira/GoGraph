@@ -20,7 +20,7 @@ import (
 
 func propGraph(t *testing.T, nodes ...string) (*Graph[string, float64], map[string]graph.NodeID) {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	ids := make(map[string]graph.NodeID, len(nodes))
 	for _, n := range nodes {
 		if err := g.AddNode(n); err != nil {
@@ -207,7 +207,7 @@ func TestNodePropDelta_SizeIsPinned(t *testing.T) {
 // [Graph.DisableMVCC] returns it to recording nothing. It replaces
 // TestPropDelta_DisabledByDefault, whose assertion was the deliberate opposite.
 func TestPropDelta_ArmedByDefaultAndDisarmable(t *testing.T) {
-	armed := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	armed := New[string, float64](adjlist.Config{})
 	if err := armed.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestPropDelta_ArmedByDefaultAndDisarmable(t *testing.T) {
 		t.Fatalf("a default graph recorded %d property deltas for one set and one delete, want 2", n)
 	}
 
-	inert := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	inert := New[string, float64](adjlist.Config{})
 	inert.disarmMVCCForTest()
 	if err := inert.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)

@@ -64,7 +64,7 @@ const (
 // nothing else about them.
 func buildLeanLabelGraph(t *testing.T, total int, label string) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range total {
 		k := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(k); err != nil {
@@ -202,7 +202,7 @@ func TestLabelCount_DisableParallelScanKeepsConstantTimeCount(t *testing.T) {
 // legible: it is about which cardinality is read, not merely about two plans.
 func TestLabelCount_LabelCardinalityNotGraphOrder(t *testing.T) {
 	// Tiny label inside a large graph: what the old gate ADMITTED.
-	big := lpg.New[string, float64](adjlist.Config{Directed: true})
+	big := lpg.New[string, float64](adjlist.Config{})
 	const bigOrder, rareN = 60_000, 100
 	for i := range bigOrder {
 		k := fmt.Sprintf("b%d", i)

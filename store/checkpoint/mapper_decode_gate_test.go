@@ -252,7 +252,7 @@ func seedCodecKeyedStore(t *testing.T, walPath string) (*lpg.Graph[int, int64], 
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[int, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[int, int64](g, w, txn.Options[int, int64]{
 		Codec:       txn.NewIntCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -339,7 +339,7 @@ func TestCheckpoint_CodecMapperKeyUndecodable_DoesNotTruncateWAL(t *testing.T) {
 			}
 			// PREMISE 2 — the CODEC refuses it, established through the exact
 			// call recovery makes on the readback (store/recovery/recovery.go).
-			probe := lpg.New[int, int64](adjlist.Config{Directed: true})
+			probe := lpg.New[int, int64](adjlist.Config{})
 			if err := snapshot.ApplyMapperToGraphWithCodec(probe, loaded.Mapper, txn.NewIntCodec()); err == nil {
 				t.Fatal("ApplyMapperToGraphWithCodec accepted the poisoned mapper: the fixture " +
 					"did not make the keys undecodable, so nothing under test is exercised")

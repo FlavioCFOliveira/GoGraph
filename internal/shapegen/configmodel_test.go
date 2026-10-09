@@ -60,7 +60,6 @@ func TestRandom_Regular_Invariants(t *testing.T) {
 			assertOrder(t, g, uint64(c.n))
 			wantSize := uint64(c.n * c.d / 2)
 			assertSize(t, g, wantSize)
-			assertDirected(t, g, false)
 			if hasSelfLoop(g) {
 				t.Fatal("graph contains a self-loop, violating the simple-graph contract")
 			}
@@ -167,7 +166,7 @@ func TestRandom_Regular_Golden_N10_D3(t *testing.T) {
 // contracts.
 func TestRandom_Regular_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	g, err := RandomRegular(10, 4, 42).Build(cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -186,7 +185,7 @@ func TestRandom_Regular_PreservesMaxShardCapacity(t *testing.T) {
 // Albert / Erdős-Rényi shard-full tests.
 func TestRandom_Regular_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: false, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	if err := buildRandomRegular(g, 300, 4, 1); err == nil {
 		t.Fatal("buildRandomRegular(g, 300, 4, 1) with MaxShardCapacity=1 returned nil error, want adjlist.ErrShardFull")
@@ -212,7 +211,7 @@ func TestRandom_Regular_ShardFullPropagates(t *testing.T) {
 // bypasses the guard to pin the surfacing branch.
 func TestRandom_Regular_BuildExhaustsBudget(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[int, int64](adjlist.Config{Directed: false, Multigraph: false})
+	g := lpg.New[int, int64](adjlist.Config{})
 	err := buildRandomRegular(g, 2, 2, 1)
 	if !errors.Is(err, ErrRegularConstruction) {
 		t.Fatalf("buildRandomRegular(2, 2): err = %v, want ErrRegularConstruction", err)
@@ -347,7 +346,6 @@ func TestRandom_Configuration_Invariants(t *testing.T) {
 				t.Fatalf("Build: %v", err)
 			}
 			assertOrder(t, g, uint64(len(c.degSeq)))
-			assertDirected(t, g, false)
 			// AC #2: in multigraph mode the degree sequence is
 			// preserved exactly; in simple-graph mode it is at most
 			// the input componentwise.
@@ -495,9 +493,6 @@ func TestRandom_Configuration_MultigraphAllowsParallelEdges(t *testing.T) {
 	}
 	assertOrder(t, g, 2)
 	assertSize(t, g, 4)
-	if !g.AdjList().Multigraph() {
-		t.Fatal("expected adjlist Multigraph() = true")
-	}
 }
 
 // TestRandom_Configuration_SimpleErasesDuplicatesAndSelfLoops
@@ -519,16 +514,13 @@ func TestRandom_Configuration_SimpleErasesDuplicatesAndSelfLoops(t *testing.T) {
 	if hasSelfLoop(g) {
 		t.Fatal("simple graph contains a self-loop")
 	}
-	if g.AdjList().Multigraph() {
-		t.Fatal("expected adjlist Multigraph() = false")
-	}
 }
 
 // TestRandom_Configuration_PreservesMaxShardCapacity confirms the
 // generator preserves cfg.MaxShardCapacity verbatim.
 func TestRandom_Configuration_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	g, err := ConfigurationModel([]int{2, 2, 2, 2}, true, 42).Build(cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -548,7 +540,7 @@ func TestRandom_Configuration_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
 	t.Run("multi", func(t *testing.T) {
 		t.Parallel()
-		cfg := adjlist.Config{Directed: false, Multigraph: true, MaxShardCapacity: 1}
+		cfg := adjlist.Config{MaxShardCapacity: 1}
 		g := lpg.New[int, int64](cfg)
 		degSeq := make([]int, 300)
 		for i := range degSeq {
@@ -560,7 +552,7 @@ func TestRandom_Configuration_ShardFullPropagates(t *testing.T) {
 	})
 	t.Run("simple", func(t *testing.T) {
 		t.Parallel()
-		cfg := adjlist.Config{Directed: false, Multigraph: false, MaxShardCapacity: 1}
+		cfg := adjlist.Config{MaxShardCapacity: 1}
 		g := lpg.New[int, int64](cfg)
 		degSeq := make([]int, 300)
 		for i := range degSeq {
@@ -719,14 +711,16 @@ func newDeterministicRand(seed uint64) *rand.Rand {
 // nodeDegreesUndirected returns the per-node undirected degree of g
 // computed from the adjacency iteration. The helper assumes g has no
 // self-loops (callers should verify this via [hasSelfLoop] first);
-// every neighbour entry contributes one to the source node's degree.
+// every stored arc (u, v) is one edge and contributes one to the
+// degree of each endpoint.
 func nodeDegreesUndirected(g *lpg.Graph[int, int64]) []int {
 	adj := g.AdjList()
 	maxID := int(adj.MaxNodeID())
 	degs := make([]int, maxID)
 	for u := 0; u < maxID; u++ {
-		for range adj.Neighbours(u) {
+		for v := range adj.Neighbours(u) {
 			degs[u]++
+			degs[v]++
 		}
 	}
 	return degs
@@ -738,10 +732,9 @@ func nodeDegreesUndirected(g *lpg.Graph[int, int64]) []int {
 // a pairing of two half-edges from the same node, so each contributes
 // one to that node's degree).
 //
-// The lpg adjacency stores a self-loop (i, i) as a single entry on
-// node i's neighbour list; iterating Neighbours(i) yields it once.
-// To realise the configuration-model degree convention, we count
-// self-loops twice during the scan.
+// Every edge is stored as one arc (u, v) and contributes one to the
+// degree of each endpoint, so a self-loop (i, i) contributes two to
+// node i, which is the configuration-model convention.
 func nodeDegreesUndirectedWithSelfLoops(g *lpg.Graph[int, int64]) []int {
 	adj := g.AdjList()
 	maxID := int(adj.MaxNodeID())
@@ -749,11 +742,7 @@ func nodeDegreesUndirectedWithSelfLoops(g *lpg.Graph[int, int64]) []int {
 	for u := 0; u < maxID; u++ {
 		for v := range adj.Neighbours(u) {
 			degs[u]++
-			if v == u {
-				// Self-loop contributes twice to the node's degree
-				// under the configuration-model convention.
-				degs[u]++
-			}
+			degs[v]++
 		}
 	}
 	return degs

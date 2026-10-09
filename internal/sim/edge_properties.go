@@ -562,7 +562,6 @@ func edgePropertiesScenario() Scenario {
 		Workload:    edgePropertiesWorkload,
 		Crash:       CrashConfig{Enabled: true, CrashProb: 1.0 / 90.0, StabilityWindow: 25},
 		Checkpoint:  CheckpointConfig{Enabled: true, Every: edgePropertiesCheckpointEvery},
-		Multigraph:  true,
 		run:         runEdgeProperties,
 	}
 }

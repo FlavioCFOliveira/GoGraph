@@ -96,7 +96,7 @@ func walEngine2956(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64], *
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -154,7 +154,7 @@ func TestTokenLimit_InMemoryMatchesWAL_2748(t *testing.T) {
 	for _, st := range statements2956() {
 		t.Run(st.name, func(t *testing.T) {
 			t.Parallel()
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			mem := cypher.NewEngine(g)
 			if err := runToCompletion2747(t, mem, fixture2956); err != nil {
 				t.Fatalf("fixture: %v", err)

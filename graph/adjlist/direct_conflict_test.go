@@ -1,9 +1,7 @@
 package adjlist
 
 // direct_conflict_test.go — rmp #2947 at the layer that owns the adjacency: a
-// write carrying no transaction refuses to publish over an uncommitted entry,
-// and an undirected write that would touch two entries refuses before it writes
-// either.
+// write carrying no transaction refuses to publish over an uncommitted entry.
 
 import (
 	"errors"
@@ -12,28 +10,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
-
-// undirectedVersioned builds an undirected, versioned list with the committed
-// edge a—b, then leaves a transaction's append b—c UNCOMMITTED, so b's and c's
-// entries carry a version no committed transaction wrote while a's does not.
-func undirectedVersioned(t *testing.T) *AdjList[string, float64] {
-	t.Helper()
-	a := New[string, float64](Config{Directed: false, Multigraph: true})
-	a.EnableVersioning()
-	clk := &mvcc.Clock{}
-	ws := &mvcc.WriteStamp{}
-	ws.SetClock(clk)
-	a.SetWriteStamp(ws)
-	if err := a.AddEdge("a", "b", 1); err != nil {
-		t.Fatalf("seed a—b: %v", err)
-	}
-	wtx := beginTxW(ws)
-	if err := a.Writer(wtx).AddEdge("b", "c", 2); err != nil {
-		t.Fatalf("pending b—c: %v", err)
-	}
-	_, _ = ws.End() // the window closes; its record stays uncommitted
-	return a
-}
 
 // entryOf returns the current entry pointer of key, the identity a refused
 // write must leave untouched.
@@ -50,42 +26,6 @@ func requireAdjConflict(t *testing.T, err error, op string) {
 	}
 }
 
-// TestDirectConflict_SecondEntryRefusesBeforeTheFirstIsWritten is the
-// atomicity property: the conflicting entry is the SECOND one the undirected
-// write would change, and the first must be left exactly as it was.
-func TestDirectConflict_SecondEntryRefusesBeforeTheFirstIsWritten(t *testing.T) {
-	cases := []struct {
-		name string
-		op   func(a *AdjList[string, float64]) error
-	}{
-		{"RemoveEdge a—b", func(a *AdjList[string, float64]) error { return a.RemoveEdge("a", "b") }},
-		{"RemoveEdgeByHandle a—b", func(a *AdjList[string, float64]) error {
-			_, hs := a.LoadEntryHandles("a")
-			_, err := a.RemoveEdgeByHandle("a", "b", hs[0])
-			return err
-		}},
-		{"RemoveAllEdgesFrom a", func(a *AdjList[string, float64]) error { return a.RemoveAllEdgesFrom("a") }},
-		{"AddEdge a—c", func(a *AdjList[string, float64]) error { return a.AddEdge("a", "c", 3) }},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			a := undirectedVersioned(t)
-			before := entryOf(a, "a")
-			size := a.Size()
-			requireAdjConflict(t, c.op(a), c.name)
-			if got := entryOf(a, "a"); got != before {
-				t.Fatalf("%s was refused on the second entry but replaced the first one", c.name)
-			}
-			if got := a.Size(); got != size {
-				t.Fatalf("%s was refused but moved the edge count %d -> %d", c.name, size, got)
-			}
-			if !a.HasEdge("a", "b") || !a.HasEdge("b", "a") {
-				t.Fatalf("%s was refused but the committed edge a—b is gone", c.name)
-			}
-		})
-	}
-}
-
 // TestDirectConflict_UntransactedWriteNeverAdoptsTheSlot is rmp #2967 at the
 // layer that owns the adjacency. A write carrying no transaction used to adopt
 // the transaction the write stamp's slot named — an exclusive bracket of the
@@ -97,7 +37,7 @@ func TestDirectConflict_SecondEntryRefusesBeforeTheFirstIsWritten(t *testing.T) 
 // slot transaction's own writes, carried through a [Writer], are admitted over
 // its own entry as before.
 func TestDirectConflict_UntransactedWriteNeverAdoptsTheSlot(t *testing.T) {
-	a := New[string, float64](Config{Directed: true, Multigraph: true})
+	a := New[string, float64](Config{})
 	a.EnableVersioning()
 	clk := &mvcc.Clock{}
 	ws := &mvcc.WriteStamp{}

@@ -33,7 +33,7 @@ func ExampleCheckpointer() {
 		panic(err)
 	}
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
