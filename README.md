@@ -5,113 +5,45 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.15.0`.** This is the project's **twentieth
+**Current release: `v0.16.0`.** This is the project's **twenty-first
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.15.0` is a pre-1.0 **MINOR** release of **33 commits** from **one
-sprint (362, *performance laboratory 20260915*) and 33 closed tasks**.
-**It is MINOR by the rule, not by decision** — unlike `v0.14.1`, which
-shipped a MINOR surface as a PATCH deliberately. The exported surface was
-measured rather than asserted, by parsing every non-test Go file outside
-`internal/`, `examples/`, `cmd/` and any `gen/` or `tck/` directory at both
-tags and diffing the rendered declarations: **4 820 exported declarations
-before, 4 822 after — two additions, and no removal, rename or
-re-signing.** That file set is a **superset** of the API surface
-[docs/semver.md](docs/semver.md) defines, so it cannot miss a change
-inside it.
+`v0.16.0` is a pre-1.0 **MINOR** release of **167 commits** from **three
+sprints**: 363 (*Performance and Efficiency Laboratory*), 364
+(*Correctness and Security Laboratory*) and 365 (*Observe, Correct and
+Optimize MVCC, Store and LPG Exercise*).
 
-**No change is breaking.** The two new identifiers are both opt-in, and
-neither alters an existing caller. `cypher/exec.ExpandConfig.EmitStoredDir`
-defaults to `false`, so every existing caller's row width and chunk schema
-are unchanged; set, it appends a fourth column carrying an undirected hop's
-stored orientation, and the caller that sets it owns registering that
-column. `graph/index/label.(*Index).BitmapShared` returns the memoised,
-**immutable** label bitmap without copying it — while `Intersect` and
-`Union` keep their caller-owned-result contract, which a regression test
-asserts by deliberately mutating a single-label `Intersect` result. **No
-on-disk format changed**: no file under `store/` was modified this cycle.
-`go.mod` and `go.sum` are **byte-identical** to `v0.14.2`, so nothing in
-the supply chain moved.
+**It breaks the exported API and changes the on-disk format.** Parsing
+every non-test Go file outside `internal/`, `examples/`, `cmd/` and any
+`gen/`, `tck/` or `testdata/` directory at both tags and diffing the
+rendered declarations gives **4 822 exported declarations before and 5 160
+after: 342 added, 74 re-signed (71 incompatibly) and 4 removed.** Most
+mutators of `graph/lpg`, `graph/adjlist` and `cypher/exec.GraphMutator`
+now return their refusal as an `error`, because every write path — direct,
+raw and store commit — is now atomic and isolated, and every token is
+bounded at 65 535 bytes.
 
-**It is a performance release, and its measurements are its substance.**
-Thirteen improvements shipped across three campaigns — Bolt extreme
-concurrency, Cypher statement parsing, and a whole-surface sweep driven by
-the examples — and **every one rests on an interleaved A/B against a
-byte-identical noise control measured in the same session.** That
-discipline is load-bearing rather than decorative: on the measurement host
-a same-versus-same arm has produced **22 of 36 flat-by-construction rows
-as statistically significant**, so an uncontrolled comparison on it means
-nothing.
-
-**The largest result is an allocation defect in a profile nobody had
-read.** `search.bfsFarthest` built its BFS frontier queue inside the
-function at capacity one and grew it once per source; it never presented
-as `bfsFarthest` in a CPU profile but as the Go runtime's allocator,
-**66.35 % of one profile**. Made caller-owned scratch pre-sized to `n`,
-`diameter.allocs` falls **2 026 768 → 433** on a 100 000-user social
-graph, total allocation **−99.49 %**, that example's CPU **221.18 → 145.72 s
-(−34.1 %)**, and the runtime bucket **66.35 % → 4.52 %**. Traversal order
-is unchanged, so **results are bit-identical**.
-
-**Three further engine results carry the release.** The label bitmap is
-now shared as an immutable memoised image instead of cloned on every scan
-(**−28.71 % geomean**, all four phases at p=0.000, with the roaring clone
-chain leaving the allocation profile entirely); an undirected hop's stored
-direction is carried on the expand triplet instead of recovered per row by
-an O(deg) topology probe (**geomean −27.02 %** over eight shapes, all
-p=0.000); and the per-row binding facts are resolved once instead of per
-row (`mapaccess2` attributable to `populateRowCtx` **8.37 s → absent**,
-total CPU **−11.35 %** at p=0.0079, with all 79 result lines identical
-across five repetitions).
-
-**The Bolt server writes once per query instead of twice, and one
-contention defect was fixed.** Coalescing the two response writes takes
-write syscalls per query from **2.000 to ~1.001** and throughput up
-**+20.66 %** at 64 connections, **+19.61 %** at 256 and **+16.99 %** at
-1 024; widening the property stripes from 64 to 256 adds **+7.0 %** at 64
-and **+13.3 %** at 1 024. Separately, the Cypher plan cache was filed and
-worked as a **defect** rather than a missed optimisation, because it got
-*slower* with more cores — one lookup cost 15.04 ns at one core against
-92.14 ns at ten, and a single lock carried 98.46 % of all mutex delay.
-Sharded 16 ways it falls **119.10 → 42.42 ns (−64.38 %)**.
-
-**Two costs are published rather than buried.** An empty graph grows
-**91 KiB** and `graph/lpg.New` takes **57 % longer**, the price of 256
-property stripes; and two-stage Cypher parsing makes the accepting path
-**−6.01 %** while the **error path costs +57.4 %**. **One operator-visible
-behaviour changes**: the Bolt per-rejection log is now bounded to one line
-per second, so 500 refused connections produce **1 log line** where they
-produced 500 — the counter `bolt.server.conn.rejected` still counts exactly
-500, so move any alert from the log volume to the counter.
-
-**Seven premises were refuted on measurement and shipped nothing**, four
-of them after the code testing them had been written in full. Two float
-reassociations of Betweenness and PageRank were implemented, validated,
-measured and **discarded**, because neither is faster: every row read flat
-against a byte-identical control that itself read +0.81 % at p=0.017. The
-8.89 s and 1.87 s of profiled self-time that motivated them were self-time
-on instructions off the critical path. **No default numeric result moved
-in this release.**
+**WAL v2 is a one-way migration.** The write-ahead log is now segmented,
+each frame carries its position, a link to its predecessor and the store
+id, every commit records the node ids it created, and node ids are
+reserved ahead of use, so `id()` and `elementId()` survive a reopen
+exactly. The first writable, clean open of an older store migrates it,
+after which **`v0.15.0` and earlier builds refuse the directory**. Back up
+a store before its first open with `v0.16.0` if you need a downgrade path.
+`store.Open` composes recovery and the store in one fail-safe call, and
+`txn.Store.Close` records the exact node-id marks at a clean close.
 
 The two compliance invariants remain in force: the module is **100 %
 openCypher TCK-compliant at the execution level** (**3 897/3 897
-scenarios**, preserved rather than extended — `tckExecutionBaseline` is
-untouched and no `.feature` file changed this cycle) and **100 %
-ACID-compliant**. **No durable format changed and no durability path
-changed**, so there is **no migration and no index rebuild** — the upgrade
-is a version bump. **The whole-tree soak, the coverage gate and the
-crash-injection battery were not run**, this release carries **no
-production certification of its own**, and **no per-release benchmark
-campaign was run** — benchmark execution left the release path in
-`v0.14.2`. The measured record for this cycle is the three campaign
-documents under `docs/` and the raw series under `docs/benchmarks/`.
+scenarios**; `tckExecutionBaseline` is unchanged) and **100 %
+ACID-compliant**. `go.mod` and `go.sum` are unchanged from `v0.15.0`.
 
 The module uses the conventional Go path
 `github.com/FlavioCFOliveira/GoGraph` and is fetchable with
-`go get github.com/FlavioCFOliveira/GoGraph@v0.15.0`. See
+`go get github.com/FlavioCFOliveira/GoGraph@v0.16.0`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.15.0.md](release-notes/v0.15.0.md) for the full release
+[release-notes/v0.16.0.md](release-notes/v0.16.0.md) for the full release
 narrative, the behaviour changes a caller must know about, and what the
 release does **not** establish.
 

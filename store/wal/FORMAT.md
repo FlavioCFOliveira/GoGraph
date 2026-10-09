@@ -124,10 +124,12 @@ elsewhere it is `ErrTornSegment`.
 ## Control records
 
 A payload whose first byte is `0xFC` is a control record, not a transaction op.
-This build writes and reads one kind:
+This build writes and reads three kinds:
 
 | Kind | Name | Body |
 |---|---|---|
+| 1 | ReserveIDs | `0xFC 0x01`, shard (1), limit (8): every node id below `limit` in `shard` may have been issued. |
+| 2 | NextIDsExact | `0xFC 0x02`, 256 × uvarint: the exact per-shard high-water marks, written at a clean close (`txn.Store.Close`). |
 | 3 | LegacySeal | `0xFC 0x03`, storeID (8), v2StartPos (8) |
 
 The seal is written, as a version-2 frame with position 0, at the end of a

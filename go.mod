@@ -2,7 +2,7 @@ module github.com/FlavioCFOliveira/GoGraph
 
 go 1.26
 
-toolchain go1.27.0
+toolchain go1.27.2
 
 require (
 	github.com/RoaringBitmap/roaring/v2 v2.26.0
