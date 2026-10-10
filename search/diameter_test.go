@@ -94,7 +94,7 @@ func TestDiameter_CompleteBipartite(t *testing.T) {
 // containing the first live, non-isolated vertex by running BFS
 // from every live, non-isolated vertex and taking the maximum
 // finite distance encountered. Used as the ground truth against
-// which the iFUB result is checked.
+// which the DiameterCtx result is checked.
 func bruteDiameter(c *csr.CSR[struct{}]) int {
 	n := int(c.MaxNodeID())
 	if n == 0 {
@@ -122,7 +122,7 @@ func bruteDiameter(c *csr.CSR[struct{}]) int {
 }
 
 // TestDiameter_ExactVsBruteVBFS uses rapid to generate small random
-// undirected graphs (12-30 vertices) and verifies the iFUB bound
+// undirected graphs (12-30 vertices) and verifies the bound
 // envelope lo <= bruteDiameter <= hi, plus that exact==true implies
 // lo == bruteDiameter. The scratch-aliasing bug fixed in D3 produced
 // a non-tight hi on many of these inputs.
