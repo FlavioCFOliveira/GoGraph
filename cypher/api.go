@@ -438,9 +438,9 @@ type buildOpts struct {
 	// gets the full unbounded GOMAXPROCS budget — the prior behaviour.
 	parallelGov *exec.ParallelGovernor
 	// fwdCSR caches the forward CSR snapshot used by the per-row relationship
-	// reconstruction helpers (edgeHandleAtFwdPos / edgeInstanceIdxFor) to read
-	// the stable per-edge handle and the per-CREATE instance index at a forward
-	// CSR position. It is built lazily, at most once per query, by [ensureFwdCSR]
+	// reconstruction helpers (edgeHandleAtFwdPos and the retired
+	// edgeInstanceIdxFor, removed by rmp #3088) to read the stable per-edge
+	// handle at a forward CSR position. It is built lazily, at most once per query, by [ensureFwdCSR]
 	// the first time a relationship is reconstructed:
 	// before #1574 each helper rebuilt the whole forward CSR (O(V+E)) PER result
 	// row, making `RETURN r` O(R·(V+E)) and dominating heap allocations.
@@ -16740,7 +16740,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 			// Stable-handle path first: read the explicit per-edge
 			// handle at this forward CSR position and resolve the type
 			// by it. This is delete-stable — unlike the positional
-			// instance idx (edgeInstanceIdxFor), it does not mis-map
+			// instance idx (edgeInstanceIdxFor, removed by rmp #3088), it does not mis-map
 			// after a parallel sibling is deleted and the neighbour
 			// slice is compacted. Both per-instance lookups are keyed on
 			// the STORAGE pair (stKey -> enKey), not the row's
@@ -16784,15 +16784,12 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 					hasByHandleEntry = true
 				}
 			}
-			if !handled {
-				instanceIdx, totalCreates, parallelCount := edgeInstanceIdxFor(bopts, g, stKey, enKey, uint64(edgeIDVal))
-				if instanceIdx > 0 && parallelCount >= totalCreates && totalCreates > 0 {
-					if perInstance := g.EdgeLabelsAt(stKey, enKey, instanceIdx); len(perInstance) > 0 {
-						ets = perInstance
-						handled = true
-					}
-				}
-			}
+			// No by-handle record: the edge was not created by Cypher (every
+			// Cypher CREATE/MERGE records its mandatory type by handle), so its
+			// type is the pair's derived union. The per-CREATE ordinal store is
+			// NOT consulted: only Cypher-created edges populate it, and they never
+			// reach here. Reading it by treating the handle as a forward-CSR
+			// position typed a Go-API edge as a Cypher sibling (rmp #3088).
 			if !handled {
 				ets = g.EdgeLabelsByID(stID, enID)
 			}
@@ -17157,69 +17154,6 @@ func relPresentByHandleOrPair(g *lpg.ReadView[string, float64], stKey, enKey str
 		return ok && !expr.IsNull(v)
 	}
 	return g.EdgeHasProperty(stKey, enKey, k)
-}
-
-// edgeInstanceIdxFor returns the 1-based per-CREATE instance index that
-// the CSR slot at edgePos corresponds to, together with the total
-// CREATE count for (srcKey, dstKey) and the number of parallel CSR
-// entries for that pair. Returns 0 / 0 / 0 when the position is out of
-// range or either endpoint is unknown to the mapper.
-//
-// Storage records one parallel CSR slot per CREATE, so counting how
-// many earlier entries (in the src's adjacency range) share the same
-// dst — up to and including edgePos — yields the CREATE-time instance
-// idx. When the pair's slot count and CREATE count disagree (slots
-// written through the Go API, or a counter recovery did not rebuild),
-// callers fall back to the per-pair union surfaces.
-func edgeInstanceIdxFor(bopts *buildOpts, g *lpg.ReadView[string, float64], srcKey, dstKey string, edgePos uint64) (instanceIdx, totalCreates, parallelCount int64) {
-	totalCreates = g.EdgeCreateCount(srcKey, dstKey)
-	if totalCreates == 0 {
-		return 0, 0, 0
-	}
-	adj := g.AdjList()
-	srcID, ok := adj.Mapper().Lookup(srcKey)
-	if !ok {
-		return 0, totalCreates, 0
-	}
-	dstID, ok := adj.Mapper().Lookup(dstKey)
-	if !ok {
-		return 0, totalCreates, 0
-	}
-	fwdCSR := ensureFwdCSR(bopts, g)
-	if fwdCSR == nil {
-		return 0, totalCreates, 0
-	}
-	verts := fwdCSR.VerticesSlice()
-	edges := fwdCSR.EdgesSlice()
-	if uint64(srcID)+1 >= uint64(len(verts)) {
-		return 0, totalCreates, 0
-	}
-	start := verts[uint64(srcID)]
-	end := verts[uint64(srcID)+1]
-	if edgePos < start || edgePos >= end {
-		return 0, totalCreates, 0
-	}
-	for pos := start; pos <= edgePos; pos++ {
-		if pos >= uint64(len(edges)) {
-			break
-		}
-		if edges[pos] == dstID {
-			parallelCount++
-		}
-	}
-	// parallelCount now equals the index of edgePos within (srcID, dstID)
-	// parallel entries (1-based). Also count remaining occurrences so
-	// the caller knows the total parallel storage entries for the pair.
-	total := parallelCount
-	for pos := edgePos + 1; pos < end; pos++ {
-		if pos >= uint64(len(edges)) {
-			break
-		}
-		if edges[pos] == dstID {
-			total++
-		}
-	}
-	return parallelCount, totalCreates, total
 }
 
 // pickEdgeType chooses the rel-type label to surface for a stored edge.
@@ -24151,7 +24085,7 @@ func ensureFwdCSR(bopts *buildOpts, g *lpg.ReadView[string, float64]) *csr.CSR[f
 //
 // The row count stays right — the snapshot began before the delete — and the third
 // row's TYPE is a sibling's. The present-time CSR has two slots for the pair, so
-// [edgeInstanceIdxFor] cannot place the third position, the per-instance guard in
+// edgeInstanceIdxFor (removed by rmp #3088) could not place the third position, the per-instance guard in
 // buildRelationshipValueFromRow declines, and the per-pair union fallback hands
 // pickEdgeType a set whose first member is R1.
 //
