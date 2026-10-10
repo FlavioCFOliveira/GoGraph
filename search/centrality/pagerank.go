@@ -7,6 +7,7 @@ import (
 	"math"
 	"runtime"
 	"runtime/pprof"
+	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -61,15 +62,118 @@ func hasInvalidFloat(values ...float64) bool {
 
 // PageRankOptions configures [PageRank].
 //
-// It holds only scalars and is taken by value, so [PageRankCtx] applies its
-// defaults to its own copy and never writes the caller's. Concurrency: one
-// PageRankOptions may configure any number of concurrent runs; it carries no
-// synchronisation, so do not mutate it while a call that is copying it is in
-// flight.
+// It is taken by value, so [PageRankCtx] applies its defaults to its own copy
+// and never writes the caller's. Concurrency: one PageRankOptions may configure
+// any number of concurrent runs; it carries no synchronisation, so do not
+// mutate it while a call that is copying it is in flight. The [PageRankBudget]
+// it may point to is itself safe for concurrent use.
 type PageRankOptions struct {
 	Damping       float64
 	MaxIterations int
 	Tolerance     float64
+
+	// Budget, when non-nil, bounds the parallel pull-path workers this run
+	// may start, shared with every other run that passes the same budget.
+	// A run takes up to GOMAXPROCS workers from it without blocking and
+	// returns them on every exit path. When fewer than two are free, the
+	// run uses one worker on the calling goroutine instead: the inline pull
+	// SpMV when c is symmetric by construction ([csr.CSR.KnownSymmetric]),
+	// otherwise the serial push SpMV. Both produce the scores the serial
+	// path produces, bit for bit. With a budget the worker count of a run
+	// depends on concurrent load, so the across-worker-count note in
+	// [PageRank]'s Determinism applies between runs (rmp #2605). A nil
+	// Budget keeps the unbudgeted behaviour: every run above the parallel
+	// threshold starts GOMAXPROCS workers.
+	Budget *PageRankBudget
+}
+
+// PageRankBudget is a fixed pool of PageRank worker slots shared by
+// concurrent [PageRank], [PageRankCtx] and [PageRanker.Run] calls through
+// [PageRankOptions.Budget]. It bounds the total number of parallel pull-path
+// worker goroutines those calls run at once, so concurrent callers stop
+// multiplying GOMAXPROCS-sized pools (nested oversubscription) while a lone
+// caller still gets the full parallel speed-up. Acquisition never blocks: a
+// run that finds fewer than two free slots runs single-threaded instead.
+//
+// Concurrency: a PageRankBudget is safe for concurrent use by any number of
+// goroutines and PageRank calls; its state is a single atomic counter. The
+// caller owns it: create one per engine or workload with [NewPageRankBudget]
+// and share it among the calls it should bound. It holds no goroutines and
+// needs no Close.
+type PageRankBudget struct {
+	capacity int64
+	inUse    atomic.Int64
+}
+
+// NewPageRankBudget returns a budget of capacity worker slots. A capacity
+// of runtime.GOMAXPROCS(0) bounds concurrent PageRank calls to the cores
+// available. It returns [ErrInvalidInput] when capacity < 1.
+func NewPageRankBudget(capacity int) (*PageRankBudget, error) {
+	if capacity < 1 {
+		return nil, ErrInvalidInput
+	}
+	return &PageRankBudget{capacity: int64(capacity)}, nil
+}
+
+// Capacity reports the number of worker slots the budget holds.
+func (b *PageRankBudget) Capacity() int { return int(b.capacity) }
+
+// InUse reports the number of worker slots currently held by running
+// PageRank calls. It is a point-in-time observation for utilisation metrics.
+func (b *PageRankBudget) InUse() int { return int(b.inUse.Load()) }
+
+// acquire takes up to want free slots without blocking and returns the
+// number taken (0 when none is free).
+func (b *PageRankBudget) acquire(want int) int {
+	for {
+		used := b.inUse.Load()
+		free := b.capacity - used
+		if free <= 0 {
+			return 0
+		}
+		take := min(int64(want), free)
+		if b.inUse.CompareAndSwap(used, used+take) {
+			return int(take)
+		}
+	}
+}
+
+// release returns n slots taken by acquire.
+func (b *PageRankBudget) release(n int) {
+	if n > 0 {
+		b.inUse.Add(-int64(n))
+	}
+}
+
+// pageRankPullWorkers selects the SpMV regime of one run. It returns
+// workers == 0 for the serial push path and workers >= 1 for the pull path
+// (workers == 1 runs inline on the caller, with no goroutine), plus held, the
+// budget slots the caller must release when the run ends. Without a budget
+// the regime is the unbudgeted one: GOMAXPROCS workers (clamped to n) when
+// GOMAXPROCS > 1 and live reaches pageRankParallelThreshold, else serial.
+func pageRankPullWorkers(b *PageRankBudget, live, n int, symmetric bool) (workers, held int) {
+	workers = runtime.GOMAXPROCS(0)
+	if workers <= 1 || live < pageRankParallelThreshold {
+		return 0, 0
+	}
+	if workers > n {
+		workers = n
+	}
+	if b == nil {
+		return workers, 0
+	}
+	held = b.acquire(workers)
+	if held >= 2 {
+		return held, held
+	}
+	b.release(held)
+	metrics.IncCounter("search.centrality.PageRank.budget.exhausted", 1)
+	if symmetric {
+		// A symmetric CSR is its own transpose, so the pull path costs no
+		// reverse build; one inline worker is faster than the push form.
+		return 1, 0
+	}
+	return 0, 0
 }
 
 // DefaultPageRankOptions returns the classic Brin-Page parameters
@@ -194,8 +298,9 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 	// reused across every iteration. For graphs below the threshold (or
 	// when GOMAXPROCS == 1) the serial push path is used unchanged, so
 	// tiny graphs never pay the transpose nor the goroutine overhead.
-	workers := runtime.GOMAXPROCS(0)
-	useParallel := workers > 1 && live >= pageRankParallelThreshold
+	workers, held := pageRankPullWorkers(opts.Budget, live, n, c.KnownSymmetric())
+	defer opts.Budget.release(held)
+	useParallel := workers > 0
 	var engine *pageRankEngine
 	if useParallel {
 		// Build only the reverse-CSR structure (offsets + in-neighbour
@@ -206,9 +311,6 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 		// iteration count is small. The lean structure-only transpose
 		// keeps the one-time O(V+E) cost minimal.
 		revVerts, revEdges := pageRankReverseStructure(c, verts, edges, n)
-		if workers > n {
-			workers = n
-		}
 		engine = newPageRankEngine(ctx, workers, revVerts, revEdges, n)
 		defer engine.close()
 	}
@@ -413,8 +515,9 @@ func (st *pageRankState[W]) run(ctx context.Context, c *csr.CSR[W], opts PageRan
 	// query). For graphs below the threshold (or when GOMAXPROCS == 1) the
 	// serial push path is used unchanged, so tiny graphs never pay the
 	// transpose nor the goroutine overhead.
-	workers := runtime.GOMAXPROCS(0)
-	useParallel := workers > 1 && live >= pageRankParallelThreshold
+	workers, held := pageRankPullWorkers(opts.Budget, live, n, c.KnownSymmetric())
+	defer opts.Budget.release(held)
+	useParallel := workers > 0
 	var engine *pageRankEngine
 	if useParallel {
 		// Build only the reverse-CSR structure (offsets + in-neighbour
@@ -428,9 +531,6 @@ func (st *pageRankState[W]) run(ctx context.Context, c *csr.CSR[W], opts PageRan
 		if !st.revInit {
 			st.revVerts, st.revEdges = pageRankReverseStructure(c, verts, edges, n)
 			st.revInit = true
-		}
-		if workers > n {
-			workers = n
 		}
 		engine = newPageRankEngine(ctx, workers, st.revVerts, st.revEdges, n)
 		defer engine.close()
@@ -703,6 +803,8 @@ type pageRankEngine struct {
 
 // newPageRankEngine builds the edge-balanced partition and launches the
 // persistent worker goroutines. close must be called to terminate them.
+// With workers == 1 no goroutine is started: iterate runs the single range
+// inline on the caller.
 func newPageRankEngine(ctx context.Context, workers int, revVerts []uint64, revEdges []graph.NodeID, n int) *pageRankEngine {
 	e := &pageRankEngine{
 		ctx:      ctx,
@@ -715,6 +817,9 @@ func newPageRankEngine(ctx context.Context, workers int, revVerts []uint64, revE
 		quit:     make(chan struct{}),
 	}
 	e.bounds = edgeBalancedBounds(revVerts, n, workers)
+	if workers == 1 {
+		return e
+	}
 	for w := 0; w < workers; w++ {
 		e.start[w] = make(chan struct{})
 		go e.worker(w)
@@ -808,6 +913,12 @@ func (e *pageRankEngine) iterate(next, cur []float64, isLive []bool, outdeg []ui
 	e.next, e.cur = next, cur
 	e.isLive, e.outdeg = isLive, outdeg
 	e.baseShare, e.damping = baseShare, damping
+	if e.workers == 1 {
+		// Inline single worker: one partial, so the delta is the sequential
+		// sum the serial push path computes.
+		e.runRange(0)
+		return e.deltas[0]
+	}
 	// Release every worker on its private channel, then wait for all to
 	// report. The per-worker start[w]/done rendezvous is the per-iteration
 	// barrier; private start channels pin each fixed range to its worker
