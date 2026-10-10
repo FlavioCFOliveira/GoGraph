@@ -317,3 +317,172 @@ go tool pprof -nodefraction=0 -sample_index=alloc_space -list pageRankBuildRever
 go tool pprof -nodefraction=0 -peek 'PropertyKeysInUse$' $L/out/elevated/25_software_house_api/cpu.pprof
 go tool pprof -nodefraction=0 -list reserveSetPropertyGen $L/out/contention/37_mvcc_write_contention/mutex.pprof
 ```
+
+---
+
+# Laboratory iteration 2, 2026-10-10 — the same sweep at `6b399a3b`
+
+Sprint 367, rmp #3087. The iteration-1 sweep was re-run at HEAD `6b399a3b` with the same
+driver, passes, examples, scales and owner reader, so every row compares 1:1 with section 2.
+**No module code was changed.** Every number below was collected in this session.
+
+## 10. Method and environment
+
+- Same as section 1, with these differences: binaries rebuilt (`LAB_REBUILD=1`, 37 binaries,
+  25 s, outside every timed window); `GOCACHE` on its default on-disk location; graph data
+  under `/Volumes/GoGraphRAM/lab3087` (deleted at the end). `$L2` =
+  `/private/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/755b6bf2-7deb-4d58-a983-07059400361e/scratchpad/lab2`.
+- Host: Apple M4, 10 cores, Darwin 27.0.0 arm64, Go 1.27.2, tree clean at `6b399a3b`,
+  `GOGRAPH_FSYNC_LATENCY=off`. Load1: start 2.80 (top process `osascript`/terminal, under
+  20% of one core each); `default` 14:42–14:48 (2.25–4.03); `elevated` 14:48–14:57
+  (2.48–3.95); peak RSS 14:57–15:02; `contention` 15:02–15:07 (up to 4.36). Every row ran
+  alone within its pass.
+- **Same-code repeat (noise).** The 15 concurrent rows above 2 s ran twice at HEAD
+  (`elevated` and `contention`): per-row CPU −3.0% to +3.2%, aggregate +1.5%, except row 37
+  (+39.9%, see below). With iteration 1's −5.1% to +5.1%, a per-row delta under **±5%** is
+  not a finding.
+- **Row 37 is not comparable from the `elevated` pass.** Its `elevated` run failed on the
+  same intermittent harness check as in iteration 1 (`ladder.L22 level=8
+  crash_image_after_checkpoint: image taken false`) and its CPU differs by 40% from the
+  passing `contention` run of the same binary. Row 37 is compared on the `contention` pass:
+  17.07 s → 16.41 s (−3.9%, within noise).
+- ¹ The peak-RSS script's argv rebuild broke `24_query` this time (exit 2: the query text
+  was passed twice; `${a% $Q}` treats `[:FRIEND]` as a glob bracket). The row was re-run by
+  hand with the exact query (`$L2/rss/24_query.rerun.log`, exit 0).
+
+## 11. Manifest before (`c794a1ed`) → after (`6b399a3b`)
+
+**Totals (`elevated`, 42 rows).** CPU **595.56 s → 443.90 s (−25.5%)**; module
+**383.88 s → 249.06 s (−35.1%)**; harness 54.57 → 56.03 s; unowned 157.11 → 138.81 s.
+Allocation **160.96 GiB → 135.67 GiB (−15.7%)**; module **144.47 GiB → 119.13 GiB
+(−17.5%)**. Contention pass: CPU 463.57 → 317.65 s; delay 398.37 → 365.22 s (module
+274.86 → 263.05 s). Row 11 alone accounts for 125.92 s of the 151.66 s CPU drop.
+
+Exit status is unchanged: every `default` row exited 0 (10 driver `cpu-total-zero` FAILs,
+instrument, as in section 2); `elevated` 31 and 37 exit 1 on the same harness checks as
+iteration 1; `24_init` `cpu-total-zero`. No row showed a module defect.
+
+| row | exit d/e before → after | CPU s | module CPU s | alloc GiB | module alloc GiB | peak RSS MiB |
+|---|---|---|---|---|---|---|
+| 01_basic | 0/0 → 0/0 | 1.29 → 1.28 (-1%) | 0.30 → 0.34 (+13%) | 1.06 → 1.04 (-2%) | 0.97 → 0.95 (-2%) | 474 → 487 |
+| 02_property_graph | 0/0 → 0/0 | 1.56 → 1.56 (+0%) | 0.43 → 0.47 (+9%) | 0.72 → 0.72 (-0%) | 0.71 → 0.71 (-0%) | 308 → 297 |
+| 03_advanced_algorithms | 0/0 → 0/0 | 45.66 → 49.35 (+8%) | 45.11 → 49.04 (+9%) | 0.06 → 0.05 (-9%) | 0.05 → 0.04 (-13%) | 33 → 30 |
+| 04_persistence | 0/0 → 0/0 | 3.82 → 3.67 (-4%) | 2.19 → 2.07 (-5%) | 1.92 → 1.86 (-3%) | 1.91 → 1.85 (-3%) | 292 → 268 |
+| 05_out_of_core | 0/0 → 0/0 | 0.40 → 0.37 (-8%) | 0.11 → 0.11 (+0%) | 0.30 → 0.26 (-12%) | 0.28 → 0.25 (-13%) | 177 → 181 |
+| 06_csv_import | 0/0 → 0/0 | 1.69 → 1.65 (-2%) | 1.17 → 1.12 (-4%) | 1.42 → 1.47 (+4%) | 1.09 → 1.13 (+4%) | 593 → 592 |
+| 07_graphml_roundtrip | 0/0 → 0/0 | 2.12 → 2.26 (+7%) | 1.39 → 1.44 (+4%) | 1.85 → 1.85 (+0%) | 1.82 → 1.83 (+0%) | 592 → 591 |
+| 08_pagerank | 0/0 → 0/0 | 5.97 → 5.97 (+0%) | 2.29 → 2.34 (+2%) | 0.68 → 0.69 (+2%) | 0.62 → 0.64 (+3%) | 300 → 302 |
+| 09_leiden | 0/0 → 0/0 | 2.96 → 2.89 (-2%) | 1.31 → 1.26 (-4%) | 2.21 → 2.15 (-2%) | 2.20 → 2.15 (-2%) | 864 → 746 |
+| 10_dimacs9_routing | 0/0 → 0/0 | 2.74 → 2.69 (-2%) | 2.32 → 2.26 (-3%) | 1.38 → 1.36 (-1%) | 1.37 → 1.35 (-1%) | 244 → 363 |
+| 11_social_network | 0/0 → 0/0 | 129.78 → 3.86 (-97%) | 129.15 → 2.08 (-98%) | 0.47 → 0.33 (-29%) | 0.45 → 0.31 (-30%) | 218 → 181 |
+| 12_build_dependency | 0/0 → 0/0 | 0.63 → 0.65 (+3%) | 0.15 → 0.16 (+7%) | 0.35 → 0.33 (-3%) | 0.30 → 0.30 (-2%) | 251 → 250 |
+| 13_network_reliability | 0/0 → 0/0 | 2.90 → 2.81 (-3%) | 2.35 → 2.20 (-6%) | 0.07 → 0.07 (+3%) | 0.05 → 0.05 (+6%) | 73 → 73 |
+| 14_routing_alternatives | 0/0 → 0/0 | 39.96 → 39.38 (-1%) | 0.54 → 0.46 (-15%) | 6.12 → 6.22 (+2%) | 0.05 → 0.04 | 38 → 37 |
+| 15_task_assignment | 0/0 → 0/0 | 3.26 → 3.30 (+1%) | 2.80 → 2.81 (+0%) | 0.30 → 0.30 (+3%) | 0.20 → 0.21 (+5%) | 211 → 211 |
+| 16_centrality_analytics | 0/0 → 0/0 | 9.07 → 9.15 (+1%) | 8.95 → 9.00 (+1%) | 0.10 → 0.09 (-10%) | 0.10 → 0.09 (-11%) | 29 → 29 |
+| 17_transactional_log | 0/0 → 0/0 | 0.53 → 0.51 (-4%) | 0.40 → 0.41 (+2%) | 0.50 → 0.16 (-68%) | 0.49 → 0.16 (-68%) | 25 → 20 |
+| 18_oocore_pipeline | 0/0 → 0/0 | 1.47 → 1.50 (+2%) | 0.34 → 0.48 (+41%) | 0.82 → 0.86 (+5%) | 0.66 → 0.71 (+8%) | 344 → 335 |
+| 19_pattern_query | 0/0 → 0/0 | 9.73 → 9.77 (+0%) | 3.73 → 3.44 (-8%) | 3.81 → 3.94 (+3%) | 3.76 → 3.89 (+3%) | 314 → 320 |
+| 20_concurrent_reads | 0/0 → 0/0 | 114.13 → 100.64 (-12%) | 61.37 → 57.14 (-7%) | 33.66 → 17.81 (-47%) | 32.29 → 16.45 (-49%) | 145 → 101 |
+| 21_typed_recovery | 0/0 → 0/0 | 11.28 → 11.29 (+0%) | 8.43 → 8.30 (-2%) | 2.12 → 2.09 (-1%) | 2.09 → 2.06 (-1%) | 372 → 332 |
+| 22_cypher | 0/0 → 0/0 | 4.43 → 4.29 (-3%) | 2.32 → 2.14 (-8%) | 1.74 → 1.65 (-5%) | 1.70 → 1.61 (-5%) | 555 → 547 |
+| 23_bolt_server | 0/0 → 0/0 | 2.97 → 2.84 (-4%) | 0.86 → 0.54 (-37%) | 0.63 → 0.68 (+8%) | 0.48 → 0.50 (+4%) | 116 → 118 |
+| 24_init | 0/0 → 0/0 | 0.00 → 0.00 | 0.00 → 0.00 | 0.01 → 0.00 | 0.01 → 0.00 | 11 → 9 |
+| 24_seed | 0/0 → 0/0 | 3.29 → 3.44 (+5%) | 2.23 → 2.23 (+0%) | 4.38 → 4.30 (-2%) | 4.35 → 4.28 (-2%) | 2122 → 1778 |
+| 24_stats | 0/0 → 0/0 | 5.60 → 5.84 (+4%) | 3.31 → 3.62 (+9%) | 3.87 → 3.98 (+3%) | 3.87 → 3.98 (+3%) | 1460 → 1396 |
+| 24_query | 0/0 → 0/0 | 4.35 → 4.44 (+2%) | 2.37 → 2.00 (-16%) | 3.79 → 3.73 (-2%) | 3.78 → 3.72 (-2%) | 1958 → 2013 ¹ |
+| 24_plandiff | 0/0 → 0/0 | 14.84 → 15.14 (+2%) | 8.74 → 9.99 (+14%) | 8.84 → 8.82 (-0%) | 8.83 → 8.81 (-0%) | 1472 → 1436 |
+| 24_snapshot | 0/0 → 0/0 | 4.93 → 5.11 (+4%) | 2.66 → 2.46 (-8%) | 4.46 → 4.43 (-1%) | 4.45 → 4.43 (-1%) | 1454 → 1392 |
+| 25_software_house_api | 0/0 → 0/0 | 24.23 → 19.25 (-21%) | 11.29 → 5.44 (-52%) | 9.55 → 3.48 (-64%) | 9.52 → 3.45 (-64%) | n/m → n/m |
+| 26_social_scale_bench | 0/0 → 0/0 | 77.18 → 72.55 (-6%) | 49.43 → 50.12 (+1%) | 32.69 → 32.51 (-1%) | 32.66 → 32.49 (-1%) | 3469 → 3558 |
+| 27_concurrent_txn | 0/0 → 0/0 | 0.86 → 0.86 (+0%) | 0.39 → 0.30 (-23%) | 0.56 → 0.56 (+0%) | 0.52 → 0.52 (+0%) | 54 → 56 |
+| 28_negative_weights | 0/0 → 0/0 | 9.51 → 9.40 (-1%) | 9.32 → 9.07 (-3%) | 1.37 → 1.36 (-0%) | 1.36 → 1.36 (+0%) | 965 → 965 |
+| 29_all_pairs | 0/0 → 0/0 | 2.91 → 2.89 (-1%) | 2.04 → 2.04 (+0%) | 0.16 → 0.16 (-3%) | 0.15 → 0.15 (-2%) | 129 → 129 |
+| 30_min_spanning_tree | 0/0 → 0/0 | 0.44 → 0.44 (+0%) | 0.16 → 0.15 (-6%) | 0.42 → 0.38 (-10%) | 0.31 → 0.28 (-9%) | 220 → 213 |
+| 31_metrics_observability | 0/1 → 0/1 | 1.08 → 1.18 (+9%) | 0.25 → 0.31 (+24%) | 0.71 → 0.71 (-0%) | 0.65 → 0.64 (-1%) | 273 (exit 1) → 271 (exit 1) |
+| 32_euler | 0/0 → 0/0 | 4.67 → 4.69 (+0%) | 0.10 → 0.04 (-60%) | 7.04 → 7.04 (-0%) | 0.29 → 0.27 (-7%) | 7228 → 7228 |
+| 33_generation_swap | 0/0 → 0/0 | 5.49 → 5.07 (-8%) | 5.11 → 4.68 (-8%) | 1.03 → 0.94 (-9%) | 1.02 → 0.93 (-9%) | 173 → 183 |
+| 34_bolt_transactions | 0/0 → 0/0 | 1.15 → 1.20 (+4%) | 0.28 → 0.31 (+11%) | 0.63 → 0.65 (+4%) | 0.59 → 0.61 (+3%) | 270 → 295 |
+| 35_mvcc_mixed_workload | 0/0 → 0/0 | 13.06 → 13.08 (+0%) | 2.77 → 2.80 (+1%) | 9.25 → 9.22 (-0%) | 8.63 → 8.62 (-0%) | 43 → 43 |
+| 36_mvcc_snapshot_topology | 0/0 → 0/0 | 6.13 → 5.91 (-4%) | 1.75 → 1.59 (-9%) | 2.85 → 2.73 (-4%) | 2.84 → 2.73 (-4%) | 48 → 47 |
+| 37_mvcc_write_contention | 0/1 → 0/1 | 17.49 → 11.73 (-33%) | 3.67 → 2.30 (-37%) | 7.08 → 4.65 (-34%) | 6.98 → 4.59 (-34%) | 87 (exit 1) → 104 |
+
+Peak RSS is one run per row with no repeat; a single-row RSS delta (for example row 10
+244 → 363 MiB with unchanged allocation) is not attributed.
+
+## 12. Verification of the fixes
+
+| commit / task | claim | measured at HEAD | verdict |
+|---|---|---|---|
+| `cfd64290` #3078 symmetric mark | PageRank and BiBFS stop transposing a symmetric CSR | `pageRankBuildReverseStructure` row 20 **13 765 MiB, 3.23 s → 0** (only row 08's directed input remains, 184.58 MiB); `PageRankCtx` row 20 17.45 → 3.60 GiB; row 20 alloc 33.66 → 17.81 GiB (−47%), CPU 114.13 → 100.64 s (−12%), peak RSS 145 → 101 MiB; `IsSymmetric` 53.36 MiB / 0.13 s → 0, `BiBFSCtx` 57.88 → 5.10 MiB | **moved as claimed** |
+| `e7b12a60` #3078 one-pass `BuildSymmetricFromAdjList` | −32% bytes, +27% build CPU | rows 09 + 33: 536 → 366 MiB (**−32%**); CPU 0.37 → 0.33 s (two to four profiler samples per site: the +27% is below this sweep's resolution) | **bytes moved as claimed**; CPU not resolvable here |
+| `4be967d2` #3079, `6b399a3b` #3085 diameter | row 11 diameter 125.6 s → 1.5 s | `bfsFarthest` **125.28 s → 1.80 s**; row 11 CPU 129.78 → 3.86 s (−97%), alloc 0.47 → 0.33 GiB | **moved as claimed** |
+| `4d831e8e` #3080 per-pair union only when needed | removes the discarded `EdgeLabels` call | `buildRelationshipValueFromRow` row 26 **13.71 → 14.99 s**; every row-26 relationship takes the `!handled` fallback (`api.go:16797` `EdgeLabelsByID` 6.83 s, `slotLabelsForPair` 6.18 s) | **did not move on the only vehicle**: row 26's edges have no by-handle record, so the union is needed there (as section 3 R2(a) predicted). The saving on Cypher-created edges is not exercised by any example at a measurable scale |
+| `1a8e25ae` #3081 key-only `PropertyKeysInUse`, streamed `AllNodesScan` | row 25 scan and introspection | `PropertyKeysInUse` **6.08 s / 1.80 GiB → 0.54 s / under 0.5 MiB**; `AllNodesScan.Init` row 25 **4 401 → 21 MiB**; row 25 module CPU 11.29 → 5.44 s, alloc 9.52 → 3.45 GiB (−64%) | **moved as claimed** |
+| `546efbe8` #3082 constraint lock skipped for unconstrained keys | less registry contention in row 37 | `reserveSetPropertyGen` (`constraints.go:1269–1270`) **1.79 s mutex + 1.85 s block → 1.11 s + 1.10 s (−39%)**; row 37 mutex total 15.57 → 15.70 s; node-property shard lock (`property.go:391`) 7.44 → 7.73 s | **moved locally**; row 37's total mutex delay did not fall (the writers now queue on the next lock) |
+| `e71407c1` #3083 snapshot buffers sized | ≈ 0.35 GiB off row 17 | row 17 alloc **0.50 → 0.16 GiB (−0.34 GiB, −68%)**; `writeMapperN` 112.7 → 20.9 MiB, `writeAndSync` 86.7 → 13.6 MiB | **moved as claimed** |
+| `fc0f6807` #3086 PageRank worker budget | opt-in; not wired into examples | row 20 `pagerank.go` worker park + coordinator 151.04 + 30.70 s → **154.81 + 30.82 s** block | **unchanged, as expected** (no caller uses the budget) |
+
+## 13. Residual module-owned costs at HEAD
+
+**Significance threshold.** A residual is **worth a task** when it costs at least **1% of
+module CPU (2.49 s)** or **1% of module allocation (1.19 GiB)** across the `elevated`
+sweep, or at least **1% of module contention delay (2.63 s)** in the `contention` pass at a
+non-idle site, and the cost is not inherent to the algorithm or the workload. Below all
+three it is **insignificant**. Costs are cumulative unless marked flat.
+
+| # | site | cost (row) | hypothesis | risk | verdict |
+|---|---|---|---|---|---|
+| **Q1** | row 20 one-shot `PageRank` from concurrent readers: `search/centrality/pagerank.go:866` worker park, `:930` barrier | **185.6 s block**; row 20 unowned CPU 33.98 s (contention pass) | nested parallelism: each concurrent caller starts `GOMAXPROCS` workers. The #3086 budget exists but no caller passes it. **Hypothesised** | low (caller-side wiring); examples only, or a default | **worth a task** |
+| **Q2** | `cypher/api.go:16797` → `graph/lpg/lpg.go:2205` `slotLabelsForPair` O(deg(src)) scan per relationship value | **6.83 s** (loop line 4.39 s flat), 0.91 GiB (row 26) | the row carries the edge's stable handle (`fwdHandle = edgeIDVal`, `api.go:16719`); a handle → slot lookup would make the type read O(1) for edges with no by-handle record. **Hypothesised** | medium: TCK multigraph scenarios (Match2 [6], Match7 [29], MatchWhere1 [11]) | **worth a task** |
+| **Q3** | `graph/lpg` `GetEdgePropertyAsOf` per-pair scan (`:177`) + string-key re-lookup (`:154`, `:158`) | **5.78 s** (row 26) | same O(deg) scan as Q2 for edge properties; caller already holds the ids. **Hypothesised** | medium (same TCK set) | **worth a task** (join with Q2) |
+| **Q4** | cypher ↔ lpg string-key round trips: `edgeInstanceIdxFor` → `EdgeCreateCount` `Mapper.Lookup` 1.16 s; `GetEdgePropertyAsOf` Lookup 0.73 s; `api.go:16695–16696` `Mapper.Resolve` 1.38 s | **≈ 3.3 s** (row 26) | the caller holds `stID/enID`; ID-keyed variants remove the Lookups (as #3080 did for labels). **Established by profile + code flow** | low | **worth a task** (join with Q2/Q3) |
+| **Q5** | `edgeInstanceIdxFor` (`api.go:17174`) receives the stable handle as `edgePos`, a CSR position | 1.51 s in row 26, all returning at `:17177` (`totalCreates == 0`) | the positional fallback compares a handle against CSR offsets `[start, end)`; when `totalCreates > 0` and a handle falls in range it counts the wrong instance. **Correctness hypothesis, not demonstrated** | correctness; TCK | **worth a task** (correctness first, then cost) |
+| **Q6** | `cypher.nodePropsToExprMap` (`api.go:15090`) | **10.73 GiB**, 3.43 s (26, 24_plandiff, 36) | node materialisation; rmp #2732 | medium | **worth a task** (exists: #2732) |
+| **Q7** | R6 `cypher/api.go:2822` `buildReadPhysical` per cached execution | **6.18 GiB**, 1.84 s (row 35 6.02 GiB = 65% of the row) | plan-pure separation; rmp #2391 | medium-high; TCK | **worth a task** (exists: #2391) |
+| **Q8** | `graph/lpg/edge_property_column.go:315` `GrowSlotWithValue` | **4.95 GiB** (4.35 GiB flat), 0.33 s (row 26 load) | copy-on-write of the whole edge-property column block per appended slot, O(deg) per append. **Hypothesised** | medium: MVCC snapshot immutability | **worth a task** |
+| **Q9** | node-property shard lock `graph/lpg/property.go:391/358`, reader `snapshot_read.go:217` | **7.73 s mutex + 5.23 s + 5.15 s block** (row 37) | row 37's deliberate hot set; the share that is shard collision between different nodes is **not measured** | medium; Isolation | **worth a task** only as a measurement (collision share) |
+| Q10 | `cypher/exec/scan_all.go:149` `AllNodesScan.Next` boxes each id | 1.02 GiB (0.85%), 1.08 s (25, 19) | `IntegerValue` stored in an interface escapes per row | low | insignificant |
+| Q11 | `cypher/exec/constraints.go:1269–1270` residual registry lock | 1.11 s mutex + 1.10 s block (row 37) | constrained writes must serialise | — | insignificant |
+| Q12 | `graph/lpg/mvcc_index.go:944` `appendSuspects` | 1.81 s block, 0.42 s CPU, 83 MiB (row 37) | shard `RLock` walk under concurrent writers | low | insignificant |
+| Q13 | `graph/lpg/edge_handle_durable.go:376` `EdgeLabelsByHandleIDAsOf` exclusive `sync.Mutex` for a read | 0.13 s mutex + 0.12 s block (row 36), 0.89 s CPU | an `RWMutex` read lock; cost is below every threshold | low | insignificant |
+| Q14 | `cypher/exec/constraint_journal.go:162`, `:284` rollback record and `copyLabels` | 9 MiB (row 37) | allocated per reservation | — | insignificant |
+| Q15 | `search/diameter.go:197–210` batch pool wake-ups: `pthread_cond_signal` via `goready` | 1.18 s unowned CPU = 31% of row 11; 2.26 s idle block at `:203` | channel handoff per sweep wakes a parked worker; sweep-wide 0.27% | low | insignificant (row-local only) |
+
+Re-confirmed and unchanged from section 7 (inherent or already tracked): WAL replay per
+`24_*` process (`store/recovery/recovery.go:2207`, 4.58 GiB over five rows), row 20 search
+pools (#2382), `adjlist.go:971` copy-on-write entries (2.72 GiB), `txn.go:1378` bulk redo
+log (2.55 GiB, 24_seed), Brandes (51.04 s), PageRank `runRange` (32.44 s), WAL group sync
+in row 21 (7.23 s).
+
+**Cross-component reading.** The largest residual chain is row 26's relationship
+materialisation: Expand produces ids and a handle, `cypher` resolves the ids to string keys,
+then `graph/lpg` re-looks the keys up and scans the source's whole adjacency for the type
+(Q2) and again for each property (Q3), and `edgeInstanceIdxFor` scans once more with a
+mismatched position (Q4, Q5). `buildRelationshipValueFromRow` alone costs 14.99 s, 30% of row 26's 50.12 s module CPU.
+
+## 14. Limits (iteration 2)
+
+- No A/B: residual gains are estimates. Q4 is established by profile and code flow; Q1–Q3,
+  Q5, Q8 and Q9 are hypotheses.
+- One run per pass; the noise band is ±5% per row. Row 37 compares on the `contention`
+  pass only.
+- The +27% build-CPU claim of `e7b12a60` is below this sweep's sampling resolution.
+- The #3080 saving on Cypher-created edges is not exercised by any example.
+- Row 25's peak RSS remains unmeasured.
+
+## 15. Reproduction (iteration 2)
+
+```bash
+cd /Users/flaviocfo/dev/xumiga/GoGraph
+$L2/sweep.sh            # default (LAB_REBUILD=1), elevated, rss.sh, contention
+(cd $L2/owner && ./owner $L2/out/elevated/*/{cpu,heap}.pprof > $L2/owner.elevated.tsv \
+  && ./owner $L2/out/default/*/*.pprof > $L2/owner.default.tsv \
+  && ./owner $L2/out/contention/*/*.pprof > $L2/owner.contention.tsv)
+python3 $L2/compare.py <scratchpad>          # section 11 table (lab1 vs lab2)
+python3 $L2/agg.py $L2/owner.elevated.tsv cpu fncum 9000
+python3 $L2/agg.py $L2/owner.elevated.tsv alloc_space line 40
+python3 $L2/agg.py $L2/owner.contention.tsv delay line 30
+go tool pprof -nodefraction=0 -list 'cypher.buildRelationshipValueFromRow$' $L2/out/elevated/26_social_scale_bench/cpu.pprof
+go tool pprof -nodefraction=0 -peek 'GetEdgePropertyAsOf$|EdgeCreateCount$' $L2/out/elevated/26_social_scale_bench/cpu.pprof
+```
