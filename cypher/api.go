@@ -437,34 +437,6 @@ type buildOpts struct {
 	// path (write path, public BuildPlanWithMutator, tests), which means the leaf
 	// gets the full unbounded GOMAXPROCS budget — the prior behaviour.
 	parallelGov *exec.ParallelGovernor
-	// fwdCSR caches the forward CSR snapshot used by the per-row relationship
-	// reconstruction helpers (edgeHandleAtFwdPos and the retired
-	// edgeInstanceIdxFor, removed by rmp #3088) to read the stable per-edge
-	// handle at a forward CSR position. It is built lazily, at most once per query, by [ensureFwdCSR]
-	// the first time a relationship is reconstructed:
-	// before #1574 each helper rebuilt the whole forward CSR (O(V+E)) PER result
-	// row, making `RETURN r` O(R·(V+E)) and dominating heap allocations.
-	//
-	// The whole query's reads resolve at ONE MVCC INSTANT, so the adjacency is stable
-	// for the snapshot's lifetime: a single snapshot reused across all rows is
-	// consistent with the Expand-time CSR that minted the positions
-	//
-	// (This used to read "run inside one lpg.Graph.View RLock". That stopped being
-	// true in sprint 334: a read no longer takes the visibility barrier at all — it
-	// carries a start timestamp and each structure resolves against it. The stability
-	// the paragraph depends on is unchanged, but it now comes from the instant rather
-	// than from excluding writers, and a reader who believed the old sentence would
-	// look for a lock that is not taken. rmp #2314.) (invariant I-POS: identical per-source out-degree counts and
-	// neighbour insertion order ⇒ identical edge positions, BuildFromAdjList
-	// being a deterministic pure function of the adjacency list). fwdCSRReady
-	// disambiguates "not yet built" from a nil snapshot. Forward-only by design:
-	// the helpers never read reverse state, so the reverse CSR is not cached.
-	//
-	// Concurrency: assigned without synchronisation, under the
-	// single-goroutine-per-query build/exec contract (the projection
-	// operator's Next drives reconstruction on one goroutine; ParallelScan
-	// workers never touch bopts).
-	fwdCSR *csr.CSR[float64]
 	// pendingPathPred maps a named path variable to a whole-path predicate that a
 	// WHERE Selection above a shortestPath()/allShortestPaths() binding wants
 	// fused INTO the operator (#1786). The Selection registers the predicate
@@ -644,7 +616,6 @@ type buildOpts struct {
 	// pushdown with itself. The polarity is negative so every build path that
 	// never sets it keeps the pushdown.
 	labelCountPushdownDisabled bool
-	fwdCSRReady                bool
 	// pinnedRead is true when the statement is read-only and reads a pinned
 	// snapshot, so every read of a node id within the statement observes the same
 	// state. It is set by [readBuildScaffold.init] and carried into subqueries by
@@ -8258,26 +8229,16 @@ func buildPlanWithMutatorFull(
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
-	// Give the write adapter the SAME bopts the read-side builders use. It used to
-	// matter because a relationship SET/REMOVE resolved the bound instance's handle
-	// from a forward-CSR position against the bopts-cached snapshot, and had to use
-	// the exact read-path mechanism to agree with reads (#1686). Since rmp #2317 the
-	// row carries the handle itself and no resolution happens, but the adapters still
-	// read bopts for the count store and the undo log. Only the concrete write
-	// adapters carry the field.
-	//
-	// The two concrete adapters are also the only mutators whose writes are
+	// The two concrete write adapters are the only mutators whose writes are
 	// journaled for live forward traversal (rmp #2883), so only they arm it. The
 	// journal belongs to the ADAPTER, not to this bopts: every plan built against
 	// one statement's adapter must share the one journal its writes feed.
 	switch m := mutator.(type) {
 	case *walMutatorAdapter:
-		m.bopts = bopts
 		if m.eng == nil || !m.eng.disableLiveTraversalForTest {
 			bopts.liveTopo = &m.liveTopo
 		}
 	case *lpgMutatorAdapter:
-		m.bopts = bopts
 		if m.eng == nil || !m.eng.disableLiveTraversalForTest {
 			bopts.liveTopo = &m.liveTopo
 		}
@@ -12700,9 +12661,7 @@ func exprHasNonScalar(e ast.Expression) bool { // per-AST-node dispatch; no hidd
 //     and carries the identical hazard, so it is reset for the identical reason:
 //     edgeVarMeta below is nil'd so a worker rebuilds its own, which means a
 //     future widening of the fused shape to a relationship pattern would reach
-//     lazyRelResolverFor on the worker goroutine. fwdCSR / fwdCSRReady are
-//     relationship-reconstruction caches the fused shape never touches; reset
-//     defensively.
+//     lazyRelResolverFor on the worker goroutine.
 //
 //   - BUILD-WRITTEN maps. The per-worker subtree rebuild runs buildOperator /
 //     buildIRProjection on the worker goroutine, and those WRITE bopts maps
@@ -12741,8 +12700,6 @@ func (b *buildOpts) forWorker() *buildOpts {
 	// Lazily-written-at-eval fields.
 	cp.nodeResolver = nil
 	cp.relResolver = nil
-	cp.fwdCSR = nil
-	cp.fwdCSRReady = false
 	// Build-written maps: nil so each worker allocates its own (no shared-map race).
 	cp.scalarCols = nil
 	cp.projAliasScalarCols = nil
@@ -16908,26 +16865,20 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 			// per-instance specialisation (Match2 [6] / Match7 [29]
 			// / MatchWhere1 [11]).
 			//
-			// Stable-handle path first: read the explicit per-edge
-			// handle at this forward CSR position and resolve the type
-			// by it. This is delete-stable — unlike the positional
-			// instance idx (edgeInstanceIdxFor, removed by rmp #3088), it does not mis-map
-			// after a parallel sibling is deleted and the neighbour
-			// slice is compacted. Both per-instance lookups are keyed on
-			// the STORAGE pair (stKey -> enKey), not the row's
-			// (srcKey, dstKey): for the undirected reverse hop the storage
-			// direction is inverted (storage holds enKey <- ... actually
-			// stKey -> enKey), and edgeIDVal is the forward-CSR position in
-			// stKey's adjacency that Expand resolved per parallel instance
-			// (rmp #1634). Falls back to the positional idx when no handle
-			// column is present or the slot's handle is 0 (a MERGE-created
-			// edge).
+			// Stable-handle path first: since rmp #2317 the row's edge id
+			// (edgeIDVal) IS the stable per-edge handle, so the type is
+			// resolved by it directly, with no CSR position to translate.
+			// This is delete-stable: compacting a pair's neighbour slice
+			// after a parallel sibling is deleted does not move a handle.
+			// Both per-instance lookups are keyed on the STORAGE pair
+			// (stKey -> enKey), not the row's (srcKey, dstKey): for an
+			// undirected reverse hop the storage direction is inverted.
+			// A handle of 0 falls back to the pair's derived union below.
 			//
-			// fwdHandle, recovered once here, is the SHARED disambiguator for
-			// both the type and the property resolution of this bound instance
-			// (rmp #1684): it is the stable per-edge handle at the row's forward
-			// CSR position, or 0 when no handle column is present or the slot's
-			// handle is the 0 sentinel. The type path consumes it inline below;
+			// fwdHandle is the SHARED disambiguator for both the type and the
+			// property resolution of this bound instance (rmp #1684): the
+			// row's stable per-edge handle, or the 0 sentinel. The type path
+			// consumes it inline below;
 			// buildEdgeProps reuses the SAME handle so r.foo / properties(r) /
 			// RETURN r report the bound edge's OWN properties rather than the
 			// latest-wins union over parallel siblings — keeping the property
@@ -17018,8 +16969,8 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 //     also compares EQUAL by relationship identity, because the ID below is the
 //     forward position in both directions.
 //
-//   - Type and properties. Recover the stable handle at fwdPos on the storage
-//     pair via [edgeHandleAtFwdPos]; when the by-handle MEMBERSHIP signal holds
+//   - Type and properties. fwdPos IS the edge's stable handle since rmp #2317,
+//     so no position is translated; when the by-handle MEMBERSHIP signal holds
 //     (a non-empty by-handle label set — Cypher CREATE/MERGE always records the
 //     mandatory type by-handle, so this also covers a zero-property parallel
 //     edge) resolve the type from [lpg.Graph.EdgeLabelsByHandle] and the
@@ -21446,17 +21397,11 @@ type lpgMutatorAdapter struct {
 	touched *touchedNodes
 	// stampCon: see [mutationUndo.stampCon] (rmp #2353/#2355).
 	stampCon bool
-	// bopts is the per-query build options carrying the cached forward-CSR
-	// snapshot ([ensureFwdCSR]). It is used only by [EdgeHandleAtPosition] to
-	// resolve a bound relationship instance's stable handle from its forward-CSR
-	// edge position, reusing the exact read-path mechanism ([edgeHandleAtFwdPos]).
-	// It may be nil (resolution then falls back to a fresh CSR build).
-	bopts *buildOpts
 	// wtx is the write transaction this statement is running as, set by
 	// [setMutatorWriteTx] the moment the bracket opens (rmp #2304). It is what
-	// [lpgMutatorAdapter.EdgeHandleAtPosition] resolves its read through, so the
-	// handle it finds is the one THIS transaction can see — its own uncommitted
-	// instances included, another in-flight writer's excluded.
+	// the adapter's writer views ([lpgMutatorAdapter.w], [lpg.Graph.WriterViewOf])
+	// read through, so what they see is what THIS transaction can see — its own
+	// uncommitted writes included, another in-flight writer's excluded.
 	//
 	// The zero value means "no transaction", which reads the present. That is the
 	// right answer for the read-only test stubs that never open a bracket, and the
@@ -22833,12 +22778,6 @@ type walMutatorAdapter struct {
 	touched *touchedNodes
 	// stampCon: see [mutationUndo.stampCon] (rmp #2353/#2355).
 	stampCon bool
-	// bopts is the per-query build options carrying the cached forward-CSR
-	// snapshot ([ensureFwdCSR]). It is used only by [EdgeHandleAtPosition] to
-	// resolve a bound relationship instance's stable handle from its forward-CSR
-	// edge position, reusing the exact read-path mechanism ([edgeHandleAtFwdPos]).
-	// It may be nil (resolution then falls back to a fresh CSR build).
-	bopts *buildOpts
 	// wtx is the write transaction this statement is running as; see the field of
 	// the same name on [lpgMutatorAdapter] for what it resolves and why the zero
 	// value is not a usable default inside a bracket (rmp #2304).
@@ -24210,72 +24149,6 @@ func csrPairFromGraphAt(g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[flo
 	}
 	rev = fwd.BuildReverse()
 	return fwd, rev, key
-}
-
-// ensureFwdCSR returns the forward CSR snapshot for relationship reconstruction,
-// building it at most once per query and caching it on bopts. The snapshot is
-// built lazily on first use so queries that never project a relationship pay
-// nothing, and reused for every result row thereafter so the O(V+E) build leaves
-// the per-row path (the #1574 fix).
-//
-// When bopts is nil (no per-query cache is available — the helpers are only
-// reached with a non-nil bopts today, but the guard keeps them safe in
-// isolation) it falls back to a one-off build, preserving the previous
-// behaviour exactly. Forward-only: the reverse CSR is never built here.
-func ensureFwdCSR(bopts *buildOpts, g *lpg.ReadView[string, float64]) *csr.CSR[float64] {
-	if g == nil {
-		return nil
-	}
-	if bopts == nil {
-		return buildFwdCSRAsOf(g)
-	}
-	if bopts.fwdCSRReady {
-		return bopts.fwdCSR
-	}
-	bopts.fwdCSR = buildFwdCSRAsOf(g)
-	bopts.fwdCSRReady = true
-	return bopts.fwdCSR
-}
-
-// buildFwdCSRAsOf builds the reconstruction CSR at the READER'S INSTANT.
-//
-// # The wrong answer this closes (rmp #2295)
-//
-// It used to call csr.BuildFromAdjListLive(g.AdjList(), …), and g.AdjList() is
-// ReadView's documented UNVERSIONED escape hatch: it answers from the PRESENT. So
-// the CSR described a different graph from the one whose forward positions it is
-// asked about — Expand minted those at the reader's instant — and a concurrent
-// DELETE of a parallel relationship made the two disagree by one slot.
-//
-// Measured before this change, with a held read transaction:
-//
-//	CREATE (a:A),(b:B),(a)-[:R1]->(b),(a)-[:R2]->(b),(a)-[:R3]->(b)
-//	tx := BeginReadTx();  MATCH (:A)-[r]->(:B) RETURN type(r)  =>  [R1 R2 R3]
-//	another transaction: MATCH (:A)-[r:R3]->(:B) DELETE r
-//	the SAME tx re-runs the same query                         =>  [R1 R2 R1]
-//
-// The row count stays right — the snapshot began before the delete — and the third
-// row's TYPE is a sibling's. The present-time CSR has two slots for the pair, so
-// edgeInstanceIdxFor (removed by rmp #3088) could not place the third position, the per-instance guard in
-// buildRelationshipValueFromRow declines, and the per-pair union fallback hands
-// pickEdgeType a set whose first member is R1.
-//
-// rmp #2295 had been DOWNGRADED to hygiene on the reasoning that the guard's skew
-// "either declines or stays self-consistent" and "never attributes one instance's
-// type to another". The decline is real and is what saves the CREATE direction; what
-// that reasoning missed is that a decline is not harmless, because the fallback it
-// declines TO picks an arbitrary member of the pair's type union.
-//
-// This is the same instant discipline [csrPairFromGraphAt] already applies, and
-// [csr.BuildFromAdjListAsOf] exists for it; the caller still caches the result per
-// query, so a query reconstructing many relationships builds it once.
-func buildFwdCSRAsOf(g *lpg.ReadView[string, float64]) *csr.CSR[float64] {
-	if snap := g.Snapshot(); snap != nil {
-		return csr.BuildFromAdjListAsOf(g.AdjList(), g.LiveNodeFilter(), snap.StartTS(), snap.TxID())
-	}
-	// No snapshot means the caller reads the present deliberately — a mutation
-	// outside any transaction — and the present is then the right instant.
-	return csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
 }
 
 // nodeIDOrNodeValue extracts a NodeID from a row column. The slot may hold a

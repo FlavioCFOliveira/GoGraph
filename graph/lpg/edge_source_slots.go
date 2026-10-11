@@ -168,7 +168,7 @@ func (v *ReadView[N, W]) cachedSlots(srcID graph.NodeID) *sourceSlots {
 // sameSlice reports whether a and b are the same published column: the same
 // backing array and the same length.
 func sameSlice[T any](a, b []T) bool {
-	return len(a) == len(b) && unsafe.SliceData(a) == unsafe.SliceData(b)
+	return len(a) == len(b) && unsafe.SliceData(a) == unsafe.SliceData(b) //nolint:gosec // G103: audited — compares backing addresses for identity only, never dereferences them.
 }
 
 // propsCurrent reports whether s still indexes the entry its source has at this

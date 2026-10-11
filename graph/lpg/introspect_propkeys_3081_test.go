@@ -89,7 +89,7 @@ func TestPropertyKeysInUse_ColumnMajorMatchesSlotMajor_3081(t *testing.T) {
 		func(i int) PropertyValue { return StringValue(fmt.Sprintf("s%d", i)) },
 	}
 	for seed := uint64(1); seed <= 6; seed++ {
-		r := rand.New(rand.NewPCG(seed, 3081))
+		r := rand.New(rand.NewPCG(seed, 3081)) //nolint:gosec // G404: math/rand/v2 PCG seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 		g := New[string, float64](adjlist.Config{})
 		const nodes = 120
 		name := func(i int) string { return fmt.Sprintf("n%d", i) }

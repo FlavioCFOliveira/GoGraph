@@ -67,7 +67,7 @@ func runDDLvsDML(t *testing.T, walBacked bool, seed uint64, rounds int) {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			rng := rand.New(rand.NewPCG(seed, uint64(w)))
+			rng := rand.New(rand.NewPCG(seed, uint64(w))) //nolint:gosec // G404: math/rand/v2 PCG seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 			for !stop.Load() {
 				id := rng.IntN(ddlDMLNodes)
 				id2 := rng.IntN(ddlDMLNodes)

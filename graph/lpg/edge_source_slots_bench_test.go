@@ -25,7 +25,7 @@ func pairReadsGraph(b *testing.B) (*Graph[string, float64], []graph.NodeID) {
 			b.Fatal(err)
 		}
 	}
-	rng := rand.New(rand.NewSource(1))
+	rng := rand.New(rand.NewSource(1)) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	srcs := make([]graph.NodeID, 0, sources)
 	for s := 0; s < sources; s++ {
 		src := fmt.Sprintf("n%d", s)

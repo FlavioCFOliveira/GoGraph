@@ -132,7 +132,7 @@ func checkView(t *testing.T, stage string, v *ReadView[string, float64], want ma
 func TestReadViewSlotCache_EquivalentToScan(t *testing.T) {
 	for seed := int64(1); seed <= 6; seed++ {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
-			rng := rand.New(rand.NewSource(seed))
+			rng := rand.New(rand.NewSource(seed)) //nolint:gosec // G404: math/rand seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 			g := slotsGraph(t)
 			slotsMutate(t, rng, g, "h", 120)
 			slotsMutate(t, rng, g, "g", 120)
@@ -164,7 +164,7 @@ func TestReadViewSlotCache_EquivalentToScan(t *testing.T) {
 
 func TestReadViewSlotCache_StaleIndexDeclines(t *testing.T) {
 	g := slotsGraph(t)
-	slotsMutate(t, rand.New(rand.NewSource(9)), g, "h", 120)
+	slotsMutate(t, rand.New(rand.NewSource(9)), g, "h", 120) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	v := g.ReadAt(nil)
 	hID, _ := g.adj.Mapper().Lookup("h")
 	s := v.buildSourceSlots(hID)
@@ -195,7 +195,7 @@ func TestReadViewSlotCache_StaleIndexDeclines(t *testing.T) {
 // sources (which evicts and races it), and checks every answer.
 func TestReadViewSlotCache_ConcurrentReadersShareOneView(t *testing.T) {
 	g := slotsGraph(t)
-	rng := rand.New(rand.NewSource(3))
+	rng := rand.New(rand.NewSource(3)) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	slotsMutate(t, rng, g, "h", 150)
 	slotsMutate(t, rng, g, "g", 150)
 	want := slotsOracle(g, nil)
@@ -208,7 +208,7 @@ func TestReadViewSlotCache_ConcurrentReadersShareOneView(t *testing.T) {
 		wg.Add(1)
 		go func(r int) {
 			defer wg.Done()
-			rr := rand.New(rand.NewSource(int64(r)))
+			rr := rand.New(rand.NewSource(int64(r))) //nolint:gosec // G404: math/rand seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 			for i := 0; i < rounds; i++ {
 				src := "h"
 				if (r%2 == 0 && i%2 == 1) || (r%2 == 1 && (i/8)%2 == 1) {

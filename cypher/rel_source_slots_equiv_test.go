@@ -226,7 +226,7 @@ func slotsEquivCompare(t *testing.T, stage string, gotW, gotL, gotP, wantW, want
 func TestRelSourceSlots_EquivalentToPerPairScan(t *testing.T) {
 	for seed := int64(1); seed <= 8; seed++ {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
-			rng := rand.New(rand.NewSource(seed))
+			rng := rand.New(rand.NewSource(seed)) //nolint:gosec // G404: math/rand seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 			g, eng := slotsEquivFixture(t)
 			slotsEquivMutate(t, rng, g, eng, 90)
 

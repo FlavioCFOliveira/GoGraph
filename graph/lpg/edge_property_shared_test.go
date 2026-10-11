@@ -80,9 +80,9 @@ func TestSharedAppend_EarlierVersionNeverSeesLaterSlot(t *testing.T) {
 
 	// Branch from version 9 (np 10, behind the cursor): the append must not write
 	// cell 10 of the shared buffer, which versions 10.. own.
-	before := unsafe.SliceData(versions[9].cols[0].idx)
+	before := unsafe.SliceData(versions[9].cols[0].idx) //nolint:gosec // G103: audited — compares backing addresses for identity only, never dereferences them.
 	br := fusedAppend(t, versions[9], 10, key, 999)
-	if unsafe.SliceData(br.cols[0].idx) == before {
+	if unsafe.SliceData(br.cols[0].idx) == before { //nolint:gosec // G103: audited — compares backing addresses for identity only, never dereferences them.
 		t.Fatal("an append from a version behind the write cursor reused the shared buffer")
 	}
 	if got := readSlots(br, key, 12); got[10] != "999" || got[9] != "109" || got[11] != "-" {

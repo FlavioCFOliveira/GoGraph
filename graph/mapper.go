@@ -505,7 +505,7 @@ type MapperCursor struct {
 // [Mapper.AppendIDs] appends nothing.
 func (c MapperCursor) Done() bool { return c.shard >= mapperShardCount }
 
-// AppendIDs appends to dst the ids of at most max interned values, holes
+// AppendIDs appends to dst the ids of at most limit interned values, holes
 // skipped, starting at cur and in exactly [Mapper.Walk] order, and returns the
 // extended slice and the position just after the last id visited. Repeated
 // calls from the zero cursor until [MapperCursor.Done] visit every id Walk
@@ -515,16 +515,16 @@ func (c MapperCursor) Done() bool { return c.shard >= mapperShardCount }
 // Concurrency: safe for concurrent use. Each shard's RLock is held only while
 // that shard's ids are copied into dst, and no caller code runs under any
 // Mapper lock, so — unlike Walk — the caller may re-enter the Mapper between
-// calls. A max of zero or less appends nothing and returns cur unchanged.
-func (m *Mapper[N]) AppendIDs(dst []NodeID, cur MapperCursor, max int) ([]NodeID, MapperCursor) {
-	for max > 0 && cur.shard < mapperShardCount {
+// calls. A limit of zero or less appends nothing and returns cur unchanged.
+func (m *Mapper[N]) AppendIDs(dst []NodeID, cur MapperCursor, limit int) ([]NodeID, MapperCursor) {
+	for limit > 0 && cur.shard < mapperShardCount {
 		s := &m.shards[cur.shard]
 		s.mu.RLock()
 		n := uint64(len(s.reverse))
-		for cur.intra < n && max > 0 {
+		for cur.intra < n && limit > 0 {
 			if s.holes == nil || !s.isHoleLocked(cur.intra) {
 				dst = append(dst, packNodeID(cur.shard, cur.intra))
-				max--
+				limit--
 			}
 			cur.intra++
 		}

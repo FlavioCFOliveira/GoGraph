@@ -162,9 +162,10 @@ const (
 // fwdPos is the FORWARD-CSR position of the physical edge this hop traverses —
 // the handle-disambiguated per-instance position, NOT a synthetic reverse
 // position. Both a forward hop and a reverse hop over the same physical edge
-// record the SAME fwdPos, so the hop is decodable by the relationship hydrator
-// ([cypher].edgeHandleAtFwdPos), which keys off a forward position to recover
-// the stable per-edge handle (rmp #1685). reversed marks whether this hop was
+// record the SAME fwdPos. When the path is emitted, [VarLengthExpand.emittedEdgeID]
+// maps fwdPos to the edge's stable per-edge handle (rmp #2317), and the
+// relationship hydrator ([cypher].resolveHopRel) keys on that handle (rmp #1685).
+// reversed marks whether this hop was
 // taken against storage direction (an undirected/reverse traversal of a
 // stored src->dst edge): the path renderer needs it to emit `<-[…]-`, and the
 // hydrator needs it to swap the storage endpoints when resolving the edge's

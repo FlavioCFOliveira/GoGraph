@@ -84,13 +84,13 @@ type edgePropTail struct {
 func (col *edgePropColumn) valBase() (unsafe.Pointer, int) {
 	switch col.kind {
 	case PropInt64, PropFloat64:
-		return unsafe.Pointer(unsafe.SliceData(col.nums)), cap(col.nums)
+		return unsafe.Pointer(unsafe.SliceData(col.nums)), cap(col.nums) //nolint:gosec // G103: audited — the backing address is only compared for identity, never dereferenced.
 	case dateKind:
-		return unsafe.Pointer(unsafe.SliceData(col.days)), cap(col.days)
+		return unsafe.Pointer(unsafe.SliceData(col.days)), cap(col.days) //nolint:gosec // G103: audited — the backing address is only compared for identity, never dereferenced.
 	case PropString:
-		return unsafe.Pointer(unsafe.SliceData(col.str)), cap(col.str)
+		return unsafe.Pointer(unsafe.SliceData(col.str)), cap(col.str) //nolint:gosec // G103: audited — the backing address is only compared for identity, never dereferenced.
 	default:
-		return unsafe.Pointer(unsafe.SliceData(col.boxed)), cap(col.boxed)
+		return unsafe.Pointer(unsafe.SliceData(col.boxed)), cap(col.boxed) //nolint:gosec // G103: audited — the backing address is only compared for identity, never dereferenced.
 	}
 }
 
@@ -110,7 +110,7 @@ func (col *edgePropColumn) appendOwned(slotIdx int32, v PropertyValue, days int3
 	vb, vcap := col.valBase()
 	t := col.tail
 	owned := t != nil && int(t.n) == n && cap(col.idx) > n && vcap > n &&
-		t.idx == unsafe.Pointer(unsafe.SliceData(col.idx)) && t.val == vb
+		t.idx == unsafe.Pointer(unsafe.SliceData(col.idx)) && t.val == vb //nolint:gosec // G103: audited — the backing address is only compared for identity, never dereferenced.
 	if !owned {
 		col.idx = col.idx[:n:n]
 		switch col.kind {
@@ -130,7 +130,7 @@ func (col *edgePropColumn) appendOwned(slotIdx int32, v PropertyValue, days int3
 		return
 	}
 	vb, _ = col.valBase()
-	col.tail = &edgePropTail{idx: unsafe.Pointer(unsafe.SliceData(col.idx)), val: vb, n: int32(n + 1)}
+	col.tail = &edgePropTail{idx: unsafe.Pointer(unsafe.SliceData(col.idx)), val: vb, n: int32(n + 1)} //nolint:gosec // G103: audited — the backing address is only compared for identity, never dereferenced.
 }
 
 // colAt returns column i of the block as a reader must see it: the column
