@@ -1310,6 +1310,18 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 // with itself and CREATE INDEX's ShareLock does (src/backend/storage/lmgr/lock.c,
 // LockConflicts).
 //
+// # An error from fn does not abort the transaction
+//
+// fn's error is returned to the caller unchanged, but it does NOT abort the
+// write: every version fn created before returning is published. The
+// transaction is aborted only when a write conflict dooms it or the caller
+// calls [WriteTx.Abandon] inside fn. A caller that needs all-or-nothing on its
+// own failure must therefore abandon the transaction, use [Graph.ApplyDurable]
+// (which abandons it when apply or durable fails), or undo its own writes
+// inside fn from an undo log, as the Cypher engine does. For an abandoned
+// transaction that kept no undo log, the adjacency entries it wrote are
+// restored by [adjlist.AdjList.WithdrawTx].
+//
 // fn must not call [Graph.ApplyAtomically] or ApplyVersioned: the
 // hold is shared, and Go's [sync.RWMutex] prefers a queued writer, so a nested
 // shared acquisition deadlocks the instant one queues. Enforced by the same

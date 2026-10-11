@@ -1414,20 +1414,20 @@ func (col *edgePropColumn) grownWithValue(oldLen int, v PropertyValue, days int3
 		return g
 	}
 	if !col.sparse {
-		s := col.toSparse() // fresh, exactly-sized backing; safe to extend in place
+		s := col.toSparse() // fresh, exactly-sized backing
 		s.length = oldLen + 1
-		s.tailAppendSparse(int32(oldLen), v, days)
+		s.appendOwned(int32(oldLen), v, days)
 		return s
 	}
 	// Share the receiver's immutable backings and extend at the tail. out aliases
-	// col's idx/value slices; appending to out's (aliased) headers writes only at
-	// the tail — a slot no reader bounded by the old length observes — or
-	// reallocates geometrically, so the prior immutable column's [0:len) prefix is
-	// never disturbed. This is the same copy-on-write-safe extend the adjacency
-	// neighbour array uses.
+	// col's idx/value slices; the append writes into their spare capacity only
+	// when this header owns the backings' write cursor (see
+	// [edgePropColumn.appendOwned]), and otherwise reallocates, so the prior
+	// column's [0:len) prefix is never disturbed and no cell another version can
+	// read is ever rewritten (rmp #3093).
 	out := *col
 	out.length = oldLen + 1
-	out.tailAppendSparse(int32(oldLen), v, days)
+	out.appendOwned(int32(oldLen), v, days)
 	return out
 }
 

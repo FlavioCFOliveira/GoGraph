@@ -54,7 +54,10 @@ package lpg
 // shared buffer. A rolled-back append therefore leaves no value: the restored
 // pre-image's np excludes the cell, and the next append on it reallocates.
 
-import "math"
+import (
+	"math"
+	"unsafe"
+)
 
 // maxSharedCols is the number of columns a block can hold in shared mode. The
 // per-version present counts live inline in [edgePropCols.np] so a fused
@@ -65,8 +68,69 @@ const maxSharedCols = 2
 // edgePropTail is the write cursor of a shared append buffer: n cells of its
 // idx and value backings have been written. Writer-only, under the source's
 // adjacency shard lock.
+//
+// On an ordinary (non-shared) sparse column extended by the fallback append
+// ([edgePropColumn.appendOwned]) the cursor also names the backings it belongs
+// to, idx and val, so a header holding other backings never matches it. Shared
+// headers leave both nil.
 type edgePropTail struct {
-	n int32
+	idx unsafe.Pointer
+	val unsafe.Pointer
+	n   int32
+}
+
+// valBase returns the address and capacity of the sparse value backing in use
+// for col's kind.
+func (col *edgePropColumn) valBase() (unsafe.Pointer, int) {
+	switch col.kind {
+	case PropInt64, PropFloat64:
+		return unsafe.Pointer(unsafe.SliceData(col.nums)), cap(col.nums)
+	case dateKind:
+		return unsafe.Pointer(unsafe.SliceData(col.days)), cap(col.days)
+	case PropString:
+		return unsafe.Pointer(unsafe.SliceData(col.str)), cap(col.str)
+	default:
+		return unsafe.Pointer(unsafe.SliceData(col.boxed)), cap(col.boxed)
+	}
+}
+
+// appendOwned pushes (slotIdx, value) onto the tail of a non-shared sparse
+// column, writing into the backings' spare capacity only when this header owns
+// their write cursor: the cursor names these backings and equals the header's
+// length, so the next cell has never been written and no other version can
+// read it. Otherwise the backings are clipped first, so the append reallocates
+// and the new backings get a fresh cursor. This is the high-water discipline of
+// the shared buffer applied to the fallback path (blocks with more than
+// maxSharedCols columns, or a bit-packed bool column): a version a rollback
+// restores ([adjlist.AdjList.WithdrawTx] carries the aux column verbatim) is
+// behind the cursor and cannot rewrite the cell the aborted version owns.
+// Writer-only, under the source's adjacency shard lock.
+func (col *edgePropColumn) appendOwned(slotIdx int32, v PropertyValue, days int32) {
+	n := len(col.idx)
+	vb, vcap := col.valBase()
+	t := col.tail
+	owned := t != nil && int(t.n) == n && cap(col.idx) > n && vcap > n &&
+		t.idx == unsafe.Pointer(unsafe.SliceData(col.idx)) && t.val == vb
+	if !owned {
+		col.idx = col.idx[:n:n]
+		switch col.kind {
+		case PropInt64, PropFloat64:
+			col.nums = col.nums[:n:n]
+		case dateKind:
+			col.days = col.days[:n:n]
+		case PropString:
+			col.str = col.str[:n:n]
+		default:
+			col.boxed = col.boxed[:n:n]
+		}
+	}
+	col.tailAppendSparse(slotIdx, v, days)
+	if owned {
+		t.n++
+		return
+	}
+	vb, _ = col.valBase()
+	col.tail = &edgePropTail{idx: unsafe.Pointer(unsafe.SliceData(col.idx)), val: vb, n: int32(n + 1)}
 }
 
 // colAt returns column i of the block as a reader must see it: the column
