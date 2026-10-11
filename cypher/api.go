@@ -645,6 +645,14 @@ type buildOpts struct {
 	// never sets it keeps the pushdown.
 	labelCountPushdownDisabled bool
 	fwdCSRReady                bool
+	// pinnedRead is true when the statement is read-only and reads a pinned
+	// snapshot, so every read of a node id within the statement observes the same
+	// state. It is set by [readBuildScaffold.init] and carried into subqueries by
+	// [buildOpts.forSubquery]; every write build leaves it false. It licenses
+	// reusing one materialised node value for consecutive rows carrying the same
+	// node id (see [newAggregationNodeKeyEval], rmp #2732): on a writing statement a
+	// later row may observe a write an earlier row's value predates.
+	pinnedRead bool
 	// scalarUseMemo is the plan-cache entry's cross-execution memo for
 	// [analyseNodeScalarUse] (rmp #2383). The read-path build points it at the
 	// entry serving this query; every other build path leaves it nil, and
@@ -12895,6 +12903,10 @@ func (b *buildOpts) forSubquery() *buildOpts {
 		// scope-independent in exactly the way this allowlist admits — it names an
 		// optimisation, not a row, a pointer or a plan node.
 		labelCountPushdownDisabled: b.labelCountPushdownDisabled,
+		// The pinned-snapshot fact (rmp #2732). Scope-independent: a subquery of a
+		// read-only statement at a pinned snapshot reads that same snapshot, and a
+		// subquery of a writing statement inherits false.
+		pinnedRead: b.pinnedRead,
 	}
 }
 
@@ -13168,7 +13180,7 @@ func tryBuildParallelAggregateScan(
 		wWalker := &lpgNodeWalker{g: g, morsel: ids}
 		scan := exec.NewAllNodesScan(wWalker)
 		wBopts := bopts.forWorker()
-		wItems, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, wBopts)
+		wItems, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, wBopts, false)
 		wProj, perr := exec.NewProject(scan, wItems)
 		if perr != nil {
 			return nil, perr
@@ -13181,7 +13193,7 @@ func tryBuildParallelAggregateScan(
 	// tryBuildParallelScanProject's probe).
 	if _, perr := exec.NewProject(exec.NewAllNodesScan(&lpgNodeWalker{g: g, morsel: []graph.NodeID{}}),
 		func() []exec.ProjectionItem {
-			items, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, bopts.forWorker())
+			items, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, bopts.forWorker(), false)
 			return items
 		}()); perr != nil {
 		return nil, false, perr
@@ -13509,7 +13521,7 @@ func buildEagerAggregation(
 	// Built by the shared helper so the serial EagerAggregation and the parallel
 	// aggregate scan (#2111) evaluate every key and argument through the SAME
 	// closures, byte-identically.
-	items, keyCols := buildAggPreProjItems(p, schemaSnap, capturedG, capturedParams, capturedReg, capturedBopts)
+	items, keyCols := buildAggPreProjItems(p, schemaSnap, capturedG, capturedParams, capturedReg, capturedBopts, capturedBopts != nil && capturedBopts.pinnedRead)
 
 	// Wrap child with the pre-projection. When the grouping keys and aggregate
 	// arguments are scalar-property accesses on a bound node and the child emits raw
@@ -13590,6 +13602,7 @@ func buildAggPreProjItems(
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
+	reuseNodeKeys bool,
 ) ([]exec.ProjectionItem, []int) {
 	items := make([]exec.ProjectionItem, 0, len(p.GroupBy)+len(p.Aggregates))
 
@@ -13602,10 +13615,13 @@ func buildAggPreProjItems(
 		if i < len(p.GroupByExprs) {
 			astExpr = p.GroupByExprs[i]
 		}
-		items = append(items, exec.ProjectionItem{
-			Alias: varName,
-			Eval:  newAggregationEval(astExpr, varName, schemaSnap, g, params, reg, bopts),
-		})
+		var eval func(exec.Row) (expr.Value, error)
+		if v, isVar := astExpr.(*ast.Variable); isVar && reuseNodeKeys {
+			eval = newAggregationNodeKeyEval(v, schemaSnap, g, params, reg, bopts)
+		} else {
+			eval = newAggregationEval(astExpr, varName, schemaSnap, g, params, reg, bopts)
+		}
+		items = append(items, exec.ProjectionItem{Alias: varName, Eval: eval})
 	}
 
 	// Aggregate argument projections.
@@ -13663,9 +13679,130 @@ func aggArgItem(
 		}
 	}
 
+	// count(DISTINCT <bare variable>): the value is read only by the DISTINCT
+	// wrapper, whose equivalence on a node is its id ([expr.Equivalent] treats a
+	// NodeValue and an IntegerValue carrying the same id as one value), and by
+	// CountAgg, which only null-checks it. A plain node binding is therefore
+	// passed as its raw id instead of a whole materialised node (rmp #2732);
+	// relationship, path and scalar bindings are built exactly as before.
+	if aggExpr.Function == "count" && aggExpr.Distinct {
+		if v, isVar := aggExpr.ArgumentExpr.(*ast.Variable); isVar {
+			eval, _ := newAggregationNodeRefEval(v, schemaSnap, g, params, reg, bopts)
+			return exec.ProjectionItem{Alias: aggExpr.OutputName, Eval: eval}
+		}
+	}
+
 	return exec.ProjectionItem{
 		Alias: aggExpr.OutputName,
 		Eval:  newAggregationEval(aggExpr.ArgumentExpr, aggExpr.Argument, schemaSnap, g, params, reg, bopts),
+	}
+}
+
+// newAggregationNodeRefEval returns an aggregation pre-projection evaluator for
+// the bare variable v that binds a PLAIN node as its raw row cell (the node id)
+// instead of a materialised [expr.NodeValue] (rmp #2732). Every other binding of
+// v — relationship, variable-length relationship list, path, scalar column — is
+// produced exactly as [newAggregationEval] produces it, because the use it plans
+// with keeps needsWholeNode set and [populateRowCtx] honours nodeRefOnly only on
+// the plain-node branch. The returned plan answers, after its first row, which
+// of the two v resolved to; see [planBindsPlainNode].
+//
+// The evaluator recycles the binding map exactly as the gated arm of
+// [newAggregationEval] does: the plan is gated, the arena is nil, and the only
+// value that escapes is the row cell itself.
+func newAggregationNodeRefEval(
+	v *ast.Variable,
+	schemaSnap map[string]int,
+	g *lpg.ReadView[string, float64],
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	bopts *buildOpts,
+) (func(exec.Row) (expr.Value, error), *rowBindPlan) {
+	use := map[string]*nodeScalarUse{v.Name: {
+		keys:           map[string]struct{}{},
+		presenceKeys:   map[string]struct{}{},
+		needsWholeNode: true,
+		nodeRefOnly:    true,
+	}}
+	bp := newRowBindPlan(newRowSchema(schemaSnap), bopts, g, use)
+	return func(row exec.Row) (expr.Value, error) {
+		return evalRowPooledOwned(v, row, bp, params, reg)
+	}, bp
+}
+
+// planBindsPlainNode reports whether the resolved plan binds name as a plain
+// node: present in the row and carrying no entity or scalar pass-through kind.
+// Only such a binding reaches the nodeRefOnly branch of [populateRowCtx].
+func planBindsPlainNode(bp *rowBindPlan, name string) bool {
+	for _, b := range bp.resolved() {
+		if b.name == name {
+			return b.kind&(bindEntityKinds|bindScalarPassThrough) == 0
+		}
+	}
+	return false
+}
+
+// newAggregationNodeKeyEval returns the pre-projection evaluator for a grouping
+// key that is the bare variable v, on a read-only statement at a pinned
+// snapshot. It returns exactly what [newAggregationEval] returns — a plain node
+// key is still a whole [expr.NodeValue], because the key value is emitted
+// downstream and may be returned, so its labels and properties are required —
+// but it materialises the node once per RUN of consecutive rows carrying the
+// same id rather than once per row (rmp #2732).
+//
+// Why it is needed: an aggregation grouped by a node, `MATCH (u)-[:F]->() WITH
+// u, count(*)`, sees one input row per relationship, and an expansion emits a
+// node's relationships consecutively. Every row's key was materialised in full
+// and all but the first of each group was discarded after hashing; on
+// examples/26_social_scale_bench that was 7.2 GB of allocation per run.
+//
+// Why it is exact: the statement reads a pinned snapshot and writes nothing, so
+// materialising an id a second time yields a value equal to the first in every
+// field. The reused value is immutable once built, and the aggregation retains
+// only the first key value of each group.
+//
+// Concurrency: the closure holds one-entry state and is NOT safe for concurrent
+// use. It is built only on the serial aggregation path, whose pre-projection is
+// driven by one goroutine; the parallel aggregate scan builds its own items per
+// worker with reuseNodeKeys false.
+func newAggregationNodeKeyEval(
+	v *ast.Variable,
+	schemaSnap map[string]int,
+	g *lpg.ReadView[string, float64],
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	bopts *buildOpts,
+) func(exec.Row) (expr.Value, error) {
+	eval, bp := newAggregationNodeRefEval(v, schemaSnap, g, params, reg, bopts)
+	var (
+		resolved, plain bool
+		have            bool
+		lastID          expr.IntegerValue
+		lastVal         expr.Value
+	)
+	return func(row exec.Row) (expr.Value, error) {
+		val, err := eval(row)
+		if err != nil {
+			return val, err
+		}
+		iv, isID := val.(expr.IntegerValue)
+		if !isID {
+			return val, nil
+		}
+		if !resolved {
+			plain, resolved = planBindsPlainNode(bp, v.Name), true
+		}
+		if !plain {
+			// A scalar column passes its integer through unchanged; an entity
+			// binding has already been built by populateRowCtx.
+			return val, nil
+		}
+		if have && iv == lastID {
+			return lastVal, nil
+		}
+		out := upgradeNodeIDToValue(iv, g)
+		have, lastID, lastVal = true, iv, out
+		return out, nil
 	}
 }
 
@@ -15317,6 +15454,21 @@ func buildUnwindOperator(
 // relationship edge ID) the value is returned unchanged so callers can rely on
 // "value-passthrough unless we can prove it's a node".
 //
+// What forces the WHOLE node (rmp #2732). Every caller reaching this function
+// holds a value that can escape into a result row or a retained structure —
+// a bare `RETURN n`, collect(n), a grouping key `WITH n, count(*)` that is
+// emitted downstream, properties(n) — or comes from a closure that analysed no
+// expression. A reader that needs only some of the node never arrives here:
+// scalar reads (n.k, n:L) take the lazy [upgradeNodeIDToValuePartial] path,
+// field extractors (id/labels/keys) take [buildPartialNodeValueForFn], and an
+// identity-only consumer (count(DISTINCT n)) binds the raw id through
+// nodeScalarUse.nodeRefOnly. Because the value is self-describing and carries
+// no reference to the read view, it must be complete when built; deferring it
+// would require the row to carry a node reference that every downstream
+// consumer resolves, which is not this engine's row contract. The one remaining
+// avoidable cost — re-materialising a grouping key once per input row — is
+// bounded to once per run of equal ids by [newAggregationNodeKeyEval].
+//
 // Relationships are not upgraded here. The engine emits a relationship as three
 // separate IntegerValue columns (srcID, edgeID, dstID) and the schema carries
 // no per-column kind information, so RelationshipValue construction needs
@@ -15428,6 +15580,16 @@ type nodeScalarUse struct {
 	needsLabelList bool
 	needsKeyNames  bool
 	needsWholeNode bool
+	// nodeRefOnly is never set by [analyseNodeScalarUse]. The aggregation builder
+	// sets it, together with needsWholeNode, on a use it constructs for a bare
+	// variable whose consumer needs a plain node binding only as a REFERENCE —
+	// the argument of count(DISTINCT x), which reads identity alone, and a
+	// grouping key that [newAggregationNodeKeyEval] materialises itself (rmp
+	// #2732). [populateRowCtx] then binds a plain node variable to its raw row
+	// cell instead of calling [upgradeNodeIDToValue]. needsWholeNode stays set so
+	// every other consumer of the use — the relationship and path reconstructions
+	// above the node branch — keeps building the whole entity exactly as before.
+	nodeRefOnly bool
 }
 
 // hasScalarFnNeed reports whether the variable is touched by at least one
@@ -16463,6 +16625,15 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, bp *rowBindPlan, arena *p
 				continue
 			}
 			use := b.use
+			// Node reference (rmp #2732): the consumer reads only the node's
+			// identity, or materialises the node itself. Restricted to a plain
+			// node binding — no entity kind, whose failed reconstruction falls
+			// through to here — so the raw cell differs from the eager upgrade
+			// only by the property and label copy the consumer does not want.
+			if use.nodeRefOnly && b.kind&bindEntityKinds == 0 {
+				ctx[b.name] = row[colIdx]
+				continue
+			}
 			// Node field-extractor (#1659: labels(n)/keys(n)/id(n)): the lazy
 			// value answers only on-demand scalar accesses (n.k, n:Label) and
 			// cannot enumerate labels or keys, and fnLabels/fnKeys/fnID

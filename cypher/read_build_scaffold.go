@@ -101,5 +101,8 @@ func (sc *readBuildScaffold) init(
 	sc.bopts.patEval = &sc.patEval
 	sc.bopts.queryCtx = ctx
 	sc.bopts.maxCollectItems = e.maxCollectItems
+	// A read-only statement at a pinned snapshot observes one state throughout
+	// (rmp #2732); a present-time view (a rendering build) does not.
+	sc.bopts.pinnedRead = rv.Snapshot() != nil
 	return &sc.walker, &sc.labelSrc, &sc.subEval, &sc.patEval, &sc.bopts
 }
