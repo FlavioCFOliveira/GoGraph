@@ -348,6 +348,11 @@ func TestMergePattern_WALDurability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w1.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g1 := lpg.New[string, float64](adjlist.Config{})
 	deleteWALEngineRun(t, g1, w1, `MERGE (a:WD1 {k: 'a'})-[:R]->(b:WD2 {k: 'b'})`)
 
@@ -359,6 +364,11 @@ func TestMergePattern_WALDurability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open2 wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	// Re-run the identical MERGE against the replayed graph. If the fresh
 	// nodes did not survive replay this would create a duplicate pair; if
 	// the global node counter were not correctly reseeded post-replay, the

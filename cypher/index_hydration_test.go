@@ -97,6 +97,11 @@ func hydOpenWith(t testing.TB, dir string, wrap func(recovery.Result[string, flo
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	st := res.NewStore(w, hydStoreOpts())
 	s := &hydSession{t: t, dir: dir, w: w, st: st, res: res}
 	if wrap == nil {

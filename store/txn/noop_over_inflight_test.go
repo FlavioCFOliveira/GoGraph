@@ -175,6 +175,11 @@ func ioOpen(t *testing.T, dir string) (*wal.Writer, *lpg.Graph[string, float64],
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, float64](adjlist.Config{})
 	return w, g, txn.NewStoreWithOptions[string, float64](g, w, ioOpts)
 }

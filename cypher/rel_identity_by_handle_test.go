@@ -41,6 +41,7 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -585,6 +586,11 @@ func newRelIDDurable(t *testing.T, cfg adjlist.Config) *relIDDurable {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	d := &relIDDurable{g: g, w: w, mu: &sync.Mutex{}, dir: dir, cfg: cfg}
 	d.cp = checkpoint.New[string, float64](checkpoint.Config{Dir: dir}, g, w, d.mu)
 	if err := d.cp.RunCheckpoint(); err != nil {

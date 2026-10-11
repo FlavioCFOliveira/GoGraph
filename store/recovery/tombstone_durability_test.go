@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -130,6 +131,11 @@ func TestRecovery_DeleteSurvivesCheckpointReopen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open1 wal.Open: %v", err)
 		}
+		t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+				t.Errorf("wal.Close: %v", err)
+			}
+		})
 		g := lpg.New[string, int64](adjlist.Config{})
 		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
 		tx := store.Begin()
@@ -156,6 +162,11 @@ func TestRecovery_DeleteSurvivesCheckpointReopen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open2 wal.Open: %v", err)
 		}
+		t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+				t.Errorf("wal.Close: %v", err)
+			}
+		})
 		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
 		// Mirror the Cypher DETACH DELETE: strip labels and properties,
 		// record the removal on the WAL, and tombstone the live graph
@@ -488,6 +499,11 @@ func TestRecovery_DeleteThenRecreateInLaterOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("wal.Open: %v", err)
 		}
+		t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+				t.Errorf("wal.Close: %v", err)
+			}
+		})
 		g := lpg.New[string, int64](adjlist.Config{})
 		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
 		tx := store.Begin()
@@ -512,6 +528,11 @@ func TestRecovery_DeleteThenRecreateInLaterOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open2 wal.Open: %v", err)
 		}
+		t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+				t.Errorf("wal.Close: %v", err)
+			}
+		})
 		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
 		tx := store.Begin()
 		mustTx(t, tx.RemoveNodeLabel("auth", "Spec"))
@@ -535,6 +556,11 @@ func TestRecovery_DeleteThenRecreateInLaterOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open3 wal.Open: %v", err)
 		}
+		t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+				t.Errorf("wal.Close: %v", err)
+			}
+		})
 		store := txn.NewStoreWithOptions[string, int64](g, w, tombstoneTxnOpts())
 		tx := store.Begin()
 		mustTx(t, tx.AddNode("auth"))

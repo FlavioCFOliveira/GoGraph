@@ -26,6 +26,7 @@ package txn_test
 // a recovery that returned an empty graph for an unrelated reason.
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,11 @@ func newBoundHarness(t *testing.T) *boundHarness {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	return &boundHarness{
 		dir: dir,
