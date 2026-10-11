@@ -457,6 +457,12 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
       (`go test -c` output), no build output or Go build temporaries, no logs, no
       profiles or traces, no benchmark or `benchstat` output, no scratch scripts.
       Those go to disk (the session scratchpad or the build cache).
+    - **The one exception: the Go build cache.** `GOCACHE` may be placed on the
+      RAM drive (for example `<ram>/gocache`), provided it never takes space the
+      graph data files of the tests and examples need. Graph data has priority:
+      keep a free-space margin for the largest graph workload, and when space runs
+      short, trim or move the cache — never the graph directories, and never by
+      cleaning the default on-disk cache.
   - **Exceptions — only where effectiveness would be compromised.** A test stays on
     disk only when the RAM drive would weaken what it proves: a test that measures
     real-device fsync latency or throughput, and any test whose finding depends on
@@ -477,8 +483,9 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
     process need different directories, and **under Go 1.27 `t.TempDir()` follows
     `GOTMPDIR`, not `TMPDIR`** (measured: with `TMPDIR` on the RAM drive and
     `GOTMPDIR` on disk, `t.TempDir()` writes to disk). So:
-    - **`go`'s own environment** keeps `GOTMPDIR` and `GOCACHE` **on disk**: the
-      build temporaries and the test binaries stay there.
+    - **`go`'s own environment** keeps `GOTMPDIR` **on disk**: the build
+      temporaries and the test binaries stay there. `GOCACHE` stays on disk too,
+      unless it is placed on the RAM drive under the build-cache exception above.
     - **The test process** gets the RAM drive for both variables through `-exec`:
       `GOTMPDIR=<disk> go test -exec "env TMPDIR=<ram>/<sub> GOTMPDIR=<ram>/<sub>" ./pkg/...`.
       `t.TempDir()` and `os.MkdirTemp` then create the graph directories on the
