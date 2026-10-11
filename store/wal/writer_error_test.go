@@ -64,6 +64,11 @@ func TestWriter_Truncate_AfterCloseReturnsErrWriterClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}

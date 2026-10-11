@@ -25,6 +25,11 @@ func TestWAL_CrashMidFrameHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	for i := 0; i < 5; i++ {
 		if err := w.Append([]byte("header-crash-frame")); err != nil {
 			t.Fatalf("Append: %v", err)

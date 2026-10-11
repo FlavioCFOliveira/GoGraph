@@ -1,6 +1,7 @@
 package txn
 
 import (
+	"errors"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -141,6 +142,11 @@ func newIsolationStore(t *testing.T) (*lpg.Graph[string, int64], *Store[string, 
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	store := NewStoreWithOptions[string, int64](g, w, Options[string, int64]{
 		Codec:       NewStringCodec(),
 		WeightCodec: NewInt64WeightCodec(),

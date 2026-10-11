@@ -42,6 +42,11 @@ func TestRecovery_IndexesSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
@@ -167,6 +172,11 @@ func TestRecovery_IndexesSurviveRestart_WiredEarly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
@@ -246,6 +256,11 @@ func TestRecovery_CorruptedIndexPayload_IsPartiallyRoundTrippable(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
@@ -363,6 +378,11 @@ func TestRecovery_PresentTimeSnapshotIsNeverHydratable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)

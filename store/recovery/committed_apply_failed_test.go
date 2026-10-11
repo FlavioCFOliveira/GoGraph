@@ -37,6 +37,11 @@ func TestCommit_ApplyRefusalLeavesNothingDurable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 
 	const n = 400 // distinct edge sources > 256 shards => cap=1 overflows on apply
 	// Cap each shard at a single node slot so the apply phase overflows.

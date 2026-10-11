@@ -25,6 +25,11 @@ func openWeightedStoreInt64(t *testing.T) (store *Store[string, int64], walPath 
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	store = NewStoreWithOptions[string, int64](g, w, Options[string, int64]{
 		Codec:       NewStringCodec(),
@@ -46,6 +51,11 @@ func openWeightedStoreFloat64(t *testing.T) (store *Store[string, float64], walP
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, float64](adjlist.Config{})
 	store = NewStoreWithOptions[string, float64](g, w, Options[string, float64]{
 		Codec:       NewStringCodec(),
@@ -227,6 +237,11 @@ func TestTxn_Options_NewStoreWithOptions_AccessorsAndV3Frame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	s := NewStoreWithOptions[string, int64](g, w, Options[string, int64]{
 		Codec:       NewStringCodec(),
@@ -298,6 +313,11 @@ func TestTxn_Options_ZeroWeightEmitsOpAddEdgeWeighted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	s := NewStoreWithOptions[string, int64](g, w, Options[string, int64]{
 		Codec:       NewStringCodec(),

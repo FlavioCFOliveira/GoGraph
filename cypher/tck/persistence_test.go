@@ -84,6 +84,11 @@ func persistAndRecover(t *testing.T, dir string, g *lpg.Graph[string, float64]) 
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	store := txn.NewStoreWithCodec[string, float64](g, w, txn.NewStringCodec())
 	tx := store.Begin()
 	g.AdjList().Mapper().Walk(func(_ graph.NodeID, nodeKey string) bool {

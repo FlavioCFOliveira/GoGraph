@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -48,6 +49,11 @@ func TestOpen_StringInt64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
@@ -171,6 +177,11 @@ func TestOpen_Int64Int64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[int64, int64](adjlist.Config{})
 	opts := txn.Options[int64, int64]{
 		Codec:       txn.NewInt64Codec(),
@@ -238,6 +249,11 @@ func TestOpen_Int64Float64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[int64, float64](adjlist.Config{})
 	opts := txn.Options[int64, float64]{
 		Codec:       txn.NewInt64Codec(),
@@ -295,6 +311,11 @@ func TestOpen_UUIDFloat64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[[16]byte, float64](adjlist.Config{})
 	opts := txn.Options[[16]byte, float64]{
 		Codec:       txn.NewUUIDCodec(),
@@ -422,6 +443,11 @@ func TestOpen_StringInt64_SnapshotSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	tx := s.Begin()

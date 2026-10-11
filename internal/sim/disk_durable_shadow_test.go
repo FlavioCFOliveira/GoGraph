@@ -772,6 +772,11 @@ func TestWALPhantomCommit_CrashInsideTheLeaderFsyncLosesTheFlushedSuffix(t *test
 	if err != nil {
 		t.Fatalf("OpenFS: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	// The frames land in the log's first segment; that file is the image.
 	seg := wal.SegmentPath(path, 1)
 

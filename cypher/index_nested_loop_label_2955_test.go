@@ -16,6 +16,7 @@ package cypher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -131,6 +132,11 @@ func TestIndexNestedLoopJoin_SeekHitsCarryTheLabel_2955(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+				t.Errorf("wal.Close: %v", err)
+			}
+		})
 		st := txn.NewStoreWithOptions[string, float64](lpg.New[string, float64](adjlist.Config{}), w,
 			txn.Options[string, float64]{Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec()})
 		eng := NewEngineWithStore(st)

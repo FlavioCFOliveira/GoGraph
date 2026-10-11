@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -57,6 +58,11 @@ func TestOpen_FreshCreateFsyncsParentAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(fresh): %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if err := w.Append([]byte("frame-0")); err != nil {
 		t.Fatalf("Append: %v", err)
 	}

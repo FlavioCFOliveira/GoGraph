@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,6 +52,11 @@ func TestRecovery_TornTailTruncatedOnReopenForAppend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open (first): %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w1.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g1 := lpg.New[string, int64](adjlist.Config{})
 	s1 := txn.NewStoreWithOptions[string, int64](g1, w1, opts)
 	tx1 := s1.Begin()
@@ -116,6 +122,11 @@ func TestRecovery_TornTailTruncatedOnReopenForAppend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open (second): %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	info, err = os.Stat(seg)
 	if err != nil {
 		t.Fatalf("Stat after reopen: %v", err)

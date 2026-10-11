@@ -24,6 +24,11 @@ func TestOpen_TruncatesBenignTornTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	for _, p := range []string{"frame-0", "frame-1"} {
 		if err := w.Append([]byte(p)); err != nil {
 			t.Fatalf("Append(%s): %v", p, err)
@@ -60,6 +65,11 @@ func TestOpen_TruncatesBenignTornTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open (reopen): %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	info, err = os.Stat(seg)
 	if err != nil {
 		t.Fatalf("Stat (after reopen): %v", err)
@@ -116,6 +126,11 @@ func TestOpen_PreservesGenuineCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	for _, p := range []string{"frame-0", "frame-1", "frame-2"} {
 		if err := w.Append([]byte(p)); err != nil {
 			t.Fatalf("Append(%s): %v", p, err)
@@ -147,6 +162,11 @@ func TestOpen_PreservesGenuineCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open (corrupt reopen): %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	info, err := os.Stat(seg)
 	if err != nil {
 		t.Fatalf("Stat: %v", err)

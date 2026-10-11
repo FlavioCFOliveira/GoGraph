@@ -55,6 +55,11 @@ func TestLog_TornFirstFrameOfEmptyActiveSegmentKeepsPrevLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	appendFrames(t, w, 3, 100, 0xD1)
 	if _, err := w.Truncate(); err != nil {
 		t.Fatal(err)
@@ -82,6 +87,11 @@ func TestLog_TornFirstFrameOfEmptyActiveSegmentKeepsPrevLink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen over a torn first frame: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	appendFrames(t, w2, 1, 10, 0xD2)
 	if err := w2.Close(); err != nil {
 		t.Fatal(err)
@@ -111,6 +121,11 @@ func TestListSegments_OutOfOrderUnlinkIsNotAGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	appendFrames(t, w, 40, 64<<10, 0xD4) // three segments
 	end := w.DurableOffset()
 	if err := w.MarkCheckpoint(end); err != nil {
@@ -143,6 +158,11 @@ func TestListSegments_OutOfOrderUnlinkIsNotAGap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writable open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if err := w2.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +178,11 @@ func TestListSegments_OutOfOrderUnlinkIsNotAGap(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+				t.Errorf("wal.Close: %v", err)
+			}
+		})
 		appendFrames(t, w, 40, 64<<10, 0xD5)
 		if err := w.Close(); err != nil {
 			t.Fatal(err)
@@ -184,6 +209,11 @@ func TestOpen_SealsLegacyLogWrittenAfterInterruptedCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +235,11 @@ func TestOpen_SealsLegacyLogWrittenAfterInterruptedCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	storeID := w2.StoreID()
 	appendFrames(t, w2, 1, 10, 0xD3)
 	if err := w2.Close(); err != nil {

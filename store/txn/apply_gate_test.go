@@ -50,6 +50,11 @@ func TestApplyGate_NoLostWakeup_MixedCommitPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 

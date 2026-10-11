@@ -54,6 +54,11 @@ func noopStampEngines() map[string]func(t *testing.T) (*cypher.Engine, string, f
 			if err != nil {
 				t.Fatalf("store.Open: %v", err)
 			}
+			t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+				if err := o.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+					t.Errorf("store.Close: %v", err)
+				}
+			})
 			eng := cypher.NewEngineWithOpened(o)
 			closed := false
 			closeFn := func() {

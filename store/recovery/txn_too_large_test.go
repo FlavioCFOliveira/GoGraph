@@ -54,6 +54,11 @@ func writeMarkerlessV3Run(t *testing.T, dir string, k int) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	for i := 0; i < k; i++ {
 		if err := w.Append(v3OpAddNodeFrame(t, codec, 1, "n"+itoa(i))); err != nil {
 			t.Fatalf("Append(frame %d): %v", i, err)
@@ -211,6 +216,11 @@ func writeCommittedTxnOfSize(t *testing.T, dir string, n int) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptionsCapped[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),

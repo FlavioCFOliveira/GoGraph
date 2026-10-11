@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -26,6 +27,11 @@ func writeCodecOnlyMultigraphCrashState(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := wlog.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithCodec(g, wlog, txn.NewStringCodec())
 

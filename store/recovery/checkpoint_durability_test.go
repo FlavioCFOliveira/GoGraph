@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -39,6 +40,11 @@ func TestCheckpointDurability_LabelsPropertiesEdgesSurvive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 
 	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{

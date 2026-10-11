@@ -27,6 +27,11 @@ func TestWAL_OpenFS_ReclaimSegmentsOverSimDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.OpenFS: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	mark, err := w.AppendRun(func(emit func([]byte) error) error {
 		for _, p := range []string{"frame-zero", "frame-one", "frame-two"} {
 			if err := emit([]byte(p)); err != nil {

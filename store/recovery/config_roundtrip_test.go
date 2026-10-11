@@ -17,6 +17,7 @@ package recovery
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,6 +51,11 @@ func writeSelfSufficientSnapshot(t *testing.T, dir string, g *lpg.Graph[string, 
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	cs := csr.BuildFromAdjList(g.AdjList())
 	snapDir := filepath.Join(dir, "snapshot")
 	if err := snapshot.WriteSnapshotFull(snapDir, cs, g); err != nil {

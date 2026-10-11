@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -51,6 +52,11 @@ func TestCheckpointDurability_NonStringKeysNotLost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 
 	g := lpg.New[int64, int64](adjlist.Config{})
 	opts := txn.Options[int64, int64]{

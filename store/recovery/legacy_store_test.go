@@ -3,6 +3,7 @@ package recovery
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -223,6 +224,11 @@ func TestRecovery_LegacyUndirected_PostMigrationWritesKeepDirection(t *testing.T
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	st := res.NewStore(w, txn.Options[string, int64]{Codec: txn.NewStringCodec(), WeightCodec: txn.NewInt64WeightCodec()})
 	tx := st.Begin()
 	mustTx(t, tx.AddEdgeWithHandle("c", "a", 0, 200))
