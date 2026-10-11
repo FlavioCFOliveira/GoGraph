@@ -210,8 +210,9 @@ func (g *Graph[N, W]) PropertyKeysInUse() []string {
 		}
 		nbs = nil
 		loaded := false
+		var tmp edgePropColumn
 		for ci := range block.cols {
-			col := &block.cols[ci]
+			col := block.colAt(ci, &tmp)
 			if seen.has(col.key) {
 				continue
 			}

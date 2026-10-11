@@ -202,6 +202,12 @@ type edgePropColumn struct {
 	// sparse selects the physical representation: true ⇔ COO (idx + compacted
 	// backing), false ⇔ dense (slot-indexed backing + optional validity bitmap).
 	sparse bool
+
+	// tail is non-nil only on a SHARED append-buffer header (see
+	// edge_property_shared.go): it records how many cells of the shared idx and
+	// value backings have been written. Only the writer, under the source's
+	// adjacency shard lock, reads or writes it; a reader never dereferences it.
+	tail *edgePropTail
 }
 
 // dateKind is the internal PropertyKind sentinel for the int32 epoch-day date
@@ -232,6 +238,13 @@ const epochDayTag = 0x01
 type edgePropCols struct {
 	cols   []edgePropColumn
 	length int
+	// np[i] is this version's present count for cols[i] when bit i of shr is
+	// set: cols[i] is then a SHARED append-buffer header whose logical content
+	// is idx[:np[i]] and the value backing [:np[i]], spanning length slots (see
+	// [edgePropCols.colAt] and edge_property_shared.go). Unused when the bit is
+	// clear, in which case cols[i] is an ordinary self-describing column.
+	np  [maxSharedCols]int32
+	shr uint8
 }
 
 // --- adjlist.AuxColumn implementation -------------------------------------
@@ -248,6 +261,10 @@ func (c *edgePropCols) GrowSlot(oldLen int) auxColumn {
 	if c == nil {
 		return nil
 	}
+	if g := c.growSharedAbsent(oldLen); g != nil {
+		return g
+	}
+	c = c.unshared(false)
 	out := &edgePropCols{length: oldLen + 1}
 	if len(c.cols) == 0 {
 		return out
@@ -306,6 +323,13 @@ func (c *edgePropCols) GrowSlotWithValue(oldLen int, payload any) auxColumn {
 		return newEdgePropColsWithValue(newLen, oldLen, p)
 	}
 	kind, days, _ := classify(p.value)
+	if g := c.growSharedWithValue(oldLen, p, kind, days); g != nil {
+		return g
+	}
+	// Fallback (more than maxSharedCols columns, or a bit-packed bool / FOR-packed
+	// date column involved): the per-append header copy below, on a block whose
+	// shared columns are first materialised as bounded, capacity-clipped views.
+	c = c.unshared(false)
 	out := &edgePropCols{length: newLen}
 	if len(c.cols) == 0 {
 		// Block existed but carried no columns yet: just the new column.
@@ -364,6 +388,11 @@ func newEdgePropColsAux(length int, payload any) auxColumn {
 // O(1) coordinate-list tail push (see [edgePropCols.GrowSlotWithValue] rule 1).
 func newEdgePropColsWithValue(length, slot int, p *edgePropPayload) *edgePropCols {
 	kind, days, _ := classify(p.value)
+	if kind != PropBool {
+		out := &edgePropCols{length: length, shr: 1, np: [maxSharedCols]int32{1}}
+		out.cols = []edgePropColumn{newSharedSingle(p.keyID, kind, slot, p.value, days)}
+		return out
+	}
 	return &edgePropCols{
 		length: length,
 		cols:   []edgePropColumn{newSparseSingleSlot(p.keyID, kind, length, slot, p.value, days)},
@@ -388,8 +417,9 @@ func (c *edgePropCols) CompactSlot(idx int) auxColumn {
 		return out
 	}
 	out.cols = make([]edgePropColumn, len(c.cols))
+	var tmp edgePropColumn
 	for i := range c.cols {
-		out.cols[i] = c.cols[i].compacted(idx)
+		out.cols[i] = c.colAt(i, &tmp).compacted(idx)
 	}
 	return out
 }
@@ -420,6 +450,9 @@ func (c *edgePropCols) Compact() auxColumn {
 	if c == nil || len(c.cols) == 0 {
 		return c
 	}
+	// A shared append buffer is materialised at exact length: the freeze pass
+	// releases its amortised-growth slack and its tie to later versions.
+	c = c.unshared(true)
 	var out *edgePropCols
 	ensureOut := func() {
 		if out == nil {
@@ -559,11 +592,12 @@ func (c *edgePropCols) del(keyID PropertyKeyID, slot int) (*edgePropCols, bool) 
 	// slot present.
 	changed := false
 	var out *edgePropCols
+	var tmp edgePropColumn
 	for i := range c.cols {
 		if c.cols[i].key != keyID {
 			continue
 		}
-		if !c.cols[i].slotValid(slot) {
+		if !c.colAt(i, &tmp).slotValid(slot) {
 			continue
 		}
 		if out == nil {
@@ -587,11 +621,12 @@ func (c *edgePropCols) get(keyID PropertyKeyID, slot int) (PropertyValue, bool) 
 	if c == nil {
 		return PropertyValue{}, false
 	}
+	var tmp edgePropColumn
 	for i := range c.cols {
 		if c.cols[i].key != keyID {
 			continue
 		}
-		if v, ok := c.cols[i].slotValue(slot); ok {
+		if v, ok := c.colAt(i, &tmp).slotValue(slot); ok {
 			return v, true
 		}
 	}
@@ -605,8 +640,9 @@ func (c *edgePropCols) forEachAt(slot int, fn func(key PropertyKeyID, v Property
 	if c == nil {
 		return
 	}
+	var tmp edgePropColumn
 	for i := range c.cols {
-		if v, ok := c.cols[i].slotValue(slot); ok {
+		if v, ok := c.colAt(i, &tmp).slotValue(slot); ok {
 			fn(c.cols[i].key, v)
 		}
 	}
@@ -619,8 +655,9 @@ func (c *edgePropCols) keyPresentAt(keyID PropertyKeyID, slot int) bool {
 	if c == nil {
 		return false
 	}
+	var tmp edgePropColumn
 	for i := range c.cols {
-		if c.cols[i].key == keyID && c.cols[i].slotValid(slot) {
+		if c.cols[i].key == keyID && c.colAt(i, &tmp).slotValid(slot) {
 			return true
 		}
 	}
@@ -641,8 +678,9 @@ func (c *edgePropCols) slotKind(keyID PropertyKeyID, slot int) (PropertyKind, bo
 	if c == nil {
 		return 0, false
 	}
+	var tmp edgePropColumn
 	for i := range c.cols {
-		if c.cols[i].key == keyID && c.cols[i].slotValid(slot) {
+		if c.cols[i].key == keyID && c.colAt(i, &tmp).slotValid(slot) {
 			return c.cols[i].kind, true
 		}
 	}
@@ -684,6 +722,14 @@ func (c *edgePropCols) clone(length int) *edgePropCols {
 	}
 	out.cols = make([]edgePropColumn, len(c.cols))
 	copy(out.cols, c.cols)
+	// A shared append-buffer header is replaced by its bounded, capacity-clipped
+	// view, so the clone is self-describing and no later write through it can
+	// reach the shared buffer's unwritten cells.
+	for i := range out.cols {
+		if c.shr&(1<<uint(i)) != 0 {
+			out.cols[i] = c.cols[i].sharedView(int(c.np[i]), c.length)
+		}
+	}
 	// If the block grew, every aliased column must be conceptually extended to
 	// the new length. We defer the physical grow to setSlot/slotValid, which
 	// bound by length; but a column's own length field must reflect the block
