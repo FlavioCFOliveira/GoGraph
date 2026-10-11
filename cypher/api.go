@@ -369,6 +369,10 @@ type buildOpts struct {
 	// boundary rewrites the maps they resolve from (see rowbind.go). Build-time
 	// state of one goroutine; forWorker clears it.
 	pendingBindPlans []*rowBindPlan
+	// seekProbe is the access path [indexSeekWouldFire] built for a Selection,
+	// pending adoption by that Selection's build (rmp #3096). Build-time state of
+	// one goroutine; forWorker clears it and forSubquery does not carry it.
+	seekProbe seekProbeVerdict
 	// projAliasScalarCols mirrors scalarCols for the BUILDROWCTX / Variable
 	// fast-path upgrade-bypass only. Distinct from scalarCols so the
 	// colliding-alias guard in buildIRProjection still routes a
@@ -640,6 +644,12 @@ type buildOpts struct {
 	// for what it holds and why it is bounded, and
 	// [rewriteCountVarToCountStarFor] for the routing.
 	countVarMemo *countVarRewriteMemo
+	// layoutMemo is the plan-cache entry's cross-execution memo of row-layout
+	// snapshots (rmp #3097). A pointer INTO the shared entry, like scalarUseMemo,
+	// and set only on a plain read execution where no reorder or anchor swap
+	// fired; nil means no memo. See [layoutMemo] for why it is exact and safe for
+	// concurrent use.
+	layoutMemo *layoutMemo
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -2949,6 +2959,13 @@ func (e *Engine) buildReadPhysical(
 	// the whole result set (#1830).
 	bopts.maxResultRows = e.maxResultRows
 	bopts.maxResultBytes = e.maxResultBytes
+	// Row-layout memo (rmp #3097): only on an ordinary execution — not a
+	// rendering or profiled build — and only when no swap gate fired, so the
+	// executions sharing the memo share their layouts. Content equality inside
+	// the memo keeps it exact regardless (see [layoutMemo]).
+	if entry != nil && prof == nil && estimates == nil && len(bopts.reorderSwap) == 0 && len(bopts.anchorSwap) == 0 {
+		bopts.layoutMemo = &entry.layouts
+	}
 	op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
 	if err == nil && estimates != nil {
 		// A rendering build reads exact statistics populations through the
@@ -5627,6 +5644,10 @@ type planCacheEntry struct {
 	// reach would duplicate knowledge that lives in the builder. See
 	// [countVarRewriteMemo].
 	countVarRewrite countVarRewriteMemo
+	// layouts memoises the build's row-layout snapshots across executions of this
+	// plan (rmp #3097). Filled lazily from the build's own call sites, like
+	// scalarUse; see [layoutMemo] for the concurrency contract.
+	layouts layoutMemo
 }
 
 // nodeScalarUseMemo memoises [analyseNodeScalarUse] per AST expression for the
@@ -11072,11 +11093,23 @@ func buildOperatorRec(
 		// Opportunistic index-seek rewrite: if the predicate is a simple equality
 		// n.prop = $name and a hash index is available, produce NodeByIndexSeek
 		// directly without first building the scan child.
+		//
+		// A columnar recogniser that declined this Selection because a seek would
+		// fire has already built that seek; adopt it rather than build it again, and
+		// skip the builders it proved decline (rmp #3096, [seekProbeVerdict]).
+		probe, probed := bopts.takeSeekProbe(p, schema)
+		if probed && (probe.kind == seekProbeHash || probe.kind == seekProbeSet) {
+			return probe.adopt(schema), nil
+		}
 		if idxMgr != nil {
-			if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr, labelSrc, bopts); err != nil {
-				return nil, err
-			} else if ok {
-				return op, nil
+			if !probed || !probe.skipsHash() {
+				if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr, labelSrc, bopts); err != nil {
+					probe.release()
+					return nil, err
+				} else if ok {
+					probe.release()
+					return op, nil
+				}
 			}
 			// Key-SET seek (#2183): the predicate is a disjunction of equalities on
 			// one property — what an UNWIND-bound key becomes once
@@ -11087,8 +11120,11 @@ func buildOperatorRec(
 			if lw, ok := walker.(*lpgNodeWalker); ok {
 				seekSetG = lw.g
 			}
-			if op, ok := tryBuildIndexSeekSetFromSelection(p, params, schema, idxMgr, seekSetG, bopts); ok {
-				return op, nil
+			if !probed || !probe.skipsSet() {
+				if op, ok := tryBuildIndexSeekSetFromSelection(p, params, schema, idxMgr, seekSetG, bopts); ok {
+					probe.release()
+					return op, nil
+				}
 			}
 		}
 		// An unclaimed seek hint is DROPPED rather than evaluated (#2183). The hint
@@ -11100,6 +11136,7 @@ func buildOperatorRec(
 		// establishes — measured at 2 952 ms for k=2001, N=20 000, against ~12 ms
 		// for the original hint-free plan.
 		if bopts != nil && bopts.seekHint[p] {
+			probe.release()
 			return buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		}
 		// Set-at-a-time multi-label conjunction (#2133): the SAME shape the
@@ -11113,8 +11150,10 @@ func buildOperatorRec(
 		// key-set seeks, which subsume the Selection outright and are more selective
 		// (see label_intersect_plan.go).
 		if op, ok, err := buildLabelIntersectionIfEnabled(p, labelSrc, schema, bopts); err != nil {
+			probe.release()
 			return nil, err
 		} else if ok {
+			probe.release()
 			return op, nil
 		}
 		// Min-cardinality multi-label anchor scan (#2077): when this Selection is
@@ -11127,8 +11166,10 @@ func buildOperatorRec(
 		// through to the default Labels[0] build when disabled or not eligible (see
 		// min_label_scan_plan.go).
 		if op, ok, err := buildMinLabelScanIfEnabled(p, walker, labelSrc, reg, params, schema, bopts); err != nil {
+			probe.release()
 			return nil, err
 		} else if ok {
+			probe.release()
 			return op, nil
 		}
 		// Opportunistic range-index seek (#1505): when the predicate is a range
@@ -11147,7 +11188,9 @@ func buildOperatorRec(
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			rangeG = lw.g
 		}
-		if rangeChild, ok := buildRangeSeekIfEnabled(bopts, p, schema, idxMgr, rangeG, params); ok {
+		if probed && probe.kind == seekProbeRange {
+			child = profileIntermediate(bopts, probe.adopt(schema))
+		} else if rangeChild, ok := buildRangeSeekIfEnabled(bopts, p, schema, idxMgr, rangeG, params); ok {
 			// profileIntermediate, because the seek is built HERE rather than by the
 			// recursion, so buildOperator's single wrap point never sees it and a
 			// profiled plan rendered the access path as "(not measured)" — the one
@@ -12731,6 +12774,9 @@ func (b *buildOpts) forWorker() *buildOpts {
 	// morsel-parallel leaf implements no exec.PlanChildren, so nothing built below it
 	// is ever reachable from the output (rmp #2765).
 	cp.estimates = nil
+	// A probe-built seek belongs to the statement's own Selection build (rmp
+	// #3096); a worker must neither adopt nor release it.
+	cp.seekProbe = seekProbeVerdict{}
 	return &cp
 }
 
@@ -17529,7 +17575,15 @@ func buildIRProjection(
 	// not address the same value in the INPUT row, so `RETURN a.id AS a,
 	// a.id` returned the bound node for the second column instead of the
 	// integer property (Return4 [3]).
-	inputSchema := copySchema(schema)
+	//
+	// Both snapshots of this function come from the plan-cache entry's layout
+	// memo when the build carries one (rmp #3097, [layoutMemo]), keyed on the
+	// projection's first item.
+	var layoutKey any
+	if len(items) > 0 {
+		layoutKey = &items[0]
+	}
+	inputSchema := bopts.projInputSchema(layoutKey, schema)
 	_ = inputSchema // referenced below in fast-path branches
 	// generalSnap is ONE schema snapshot shared by every general-path item in this
 	// body, built on the first item that needs it. Every such item resolves against
@@ -18069,7 +18123,7 @@ func buildIRProjection(
 			if evalFn == nil {
 				// General path: evaluate full AST expression with loaded RowContext.
 				if !generalSnapReady {
-					generalSnap = newRowSchema(copySchema(schema))
+					generalSnap = bopts.projGeneralRowSchema(layoutKey, schema)
 					generalSnapReady = true
 				}
 				schemaSnap := generalSnap
@@ -18389,9 +18443,16 @@ func columnarScanVar(plan ir.LogicalPlan) (string, bool) {
 // Being defined in terms of the real rewrites, rather than re-deriving their conditions,
 // is deliberate: a probe that guessed would drift from what buildOperator actually does,
 // and the failure mode of drift here is silently losing an index again.
+//
+// When schema is empty — the only case either caller reaches — the operator the
+// probe built is not discarded: it is handed to the Selection build of the same
+// statement through bopts, so the seek is built once per execution (rmp #3096,
+// see [seekProbeVerdict]). labelSrc is the statement's resolver, the one that
+// build passes, so the handed-off operator is the one it would have built.
 func indexSeekWouldFire(
 	sel *ir.Selection,
 	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
 	params map[string]expr.Value,
 	schema map[string]int,
 	idxMgr *index.Manager,
@@ -18410,22 +18471,49 @@ func indexSeekWouldFire(
 		g = lw.g
 	}
 
+	if labelSrc == nil {
+		labelSrc = labelSrcFromView(g)
+	}
+	// The verdict is handed on only for an empty schema; see [seekProbeVerdict].
+	handOff := len(schema) == 0
+
+	// Each builder writes the schema only on success, so with an empty schema one
+	// map serves all three; it is replaced should a declining builder ever write.
+	var work map[string]int
+	probeSchema := func() map[string]int {
+		if !handOff || work == nil || len(work) != 0 {
+			work = copySchema(schema)
+		}
+		return work
+	}
+
 	// Hash seek on `n.prop = <const>`.
-	if op, ok, err := tryBuildIndexSeekFromSelection(sel, params, copySchema(schema), idxMgr, labelSrcFromView(g), bopts); err == nil && ok {
-		closeProbe(op)
+	op, ok, hashErr := tryBuildIndexSeekFromSelection(sel, params, probeSchema(), idxMgr, labelSrc, bopts)
+	if hashErr == nil && ok {
+		settleProbe(handOff, bopts, sel, seekProbeHash, op, work, false)
 		return true
 	}
 	// Key-set seek: a disjunction of equalities on one property (#2183).
-	if op, ok := tryBuildIndexSeekSetFromSelection(sel, params, copySchema(schema), idxMgr, g, bopts); ok {
-		closeProbe(op)
+	if op, ok := tryBuildIndexSeekSetFromSelection(sel, params, probeSchema(), idxMgr, g, bopts); ok {
+		settleProbe(handOff, bopts, sel, seekProbeSet, op, work, hashErr != nil)
 		return true
 	}
 	// Range seek on a bound btree (#1505), including the numeric companion #2169 opens.
-	if op, ok := buildRangeSeekIfEnabled(bopts, sel, copySchema(schema), idxMgr, g, params); ok {
-		closeProbe(op)
+	if op, ok := buildRangeSeekIfEnabled(bopts, sel, probeSchema(), idxMgr, g, params); ok {
+		settleProbe(handOff, bopts, sel, seekProbeRange, op, work, hashErr != nil)
 		return true
 	}
 	return false
+}
+
+// settleProbe hands a probe-built operator to the Selection build when handOff
+// holds, and releases it otherwise.
+func settleProbe(handOff bool, bopts *buildOpts, sel *ir.Selection, kind seekProbeKind, op exec.Operator, after map[string]int, hashErr bool) {
+	if !handOff {
+		closeProbe(op)
+		return
+	}
+	bopts.recordSeekProbe(sel, kind, op, after, hashErr)
 }
 
 // closeProbe releases an operator built only to answer a planning question.
@@ -18479,7 +18567,7 @@ func tryBuildColumnarFilterChain(
 	// which is flat in the label population. Composing the two (seek to narrow the
 	// stream, columnar to avoid boxing what survives) is the better end state and is
 	// tracked separately; yielding is the part that is unconditionally correct.
-	if indexSeekWouldFire(sel, walker, params, schema, idxMgr, bopts) {
+	if indexSeekWouldFire(sel, walker, labelSrc, params, schema, idxMgr, bopts) {
 		return nil, false, nil
 	}
 	// The min-cardinality label re-anchor (#2077) replaces the scanned label with the
@@ -18875,7 +18963,7 @@ func tryBuildColumnarAggSource(
 		// min-label re-anchor (#2077) and the label intersection (#2133) each reduce the
 		// rows SCANNED. All three are evaluated read-only against the innermost
 		// Selection, the one buildOperator would rewrite.
-		if indexSeekWouldFire(innermost, walker, params, schema, idxMgr, bopts) {
+		if indexSeekWouldFire(innermost, walker, labelSrc, params, schema, idxMgr, bopts) {
 			return nil, false, nil
 		}
 		if bopts.minLabelScanEnabled {
@@ -19538,7 +19626,9 @@ func buildScalarPropertyChunkFiller(nodeChunkCol int, propName string, g *lpg.Re
 func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) exec.FilterFn {
 	// Derived ONCE per execution: the predicate closure runs per row, and the
 	// row layout is a pure function of the schema.
-	rs := newRowSchema(copySchema(schema))
+	// From the plan-cache entry's layout memo when the build carries one (rmp
+	// #3097, [layoutMemo]).
+	rs := bopts.filterRowSchema(predExpr, schema)
 	scalarUse, bail := analyseNodeScalarUseFor(bopts, predExpr)
 	if bail {
 		scalarUse = nil
