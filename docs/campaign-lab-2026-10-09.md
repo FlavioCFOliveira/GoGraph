@@ -687,7 +687,7 @@ python3 $L3/agg.py $L3/owner.repeat.tsv cpu summary
 # Campaign conclusion, 2026-10-12
 
 Sprint 367, rmp #3107. Built only from recorded evidence: sections 1–22, the commit messages
-`c794a1ed..8932f1f3`, and the rmp task logs cited per row. **No new measurement.**
+`c794a1ed..8932f1f3` plus `590d85f3` and `5b3d50af`, and the rmp task logs cited per row. **No new measurement.**
 
 ## 23. Final totals
 
@@ -715,6 +715,7 @@ After iteration 3 (**paired example-26 runs, not sweep totals**; units as record
 | aggregation → node materialisation → lpg properties | `nodePropsToExprMap` 10.73 GiB, 3.43 s (Q6) | #2732 `280ce211` | 733 MiB, 0.23 s (§18) | node references through aggregation not carried (row contract), left as is (#2732) |
 | cached read: plan cache → physical build → index seek (row 35) | `buildReadPhysical` 6.35 GiB (R6), 6.18 GiB (Q7) | #3096/#3097 `3f8bddfc` | `copySchema` 1.19 → 0.10 GiB; throughput +22.5%, alloc/op −17.7% (§17, §18) | U2 5.55 GiB, backlog S3–S6 |
 | SET → constraint registry → lpg node-property shard locks (row 37) | `reserveSetPropertyGen` 1.79 s mutex + 1.85 s block (R8) | #3082 `546efbe8` | 1.11 s + 1.10 s (§12) | Q11 below threshold; shard lock inherent (U10, #3091) |
+| MVCC reclaim → node-property shard locks → readers (row 37) | `reclaimPropVersions` write-locked every shard per pass: 5.9 M write-locks/run, **95.8%** on shards without history; waiters' delay 1.71/1.93 s; abort sweeps 0 ms (#3108) | #3108 `590d85f3` (read-locked pre-check) | waiters' delay median **1187 → 104 ms** (5 paired runs, every new run below every base run) (#3108) | write-locked unlink of real history, inherent (#3108) |
 | Cypher introspection and scan → lpg (row 25) | `PropertyKeysInUse` 6.08 s, 1.80 GiB (R5); `AllNodesScan.Init` 4.88 GiB (R7) | #3081 `1a8e25ae` | 0.54 s, < 0.5 MiB; 21 MiB (§12) | `AllNodesScan.Next` boxing (Q10), part of U1 |
 | checkpoint → snapshot writer (row 17) | 1 MiB `bufio` writers ≈ 360 MiB (R9) | #3083 `e71407c1` | row 17 0.50 → 0.16 GiB (§12) | none ranked |
 | csr projection → search analytics (PageRank, BiBFS) | transpose of a symmetric CSR 13.96 GiB, 3.24 s (R1); `IsSymmetric` 53 MiB (V3); intermediate directed CSR ≈ 0.27 GiB (P2) | #3078 `cfd64290`, `e7b12a60` | transpose 0 on row 20; row 20 alloc −47%; rows 09 + 33 536 → 366 MiB (§12) | one-pass build +27% CPU, accepted by the user (#3078) |
@@ -744,7 +745,7 @@ After iteration 3 (**paired example-26 runs, not sweep totals**; units as record
 | Q6, Q8 | fixed (#2732, #3090) | §18 |
 | Q7 / U2 read build | S1 + S2 fixed (#3096/#3097); S3–S6 backlog: #3098 S3 row-bind and closures, #3099 S4 access-path cache, #3100 S5 build-object size, #3101 S6 shared operator tree | #2391, #3097; titles of #3099–#3101; sprint 367 DECISION 155 |
 | Q9 / U10 shard lock | inherent: cross-node share 1.13/1.35 s instrumented, ≈ 0.6–0.8 s scaled | #3091 |
-| whole-shard sweeps (`reclaimPropVersions`, abort-reclaim) | **undecided, not investigated**: 2.31/2.26 s in #3091's instrumented runs; not costed against the iteration-3 threshold | #3091 |
+| whole-shard sweeps (`reclaimPropVersions`, abort-reclaim) | fixed (#3108, `590d85f3`): all of it is `reclaimPropVersions` (abort sweeps 0 ms); 95.8% of 5.9 M write-locks/run hit shards without history; waiters' delay median 1187 → 104 ms (5 paired runs); residual write-locked unlink inherent | #3091, #3108 |
 | Q10–Q15, U8, U9 | below threshold | §13, §19 |
 | U1 id boxing (5.83 GiB), U7 string boxing (joins U1) | user-dropped (row-model change): measurement recorded, no task | §19; sprint 367 DECISION 155 |
 | U3 pair/type column builds | inherent (#3103) | #3103 |
@@ -763,7 +764,8 @@ After iteration 3 (**paired example-26 runs, not sweep totals**; units as record
 - **Verdict: example-driven optimisation of GoGraph has reached insignificant returns at
   `8932f1f3`.** The last change is below the 1% threshold; every remaining module residual is
   inherent, idle, below threshold, user-dropped (U1, U5), or in the backlog as design work
-  (S3–S6, #3098–#3101). One item is not decided: the whole-shard sweeps noted in #3091.
+  (S3–S6, #3098–#3101). **No residual remains undecided**: the whole-shard sweeps noted in
+  #3091 were fixed by #3108.
 
 ## 28. Bugs found and claims corrected
 
@@ -774,4 +776,5 @@ After iteration 3 (**paired example-26 runs, not sweep totals**; units as record
 | **#3095** | test-owned WAL writers outlived their test directory; not introduced by this sprint (26/2 200 at `c794a1ed`) | `TestEnginesB2WALClosedWhenTestEnds_3095` | #3095 |
 | #3089 correction | presence 2.02 → 0.69 s **not reproduced**: 2.30 → 1.81 s in the sweep | — | #3089, §18 |
 | #3090 correction | premise wrong: values already grew amortised; the copy was the per-version column headers (384 B for ≈ 12 B of value) | — | #3090 |
+| #3109 correction | example 37's `ladder.IX11` was a harness check that could not fail on serialisation (a forced-serialisation mutant passed it); present at `c794a1ed`, **not a module regression**; fixed in `5b3d50af` (fixed check 15/15 pass, mutant 15/15 fail) | fixed IX11 check | #3109 |
 | other refuted premises | #3080 step (b) O(1) slot read; #2732 original cause; #2391 recorded split; #3091 shard collision | — | task logs |
