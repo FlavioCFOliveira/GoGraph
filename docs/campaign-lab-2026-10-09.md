@@ -486,3 +486,200 @@ python3 $L2/agg.py $L2/owner.contention.tsv delay line 30
 go tool pprof -nodefraction=0 -list 'cypher.buildRelationshipValueFromRow$' $L2/out/elevated/26_social_scale_bench/cpu.pprof
 go tool pprof -nodefraction=0 -peek 'GetEdgePropertyAsOf$|EdgeCreateCount$' $L2/out/elevated/26_social_scale_bench/cpu.pprof
 ```
+
+# Laboratory iteration 3, 2026-10-12 — the same sweep at `7b8120df`
+
+Sprint 367, rmp #3102. The iteration-1 sweep was re-run at HEAD `7b8120df` with the same
+driver, passes, examples, scales and owner reader, so every row compares 1:1 with sections 2
+and 11. **No module code was changed.** Every number below was collected in this session.
+
+## 16. Method and environment (iteration 3)
+
+- Same as sections 1 and 10, with these differences: binaries rebuilt (`LAB_REBUILD=1`,
+  37 binaries, 25 s, outside every timed window); `GOCACHE` on its default on-disk location,
+  `GOTMPDIR` on disk; graph data under `/Volumes/GoGraphRAM/lab3102` (deleted at the end).
+  `$L3` = `/private/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/755b6bf2-7deb-4d58-a983-07059400361e/scratchpad/lab3`.
+- **Peak-RSS harness fix.** `$L3/rss.sh` strips the query with a quoted, literal pattern
+  (`${a%" $Q"}`) and runs `set -f` before word splitting, so `[:FRIEND]` is no longer read as
+  a glob bracket. `24_query` ran with the exact query and exited 0 (1 432 MiB).
+- Host: Apple M4, 10 cores, Darwin 27.0.0 arm64, Go 1.27.2, tree clean at `7b8120df`,
+  `GOGRAPH_FSYNC_LATENCY=off`. Load1: start 1.34 (top processes WindowServer 31%,
+  `osascript` 26%, `system_profiler` 21%, iTerm 21% of one core); `default` 13:14–13:20
+  (to 2.81); `elevated` 13:20–13:29 (2.74); peak RSS 13:29–13:34 (4.07); `contention`
+  13:34–13:38 (4.08); A/B repeat 13:39–13:46 (2.43–5.13). Every row ran alone within its pass.
+- **A/B and repeat.** `$L3/repeat.sh` ran rows 26 (2 + 2), 35 (3 + 3) and 36 (3 + 3)
+  **interleaved**, A = the iteration-2 binaries (`6b399a3b`), B = HEAD, CPU and heap profiles
+  only, plus one same-code repeat of rows 03 and 20 at HEAD.
+- **Noise.** Same code, same profiles: row 03 50.54 → 49.93 s (−1.2%); row 26 B1/B2 −1.5%,
+  A1/A2 −0.6%; row 36 spread 10–14% within an arm; row 20 97.33 → 106.65 s (+9.6%, load1 up
+  to 5.13). The `elevated`-vs-`contention` comparison (15 rows above 2 s; the second pass adds
+  mutex and block profiling) gives −3.4% to +10.7% per row, aggregate +1.3%. **A single-run
+  per-row delta under ±10% is not a finding this iteration**; rows 26, 35 and 36 are judged on
+  the interleaved A/B only.
+
+## 17. Manifest `c794a1ed` → `6b399a3b` → `7b8120df`
+
+**Totals (`elevated`, 42 rows).** CPU **595.56 → 443.90 → 429.80 s** (−3.2% vs iteration 2,
+−27.8% vs iteration 1); module **383.88 → 249.06 → 233.24 s** (−6.4%, −39.2%); harness
+54.57 → 56.03 → 54.54 s; unowned 157.11 → 138.81 → 142.02 s. Allocation **160.96 → 135.67 →
+125.22 GiB** (−7.7%, −22.2%); module **144.47 → 119.13 → 108.38 GiB** (−9.0%, −25.0%).
+Contention pass: CPU 463.57 → 317.65 → 304.39 s; delay 398.37 → 365.22 → 229.97 s (module
+274.86 → 263.05 → 127.99 s, −51% vs iteration 2).
+
+Row 37's `elevated` run failed in iteration 2 and passed here; its `contention` run failed
+here on the same intermittent harness check (`ladder.L22 level=8 crash_image_after_checkpoint:
+image taken false`). Its passing runs compare: 16.41 s (iteration 2, `contention`) → 16.41 s
+(HEAD, `elevated`). Excluding row 37, module CPU 246.76 → 229.91 s (−6.8%) and module
+allocation 114.54 → 101.23 GiB (−11.6%). Row 26 accounts for 10.58 s of the 15.82 s module-CPU
+drop and 10.81 GiB of the 10.75 GiB module-allocation drop; the remaining per-row CPU deltas
+are inside the noise band.
+
+Exit status: every `default` row exited 0 (11 driver `cpu-total-zero` FAILs — instrument,
+short runs with no CPU sample; 10 in iteration 2, the set varies run to run); `elevated` 31
+exits 1 on the same harness check as iterations 1 and 2; `24_init` `cpu-total-zero`. No row
+showed a module defect.
+
+| row | exit d/e (3 points) | CPU s | module CPU s | alloc GiB | module alloc GiB | peak RSS MiB |
+|---|---|---|---|---|---|---|
+| 01_basic | 0/0 → 0/0 → 0/0 | 1.29 → 1.28 → 1.31 | 0.30 → 0.34 → 0.32 | 1.06 → 1.04 → 1.06 | 0.97 → 0.95 → 0.95 | 474 → 487 → 494 |
+| 02_property_graph | 0/0 → 0/0 → 0/0 | 1.56 → 1.56 → 1.61 | 0.43 → 0.47 → 0.45 | 0.72 → 0.72 → 0.74 | 0.71 → 0.71 → 0.72 | 308 → 297 → 303 |
+| 03_advanced_algorithms | 0/0 → 0/0 → 0/0 | 45.66 → 49.35 → 50.54 | 45.11 → 49.04 → 50.07 | 0.06 → 0.05 → 0.05 | 0.05 → 0.04 → 0.04 | 33 → 30 → 31 |
+| 04_persistence | 0/0 → 0/0 → 0/0 | 3.82 → 3.67 → 3.68 | 2.19 → 2.07 → 2.16 | 1.92 → 1.86 → 1.93 | 1.91 → 1.85 → 1.91 | 292 → 268 → 274 |
+| 05_out_of_core | 0/0 → 0/0 → 0/0 | 0.40 → 0.37 → 0.39 | 0.11 → 0.11 → 0.10 | 0.30 → 0.26 → 0.29 | 0.28 → 0.25 → 0.27 | 177 → 181 → 176 |
+| 06_csv_import | 0/0 → 0/0 → 0/0 | 1.69 → 1.65 → 1.58 | 1.17 → 1.12 → 1.05 | 1.42 → 1.47 → 1.43 | 1.09 → 1.13 → 1.11 | 593 → 592 → 592 |
+| 07_graphml_roundtrip | 0/0 → 0/0 → 0/0 | 2.12 → 2.26 → 2.17 | 1.39 → 1.44 → 1.48 | 1.85 → 1.85 → 1.79 | 1.82 → 1.83 → 1.77 | 592 → 591 → 591 |
+| 08_pagerank | 0/0 → 0/0 → 0/0 | 5.97 → 5.97 → 5.98 | 2.29 → 2.34 → 1.88 | 0.68 → 0.69 → 0.70 | 0.62 → 0.64 → 0.65 | 300 → 302 → 299 |
+| 09_leiden | 0/0 → 0/0 → 0/0 | 2.96 → 2.89 → 2.93 | 1.31 → 1.26 → 1.37 | 2.21 → 2.15 → 2.12 | 2.20 → 2.15 → 2.12 | 864 → 746 → 742 |
+| 10_dimacs9_routing | 0/0 → 0/0 → 0/0 | 2.74 → 2.69 → 2.74 | 2.32 → 2.26 → 2.43 | 1.38 → 1.36 → 1.37 | 1.37 → 1.35 → 1.36 | 244 → 363 → 242 |
+| 11_social_network | 0/0 → 0/0 → 0/0 | 129.78 → 3.86 → 3.76 | 129.15 → 2.08 → 1.92 | 0.47 → 0.33 → 0.33 | 0.45 → 0.31 → 0.31 | 218 → 181 → 184 |
+| 12_build_dependency | 0/0 → 0/0 → 0/0 | 0.63 → 0.65 → 0.59 | 0.15 → 0.16 → 0.19 | 0.35 → 0.33 → 0.35 | 0.30 → 0.30 → 0.31 | 251 → 250 → 250 |
+| 13_network_reliability | 0/0 → 0/0 → 0/0 | 2.90 → 2.81 → 2.90 | 2.35 → 2.20 → 2.35 | 0.07 → 0.07 → 0.07 | 0.05 → 0.05 → 0.05 | 73 → 73 → 73 |
+| 14_routing_alternatives | 0/0 → 0/0 → 0/0 | 39.96 → 39.38 → 39.93 | 0.54 → 0.46 → 0.60 | 6.12 → 6.22 → 6.19 | 0.05 → 0.04 → 0.04 | 38 → 37 → 38 |
+| 15_task_assignment | 0/0 → 0/0 → 0/0 | 3.26 → 3.30 → 3.39 | 2.80 → 2.81 → 2.93 | 0.30 → 0.30 → 0.28 | 0.20 → 0.21 → 0.19 | 211 → 211 → 211 |
+| 16_centrality_analytics | 0/0 → 0/0 → 0/0 | 9.07 → 9.15 → 9.29 | 8.95 → 9.00 → 9.19 | 0.10 → 0.09 → 0.09 | 0.10 → 0.09 → 0.09 | 29 → 29 → 26 |
+| 17_transactional_log | 0/0 → 0/0 → 0/0 | 0.53 → 0.51 → 0.48 | 0.40 → 0.41 → 0.40 | 0.50 → 0.16 → 0.17 | 0.49 → 0.16 → 0.17 | 25 → 20 → 20 |
+| 18_oocore_pipeline | 0/0 → 0/0 → 0/0 | 1.47 → 1.50 → 1.47 | 0.34 → 0.48 → 0.47 | 0.82 → 0.86 → 0.86 | 0.66 → 0.71 → 0.71 | 344 → 335 → 340 |
+| 19_pattern_query | 0/0 → 0/0 → 0/0 | 9.73 → 9.77 → 9.29 | 3.73 → 3.44 → 3.04 | 3.81 → 3.94 → 3.80 | 3.76 → 3.89 → 3.74 | 314 → 320 → 310 |
+| 20_concurrent_reads | 0/0 → 0/0 → 0/0 | 114.13 → 100.64 → 97.33 | 61.37 → 57.14 → 52.03 | 33.66 → 17.81 → 18.37 | 32.29 → 16.45 → 17.02 | 145 → 101 → 103 |
+| 21_typed_recovery | 0/0 → 0/0 → 0/0 | 11.28 → 11.29 → 11.39 | 8.43 → 8.30 → 8.35 | 2.12 → 2.09 → 2.19 | 2.09 → 2.06 → 2.16 | 372 → 332 → 359 |
+| 22_cypher | 0/0 → 0/0 → 0/0 | 4.43 → 4.29 → 4.12 | 2.32 → 2.14 → 2.16 | 1.74 → 1.65 → 1.63 | 1.70 → 1.61 → 1.58 | 555 → 547 → 540 |
+| 23_bolt_server | 0/0 → 0/0 → 0/0 | 2.97 → 2.84 → 2.81 | 0.86 → 0.54 → 0.70 | 0.63 → 0.68 → 0.65 | 0.48 → 0.50 → 0.48 | 116 → 118 → 113 |
+| 24_init | 0/0 → 0/0 → 0/0 | 0.00 → 0.00 → 0.00 | 0.00 → 0.00 → 0.00 | 0.01 → 0.00 → 0.01 | 0.01 → 0.00 → 0.00 | 11 → 9 → 9 |
+| 24_seed | 0/0 → 0/0 → 0/0 | 3.29 → 3.44 → 3.42 | 2.23 → 2.23 → 2.10 | 4.38 → 4.30 → 4.36 | 4.35 → 4.28 → 4.33 | 2122 → 1778 → 2123 |
+| 24_stats | 0/0 → 0/0 → 0/0 | 5.60 → 5.84 → 5.81 | 3.31 → 3.62 → 3.48 | 3.87 → 3.98 → 3.95 | 3.87 → 3.98 → 3.95 | 1460 → 1396 → 1431 |
+| 24_query | 0/0 → 0/0 → 0/0 | 4.35 → 4.44 → 4.40 | 2.37 → 2.00 → 2.13 | 3.79 → 3.73 → 3.78 | 3.78 → 3.72 → 3.78 | 1958 → 2013 ¹ → 1432 |
+| 24_plandiff | 0/0 → 0/0 → 0/0 | 14.84 → 15.14 → 13.11 | 8.74 → 9.99 → 8.22 | 8.84 → 8.82 → 6.21 | 8.83 → 8.81 → 6.20 | 1472 → 1436 → 1423 |
+| 24_snapshot | 0/0 → 0/0 → 0/0 | 4.93 → 5.11 → 5.05 | 2.66 → 2.46 → 2.36 | 4.46 → 4.43 → 4.38 | 4.45 → 4.43 → 4.37 | 1454 → 1392 → 1420 |
+| 25_software_house_api | 0/0 → 0/0 → 0/0 | 24.23 → 19.25 → 17.93 | 11.29 → 5.44 → 5.08 | 9.55 → 3.48 → 3.41 | 9.52 → 3.45 → 3.38 | n/m |
+| 26_social_scale_bench | 0/0 → 0/0 → 0/0 | 77.18 → 72.55 → 59.64 | 49.43 → 50.12 → 39.54 | 32.69 → 32.51 → 21.70 | 32.66 → 32.49 → 21.68 | 3469 → 3558 → 3460 |
+| 27_concurrent_txn | 0/0 → 0/0 → 0/0 | 0.86 → 0.86 → 0.84 | 0.39 → 0.30 → 0.36 | 0.56 → 0.56 → 0.56 | 0.52 → 0.52 → 0.53 | 54 → 56 → 56 |
+| 28_negative_weights | 0/0 → 0/0 → 0/0 | 9.51 → 9.40 → 9.58 | 9.32 → 9.07 → 9.41 | 1.37 → 1.36 → 1.37 | 1.36 → 1.36 → 1.35 | 965 → 965 → 965 |
+| 29_all_pairs | 0/0 → 0/0 → 0/0 | 2.91 → 2.89 → 2.89 | 2.04 → 2.04 → 2.01 | 0.16 → 0.16 → 0.16 | 0.15 → 0.15 → 0.16 | 129 → 129 → 129 |
+| 30_min_spanning_tree | 0/0 → 0/0 → 0/0 | 0.44 → 0.44 → 0.45 | 0.16 → 0.15 → 0.15 | 0.42 → 0.38 → 0.41 | 0.31 → 0.28 → 0.30 | 220 → 213 → 215 |
+| 31_metrics_observability | 0/1 → 0/1 → 0/1 | 1.08 → 1.18 → 1.34 | 0.25 → 0.31 → 0.48 | 0.71 → 0.71 → 0.71 | 0.65 → 0.64 → 0.65 | 273 → 271 → 262 (exit 1) |
+| 32_euler | 0/0 → 0/0 → 0/0 | 4.67 → 4.69 → 4.75 | 0.10 → 0.04 → 0.10 | 7.04 → 7.04 → 7.04 | 0.29 → 0.27 → 0.29 | 7228 → 7228 → 4827 |
+| 33_generation_swap | 0/0 → 0/0 → 0/0 | 5.49 → 5.07 → 4.85 | 5.11 → 4.68 → 4.46 | 1.03 → 0.94 → 1.01 | 1.02 → 0.93 → 1.00 | 173 → 183 → 182 |
+| 34_bolt_transactions | 0/0 → 0/0 → 0/0 | 1.15 → 1.20 → 1.18 | 0.28 → 0.31 → 0.25 | 0.63 → 0.65 → 0.66 | 0.59 → 0.61 → 0.62 | 270 → 295 → 284 |
+| 35_mvcc_mixed_workload | 0/0 → 0/0 → 0/0 | 13.06 → 13.08 → 13.19 | 2.77 → 2.80 → 2.55 | 9.25 → 9.22 → 9.61 | 8.63 → 8.62 → 8.82 | 43 → 43 → 48 |
+| 36_mvcc_snapshot_topology | 0/0 → 0/0 → 0/0 | 6.13 → 5.91 → 5.28 | 1.75 → 1.59 → 1.59 | 2.85 → 2.73 → 2.06 | 2.84 → 2.73 → 2.06 | 48 → 47 → 45 |
+| 37_mvcc_write_contention | 0/1 → 0/1 → 0/0 | 17.49 → 11.73 → 16.41 ² | 3.67 → 2.30 → 3.33 ² | 7.08 → 4.65 → 7.38 ² | 6.98 → 4.59 → 7.15 ² | 87 → 104 → 112 |
+
+¹ Iteration 2's value is the manual re-run (section 10). ² Iteration 2's `elevated` run
+failed early; compare on the passing runs (above). Peak RSS is one run per row: row 32
+(7 228 → 4 827 MiB, harness-owned allocation unchanged) and row 24_seed (1 778 → 2 123 MiB,
+back to its iteration-1 value) are not attributed. Row 35 runs for a fixed duration, so its
+totals are not per-operation; see section 18.
+
+**Interleaved A/B (A = `6b399a3b`, B = `7b8120df`).**
+
+| row | CPU s A → B | module CPU s A → B | alloc GiB A → B | per-operation |
+|---|---|---|---|---|
+| 26 (n = 2 + 2) | 74.26, 73.84 → 62.41, 61.45 (**−16.4%**) | 47.63, 46.79 → 38.76, 41.90 (−14.6%) | 32.86, 32.80 → 21.58, 21.68 (**−34.1%**) | fixed workload |
+| 36 (n = 3 + 3) | 6.09, 5.90, 6.73 → 5.38, 5.00, 5.51 (**−15.1%**) | 1.66 → 1.55 mean (within noise) | 2.80, 2.71, 2.88 → 2.06, 2.01, 2.08 (**−26.7%**) | fixed workload |
+| 35 (n = 3 + 3) | 13.35, 13.15, 12.76 → 13.13, 13.07, 12.99 (fixed duration) | — | module 8.25 → 8.32 GiB mean | summed phase throughput 2.21 M → 2.70 M ops/s (**+22.5%**); module allocation per operation **4 012 → 3 304 B (−17.7%)** |
+
+## 18. Verification of the iteration-2 fixes
+
+| commit / task | claim | measured at HEAD (`elevated`, cumulative) | verdict |
+|---|---|---|---|
+| `4e9c48bb` #3088 `edgeInstanceIdxFor` removed | correctness; the positional fallback goes | `edgeInstanceIdxFor` 1.51 s → **0**; `EdgeCreateCount` (`ReadView` + `Graph`) 1.50 + 1.49 s → **0** | **moved as claimed** (cost side; the correctness regression test is not re-run here) |
+| `d56bfbe6` #3089 per-`ReadView` slot index | row 26 type lookup 5.49 → 3.22 s, presence 2.02 → 0.69 s | `EdgeLabelsByID` **6.83 → 3.79 s (−45%)**, `slotLabelsForPair` 6.20 → 0.33 s; `ReadView.GetEdgeProperty` 5.78 → **4.76 s (−18%)** (`edgePropertyBySlots` 3.21 s, `pairIDs` 0.93 s); `ReadView.EdgeHasProperty` 2.30 → **1.81 s (−21%)** (`edgeHasPropertyBySlots` 1.07 s, `pairIDs` 0.37 s); new cost `buildSourceSlots` 1.69 s and **692 MiB** | **type lookup moved as claimed**; presence moved **less** than claimed at the `ReadView` call (1.81 s, not 0.69 s); property read moved partly |
+| `7e7b854a` #3090, `ce609ce6` #3093 shared append buffers | row 26 site 5 077 → 1 518 MB | `GrowSlotWithValue` **5 068.9 → 1 542.4 MiB (−70%)** | **moved as claimed** |
+| `280ce211` #2732 aggregations do not materialise nodes | count DISTINCT node −74% allocs | `nodePropsToExprMap` **10 984 → 733 MiB, 3.43 → 0.23 s**; `populateRowCtx` 17.23 → 5.61 GiB; row 24_plandiff alloc −30%, row 36 −27% (A/B) | **moved as claimed** |
+| `85f8ba86` #3094 lint, dead forward-CSR helpers | no runtime claim | — | not measurable here |
+| `b737b3a2`, `3d1be4dd`, `138f7bc3` #3095 | test-only | — | not exercised by examples |
+| `3f8bddfc` #3096/#3097 seek once, layout memo | point read −19%, 82 → 61 allocs; example 35 `copySchema` 766 → 50 B/exec | row 35 `copySchema` **1.19 → 0.10 GiB (−92%)** at +22.5% more operations; read build per operation −25%; `indexSeekWouldFire` 0.72 → 1.23 GiB (the seek is now built there and handed off) | **moved as claimed** |
+| `7b8120df` #3092 example 20 PageRank budget | block −67% | row 20 `pagerank.go:866` + `:930` block **185.63 → 60.13 s (−68%)**; row 20 CPU 100.36 → 101.81 s, unowned 33.98 → 34.39 s (contention pass); 8-worker throughput 206 → 212 reads/s | **block moved as claimed**; CPU and throughput did **not** move — the removed delay was parked-worker wait, not work |
+
+## 19. Residual module-owned costs at HEAD
+
+**Significance threshold** (as section 13, recomputed on this sweep): **1% of module CPU =
+2.33 s**, **1% of module allocation = 1.08 GiB** (`elevated`), **1% of module contention delay
+= 1.28 s** (`contention`), at a non-idle site, not inherent to the algorithm or workload.
+
+| # | site | cost (row) | hypothesis | risk | verdict |
+|---|---|---|---|---|---|
+| **U1** | integer ids boxed into `expr.Value` per row: `cypher/exec/expand.go:1284–1286` (`IntegerValue(srcID/edgeID/dstID)`), `scan_label.go:206`, `scan_all.go:149` | **5.83 GiB (5.4%)** (26, 25, 24_plandiff, 35, 19); `Expand.buildRow` 1.52 s flat (26) | `IntegerValue` is an `int64` stored in the `Value` interface, so every id above 255 is a heap object. **Established by code**; the remedy (ids carried unboxed, e.g. in the `Chunk` `i64` columns) changes the row representation | medium-high; **row-model change — user decision** | **worth a task** |
+| **U2** | `cypher.(*Engine).buildReadPhysical` per cached execution (row 35) | **5.55 GiB (5.1%)**: scaffold 1.67 GiB flat, range seek 1.00 GiB, `newRowBindPlan` 0.52 GiB, predicate/projection closures, operator structs | plan-pure separation | per S3–S6 | **worth a task — already backlog S3 (rowbind/closures), S4 (seek memo, ~1.0 GiB here), S5 (scaffold), S6 (operator tree)** |
+| **U3** | `cypher.csrPairAndColumnCachedFor` → `buildRelTypeColumn` 5.72 s (`encodeSlotTypes` 2.05 s) | **7.99 s (3.4%), 2.81 GiB (2.6%)** (26) | the CSR pair and type column are cached per graph version; the number of builds per version in row 26 is **not measured**; rebuilds after each write phase would make it inherent | unknown until measured | **worth a measurement task** (count builds per version, then decide) |
+| **U4** | `cypher/expr.NewLazyRelationshipValue` (`value.go:809`), one heap object per relationship per row | **2.72 GiB (2.5%)**, 0.66 s (26) | the lazy value is returned by pointer; a value-typed or row-scoped form would remove one allocation per relationship. **Hypothesised** | medium (value lifetime crosses `Result`) | **worth a task** |
+| **U5** | cypher ↔ lpg id → key → id round trip in relationship materialisation: `api.go:16869–16870` `Mapper.Resolve` 1.10 s, then `ReadView.pairIDs` `Mapper.Lookup` 1.31 s | **2.41 s (1.03%)** (26) | the caller holds `srcID`/`dstID`; ID-keyed `GetEdgeProperty`/`EdgeHasProperty` variants remove both directions (iteration-2 Q4 remainder). **Established by profile + code flow** | low | **worth a task** (join with U4, same path) |
+| U6 | `graph/mvcc.NewCommitInfo` (`mvcc.go:98`) | 1.45 GiB (1.3%) (26 load, 24_*) | one record per committed transaction; lifetime is the version chain's | — | inherent (not ranked) |
+| U7 | `graph/lpg.StringValue` (`property.go:118`) | 1.11 GiB (1.02%) (26, 19) | string boxed into `PropertyValue.v`; at threshold | medium (property model) | at threshold; join U1's decision |
+| U8 | `cypher/exec.NewChunk` (`chunk.go:176`) | 1.08 GiB (1.00%) (37) | per-statement `i64` column | low | at threshold; insignificant |
+| U9 | `ReadView.buildSourceSlots` (#3089 index) | 1.69 s (0.72%), 692 MiB (0.62%) (26) | single-entry index rebuilt on each source switch | low | insignificant |
+| U10 | row 37 node-property shard lock `property.go:391/358`, reader `snapshot_read.go:217` | 7.88 s mutex + 5.79 s + 5.04 s block | the deliberate hot set; #3091 measured cross-node collisions below threshold | — | inherent (closed by #3091) |
+| U11 | `graph/lpg/mvcc_vacuum.go:717` | 17.32 s block (26, 22, 34) | the vacuum loop's idle `select` | — | idle |
+| U12 | row 20 PageRank park `pagerank.go:866/930` | 60.13 s block | parked budgeted workers; CPU and throughput unchanged by #3092 | — | idle |
+
+Re-confirmed and unchanged (inherent or tracked): WAL replay per `24_*` process
+(`recovery.go:2207`, 4.47 GiB), row 20 search pools (#2382; `search.go:164` 4.19 GiB),
+`adjlist.go:971` copy-on-write entries (2.74 GiB), `txn.go:1379` bulk redo (2.49 GiB),
+Brandes (row 03, 50.07 s), PageRank `runRange`, Johnson, WAL group sync in row 21 (7.04 s).
+No vacuous code was found in this iteration's sites: every removed path (#3088) shows zero
+residual samples, and no new site returns a discarded result.
+
+**Cross-component reading.** Row 26's relationship materialisation remains the largest chain
+(`buildRelationshipValueFromRow` 8.84 s, 5.02 GiB, from 15.02 s / 4.58 GiB: CPU −41%, allocation +0.44 GiB, the #3089 index): Expand boxes the
+ids (U1) → `cypher` resolves ids to string keys (U5) → `graph/lpg` looks the keys up again
+(U5) → the slot index (#3089) → one lazy value object per relationship (U4); the type column
+the Expand reads is built in `cypher` from the `graph/csr` pair (U3). The second chain is the
+read build (U2, cypher → planner → exec), already designed in `docs/design-plan-pure-separation.md`.
+
+## 20. Significance and campaign verdict
+
+- **Moved this iteration:** module CPU −6.4% (−15.82 s), module allocation −9.0%
+  (−10.75 GiB), module contention delay −51% (−135.06 s, parked wait). Beyond the noise band
+  only on rows 26, 35, 36 (interleaved A/B) and on the site-level deltas of section 18.
+- **Significant residuals not in the backlog:** U1 (5.4% alloc, row-model change), U3 (3.4%
+  CPU, measurement first), U4 (2.5% alloc), U5 (1.03% CPU). **In the backlog:** U2 = S3–S6.
+- **Verdict: one more optimisation iteration is warranted, narrowly** — on the row-26
+  relationship path (U5 + U4 together, low/medium risk; U3 measured first). U1 is the
+  largest item but changes the row representation and goes to the user as an architecture
+  decision, as S4 and S6 do. Every other module site is below the threshold, idle, or
+  inherent; once U3–U5 are done or refused, the campaign has reached diminishing returns
+  for example-driven work.
+
+## 21. Limits (iteration 3)
+
+- Noise is wider than in iterations 1 and 2 (load1 up to 5.13): ±10% per single-run row.
+- A/B covers rows 26, 35, 36 only. Row 35's per-operation figure assumes equal phase
+  durations (the example reports per-phase throughput, not counts).
+- U3's build count, U4's and U7's remedies are hypotheses; U1's remedy is not designed.
+- Row 25's peak RSS remains unmeasured; peak RSS has no repeat.
+
+## 22. Reproduction (iteration 3)
+
+```bash
+cd /Users/flaviocfo/dev/xumiga/GoGraph
+$L3/sweep.sh            # default (LAB_REBUILD=1), elevated, rss.sh (fixed), contention
+$L3/repeat.sh           # interleaved A/B rows 26, 35, 36; repeats rows 03, 20
+$L3/owner/owner $L3/out/elevated/*/{cpu,heap}.pprof > $L3/owner.elevated.tsv
+$L3/owner/owner $L3/out/contention/*/*.pprof       > $L3/owner.contention.tsv
+$L3/owner/owner $L3/repeat/*/{cpu,heap}.pprof      > $L3/owner.repeat.tsv
+python3 $L3/compare3.py <scratchpad>                # section 17 table (lab1, lab2, lab3)
+python3 $L3/fn.py '<function regex>' $L2/owner.elevated.tsv $L3/owner.elevated.tsv   # section 18
+python3 $L3/agg.py $L3/owner.elevated.tsv alloc_space line 40
+python3 $L3/agg.py $L3/owner.contention.tsv delay line 30
+python3 $L3/agg.py $L3/owner.repeat.tsv cpu summary
+```
