@@ -1061,3 +1061,49 @@ python3 $L5/agg.py $L5/owner.elevated.tsv cpu fn 40
 python3 $L5/agg.py $L5/owner.contention.tsv delay line 30
 python3 $L5/agg.py $L5/owner.repeat6.tsv {cpu,alloc_space,delay} summary
 ```
+
+# Campaign close, 2026-10-12
+
+## 45. Final significance verdict
+
+Section 42 left two residuals marginally above the 1% thresholds recomputed at `c52a6380`
+(module CPU **2.38 s**, allocation **1.03 GiB**, contention delay **1.36 s**). Both were worked
+and measured in paired example-37 runs.
+
+| # | site | before | after (paired, example 37) | fix | decision |
+|---|---|---|---|---|---|
+| **U8** | `exec.NewChunk` | 1.11 GiB (ledger); 1.1–2.2 GiB paired | **0.09–0.15 GiB** | #3114 `3e2f9a2d`: pooled node-id chunks for counted label scans; small filtered count −51% time, −95% B/op | **below threshold** (1.03 GiB) |
+| **Q12** | `lpg.appendSuspects` | 1.57 s block (ledger) | block delay **−35%** on the life shards; CPU **−51%** | #3115 `82c0dfb5`: per-shard emptiness flags skip the 92% of shards holding nothing | **below threshold**: ≈1.02 s (derived) against 1.36 s |
+
+- **Q12 is a derived estimate.** ≈1.02 s is the paired −35% applied to the 1.57 s ledger
+  figure, not a full-sweep re-measurement. The remaining label-shard wait is inherent writer
+  overlap.
+- **Verdict:** every residual in section 41 is now fixed, inherent, idle, below threshold,
+  user-dropped, or in the backlog (S3–S6, #3098–#3101). **Returns are insignificant; the
+  iterative campaign stops.**
+- **Limit:** no sweep was run after #3114 and #3115; their effect is established by paired
+  example-37 runs only.
+
+## 46. Cross-component result
+
+The synergy evidence is section 24: 13 cross-component chains, each with its fix and measured
+after-value. Module totals `c794a1ed` → `c52a6380` (section 38): CPU 383.88 → 237.77 s
+(**−38.1%**), allocation 144.47 → 103.20 GiB (**−28.6%**), contention delay 274.86 → 136.44 s
+(**−50.4%**).
+
+## 47. Sprint-close gate
+
+- **`make ci` at `7b2fd112`:** every package passed — race detector, openCypher TCK
+  **3897/3897**, crash/recovery battery, kgverify **20/20**.
+- **`test-short` exited 2** only on hard per-package time ceilings that predate the sprint:
+  `internal/sim` 1658.8 s > 780 s, `cypher` 559.6 s > 420 s, `bench/csrorder` 247.2 s > 240 s.
+  Tracked in backlog #3067; per CLAUDE.md, test-time budgets do not gate.
+- **Test-only gate fixes at close:**
+
+| task | commit | defect |
+|---|---|---|
+| #3116 | `3e6c7024` | schema-walk gate blind after the layout memo |
+| #3117 | `bbbee294` | free-space floor measured the RAM drive instead of the repository volume |
+| #3118 | `7b2fd112` | contention ranking compared without a tie tolerance |
+
+- **Merge:** sprint 367 merged into `develop` at `4d1947e8`.
