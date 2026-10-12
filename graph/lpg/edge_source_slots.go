@@ -182,6 +182,44 @@ func (v *ReadView[N, W]) propsCurrent(s *sourceSlots) bool {
 // through s: the same label ids in the same order. ok is false when s no longer
 // describes the entry the view resolves.
 func (v *ReadView[N, W]) edgeLabelsBySlots(s *sourceSlots, dstID graph.NodeID) (labels []string, ok bool) {
+	var idBuf [4]LabelID
+	ids, ok := v.edgeLabelIDsBySlots(s, dstID, idBuf[:0])
+	if !ok || len(ids) == 0 {
+		return nil, ok
+	}
+	g := v.g
+	out := make([]string, 0, len(ids))
+	for _, lid := range ids {
+		if name, has := g.reg.Resolve(lid); has {
+			out = append(out, name)
+		}
+	}
+	return out, true
+}
+
+// forEachEdgeLabelBySlots is [Graph.ForEachEdgeLabelByIDAsOf] for (s.src,
+// dstID) answered through s: the same names in the same order, with no result
+// slice (rmp #3106). It returns false, visiting nothing, when s is stale.
+func (v *ReadView[N, W]) forEachEdgeLabelBySlots(s *sourceSlots, dstID graph.NodeID, visit func(name string)) bool {
+	var idBuf [4]LabelID
+	ids, ok := v.edgeLabelIDsBySlots(s, dstID, idBuf[:0])
+	if !ok {
+		return false
+	}
+	for _, lid := range ids {
+		if name, has := v.g.reg.Resolve(lid); has {
+			visit(name)
+		}
+	}
+	return true
+}
+
+// edgeLabelIDsBySlots appends to ids the distinct label ids of (s.src, dstID)
+// in the order [Graph.EdgeLabelsByIDAsOf] collects them: the pair's slots in
+// ascending position, then the overflow. ok is false when s no longer describes
+// the entry the view resolves. The caller's buffer keeps the common case off the
+// heap (rmp #3106).
+func (v *ReadView[N, W]) edgeLabelIDsBySlots(s *sourceSlots, dstID graph.NodeID, ids []LabelID) (_ []LabelID, ok bool) {
 	g := v.g
 	k := edgeKey{src: s.src, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
@@ -191,9 +229,8 @@ func (v *ReadView[N, W]) edgeLabelsBySlots(s *sourceSlots, dstID graph.NodeID) (
 	nbs, labs := g.entrySlotLabels(s.src, v.snap)
 	if !sameSlice(nbs, s.nbs) || !sameSlice(labs, s.labs) {
 		sh.mu.RUnlock()
-		return nil, false
+		return ids, false
 	}
-	var ids []LabelID
 	seen := func(lid LabelID) bool {
 		for _, x := range ids {
 			if x == lid {
@@ -220,16 +257,7 @@ func (v *ReadView[N, W]) edgeLabelsBySlots(s *sourceSlots, dstID graph.NodeID) (
 		}
 	}
 	sh.mu.RUnlock()
-	if len(ids) == 0 {
-		return nil, true
-	}
-	out := make([]string, 0, len(ids))
-	for _, lid := range ids {
-		if name, has := g.reg.Resolve(lid); has {
-			out = append(out, name)
-		}
-	}
-	return out, true
+	return ids, true
 }
 
 // forEachEdgePropertyBySlots is [Graph.ForEachEdgePropertyByIDAsOf] for

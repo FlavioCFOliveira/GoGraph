@@ -185,8 +185,14 @@ func (v *ReadView[N, W]) EdgeLabelsByID(srcID, dstID graph.NodeID) []string {
 }
 
 // ForEachEdgeLabelByID streams the pair's derived type union at this view's
-// instant.
+// instant: the names [ReadView.EdgeLabelsByID] returns, in the same order,
+// without building the result slice. Like EdgeLabelsByID it finds a
+// high-degree source's pair through the view's slot index; the answer is
+// identical.
 func (v *ReadView[N, W]) ForEachEdgeLabelByID(srcID, dstID graph.NodeID, visit func(name string)) {
+	if s := v.cachedSlots(srcID); s != nil && v.forEachEdgeLabelBySlots(s, dstID, visit) {
+		return
+	}
 	v.g.ForEachEdgeLabelByIDAsOf(srcID, dstID, v.snap, visit)
 }
 

@@ -89,6 +89,12 @@ func viaView(v *ReadView[string, float64], src, dst string) string {
 	if l1 != l2 {
 		return "EdgeLabels/EdgeLabelsByID disagree: " + l1 + " vs " + l2
 	}
+	// The streamed surface (rmp #3106) must emit the same names in the same order.
+	var streamed []string
+	v.ForEachEdgeLabelByID(srcID, dstID, func(name string) { streamed = append(streamed, name) })
+	if l3 := strings.Join(streamed, ","); l3 != l2 {
+		return "ForEachEdgeLabelByID/EdgeLabelsByID disagree: " + l3 + " vs " + l2
+	}
 	return pairAnswer(v.EdgeLabelsByID(srcID, dstID), v.EdgeProperties(src, dst), p, q, pOK, qOK,
 		v.EdgeHasProperty(src, dst, "p"), v.EdgeHasProperty(src, dst, "q"))
 }

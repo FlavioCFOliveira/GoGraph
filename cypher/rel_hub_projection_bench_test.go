@@ -84,9 +84,13 @@ func BenchmarkRelHubProjection(b *testing.B) {
 		lazyQ  = "MATCH (:H)-[r]->(x) RETURN r.since"
 		eagerQ = "MATCH (:H)-[r]->(x) RETURN type(r), properties(r)"
 		presQ  = "MATCH (:H)-[r]->(x) RETURN r.since IS NOT NULL"
+		// multiQ carries an accepted-type list, so every row resolves its
+		// type through pickEdgeType's accepted-list branch (rmp #3106).
+		multiQ = "MATCH (:H)-[r:FRIEND|LIKE]->(x) RETURN r.since"
 	)
 	b.Run("GoAPI/lazy", func(b *testing.B) { runRelHub(b, relHubGoAPI(b), lazyQ) })
 	b.Run("GoAPI/eager", func(b *testing.B) { runRelHub(b, relHubGoAPI(b), eagerQ) })
 	b.Run("GoAPI/presence", func(b *testing.B) { runRelHub(b, relHubGoAPI(b), presQ) })
+	b.Run("GoAPI/multitype", func(b *testing.B) { runRelHub(b, relHubGoAPI(b), multiQ) })
 	b.Run("Cypher/eager", func(b *testing.B) { runRelHub(b, relHubCypher(b), eagerQ) })
 }

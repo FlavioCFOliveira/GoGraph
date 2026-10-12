@@ -16991,11 +16991,16 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 			// NOT consulted: only Cypher-created edges populate it, and they never
 			// reach here. Reading it by treating the handle as a forward-CSR
 			// position typed a Go-API edge as a Cypher sibling (rmp #3088).
-			if !handled {
-				ets = g.EdgeLabelsByID(stID, enID)
-			}
-			if len(ets) > 0 {
-				edgeType = pickEdgeType(ets, meta.acceptedTypes)
+			//
+			// The pair union is streamed into the picker rather than returned as a
+			// slice: the slice was one allocation per materialised relationship,
+			// read once by pickEdgeType and dropped (rmp #3106).
+			if handled {
+				if len(ets) > 0 {
+					edgeType = pickEdgeType(ets, meta.acceptedTypes)
+				}
+			} else if t, ok := pickPairEdgeType(g, stID, enID, meta.acceptedTypes); ok {
+				edgeType = t
 			}
 			// Lazy relationship (rmp #2388): every field below is already
 			// resolved, so when the use is value-key-only the property map is
@@ -17375,14 +17380,17 @@ func pickEdgeType(stored, accepted []string) string {
 	if len(stored) == 0 {
 		return ""
 	}
+	// The accepted list comes from the pattern text (`[r:A|B]`), so it is a
+	// handful of names: a nested scan answers it with no per-row allocation,
+	// where a set built here cost one map per materialised relationship (rmp
+	// #3106). The scan order — stored labels outermost — is the selection rule
+	// itself: the FIRST stored label that is accepted wins.
 	if len(accepted) > 0 {
-		acceptSet := make(map[string]struct{}, len(accepted))
-		for _, a := range accepted {
-			acceptSet[a] = struct{}{}
-		}
 		for _, s := range stored {
-			if _, ok := acceptSet[s]; ok {
-				return s
+			for _, a := range accepted {
+				if s == a {
+					return s
+				}
 			}
 		}
 	}
@@ -17393,6 +17401,38 @@ func pickEdgeType(stored, accepted []string) string {
 		}
 	}
 	return best
+}
+
+// pickPairEdgeType is [pickEdgeType] over the pair's derived type union,
+// streamed from [lpg.ReadView.ForEachEdgeLabelByID] instead of materialised by
+// [lpg.ReadView.EdgeLabelsByID] (rmp #3106). Both surfaces emit the same names
+// in the same order, so the result is pickEdgeType's: the first emitted name
+// that is accepted, else the smallest emitted name. ok is false when the pair
+// has no type, where the caller keeps its declared type exactly as it did on an
+// empty slice.
+func pickPairEdgeType(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID, accepted []string) (string, bool) {
+	var (
+		best, hit    string
+		seen, hasHit bool
+	)
+	g.ForEachEdgeLabelByID(srcID, dstID, func(name string) {
+		if !seen || name < best {
+			best = name
+		}
+		seen = true
+		if !hasHit {
+			for _, a := range accepted {
+				if name == a {
+					hit, hasHit = name, true
+					break
+				}
+			}
+		}
+	})
+	if hasHit {
+		return hit, true
+	}
+	return best, seen
 }
 
 // buildIRProjection converts IR ProjectionItems to a physical Project operator.
