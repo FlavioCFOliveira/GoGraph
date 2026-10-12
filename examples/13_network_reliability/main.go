@@ -255,7 +255,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 func reportSPOF(ctx context.Context, w io.Writer, net *network) (search.BCCResult, error) {
 	// One stored relationship per link; BuildSymmetric projects it to the
 	// undirected view the biconnected-components analysis is defined on.
-	c := csr.BuildFromAdjList(net.adj).BuildSymmetric()
+	c := csr.BuildSymmetricFromAdjList(net.adj)
 
 	start := time.Now()
 	res, err := search.HopcroftTarjanBCCCtx(ctx, c)

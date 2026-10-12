@@ -15,6 +15,7 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -117,6 +118,11 @@ func TestCypher_ParallelEdge_WAL_Durable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w1.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g1 := lpg.New[string, float64](adjlist.Config{})
 	store1 := txn.NewStoreWithOptions[string, float64](g1, w1, walGuardStoreOpts())
 	eng1 := cypher.NewEngineWithStore(store1)

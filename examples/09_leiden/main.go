@@ -174,7 +174,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	}
 	// One stored relationship per edge; BuildSymmetric projects it to the
 	// undirected view Leiden and the modularity computation are defined on.
-	c := csr.BuildFromAdjList(a).BuildSymmetric()
+	c := csr.BuildSymmetricFromAdjList(a)
 	buildElapsed := time.Since(buildStart)
 
 	nodes := cfg.communities * cfg.communitySize

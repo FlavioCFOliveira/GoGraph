@@ -137,6 +137,11 @@ func TestRelationshipDurability_NoWeightCodec_2747(t *testing.T) {
 		if err != nil {
 			t.Fatalf("wal.Open: %v", err)
 		}
+		t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+				t.Errorf("wal.Close: %v", err)
+			}
+		})
 		g := lpg.New[string, float64](adjlist.Config{})
 		st := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 			Codec:       txn.NewStringCodec(),
@@ -169,6 +174,11 @@ func TestRelationshipDurability_NoWeightCodec_2747(t *testing.T) {
 		if err != nil {
 			t.Fatalf("wal.Open: %v", err)
 		}
+		t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+				t.Errorf("wal.Close: %v", err)
+			}
+		})
 		g := lpg.New[string, float64](adjlist.Config{})
 		// NewStoreWithCodec leaves the store WITHOUT a weight codec. This is the
 		// wiring store/db.go's "Typical wiring" doc comment recommended verbatim

@@ -19,6 +19,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // openedOptions is the codec pair the test opens with.
@@ -60,6 +61,11 @@ func TestNewEngineWithOpened_ReRegistersRecoveredSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := o.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("store.Close: %v", err)
+		}
+	})
 	eng := cypher.NewEngineWithOpened(o)
 	for _, q := range []string{
 		`CREATE CONSTRAINT person_id FOR (n:Person) REQUIRE n.id IS UNIQUE`,
@@ -172,6 +178,11 @@ func TestNewEngineWithOpened_ReadOnlyRefusesWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := o.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("store.Close: %v", err)
+		}
+	})
 	eng := cypher.NewEngineWithOpened(o)
 	for _, q := range []string{
 		`CREATE (:Person {id: 1})`,

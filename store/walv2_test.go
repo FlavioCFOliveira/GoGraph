@@ -183,6 +183,11 @@ func openSegStore(t *testing.T, dir string) *segStore {
 	if err != nil {
 		t.Fatalf("wal.OpenWithOptions: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	return &segStore{dir: dir, w: w, st: res.NewStore(w, txn.Options[string, float64]{
 		Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec(),
 	})}

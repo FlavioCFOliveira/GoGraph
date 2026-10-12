@@ -11,6 +11,7 @@ package recovery
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -116,6 +117,11 @@ func TestWALCrash_StoreCreation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reopen after %s: %v", scenario, err)
 			}
+			t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+				if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+					t.Errorf("wal.Close: %v", err)
+				}
+			})
 			st := res.NewStore(w, txn.Options[int64, int64]{Codec: txn.NewInt64Codec(), WeightCodec: txn.NewInt64WeightCodec()})
 			tx := st.Begin()
 			if err := tx.AddEdge(7, 8, 9); err != nil {
@@ -153,6 +159,11 @@ func TestWALCrash_Migration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reopen after %s: %v", scenario, err)
 			}
+			t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+				if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+					t.Errorf("wal.Close: %v", err)
+				}
+			})
 			st := res.NewStore(w, txn.Options[int64, int64]{Codec: txn.NewInt64Codec(), WeightCodec: txn.NewInt64WeightCodec()})
 			tx := st.Begin()
 			if err := tx.AddEdge(crashPostEdge.src, crashPostEdge.dst, crashPostEdge.weight); err != nil {

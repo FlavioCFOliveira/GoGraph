@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"encoding/binary"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -19,6 +20,11 @@ func writeV2Workload(t *testing.T, dir string, codec txn.Codec[string]) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec[string, int64](g, w, codec)
 	for _, name := range []string{"alice", "bob", "carol"} {
@@ -106,6 +112,11 @@ func TestTxn_V2Replay_BinaryMarshaler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	codec := txn.NewBinaryMarshalerCodec[textKey, *textKey]()
 	g := lpg.New[textKey, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec[textKey, int64](g, w, codec)

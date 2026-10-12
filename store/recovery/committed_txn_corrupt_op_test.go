@@ -103,6 +103,11 @@ func TestRecovery_CorruptOpInsideCommittedTxn_NotCleanAndDiagnosable_2794(t *tes
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, int64](g, w, opts)
 	for _, key := range []string{"keep", "lost", "after"} {
@@ -221,6 +226,11 @@ func TestRecovery_CorruptOpInsideCommittedTxn_ReplayWALAgrees(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, int64](g, w, opts)
 	for _, key := range []string{"keep", "lost"} {

@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"encoding/binary"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -104,6 +105,11 @@ func TestOpen_MalformedV2Frame_NotApplied(t *testing.T) {
 			if err != nil {
 				t.Fatalf("wal.Open: %v", err)
 			}
+			t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+				if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+					t.Errorf("wal.Close: %v", err)
+				}
+			})
 			payload := append([]byte{txn.OpRecordV2, byte(txn.OpAddEdge)}, tc.body...)
 			if err := w.Append(payload); err != nil {
 				t.Fatalf("Append: %v", err)
@@ -161,6 +167,11 @@ func TestOpen_WeightedV2Frame_TruncatedWeightRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	codec := txn.NewStringCodec()
 	// src + dst decode cleanly; the weight varint is absent, so the
 	// int64 weight codec fails and the weighted op is rejected.

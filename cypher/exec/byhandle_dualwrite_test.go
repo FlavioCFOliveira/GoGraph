@@ -5,11 +5,11 @@ package exec_test
 // perform for a bound relationship (#1686).
 //
 // Each test drives the write operator over a single relationship row using the
-// stubMutator (whose by-handle property store and EdgeHandleAtPosition resolver
-// are programmable), and asserts that the per-pair store AND the per-instance
-// by-handle store are both updated for the bound instance — and ONLY for the
-// resolved handle. When the resolver returns 0 (no stable handle) the by-handle
-// store must be left untouched (per-pair-only fallback).
+// stubMutator (whose by-handle property store is programmable), and asserts
+// that the per-pair store AND the per-instance by-handle store are both updated
+// for the bound instance — and ONLY for the handle the row carries. When the
+// row's handle is 0 (no stable handle) the by-handle store must be left
+// untouched (per-pair-only fallback).
 
 import (
 	"context"

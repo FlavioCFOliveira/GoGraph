@@ -1,6 +1,7 @@
 package bulk
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -67,6 +68,11 @@ func TestLoader_RecoveryEqual(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal.Close: %v", err)
 	}

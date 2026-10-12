@@ -2,6 +2,7 @@ package exec
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
@@ -185,6 +186,46 @@ func NewChunk(capacity int, kinds ...expr.Kind) *Chunk {
 		}
 	}
 	return c
+}
+
+// nodeIDChunkPool recycles the one chunk shape every node scan emits — a single
+// static integer column of [DefaultChunkCapacity] rows (rmp #3114). Before it, a
+// filtered count (CountRows over a ColumnarFilter over a scan) allocated two such
+// chunks, 32 KiB each, on every statement however few rows it read. The pool is
+// bounded by the garbage collector ([sync.Pool] drops idle entries across GC
+// cycles) and admits only chunks whose backing never grew past the default
+// capacity, so a pooled entry never pins more than one default-sized column.
+// [sync.Pool] is safe for concurrent use.
+var nodeIDChunkPool sync.Pool
+
+// newNodeIDChunk returns an empty Chunk with one static integer column, taken
+// from [nodeIDChunkPool] when capacity is the default and freshly built
+// otherwise. It is what the node scans hand out from NewOutputChunk.
+func newNodeIDChunk(capacity int) *Chunk {
+	if capacity < 1 || capacity == DefaultChunkCapacity {
+		if c, ok := nodeIDChunkPool.Get().(*Chunk); ok {
+			return c
+		}
+	}
+	return NewChunk(capacity, expr.KindInteger)
+}
+
+// releaseChunk returns c to [nodeIDChunkPool] when it has the pooled shape and
+// drops it otherwise. The caller must be the chunk's sole owner and must not
+// touch c afterwards: every cell has already been copied out or counted, and no
+// producer retains a destination chunk past its FillChunk call. A nil c is a
+// no-op.
+func releaseChunk(c *Chunk) {
+	if c == nil || c.capacity != DefaultChunkCapacity || len(c.cols) != 1 {
+		return
+	}
+	col := &c.cols[0]
+	if col.store != stI64 || col.dynamic || col.kind != expr.KindInteger ||
+		cap(col.i64) != DefaultChunkCapacity {
+		return
+	}
+	c.Reset()
+	nodeIDChunkPool.Put(c)
 }
 
 // NewDynamicChunk creates an empty Chunk with ncols dynamic columns and a row

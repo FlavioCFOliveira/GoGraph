@@ -3,10 +3,11 @@ package cypher_test
 // rel_projection_bench_test.go — empirical evidence for task #1574.
 //
 // It isolates the cost of reconstructing expr.RelationshipValue per result row
-// in the projection path (buildRelationshipValueFromRow → edgeHandleAtFwdPos /
-// edgeInstanceIdxFor). Before #1574 each of those helpers rebuilt the entire
-// forward CSR (O(V+E)) per row, making `MATCH (a)-[r]->(b) RETURN r` cost
-// O(R·(V+E)) per query and dominating heap allocations in the DST profile.
+// in the projection path (buildRelationshipValueFromRow). Before #1574 the
+// position-to-handle helpers that path called each rebuilt the entire forward
+// CSR (O(V+E)) per row, making `MATCH (a)-[r]->(b) RETURN r` cost O(R·(V+E))
+// per query and dominating heap allocations in the DST profile. Those helpers
+// are gone (rmp #2317 and #3088): the row now carries the stable handle.
 //
 // The benchmark seeds a multigraph (so both the stable-handle path and the
 // parallel-edge instance-idx path are exercised) once, outside the timer, then
@@ -93,9 +94,8 @@ func benchmarkRelProjection(b *testing.B, nNodes, fanout int) {
 	// count(r) is the DST checker's per-tick sampled-edge probe. To evaluate
 	// the aggregate the executor builds the row context for EVERY matched edge,
 	// which reconstructs the full RelationshipValue per row
-	// (buildRelationshipValueFromRow → edgeHandleAtFwdPos / edgeInstanceIdxFor).
-	// That per-row path is exactly what #1574 targets; this query reproduces
-	// the profile's dominant allocator faithfully.
+	// (buildRelationshipValueFromRow). That per-row path is exactly what #1574
+	// targeted.
 	const q = "MATCH (a)-[r]->(b) RETURN count(r)"
 	b.ReportAllocs()
 	b.ResetTimer()

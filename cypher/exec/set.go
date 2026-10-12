@@ -43,12 +43,11 @@ import (
 // than a node.
 //
 // SrcCol and DstCol hold the endpoint NodeIDs as IntegerValue. EdgeCol holds
-// the forward-CSR edge-position counter (= schema[entityVar]); it is used to
-// resolve the bound parallel instance's stable handle via
-// [GraphMutator.EdgeHandleAtPosition] so a relationship SET/REMOVE maintains
-// the per-instance by-handle property store (#1686). EdgeCol may be 0 only when
-// it genuinely is column 0; callers distinguish "no handle" by the resolver
-// returning 0, not by the column index.
+// the bound parallel instance's stable per-edge handle (= schema[entityVar];
+// rmp #2317), which [resolveRelHandle] reads so a relationship SET/REMOVE
+// maintains the per-instance by-handle property store (#1686). EdgeCol may be 0
+// only when it genuinely is column 0; callers distinguish "no handle" by
+// resolveRelHandle returning 0, not by the column index.
 type RelCols struct {
 	SrcCol  int
 	DstCol  int
@@ -297,8 +296,8 @@ func (op *SetProperty) resolveEntity(varName string, row Row) (entityBinding, er
 
 // resolveRelBinding resolves a relationship entity from the (SrcCol, DstCol)
 // pair of row columns that hold endpoint NodeIDs as IntegerValue. It also
-// resolves the bound parallel instance's stable handle from the forward-CSR
-// edge position at rc.EdgeCol (when that column holds an IntegerValue), so a
+// reads the bound parallel instance's stable handle from rc.EdgeCol (when that
+// column holds an IntegerValue), so a
 // relationship SET/REMOVE can maintain the per-instance by-handle property
 // store (#1686). A handle of 0 (no stable identity / unresolved) leaves the
 // by-handle store untouched downstream.
@@ -383,8 +382,8 @@ func relStorageDirection(mut GraphMutator, srcKey, dstKey string, handle uint64)
 // # It is now a read, not a resolution (rmp #2317)
 //
 // The column used to hold a forward-CSR POSITION, which had to be resolved against
-// a per-query CSR snapshot to recover the handle
-// ([GraphMutator.EdgeHandleAtPosition], now retired). It holds the handle itself.
+// a per-query CSR snapshot to recover the handle (a GraphMutator resolver since
+// removed). It holds the handle itself.
 //
 // That lookup is also what made a relationship's properties SPLIT-BRAIN across two
 // stores (rmp #2334): a post-projection row carries a self-describing

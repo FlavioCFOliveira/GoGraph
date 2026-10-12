@@ -205,7 +205,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	net.adj.Compact(ctx)
 	// One stored relationship per road; BuildSymmetric projects it to the
 	// two-way network every routing algorithm reads.
-	c := csr.BuildFromAdjList(net.adj).BuildSymmetric()
+	c := csr.BuildSymmetricFromAdjList(net.adj)
 
 	fmt.Fprintf(w, "graph.nodes=%d\n", c.Order())
 	fmt.Fprintf(w, "graph.edges=%d\n", c.Size())

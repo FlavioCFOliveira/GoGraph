@@ -805,12 +805,13 @@ func (s *Store[N, W]) installIDReserver() {
 	m.SetIDReserver(s.ids)
 }
 
-// Close ends the store's use of its WAL for node id reservations (WAL v2 step 4):
-// it stops the reservation prefetch goroutine and appends the mapper's exact
-// per-shard high-water marks (a NextIDsExact record), so the next recovery
-// resumes at those marks and a clean restart wastes no id. It does not close the
-// WAL and does not refuse later transactions: a node created after Close
-// reserves synchronously, and its reservation is logged after the exact marks.
+// Close records the end of the store's node id reservations (WAL v2 step 4): it
+// appends the mapper's exact per-shard high-water marks (a NextIDsExact record)
+// to the WAL, once, so the next recovery resumes at those marks and a clean
+// restart wastes no id. It owns no goroutine and stops none: every reservation
+// is appended synchronously by the transaction that needs it. It does not close
+// the WAL and does not refuse later transactions: a node created after Close
+// still reserves as before, and its reservation is logged after the exact marks.
 //
 // Call it with writers quiesced, before the WAL is closed — [store.Opened]'s
 // close does so inside [Store.RunUnderCommitLock]. Without a call the next

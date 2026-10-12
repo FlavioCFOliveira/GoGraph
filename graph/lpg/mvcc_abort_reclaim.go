@@ -242,9 +242,7 @@ func (g *Graph[N, W]) withdrawAbortedWrites(writes []mvcc.SideWrite) int {
 			sh := g.nodeLabelShardFor(id)
 			sh.mu.Lock()
 			labels += g.reclaimAbortedLabelsLocked(sh, id)
-			if len(sh.d) == 0 {
-				sh.d = nil
-			}
+			sh.dropDeltasIfEmpty()
 			sh.mu.Unlock()
 		case sideNodeProps:
 			id := graph.NodeID(w.A)
@@ -436,9 +434,7 @@ func (g *Graph[N, W]) withdrawAbortedLabels() int {
 		for id := range sh.d {
 			freed += g.reclaimAbortedLabelsLocked(sh, id)
 		}
-		if len(sh.d) == 0 {
-			sh.d = nil
-		}
+		sh.dropDeltasIfEmpty()
 		sh.mu.Unlock()
 	}
 	if freed > 0 {

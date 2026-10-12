@@ -49,6 +49,11 @@ func TestWALOpen_ExclusiveLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open (third, after close): %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w3.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if err := w3.Close(); err != nil {
 		t.Fatalf("Close (third): %v", err)
 	}
@@ -68,6 +73,11 @@ func TestWALOpen_ExclusiveLock_FreshAndExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open (initial create): %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w0.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if err := w0.Close(); err != nil {
 		t.Fatalf("Close (initial): %v", err)
 	}
@@ -77,6 +87,11 @@ func TestWALOpen_ExclusiveLock_FreshAndExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open (existing): %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w1.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 
 	// Concurrent open on the same existing file: must be rejected.
 	w2, err := wal.Open(walPath)

@@ -22,6 +22,7 @@ package recovery_test
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -44,6 +45,11 @@ func writeAndClose(t *testing.T, dir string, n, keyBase int) (walPath string, la
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := wr.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, wr, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
@@ -187,6 +193,11 @@ func TestClockRestore_AWALWithNoTimestampsLeavesTheClockAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := wr.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	// The store's OWN commit path writes commitTS 0 — "no MVCC timestamp" — which
 	// is the same thing recovery sees in a pre-#2309 file.
 	g := lpg.New[string, float64](adjlist.Config{})

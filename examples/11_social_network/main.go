@@ -279,7 +279,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 
 	// One stored FRIEND relationship per friendship; BuildSymmetric projects
 	// it to the undirected view every analytic below is defined on.
-	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
+	c := csr.BuildSymmetricFromAdjList(g.AdjList())
 	mapper := g.AdjList().Mapper()
 
 	if err := reportInfluence(ctx, w, c, mapper, stats.idComm, cfg); err != nil {

@@ -23,6 +23,7 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -223,6 +224,11 @@ func TestRollback_ParallelEdges_Durable_2885(t *testing.T) {
 		if err != nil {
 			t.Fatalf("wal.Open: %v", err)
 		}
+		t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+				t.Errorf("wal.Close: %v", err)
+			}
+		})
 		st := txn.NewStoreWithOptions[string, float64](res.Graph, w, parallelEdgeStoreOpts())
 		return cypher.NewEngineWithStore(st), res.Graph, w
 	}

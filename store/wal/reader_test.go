@@ -139,6 +139,11 @@ func BenchmarkReader_Replay(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	b.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			b.Errorf("wal.Close: %v", err)
+		}
+	})
 	payload := make([]byte, 4096)
 	const frames = 64
 	for i := 0; i < frames; i++ {

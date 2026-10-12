@@ -17,6 +17,7 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -254,6 +255,11 @@ func TestDetachDelete_ParallelEdges_NoDangling_WAL(t *testing.T) {
 				if err != nil {
 					t.Fatalf("wal.Open: %v", err)
 				}
+				t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+					if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+						t.Errorf("wal.Close: %v", err)
+					}
+				})
 				g := lpg.New[string, float64](cf.cfg)
 				queries := append(append([]string{parallelSetup}, c.edges...), parallelDetach)
 				deleteWALEngineRun(t, g, w, queries...)

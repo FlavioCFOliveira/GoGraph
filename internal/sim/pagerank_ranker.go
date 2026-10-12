@@ -41,15 +41,18 @@ package sim
 // # A premise in the task was wrong: options cannot move the regime
 //
 // The brief asked for the sequence to interleave the serial and parallel regimes
-// "with varying options". [centrality.PageRankOptions] has no parallelism knob —
-// VERIFIED in source, its only fields are `Damping`, `MaxIterations` and
-// `Tolerance`. The regime is decided inside `pageRankState.run` as
+// "with varying options". The scalar options (`Damping`, `MaxIterations`,
+// `Tolerance`) do not select the regime. [centrality.PageRankOptions.Budget]
+// (rmp #3086) does — a budget with fewer than two free worker slots sends a run
+// to a single-threaded path — but this file never sets it: a nil Budget keeps
+// the unbudgeted regime, which `pageRankPullWorkers` (called from
+// `pageRankState.run`) decides as
 //
 //	workers := runtime.GOMAXPROCS(0)
-//	useParallel := workers > 1 && live >= pageRankParallelThreshold
+//	parallel := workers > 1 && live >= pageRankParallelThreshold
 //
-// and a PageRanker is bound to one immutable CSR, so `live` is fixed for its
-// whole lifetime. The only reachable lever is therefore the process-global
+// and that regime is the one this file must reach. A PageRanker is bound to
+// one immutable CSR, so `live` is fixed for its whole lifetime. The only reachable lever is therefore the process-global
 // GOMAXPROCS, over a fixture with at least `pageRankParallelThreshold` live
 // nodes — and that is also the only way to make the LAZY transpose build land
 // mid-sequence instead of on the first Run.

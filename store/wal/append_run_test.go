@@ -17,6 +17,7 @@ package wal
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -108,6 +109,11 @@ func appendContiguity(t *testing.T, useRun bool, frameCount, competitors int) (r
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 
 	frames := txnFrames("T", frameCount)
 	// start releases every goroutine at once, so the competitors are already
@@ -266,6 +272,11 @@ func TestAppendRun_PropagatesTheCallbackError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	sentinel := fmt.Errorf("encode failed")
 	_, rerr := w.AppendRun(func(emit func([]byte) error) error {
 		if aerr := emit([]byte("T:op0")); aerr != nil {

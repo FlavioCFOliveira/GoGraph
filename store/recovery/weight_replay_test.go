@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"errors"
 	"math"
 	"path/filepath"
 	"testing"
@@ -52,6 +53,11 @@ func TestTxn_RoundtripWeightedEdge_Recovery(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+				t.Errorf("wal.Close: %v", err)
+			}
+		})
 		g := lpg.New[string, int64](adjlist.Config{})
 		opts := txn.Options[string, int64]{
 			Codec:       txn.NewStringCodec(),
@@ -90,6 +96,11 @@ func TestTxn_RoundtripWeightedEdge_Recovery(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+				t.Errorf("wal.Close: %v", err)
+			}
+		})
 		g := lpg.New[string, float64](adjlist.Config{})
 		opts := txn.Options[string, float64]{
 			Codec:       txn.NewStringCodec(),
@@ -136,6 +147,11 @@ func TestTxn_ForwardCompat_PreT8WALReplays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	g := lpg.New[string, int64](adjlist.Config{})
 	pre := txn.NewStoreWithCodec[string, int64](g, w, txn.NewStringCodec())
 	tx := pre.Begin()

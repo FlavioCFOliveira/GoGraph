@@ -941,6 +941,9 @@ func (g *Graph[N, W]) appendSuspects(out []graph.NodeID) []graph.NodeID {
 	if g.labelDeltaActive.Load() != 0 {
 		for i := range g.nodeLabelShards {
 			sh := &g.nodeLabelShards[i]
+			if !sh.hasD.Load() {
+				continue // d is nil: nothing to collect, no lock to queue on
+			}
 			sh.mu.RLock()
 			for id := range sh.d {
 				out = append(out, id)
@@ -951,6 +954,9 @@ func (g *Graph[N, W]) appendSuspects(out []graph.NodeID) []graph.NodeID {
 	if g.nodeLifeActive.Load() != 0 {
 		for i := range g.nodeLifeShards {
 			sh := &g.nodeLifeShards[i]
+			if !sh.hasRec.Load() {
+				continue // born and died are nil; see nodeLifeShard.hasRec
+			}
 			sh.mu.RLock()
 			for id := range sh.born {
 				out = append(out, id)

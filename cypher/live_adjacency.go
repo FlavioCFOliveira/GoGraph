@@ -565,10 +565,8 @@ func (c *liveFwdCSR) HandlesSlice() []uint64 { return c.handles }
 //
 // Every other traversal keeps the whole-graph build: an incoming or undirected
 // Expand, OptionalExpand or VarLengthExpand; shortestPath and allShortestPaths,
-// whose bidirectional search reads the reverse frontier; the fused cyclic expand
-// (ExpandIntersect), whose second leg reads incoming edges; and the
-// relationship-reconstruction helper [ensureFwdCSR], which indexes positions of
-// a whole-graph adjacency.
+// whose bidirectional search reads the reverse frontier; and the fused cyclic
+// expand (ExpandIntersect), whose second leg reads incoming edges.
 func traversalAdjacencySource(
 	bopts *buildOpts, g *lpg.ReadView[string, float64], relTypes []string, dir exec.Direction,
 ) exec.AdjacencySource {

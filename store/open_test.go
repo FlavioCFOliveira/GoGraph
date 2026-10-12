@@ -184,6 +184,11 @@ func buildCommittedWAL(t *testing.T, dir string, keys ...string) {
 	if err != nil {
 		t.Fatalf("store.Open (build): %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := o.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("store.Close: %v", err)
+		}
+	})
 	commitNodes(t, o.Store(), keys...)
 	if err := o.Close(); err != nil {
 		t.Fatalf("Close (build): %v", err)
@@ -236,6 +241,11 @@ func requireWALLockFree(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatalf("the WAL is not openable after a refused store.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal Close: %v", err)
 	}
@@ -348,6 +358,11 @@ func TestOpen_WALLockedFailsAndLeaksNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := o.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("store.Close: %v", err)
+		}
+	})
 	if _, err := store.Open(dir, openOptions()); !errors.Is(err, wal.ErrWALLocked) {
 		t.Fatalf("second store.Open: got %v, want wal.ErrWALLocked", err)
 	}
@@ -568,6 +583,11 @@ func TestOpen_AllowUnclean_OpensReadOnly(t *testing.T) {
 			if err != nil {
 				t.Fatalf("store.Open with AllowUnclean: %v", err)
 			}
+			t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+				if err := o.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+					t.Errorf("store.Close: %v", err)
+				}
+			})
 			if !o.ReadOnly() || !o.Store().ReadOnly() || o.WAL() != nil {
 				t.Fatalf("ReadOnly()=%t Store().ReadOnly()=%t WAL()=%v: want a read-only open with no WAL writer",
 					o.ReadOnly(), o.Store().ReadOnly(), o.WAL())
@@ -669,6 +689,11 @@ func TestOpen_AllowUnclean_CleanRecoveryOpensForWriting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := o.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("store.Close: %v", err)
+		}
+	})
 	if o.ReadOnly() || o.Store().ReadOnly() || o.WAL() == nil {
 		t.Fatalf("a clean recovery with AllowUnclean opened read-only (ReadOnly=%t, WAL=%v)", o.ReadOnly(), o.WAL())
 	}

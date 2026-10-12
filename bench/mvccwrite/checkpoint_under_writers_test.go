@@ -31,6 +31,7 @@ package mvccwrite
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -63,6 +64,11 @@ func newCPRig(tb testing.TB, withCheckpointer bool) *cpRig {
 	if err != nil {
 		tb.Fatalf("wal.Open: %v", err)
 	}
+	tb.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := wr.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			tb.Errorf("wal.Close: %v", err)
+		}
+	})
 	st := txn.NewStoreWithOptions[string, float64](g, wr, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

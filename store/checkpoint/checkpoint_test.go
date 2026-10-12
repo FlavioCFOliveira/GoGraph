@@ -127,6 +127,11 @@ func twoSegmentWAL(t *testing.T, walPath string) (*wal.Writer, int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	payload := make([]byte, 64<<10)
 	var seg2 int64
 	for i := 0; i < 17; i++ {

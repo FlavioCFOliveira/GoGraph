@@ -254,7 +254,7 @@ func buildRelValueWithUse(t *testing.T, c lazyRelCoords, use *nodeScalarUse) exp
 	t.Helper()
 	row := exec.Row{expr.IntegerValue(c.srcID), expr.IntegerValue(c.handle), expr.IntegerValue(c.dstID)}
 	meta := edgeVarInfo{edgeType: "R", acceptedTypes: []string{"R"}, srcCol: 0, edgeCol: 1, dstCol: 2}
-	v, ok := buildRelationshipValueFromRow(row, &meta, c.view, nil, use)
+	v, ok := buildRelationshipValueFromRow(row, &meta, c.view, nil, use, nil)
 	if !ok {
 		t.Fatal("buildRelationshipValueFromRow refused the synthesised row")
 	}
@@ -675,11 +675,10 @@ func TestLazyRelationshipReversedHopReadsTheStorageEndpoints(t *testing.T) {
 	}
 }
 
-// TestLazyRelationshipEachBindingIsItsOwnInstance pins the consequence of
-// allocating fresh instead of reusing a pooled struct: two relationship
-// variables bound in one row are independent values. An arena variant was
-// measured and rejected (see buildRelationshipValueFromRow); if one is ever
-// reintroduced, this is the property it must not break.
+// TestLazyRelationshipEachBindingIsItsOwnInstance pins that two relationship
+// variables bound in one row are independent values on the freshly allocated
+// (arena-less) path. The pooled path's arena (rmp #3104) must keep the same
+// property; TestBorrowLazyRelDistinctSlotsAndFullRebind pins it there.
 func TestLazyRelationshipEachBindingIsItsOwnInstance(t *testing.T) {
 	src1 := expr.RelSource{StartKey: "a", EndKey: "b"}
 	src2 := expr.RelSource{StartKey: "b", EndKey: "c"}

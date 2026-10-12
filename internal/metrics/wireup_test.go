@@ -3,6 +3,7 @@ package metrics_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -162,6 +163,11 @@ func driveWALSample(t *testing.T, be *countingBackend, walPath string) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	expectLatency(t, be, "store.wal.Open")
 
 	if err := w.Append([]byte("payload")); err != nil {

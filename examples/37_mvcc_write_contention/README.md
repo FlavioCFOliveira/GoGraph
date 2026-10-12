@@ -780,7 +780,7 @@ operations per arm and level, except L13 (32) and L15 (64); see "Sizes" below.
 | `L17` | L17 | 8 transactions hold 16 000 (soak: 150 000) uncommitted nodes; counts; a 9 M-row statement cancelled after 2 ms | Count = committed only; cancelled statement returns `context.Canceled` within 1 s |
 | `L18` | L18 | Property writes, edge creates and `DETACH DELETE`s, 50% rolled back | Total <= Bound after quiescence; 0 dangling arcs; every hub writable by a lone writer |
 | `L19` | L19, DD08, DD09 | `CREATE`/`DROP INDEX` cycles and an overlapping `CREATE INDEX` on the same object while writers churn and the vacuum is swept in a loop | Seek = scan; every DDL refusal classified (`already_exists`); DDL latency below `hangBudget`; no writer starved |
-| `IX11` | IX11 (Turso `tests.rs:4940`, `:5550`, MIT) | One writer re-values the hash-indexed `s` and the btree-indexed `b` of all 64 `:L` nodes in one autocommit statement, generation after generation; every goroutine opens read transactions at every instant, the index delivery included, reads the generation its snapshot holds and seeks the current and the next generation's value of one node through each index | `seeks_planned_as_index`, `commits_overlapped_reads`, `never_mixed` (one generation per snapshot), `seek_equals_scan` |
+| `IX11` | IX11 (Turso `tests.rs:4940`, `:5550`, MIT) | One writer re-values the hash-indexed `s` and the btree-indexed `b` of all 64 `:L` nodes in one autocommit statement, generation after generation; every goroutine opens read transactions at every instant, the index delivery included, reads the generation its snapshot holds and seeks the current and the next generation's value of one node through each index; before closing, it reads the latest committed generation outside its snapshot | `seeks_planned_as_index`, `commits_overlapped_reads` (at least 2 read transactions saw a commit published while they were open), `never_mixed` (one generation per snapshot), `seek_equals_scan` |
 | `L21` | L21 (Turso `shuttle_mvcc.rs:749`, `tests.rs:792`, MIT) | One writer `SET n.v = i` in a loop; a goroutine calls `ReclaimNow` without pause; every goroutine opens read transactions that read `n` three times, 2 ms apart | `reclaimed_during_reads`, `node_seen_exactly_once`, `value_committed_by_start` (between the value acknowledged before BEGIN and the value attempted after it), `repeatable`, and the sampler's `watermark_regressions_zero`, `horizon_stale_leaves_zero` |
 | `L22`, `L22.crash` | L22 (Turso `tests.rs:5403`, `:18953`, MIT) | Bank transfers (two accounts per goroutine, at least 8; each also creates a `:Tr` node) on the durable store while `RunCheckpoint` runs back to back; read transactions repeat `sum` and `count` three times, 1 ms apart; half-way, after a checkpoint, a crash image is copied between checkpoints under the commit lock and recovered | `checkpoints_ran`, `snapshots_pinned_across_reads`, `snapshot_total_and_count_constant`, `crash_image_after_checkpoint`; after recovery `snapshot_used`, `total_and_count_unchanged`, `acked_present` |
 
@@ -867,13 +867,26 @@ with the injected fsync latency, levels 1, 8 and 64, three runs per size:
 
 | Gate | Seeded mutant | Total ops | Detection | Green |
 |---|---|---|---|---|
-| `IX11` `seek_equals_scan` | `index.Manager.DescribesSnapshot` always true (the seek never declines to the scan) | 16 | 3 of 3 runs at every level; at 4, level 1 runs too few commits to overlap a read (`commits_overlapped_reads` fails). Since rmp #3061 the btree arm's read of the next generation's key, absent from the reader's snapshot, is planned as a seek, not a label scan, so both btree reads compare a seek with a scan; re-measured: 3 of 3 runs at every level | 3 of 3 |
+| `IX11` `seek_equals_scan` | `index.Manager.DescribesSnapshot` always true (the seek never declines to the scan) | 16 | 3 of 3 runs at every level; at 4, level 1 runs too few commits to overlap a read (`commits_overlapped_reads` fails; measured before rmp #3109, which keeps the readers reading past the total until the overlap is seen). Since rmp #3061 the btree arm's read of the next generation's key, absent from the reader's snapshot, is planned as a seek, not a label scan, so both btree reads compare a seek with a scan; re-measured: 3 of 3 runs at every level | 3 of 3 |
 | `L21` `value_committed_by_start`, `repeatable` | `Horizon.Oldest` returns its fallback without scanning the readers (reclaim past the watermark) | 4 (the 4-per-goroutine floor) | 3 of 3 runs at every level (`repeatable`; `value_committed_by_start` at 8 and 64 in every run) | 3 of 3 |
 | `L22.crash` `acked_present`, `total_and_count_unchanged` | `Checkpointer.awaitCommitQuiescence` returns at once (checkpoint capture skew: the durable-but-unpublished window is not waited out) | 32 | 5 of 5 runs fail at one level or more, never at the same levels every run (for example `1 of 174 acknowledged transfers missing`, `recovered sum=12802`); at 16, 2 of 3 | 3 of 3 |
 
 `IX11` runs 64 nodes because of the planner, not the delivery: at 32 and 48 nodes the
 parameterised btree prefix seek is planned as a label scan, and
 `seeks_planned_as_index` fails.
+
+`IX11` `commits_overlapped_reads` counts the read transactions whose autocommit read of
+the latest generation, issued before their `Commit`, returns a later generation than
+their own snapshot: a commit was published while they were open. The readers keep
+opening read transactions past their total until 2 such overlaps are seen, for at most
+5 s (rmp #3109). Before #3109 the check was `large_commits > 1` over a fixed total;
+with a 1-5 ms fsync and no race detector the 16 read transactions of level 1 ended
+before the second commit (it failed at level 1 in 10 of 10 runs and at level 8 in 9 of
+10, at `c794a1ed` and at `590d85f3`), and a mutant that
+serialises commits against open read transactions (a harness `sync.RWMutex`, applied
+with `go test -overlay`) passed it. Against that mutant the current check fails 15 of
+15 runs at every level (0 overlaps, hundreds to thousands of commits); without it, it
+passes 15 of 15 runs with no, 1-5 ms and 5-20 ms injected fsync latency.
 
 At the soak layer's 256 and 1 024 goroutines (4 096 operations) the three arms passed
 3 of 3 runs. The first soak run of `L22` caught the arm's OWN defect: a transfer

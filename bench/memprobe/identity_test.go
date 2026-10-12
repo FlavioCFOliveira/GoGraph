@@ -81,7 +81,7 @@ func measure(t *testing.T, name string, n int, build func() any) {
 	// collection first, by which point the structure being attributed has
 	// been reclaimed and the profile describes an empty heap.
 	if path := os.Getenv("PROBE_HEAP_PROFILE"); path != "" {
-		f, err := os.Create(path)
+		f, err := os.Create(path) //nolint:gosec // G304: path is the operator-supplied PROBE_HEAP_PROFILE output file of this opt-in probe, not untrusted input.
 		if err != nil {
 			t.Fatalf("create heap profile: %v", err)
 		}

@@ -175,7 +175,12 @@ func reserveConstraintValue(
 		for i, label := range all {
 			g := gen0
 			if i > 0 {
-				g = genRest[i-1]
+				// genRest is nil when the reservation touched no value-set
+				// (an unconstrained key, rmp #3082): every generation is 0.
+				g = 0
+				if genRest != nil {
+					g = genRest[i-1]
+				}
 			}
 			if g&reservationInserted != 0 {
 				reg.releaseInGeneration(constraintKey(label, prop), sv, g&^reservationInserted)

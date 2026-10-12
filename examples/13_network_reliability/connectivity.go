@@ -37,7 +37,7 @@ func reportConnectivity(ctx context.Context, w io.Writer, net *network, bridges 
 
 	// Intact backbone: one connected component.
 	start := time.Now()
-	_, kIntact, err := search.WCCCtx(ctx, csr.BuildFromAdjList(net.adj).BuildSymmetric())
+	_, kIntact, err := search.WCCCtx(ctx, csr.BuildSymmetricFromAdjList(net.adj))
 	if err != nil {
 		return fmt.Errorf("WCC (intact): %w", err)
 	}
@@ -49,7 +49,7 @@ func reportConnectivity(ctx context.Context, w io.Writer, net *network, bridges 
 	if err != nil {
 		return err
 	}
-	severedCSR := csr.BuildFromAdjList(severed).BuildSymmetric()
+	severedCSR := csr.BuildSymmetricFromAdjList(severed)
 
 	start = time.Now()
 	comp, kSevered, err := search.WCCCtx(ctx, severedCSR)

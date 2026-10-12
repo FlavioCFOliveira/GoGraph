@@ -63,6 +63,11 @@ func TestWriter_RolloverKeepsRunsWholeAndPositionsContinuous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	const runs, perRun, size = 30, 4, 100 << 10
 	for r := range runs {
 		mark, err := w.AppendRun(func(emit func([]byte) error) error {
@@ -104,6 +109,11 @@ func TestWriter_RolloverKeepsRunsWholeAndPositionsContinuous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if got := w2.DurableOffset(); got != end {
 		t.Fatalf("reopened at position %d, the log ended at %d", got, end)
 	}
@@ -205,6 +215,11 @@ func TestOpen_DeletesUnfinishedSpareAndLeftovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	appendFrames(t, w, 40, 64<<10, 0xB0) // three segments
 	// The control write of a checkpoint whose unlink never ran.
 	if err := w.MarkCheckpoint(w.DurableOffset()); err != nil {
@@ -246,6 +261,11 @@ func TestWriter_PreparerCreatesTheNextSegment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(SegmentPath(walPath, 2)); err == nil {

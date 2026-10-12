@@ -117,7 +117,7 @@ func AssertBipartite[N comparable, W any](t testing.TB, g graphView[N, W]) {
 	// The undirected view: storage holds each edge once, in its own direction,
 	// so the 2-colouring walks the symmetric projection.
 	m := adj.Mapper()
-	c := csr.BuildFromAdjList(adj).BuildSymmetric()
+	c := csr.BuildSymmetricFromAdjList(adj)
 	maxID := uint64(m.MaxNodeID()) + 1
 	colour := make([]uint8, maxID)
 

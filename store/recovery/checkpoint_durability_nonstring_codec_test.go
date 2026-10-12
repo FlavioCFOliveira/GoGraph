@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -39,6 +40,11 @@ func TestCheckpointDurability_NonStringKeysCodecTruncates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 
 	g := lpg.New[int64, int64](adjlist.Config{})
 	opts := txn.Options[int64, int64]{
@@ -131,6 +137,11 @@ func TestCheckpointDurability_UUIDKeysCodecTruncates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 
 	g := lpg.New[[16]byte, int64](adjlist.Config{})
 	opts := txn.Options[[16]byte, int64]{

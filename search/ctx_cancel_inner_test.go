@@ -8,8 +8,8 @@ package search
 //
 //   - #1304 BFSDirectionOptCtx — new Ctx variant; polls at the driver loop top
 //     and at 4096-node granularity inside the bottom-up O(V) scan.
-//   - #1305 DiameterCtx — polls before each per-vertex eccentricity BFS inside
-//     an iFUB level, not just once per level.
+//   - #1305 DiameterCtx — polls before every batch of eccentricity BFS sweeps
+//     (one sweep per batch below diameterParallelMinComponent).
 //   - #1306 TarjanSCCCtx — polls every 4096 work-stack steps inside the inner
 //     DFS loop, not just once per DFS root.
 //   - #1307 CountTrianglesCtx — polls every 4096 candidate pairs in the inner
@@ -189,23 +189,16 @@ func TestBFSDirectionOptCtx_LiveContext_FullTraversal(t *testing.T) {
 // --- #1305 DiameterCtx ----------------------------------------------------
 
 // TestDiameterCtx_Cancel_DuringInnerBFS verifies that cancellation is observed
-// inside the iFUB per-vertex refinement loop, and that the per-vertex poll is
-// load-bearing — the coarser per-level poll alone is not enough to interrupt a
-// single wide level.
+// between the eccentricity sweeps of a long run, not only at entry.
 //
-// A complete graph K1000 has diameter 1, so the iFUB refinement runs a single
-// level (k == 1) that contains every non-centre vertex (~999): one giant level
-// of ~999 inner eccentricity BFS sweeps. The poll sequence entering that level
-// is: 2-sweep precondition (call 1), post-2-sweep (call 2), the level-1 per-level
-// check (call 3); cancelAfterNCalls(3) reports cancelled from call 4 onward.
-//
-// With the per-vertex poll the very first inner BFS poll (call 4) observes the
-// cancellation and the function returns context.Canceled having run no further
-// sweeps. WITHOUT it the inner loop polls ctx.Err() zero times across all ~999
-// sweeps; that single k == 1 iteration is the last, so the loop then exits and
-// the function returns a NIL error after wasting the entire level — i.e. the
-// cancel test fails (nil != Canceled) pre-fix. K1000 thus discriminates the
-// per-vertex check from the per-level check it replaces.
+// In a complete graph K1000 every vertex has eccentricity 1 and upper bound 2
+// after any sweep, so no bound removes a vertex before it has been a source:
+// the run makes 1000 sweeps, one per batch (1000 vertices is below
+// diameterParallelMinComponent). The polls are: before the seed sweep (call 1),
+// then before each batch (calls 2 and 3); cancelAfterNCalls(3) reports
+// cancelled from call 4 onward, so the function must return context.Canceled
+// after three sweeps. A run that polled only at entry would return a NIL error
+// after all 1000 sweeps.
 func TestDiameterCtx_Cancel_DuringInnerBFS(t *testing.T) {
 	t.Parallel()
 	g, err := shapegen.Complete(1_000, false).Build(adjlist.Config{})

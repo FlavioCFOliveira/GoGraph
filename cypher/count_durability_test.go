@@ -28,6 +28,7 @@ package cypher
 // closed). Layer: short.
 
 import (
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -94,6 +95,11 @@ func countRunCycle(t *testing.T, dir string, g *lpg.Graph[string, float64], chec
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	store := txn.NewStoreWithOptions[string, float64](g, w, countDurStoreOpts())
 	eng := NewEngineWithStore(store)
 	for _, q := range queries {
@@ -131,6 +137,11 @@ func countReopen(t *testing.T, dir string) (*Engine, *lpg.Graph[string, float64]
 	if err != nil {
 		t.Fatalf("reopen wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	store := txn.NewStoreWithOptions[string, float64](res.Graph, w, countDurStoreOpts())
 	eng := NewEngineWithStoreAndSchema(store, res.Constraints, res.Indexes)
 	return eng, res.Graph, func() {

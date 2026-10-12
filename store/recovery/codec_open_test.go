@@ -27,6 +27,11 @@ func TestOpen_RejectsUnknownLeadingByte(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	// Leading byte = OpSetNodeLabel (a v1 OpKind, not OpRecordV2/V3),
 	// followed by srcLen|src, dstLen|dst, labelLen|label.
 	frame := []byte{byte(txn.OpSetNodeLabel)}
@@ -72,6 +77,11 @@ func TestOpen_TruncatedV2Body(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	// version + kind + truncated string codec length prefix
 	payload := []byte{txn.OpRecordV2, byte(txn.OpAddEdge), 0x10, 0x00}
 	if err := w.Append(payload); err != nil {
@@ -111,6 +121,11 @@ func TestOpen_TruncatedV2DstBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	// Build a partial v2 frame: codec(src) ok, codec(dst) short.
 	codec := txn.NewStringCodec()
 	body, _ := codec.Encode(nil, "alice")
@@ -152,6 +167,11 @@ func TestOpen_V2MissingTrailingLabelLength(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	codec := txn.NewStringCodec()
 	body, _ := codec.Encode(nil, "alice")
 	body, _ = codec.Encode(body, "bob")
@@ -191,6 +211,11 @@ func TestOpen_V2LabelOverflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	codec := txn.NewStringCodec()
 	body, _ := codec.Encode(nil, "alice")
 	body, _ = codec.Encode(body, "bob")

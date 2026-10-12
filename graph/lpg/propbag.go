@@ -550,6 +550,23 @@ func (b *propBag) len() int {
 // forEach invokes fn once per (keyID, value) pair in the bag. The iteration
 // order is unspecified, matching the prior map-backed behaviour. fn must not
 // mutate the bag.
+// forEachKey invokes fn once per key in the bag, in the order forEach visits
+// them, decoding no value: it reads only each record's header ([bagKeyAt]), so it
+// allocates nothing for a string or a boxed value.
+func (b *propBag) forEachKey(fn func(key PropertyKeyID)) {
+	if b.m != nil {
+		for k := range b.m {
+			fn(k)
+		}
+		return
+	}
+	for off := 0; off < len(b.buf); {
+		k, next := bagKeyAt(b.buf, off)
+		fn(k)
+		off = next
+	}
+}
+
 func (b *propBag) forEach(fn func(key PropertyKeyID, val PropertyValue)) {
 	if b.m != nil {
 		for k, v := range b.m {
