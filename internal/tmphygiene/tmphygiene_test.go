@@ -1,6 +1,7 @@
 // Package tmphygiene holds the temp-area hygiene gates for the GoGraph
 // repository: the suite must not strand directories in the system temporary
-// area, and the volume that area lives on must have room for the gate to run.
+// area, and the volume holding the repository must have room for the coverage
+// gate to run.
 //
 // The package is test-only by design; it has no production surface. It follows
 // the precedent of internal/docscheck and internal/scriptgate, which hold the
@@ -26,9 +27,10 @@
 //
 //   - TestTempArea_OwnedDirectoriesDoNotAccumulate watches the directories this
 //     module creates and can therefore fix.
-//   - TestTempArea_VolumeHasRoomForTheGate watches free space, whoever consumed
-//     it. This is the one that would have saved the triage, and measurement says
-//     it has to be scoped this way: on the machine where #2527 was diagnosed
+//   - TestTempArea_VolumeHasRoomForTheGate watches free space on the volume
+//     that receives the coverage profiles, whoever consumed it. This is the one
+//     that would have saved the triage, and measurement says it has to be scoped
+//     by volume, not by owner: on the machine where #2527 was diagnosed
 //     this module's own stranded directories held 533 MB, while `go build`'s
 //     abandoned work directories held 10.0 GB. A guard that counted only
 //     "gograph-*" would have exonerated the temp area on the very run that the
@@ -216,8 +218,8 @@ const (
 	// run (SOAK_TIMEOUT ?= 4h), not a nightly one.
 	ownedStaleAfter = 24 * time.Hour
 
-	// gateFreeBytesFloor is the free space below which `make ci` cannot be
-	// trusted, derived from what the gate itself writes. The coverage step
+	// gateFreeBytesFloor is the free space below which `make cover-gate` cannot
+	// be trusted, derived from what that gate itself writes. The coverage step
 	// produces cover.out (measured 636,852,854 B) and cover.lib.out (measured
 	// 499,337,233 B); scripts/cover_gate.sh materialises each as a ".tmp.$$",
 	// copies it to a ".pub.$$" and renames that over the previously published
@@ -227,6 +229,14 @@ const (
 	// 4 GiB is the smallest round floor above that. Below it the run is not
 	// merely tight — it is the regime in which the WAL starts reporting ENOSPC
 	// as a poisoned writer, which is the misreading this gate exists to prevent.
+	//
+	// The floor applies to the volume holding the REPOSITORY, not to the test
+	// process's temp area (rmp #3117). cover_gate.sh writes every one of those
+	// files at a path relative to its working directory (COVER_PROFILE defaults
+	// to cover.out, COVER_LIB_PROFILE to cover.lib.out), and `make cover-gate`
+	// runs it from the repository root. The temp area holds only test graph data
+	// — on this project a 4 GiB RAM drive — and no measured peak footprint of the
+	// suite's graph data exists to size a floor for it, so none is asserted.
 	gateFreeBytesFloor = 4 << 30
 )
 
@@ -878,18 +888,24 @@ func plantNames(prefix string, n int) []string {
 // ─── gate 2: free space ──────────────────────────────────────────────────────
 
 // TestTempArea_VolumeHasRoomForTheGate is the gate that answers the misreading
-// #2527 caused. When the temp volume is nearly full, the WAL's ENOSPC report
-// reads as a durability defect; this states plainly that it is not.
+// #2527 caused. When the volume a gate writes to is nearly full, the WAL's
+// ENOSPC report reads as a durability defect; this states plainly that it is
+// not.
 //
-// It is a FAILURE and not a warning for two reasons. Below the floor `make ci`
-// cannot pass anyway — the coverage step alone needs ~3.2 GiB — so the check
+// It measures the volume holding the repository root, because that is where
+// scripts/cover_gate.sh writes its profiles (see gateFreeBytesFloor). It does
+// not measure os.TempDir(): that is the test process's graph-data area, which
+// receives none of those profiles (rmp #3117).
+//
+// It is a FAILURE and not a warning for two reasons. Below the floor `make
+// cover-gate` cannot pass anyway — the coverage step alone needs ~3.2 GiB — so the check
 // cannot be a nuisance on a volume that could have run the gate. And a warning
 // buried in a twenty-minute log beside seventeen red packages is precisely the
 // signal that went unread.
 func TestTempArea_VolumeHasRoomForTheGate(t *testing.T) {
 	t.Parallel()
 
-	root := os.TempDir()
+	root := moduleRoot(t)
 	free, err := availableBytes(root)
 	if err != nil {
 		// Degrade ONE capability rather than deleting the whole gate: on a
@@ -898,20 +914,20 @@ func TestTempArea_VolumeHasRoomForTheGate(t *testing.T) {
 		t.Skipf("free space on %s is not observable on this platform: %v", root, err)
 	}
 
-	t.Logf("temp volume %s: %.2f GiB free (floor %.2f GiB)",
+	t.Logf("repository volume %s: %.2f GiB free (floor %.2f GiB)",
 		root, float64(free)/(1<<30), float64(gateFreeBytesFloor)/(1<<30))
 
 	if free < gateFreeBytesFloor {
-		t.Errorf("only %.2f GiB free on the volume holding %s; the gate needs at least %.2f GiB.\n\n"+
+		t.Errorf("only %.2f GiB free on the volume holding the repository %s; the coverage gate needs at least %.2f GiB.\n\n"+
 			"READ ANY WAL DURABILITY FAILURE IN THIS RUN AS ENVIRONMENTAL. On a full volume "+
 			"fsync fails with ENOSPC and store/wal correctly refuses to acknowledge the write, "+
 			"reporting a poisoned writer that discarded its un-synced suffix. That message is "+
 			"identical to the one a genuine durability defect produces, and in rmp #2527 it "+
 			"turned seventeen red packages into a suspected data-loss bug. Free space first, "+
 			"then re-read the failures.\n\n"+
-			"The floor is what this gate itself writes: scripts/cover_gate.sh keeps up to three "+
+			"The floor is what scripts/cover_gate.sh writes in the repository root: up to three "+
 			"copies each of cover.out (~607 MiB) and cover.lib.out (~476 MiB) while publishing "+
-			"them, ~3.2 GiB, before the Go build cache and the test binaries.",
+			"them, ~3.2 GiB.",
 			float64(free)/(1<<30), root, float64(gateFreeBytesFloor)/(1<<30))
 	}
 }
