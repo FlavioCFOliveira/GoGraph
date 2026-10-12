@@ -16376,10 +16376,19 @@ func buildRowCtxWithUse(row exec.Row, bp *rowBindPlan) expr.RowContext {
 // global arena would let two concurrent query goroutines clobber each other's
 // node ids. See [acquireRowCtx]/[releaseRowCtx] and the soundness invariant on
 // [populateRowCtx].
+//
+// The struct is kept at exactly one 64-byte cache line (pinned by
+// TestPooledRowCtxFitsOneCacheLine): the two cursors are int32 so the
+// relationship arena (rmp #3104) fits beside the node arena without growing the
+// unit. An earlier relationship-arena variant with int cursors grew the unit past
+// one line and cost a reproducible ~1.7% on an aggregation that binds no
+// relationship at all (#2388 measurement record).
 type pooledRowCtx struct {
-	ctx  expr.RowContext      // the per-row variable bindings map
-	lazy []expr.LazyNodeValue // arena of reusable lazy node structs
-	used int                  // cursor into lazy; reset to 0 on each acquire
+	ctx     expr.RowContext              // the per-row variable bindings map
+	lazy    []expr.LazyNodeValue         // arena of reusable lazy node structs
+	rels    []expr.LazyRelationshipValue // arena of reusable lazy relationship structs (rmp #3104)
+	used    int32                        // cursor into lazy; reset to 0 on each acquire
+	relUsed int32                        // cursor into rels; reset to 0 on each acquire
 }
 
 // rowCtxPool recycles per-row [pooledRowCtx] units for the non-escaping
@@ -16446,7 +16455,7 @@ func acquireRowCtx(schemaLen int) *pooledRowCtx {
 		p = &pooledRowCtx{ctx: make(expr.RowContext, rowCtxPoolCap)}
 	}
 	clear(p.ctx)
-	p.used = 0
+	p.used, p.relUsed = 0, 0
 	return p
 }
 
@@ -16457,7 +16466,7 @@ func acquireRowCtx(schemaLen int) *pooledRowCtx {
 // a distinct arena slot (the cursor advances per call within one populateRowCtx
 // pass), so two variables in the same row never alias one struct.
 func (p *pooledRowCtx) borrowLazy(id uint64, res expr.NodeResolver) *expr.LazyNodeValue {
-	if p.used < len(p.lazy) {
+	if int(p.used) < len(p.lazy) {
 		v := &p.lazy[p.used]
 		p.used++
 		v.Reset(id, res)
@@ -16467,6 +16476,30 @@ func (p *pooledRowCtx) borrowLazy(id uint64, res expr.NodeResolver) *expr.LazyNo
 	v := &p.lazy[len(p.lazy)-1]
 	p.used++
 	v.Reset(id, res)
+	return v
+}
+
+// borrowLazyRel is [pooledRowCtx.borrowLazy] for a relationship (rmp #3104): it
+// returns a [*expr.LazyRelationshipValue] from the unit's relationship arena,
+// rebound to the given identity, type, storage coordinates and resolver. The
+// pointer is owned by this pooledRowCtx and is valid only until the unit is
+// released; it must never escape the row it is read in, which the scalarUse gate
+// guarantees exactly as it does for a borrowed lazy node. Each relationship
+// variable in a row draws a distinct slot (the cursor advances per call within
+// one populateRowCtx pass), so two variables in one row never alias one struct.
+//
+// The slot is rebound by assigning the value [expr.NewLazyRelationshipValue]
+// builds. The constructor is inlined and its result does not escape, so the
+// assignment is a stack-to-arena copy with no heap allocation, and the rebound
+// slot is field-for-field the value the constructor returns — no second
+// construction path exists to drift from it.
+func (p *pooledRowCtx) borrowLazyRel(id, startID, endID uint64, relType string, src expr.RelSource, res expr.RelationshipResolver) *expr.LazyRelationshipValue {
+	if int(p.relUsed) >= len(p.rels) {
+		p.rels = append(p.rels, expr.LazyRelationshipValue{})
+	}
+	v := &p.rels[p.relUsed]
+	p.relUsed++
+	*v = *expr.NewLazyRelationshipValue(id, startID, endID, relType, src, res)
 	return v
 }
 
@@ -16601,7 +16634,7 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, bp *rowBindPlan, arena *p
 				// fetch be replaced by a kind-gated EdgeHasProperty presence
 				// check. It is nil on every ungated plan, which keeps that build
 				// byte-identical (C5).
-				if rv, ok := buildRelationshipValueFromRow(row, &b.meta.edge, g, bopts, b.use); ok {
+				if rv, ok := buildRelationshipValueFromRow(row, &b.meta.edge, g, bopts, b.use, arena); ok {
 					ctx[b.name] = rv
 					continue
 				}
@@ -16829,17 +16862,17 @@ func slotHoldsHandle(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID
 // [expr.RelationshipValue] exactly as before, which is why the return type is
 // expr.Value rather than expr.RelationshipValue.
 //
-// The lazy value is allocated fresh per row rather than drawn from the pooled
-// RowContext's struct arena, the way the lazy NODE value is. That is a MEASURED
-// choice, not an oversight: an arena variant was built and interleaved against
-// this one, and it made the pooled path no faster (the predicate query moved
-// -5.44% without it against -5.51% with it, a difference inside the measured
-// noise floor) while growing [pooledRowCtx] past one cache line, which cost a
-// reproducible ~1.7% on an unrelated aggregation that binds no relationship at
-// all. Allocating one small immutable struct also keeps the value free of the
-// single-goroutine ownership contract a reused struct would carry. See the
-// #2388 measurement record.
-func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.Value, bool) {
+// ARENA (rmp #3104). When arena is non-nil — the pooled non-escaping path
+// ([evalRowPooled] on a gated plan), and only there — the lazy value is drawn
+// from the pooled RowContext's relationship arena ([pooledRowCtx.borrowLazyRel])
+// instead of being allocated per row, the way the lazy NODE value is (#1697). It
+// carries the same ownership contract as a borrowed lazy node: valid only until
+// the unit is released, never escaping the row. Every other caller (the
+// aggregation pre-projection, the eager builders, tests) passes nil and gets a
+// freshly allocated value exactly as before. The #2388 arena variant was
+// rejected because it grew [pooledRowCtx] past one cache line; this one keeps the
+// unit at 64 bytes by narrowing the cursors to int32.
+func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse, arena *pooledRowCtx) (expr.Value, bool) {
 	// The oracle for "the relationship is resolved once per row" (#2658): one count
 	// per mapper-resolution + [relStoredInverted] + by-handle-routing pass. Gated,
 	// so it costs a predicted branch when off — see [projFusionCountersOn].
@@ -16969,6 +17002,10 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 			// the ONLY thing left to build — and the lazy value builds it never.
 			// Falls through to the eager map on every shape the gate rejects.
 			if relSrc, lazyOK := relLazyRoute(g, stKey, enKey, fwdHandle, hasByHandleEntry, relUse); lazyOK {
+				if arena != nil {
+					return arena.borrowLazyRel(uint64(edgeIDVal), storageStart, storageEnd,
+						edgeType, relSrc, lazyRelResolverFor(bopts, g)), true
+				}
 				return expr.NewLazyRelationshipValue(uint64(edgeIDVal), storageStart, storageEnd,
 					edgeType, relSrc, lazyRelResolverFor(bopts, g)), true
 			}
