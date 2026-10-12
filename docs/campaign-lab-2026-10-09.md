@@ -761,11 +761,14 @@ After iteration 3 (**paired example-26 runs, not sweep totals**; units as record
 - **The last changes against it.** #3104 removed 2.8 GB in example 26 (paired), above the
   allocation threshold. #3106 removed ≈ 0.8 GB (paired, about 0.76 GiB), **below** it, and its
   CPU change is inside the run spread (#3106). #3103 found U3 inherent; #3105 dropped U5 at 1.03%.
-- **Verdict: example-driven optimisation of GoGraph has reached insignificant returns at
-  `8932f1f3`.** The last change is below the 1% threshold; every remaining module residual is
-  inherent, idle, below threshold, user-dropped (U1, U5), or in the backlog as design work
-  (S3–S6, #3098–#3101). **No residual remains undecided**: the whole-shard sweeps noted in
-  #3091 were fixed by #3108.
+- **Verdict (iteration 4, §30–§34, full sweep at `ffeebf23`): example-driven optimisation of
+  GoGraph has NOT yet reached insignificant returns.** The last changes were confirmed at sweep
+  level (module allocation −3.0%, no regression) and #3106 and #3108 are each below the 1%
+  threshold, but two module residuals above the recomputed allocation threshold (1.05 GiB) were
+  never ranked or decided: **N1**, PageRank's per-call rank vectors (2.63 GiB, 2.50%), and
+  **N2**, the adjacency reverse-index appends (1.73 GiB, 1.64%). Every other residual is
+  inherent, idle, below threshold, user-dropped (U1, U5, U7), or in the backlog as design work
+  (S3–S6, #3098–#3101); the whole-shard sweeps noted in #3091 were fixed by #3108.
 
 ## 28. Bugs found and claims corrected
 
@@ -778,3 +781,138 @@ After iteration 3 (**paired example-26 runs, not sweep totals**; units as record
 | #3090 correction | premise wrong: values already grew amortised; the copy was the per-version column headers (384 B for ≈ 12 B of value) | — | #3090 |
 | #3109 correction | example 37's `ladder.IX11` was a harness check that could not fail on serialisation (a forced-serialisation mutant passed it); present at `c794a1ed`, **not a module regression**; fixed in `5b3d50af` (fixed check 15/15 pass, mutant 15/15 fail) | fixed IX11 check | #3109 |
 | other refuted premises | #3080 step (b) O(1) slot read; #2732 original cause; #2391 recorded split; #3091 shard collision | — | task logs |
+
+# Laboratory iteration 4, 2026-10-12 — the same sweep at `ffeebf23`
+
+Sprint 367, rmp #3110. The iteration-3 sweep was re-run at HEAD `ffeebf23` (module code as at
+`590d85f3`: #3104 `a5f2668f`, #3106 `8932f1f3`, #3108 `590d85f3`; #3109 `5b3d50af` changes the
+example-37 harness only) with the same driver, passes, examples, scales and owner reader, so
+every row compares 1:1 with section 17. **No module code was changed.** Every number below was
+collected in this session.
+
+## 29. Method and environment (iteration 4)
+
+- Same as section 16, with these differences: `$L4` =
+  `/private/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/755b6bf2-7deb-4d58-a983-07059400361e/scratchpad/lab4`;
+  binaries rebuilt (`LAB_REBUILD=1`, 37 binaries, 25 s, outside every timed window); graph data
+  under `/Volumes/GoGraphRAM/lab3110` (deleted at the end); `GOCACHE` default (on disk).
+- Host: Apple M4, 10 cores, Darwin 27.0.0 arm64, Go 1.27.2, tree clean,
+  `GOGRAPH_FSYNC_LATENCY=off`. Load1: start 2.60 (top processes iTerm 30%, `claude` 16%,
+  `sysmond` 13%, `osascript` 11%, WindowServer 9% of one core); `default` 15:55–16:01 (to 3.94);
+  `elevated` 16:01–16:09 (3.95); peak RSS 16:09–16:14 (4.60); `contention` 16:14–16:19 (3.11);
+  A/B repeats 16:19–16:28 (2.78–6.03). Every row ran alone within its pass.
+- **A/B.** `$L4/repeat.sh` ran rows 26 (3 + 3, CPU and heap) and 37 (3 + 3, with
+  `-contention 1`) **interleaved**, A = the iteration-3 binaries (`7b8120df`), B = HEAD.
+  `$L4/repeat2.sh` re-ran the rows the sweep flagged (section 31): 08 and 23 (3 + 3, CPU and
+  heap) and the peak RSS of 10 and 32 (3 + 3, `/usr/bin/time -l`), interleaved the same way.
+- **Noise.** Same-code spread inside one arm: row 26 module CPU 40.01–44.31 s (A) and
+  40.67–49.96 s (B); row 37 total CPU 16.78–24.76 s (B; B3 executed more statements:
+  `NewChunk` 2.04 GiB against 1.05–1.11 GiB); rows below 1 s of module CPU move ±30–50% run to
+  run (rows 02, 14, 32 fell 31–50% with no change in their code paths). As in iteration 3, **a
+  single-run per-row delta under ±10% is not a finding**, and rows under 1 s of module CPU are
+  judged on A/B only.
+
+## 30. Totals `c794a1ed` → `6b399a3b` → `7b8120df` → `ffeebf23`
+
+| measure (`elevated` sweep unless stated) | iteration 1 → 2 → 3 → 4 | iteration 4 vs 3 | vs iteration 1 |
+|---|---|---|---|
+| module CPU | 383.88 → 249.06 → 233.24 → **232.74 s** | −0.2% (inside noise) | −39.4% |
+| module allocation | 144.47 → 119.13 → 108.38 → **105.17 GiB** | **−3.0% (−3.21 GiB)** | −27.2% |
+| module contention delay (`contention` pass) | 274.86 → 263.05 → 127.99 → **126.17 s** | −1.4% | −54.1% |
+| total CPU | 595.56 → 443.90 → 429.80 → 428.03 s | −0.4% | −28.1% |
+| total allocation | 160.96 → 135.67 → 125.22 → 121.89 GiB | −2.7% | −24.3% |
+| harness / unowned CPU | 54.57 / 157.11 → … → 54.54 / 142.02 → 55.51 / 139.78 s | +1.8% / −1.6% | — |
+
+Row 26 carries the allocation drop: module 21.68 → 18.25 GiB (−3.43 GiB, −15.8%); every other
+row's module allocation moved by at most 0.19 GiB (row 20, +1.1%, inside noise). Exit status: every `default` row exited 0
+(11 `cpu-total-zero` instrument FAILs, the same 11 rows as iteration 3); `elevated` row 31 exits
+1 on the same planner-statistics harness check as iterations 1–3, `24_init` `cpu-total-zero`;
+`contention` row 37 exits 1 on the same intermittent check as iteration 3
+(`ladder.L22 level=8 crash_image_after_checkpoint: image taken false`), profiles written. No row
+showed a module defect. Per-row table: `$L4/compare4.md`.
+
+## 31. Verification of #3104, #3106, #3108 at sweep level
+
+| commit / task | claim (paired, single example) | sweep (`elevated`, owner reader) | interleaved A/B | verdict |
+|---|---|---|---|---|
+| `a5f2668f` #3104 pooled lazy relationship values | example 26 alloc −12.6%; lazy-rel 2.8 GB → 0 | `NewLazyRelationshipValue` **2 783.3 MiB, 0.66 s → 0 MiB, 0.03 s** | row 26 module alloc 22 211 / 22 134 / 22 189 → 18 716 / 18 599 / 18 678 MiB (**−15.8%, −3.43 GiB**, every B below every A), shared with #3106 | **confirmed** |
+| `8932f1f3` #3106 streamed edge labels | label slice 0.64 GB → 0; CPU not claimed | `edgeLabelsBySlots` **614.0 MiB → 0**; `EdgeLabelsByID` 1 347.9 MiB, 3.79 s → 5.5 MiB, 0 s; new `ForEachEdgeLabelByID` 4.11 s, 687.9 MiB (of which `buildSourceSlots` 675.9 MiB, unchanged); `buildRelationshipValueFromRow` 8.88 s, 5.02 GiB → **8.13 s, 1.66 GiB** | included above; row 26 module CPU 40.01 / 44.31 / 42.31 → 41.59 / 49.96 / 40.67 s (no change beyond spread) | **confirmed for allocation**; CPU unchanged, as #3106 stated |
+| `590d85f3` #3108 read-locked reclaim pre-check | waiters' delay median 1 187 → 104 ms (instrumented) | `reclaimPropVersions` delay 0.44 s → 0.23 s (single run each) | row 37 `reclaimPropVersions` **mutex delay 0.31 / 0.26 / 0.29 → 0.07 / 0.06 / 0.09 s (−75%)**; block delay 0.20 / 0.24 / 0.19 → 0.19 / 0.18 / 0.21 s (unchanged) | **confirmed in direction**; the profile sees the waiters' share only at the unlock site, so the instrumented −91% is not reproduced by this method; both before and after are below the 1.26 s threshold |
+
+## 32. Rows flagged by the sweep, repeated
+
+| row | sweep, iteration 3 → 4 | interleaved repeat A (`7b8120df`) → B (HEAD) | verdict |
+|---|---|---|---|
+| 08_pagerank | module CPU 1.88 → 2.21 s (+17.6%) | 2.59 / 2.00 / 2.26 → 2.17 / 1.95 / 1.67 s | **not a regression** (iteration 3's 1.88 s was a low draw; iterations 1–2: 2.29, 2.34 s) |
+| 23_bolt_server | module CPU 0.70 → 0.78 s (+11.4%) | 1.05 / 0.82 / 0.78 → 0.72 / 0.78 / 0.85 s | **not a regression** |
+| 30_min_spanning_tree | module CPU 0.15 → 0.17 s (+13.3%) | not repeated: 0.02 s is two 10 ms samples | below resolution |
+| 10_dimacs9_routing | peak RSS 242 → 387 MiB | 376 / 391 / 366 → 385 / 242 / 386 MiB | **bimodal in both arms** (iteration 2 had 363); not a regression |
+| 32_euler | peak RSS 4 827 → 7 228 MiB | 7 228 × 3 → 7 228 × 3 | **iteration 3's 4 827 MiB was the outlier** (iterations 1–2: 7 228); harness-owned |
+| 24_seed | peak RSS 2 123 → 1 818 MiB | not repeated | one-run RSS, moves between 1 778 and 2 123 MiB across iterations |
+
+No row regressed beyond noise.
+
+## 33. Residual module-owned costs at HEAD
+
+**Threshold** (recomputed on this sweep): 1% of module CPU = **2.33 s**, of module allocation =
+**1.05 GiB**, of module contention delay = **1.26 s**.
+
+| # | site (row) | cost at HEAD | status |
+|---|---|---|---|
+| **N1** | `search/centrality.PageRankCtx` `pagerank.go:286–287`, the per-call `cur` and `next` rank vectors (row 20) | **2.63 GiB (2.50%)**: 1 366.2 + 1 325.6 MiB (iteration 3: 1 391.4 + 1 350.1 MiB) | **above threshold, never ranked** (present in iterations 2 and 3, not listed in sections 13 or 19). One vector is the returned result; the other is scratch dropped at return. **Hypothesis:** the scratch half, ≈ 1.31 GiB (1.25%), is poolable. Not measured |
+| **N2** | `graph/adjlist.(*revIndex).add` `reverse.go:134` (per-destination source-list append) and `:130` (shard array doubling) (rows 26, 09, 01, 33, 32, 18 and others) | **1.73 GiB (1.64%)**: 1 148.7 + 618.6 MiB (iteration 3: 1 174.4 + 595.6 MiB) | **above threshold, never ranked**. Part is the index's own content, part is amortised-growth garbage; the split is **not measured** |
+| N3 | `graph/lpg.(*sourceSlots).pairRun` (row 26) | **2.82 s (1.21%)** flat (iteration 3: 2.85 s) | above threshold as a site, never ranked. Three binary searches of the same (source, destination) pair per relationship: labels 1.21 s, property 1.01 s, presence 0.60 s. Removing two of three would save at most ≈ 1.61 s (0.69%): **remedy below threshold** (hypothesised) |
+| U1 | id boxing: `expand.go:1284–1286` 3.43 GiB, `scan_label.go:206` 1.44 GiB, `scan_all.go:149` 1.00 GiB | 5.87 GiB (5.6%) | user-dropped (§26) |
+| U7 | `lpg.StringValue` `property.go:118` | 1.14 GiB (1.08%) | user-dropped with U1 (§26) |
+| U8 | `exec.NewChunk` `chunk.go:176` (row 37) | 1.12 GiB (1.06%); 1.05–2.04 GiB across row-37 repeats (statement count varies) | at threshold; varies with the workload's statement count |
+| U2 | `buildReadPhysical` (row 35) | 5.94 GiB cumulative | backlog S3–S6, #3098–#3101 |
+| U3 | `csrPairAndColumnCachedFor` (row 26) | 7.51 s, 2.74 GiB | inherent (#3103) |
+| U5 | `Mapper.Resolve` 1.43 s + `Mapper.Lookup` 1.75 s | 3.18 s combined | user-dropped (#3105) |
+| U6 | `mvcc.NewCommitInfo` | 1.43 GiB (1.36%) | inherent |
+| U10 | row 37 node-property shard lock `property.go:391/358`, `snapshot_read.go:217` | 8.03 s mutex, 5.64 + 5.15 s block | inherent (#3091) |
+| U11, U12 | vacuum idle `select` `mvcc_vacuum.go:717` 16.82 s; PageRank parked workers `pagerank.go:866/930` 56.95 + 11.29 s | — | idle |
+| — | other contention sites above 1.26 s: `diameter.go:203` 2.28 s (worker waits for jobs), `serve.go:1562` 2.18 s (connection `select`), `isolationtest` runner 1.84 s (test harness), `txn.go:2228` `waitApplyTurn` 1.71 s, `mvcc_vacuum.go:755` 1.53 s (backoff timer) | — | idle or ordered-apply wait; unchanged from iteration 3 (2.37, 2.28, 1.80, 1.86, 1.49 s) |
+| — | algorithm kernels (flat, no allocation): Brandes 52.22 s, PageRank `runRange` 31.81 s, `dijkHeap.pop` 12.54 s, Johnson 8.91 s, `dijkstraCore` 7.55 s, BFS row 33 3.44 s, `HungarianCtx` 2.88 s, `bfsScratch.run`/`runHarmonic` 2.76/2.74 s; WAL group sync 8.43 s; WAL replay per `24_*`; row 20 search pools (#2382); copy-on-write adjacency `adjlist.go:971` 3.95 GiB (both shapes); bulk redo `txn.go:1379` 2.49 GiB; `johnsonPrepare` 1.23 GiB | — | inherent or tracked, as section 19 |
+
+## 34. Final verdict (iteration 4)
+
+- **Moved since iteration 3:** module allocation −3.0% (−3.21 GiB), all of it row 26 and all of
+  it attributed to #3104 and #3106 at site level; module CPU and module contention delay inside
+  the noise band. No regression.
+- **Every last change was confirmed at sweep level** (section 31); #3106 and #3108 are each
+  below the threshold on their own.
+- **Verdict: the significance verdict of section 27 is NOT confirmed as stated.** Two module
+  residuals are above the 1% allocation threshold and were never ranked or decided: **N1**,
+  PageRank's per-call rank vectors (2.63 GiB, 2.50%; poolable scratch ≈ 1.31 GiB, 1.25%,
+  hypothesised), and **N2**, the adjacency reverse-index appends (1.73 GiB, 1.64%; the growth
+  share unmeasured). N3 (`pairRun`, 1.21% CPU) is above the threshold as a site, but its
+  hypothesised remedy is below it. Every other residual is below the threshold, inherent, idle,
+  user-dropped (U1, U5, U7) or in the backlog (S3–S6, #3098–#3101).
+
+## 35. Limits (iteration 4)
+
+- A/B covers rows 26, 37, 08, 23 and the peak RSS of rows 10 and 32 only; every other row is
+  one run per pass.
+- #3108's instrumented figure (waiters' delay) is not reproducible with pprof's mutex profile,
+  which charges the delay to the unlocking stack; the sweep verifies direction only.
+- N1's and N2's remedies and gains are hypotheses; N2's content-versus-growth split and N3's
+  three-search cost per call are read from profiles, not measured by a single-variable change.
+
+## 36. Reproduction (iteration 4)
+
+```bash
+cd /Users/flaviocfo/dev/xumiga/GoGraph
+$L4/sweep.sh            # default (LAB_REBUILD=1), elevated, rss.sh, contention
+$L4/repeat.sh           # interleaved A/B rows 26 and 37 (A = $L3/bin, B = $L4/bin)
+$L4/repeat2.sh          # interleaved A/B rows 08, 23 (profiles) and 10, 32 (peak RSS)
+$L4/owner/owner $L4/out/elevated/*/{cpu,heap}.pprof > $L4/owner.elevated.tsv
+$L4/owner/owner $L4/out/contention/*/*.pprof       > $L4/owner.contention.tsv
+$L4/owner/owner $L4/repeat/*/*.pprof               > $L4/owner.repeat.tsv
+$L4/owner/owner $L4/repeat2/*/{cpu,heap}.pprof     > $L4/owner.repeat2.tsv
+python3 $L4/compare4.py <scratchpad>                # section 30 totals, per-row table
+python3 $L3/fn.py '<function regex>' $L3/owner.elevated.tsv $L4/owner.elevated.tsv   # section 31
+python3 $L4/linediff.py alloc_space line $L3/owner.elevated.tsv $L4/owner.elevated.tsv 900
+python3 $L4/agg.py $L4/owner.elevated.tsv cpu fn 40
+python3 $L4/agg.py $L4/owner.contention.tsv delay line 30
+python3 $L4/agg.py $L4/owner.repeat.tsv {cpu,alloc_space,delay} summary
+```
