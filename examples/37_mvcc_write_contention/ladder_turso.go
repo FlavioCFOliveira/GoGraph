@@ -61,6 +61,32 @@ const (
 
 func ix11Gen(g int64) string { return fmt.Sprintf("g%06d", g) }
 
+// ix11MinOverlaps is the number of read transactions that must each see a large
+// commit published while they are open: the arm's proof that commits and reads
+// run concurrently. A read transaction is open from its BeginReadTx to its
+// Commit; it saw a commit published inside that interval when an autocommit read
+// issued before its Commit returns a later generation than its own snapshot.
+const ix11MinOverlaps = 2
+
+// ix11OverlapBudget bounds how long the readers keep opening read transactions
+// past their operation count while fewer than ix11MinOverlaps overlaps have been
+// seen (rmp #3109). The count alone does not open a long enough window: a durable
+// commit costs an fsync (1-5 ms injected in the tests, more on a real device),
+// and 16 read transactions without the race detector take less, so a fixed count
+// let the readers finish before the writer's second commit. When commits are
+// serialised against open read transactions no overlap is ever seen, the readers
+// stop at the budget, and commits_overlapped_reads fails.
+const ix11OverlapBudget = 5 * time.Second
+
+// ix11ParseGen returns the generation a value of the arm carries.
+func ix11ParseGen(val string) (int64, error) {
+	var gen int64
+	if _, err := fmt.Sscanf(val, "g%06d", &gen); err != nil {
+		return 0, fmt.Errorf("IX11: unreadable value %q", val)
+	}
+	return gen, nil
+}
+
 // ix11Key is the value node id holds at generation g.
 func ix11Key(g int64, id int) string { return fmt.Sprintf("%s-%d", ix11Gen(g), id+100) }
 
@@ -91,9 +117,9 @@ func rowIX11Load(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 		}
 	}
 	var (
-		commits, reads, mixed, mismatches atomic.Int64
-		writerErr, readerErr              atomic.Pointer[error]
-		firstBad                          atomic.Pointer[string]
+		commits, reads, overlapped, mixed, mismatches atomic.Int64
+		writerErr, readerErr                          atomic.Pointer[error]
+		firstBad                                      atomic.Pointer[string]
 	)
 	bad := func(format string, args ...any) {
 		mismatches.Add(1)
@@ -120,8 +146,9 @@ func rowIX11Load(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 	}()
 	smp := startSampler(m.g, true)
 	ops := lc.opsPerWorker(level)
+	deadline := time.Now().Add(ix11OverlapBudget)
 	err = fanOut(ctx, level, func(ctx context.Context, _ int) error {
-		for range ops {
+		for n := 0; n < ops || (overlapped.Load() < ix11MinOverlaps && time.Now().Before(deadline)); n++ {
 			tx, err := m.eng.BeginReadTx(ctx)
 			if err != nil {
 				return err
@@ -137,9 +164,9 @@ func rowIX11Load(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 					return nil
 				}
 				val := sval(rows[0][0])
-				var gen int64
-				if _, serr := fmt.Sscanf(val, "g%06d", &gen); serr != nil {
-					return fmt.Errorf("IX11: unreadable value %q", val)
+				gen, err := ix11ParseGen(val)
+				if err != nil {
+					return err
 				}
 				for _, c := range []struct {
 					q    string
@@ -159,6 +186,23 @@ func rowIX11Load(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 					if seek != scan || scan != c.want {
 						bad("snapshot at %s: %s [%s] seek=%d scan=%d want %d", val, c.q[:24], c.v, seek, scan, c.want)
 					}
+				}
+				// The latest committed generation, read outside the snapshot while
+				// the transaction is still open.
+				latest, err := drain(m.eng.Run(ctx, ix11Values, nil))
+				if err != nil {
+					return err
+				}
+				if len(latest) != 1 || intAt(latest, 0, 1) != ix11LoadNodes {
+					mixed.Add(1)
+					return nil
+				}
+				lgen, err := ix11ParseGen(sval(latest[0][0]))
+				if err != nil {
+					return err
+				}
+				if lgen > gen {
+					overlapped.Add(1)
 				}
 				return nil
 			}()
@@ -190,10 +234,11 @@ func rowIX11Load(ctx context.Context, lc *ladderConfig, out *ladderOut, level in
 		first = *p
 	}
 	out.tele("IX11", level, "nodes_per_commit", ix11LoadNodes, "large_commits", commits.Load(), "read_txns", reads.Load(),
-		"mixed_snapshots", mixed.Load(), "seek_scan_mismatches", mismatches.Load())
+		"overlapped_read_txns", overlapped.Load(), "mixed_snapshots", mixed.Load(), "seek_scan_mismatches", mismatches.Load())
 	out.check("IX11", level, "seeks_planned_as_index", planned, "a seek of the arm is not planned as an index access: %s", unplanned)
-	out.check("IX11", level, "commits_overlapped_reads", commits.Load() > 1 && reads.Load() > 0,
-		"%d large commits, %d read transactions", commits.Load(), reads.Load())
+	out.check("IX11", level, "commits_overlapped_reads", overlapped.Load() >= ix11MinOverlaps,
+		"%d read transactions saw a commit published while open, want >= %d (%d large commits, %d read transactions)",
+		overlapped.Load(), ix11MinOverlaps, commits.Load(), reads.Load())
 	out.check("IX11", level, "never_mixed", mixed.Load() == 0, "%d snapshots saw old and new values together", mixed.Load())
 	out.check("IX11", level, "seek_equals_scan", mismatches.Load() == 0, "%d mismatches; first: %s", mismatches.Load(), first)
 	smp.report(out, "IX11", level, level)
