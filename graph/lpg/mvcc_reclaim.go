@@ -25,6 +25,8 @@ package lpg
 // O(nodes carrying history), not O(nodes): the sparse side maps ARE the index
 // of what has versions, so a shard with no history costs one nil check.
 
+import "github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
+
 // ReclaimVersions frees every VERSION CHAIN record that no reader can reach any
 // more — node labels, node properties and the per-edge side stores — and
 // returns how many were released.
@@ -126,6 +128,21 @@ func (g *Graph[N, W]) reclaimPropVersions(watermark uint64) int {
 	freed := 0
 	for i := range g.nodePropShards {
 		s := &g.nodePropShards[i]
+		// Decide under the READ lock whether the shard has anything to unlink
+		// (rmp #3108). The write lock is what readers pay for: a pending writer
+		// blocks every new RLock until the active ones drain, and measured on
+		// example 37 this sweep took it 5.9 M times in one run, 95.8% of them on
+		// a shard with no history and half of the rest on a shard with nothing
+		// at or below the watermark. Skipping such a shard is the same outcome
+		// as a sweep that ran just before the version that would have needed it
+		// arrived; the next pass sees that version, and the write lock still
+		// guards every mutation below.
+		s.mu.RLock()
+		if !propShardNeedsReclaimLocked(s, watermark, hist) {
+			s.mu.RUnlock()
+			continue
+		}
+		s.mu.RUnlock()
 		s.mu.Lock()
 		if s.d == nil {
 			s.mu.Unlock()
@@ -170,6 +187,45 @@ func (g *Graph[N, W]) reclaimPropVersions(watermark uint64) int {
 		g.propDeltaActive.Add(-int64(freed))
 	}
 	return freed
+}
+
+// propShardNeedsReclaimLocked reports whether [Graph.reclaimPropVersions] has
+// anything to change in s at watermark: a nil chain head to drop, an ABORTED
+// head to withdraw, or a delta at or below the watermark to unlink. The caller
+// holds at least the shard's read lock.
+//
+// When it reports false it has observed every chain's retained depth into hist,
+// exactly as the write-locked walk would have, so the depth distribution is
+// identical whichever path a shard takes. When it reports true it has observed
+// nothing: the write-locked walk that follows observes every chain once.
+func propShardNeedsReclaimLocked(s *nodePropShard, watermark uint64, hist *mvcc.DepthHist) bool {
+	if s.d == nil {
+		return false
+	}
+	if len(s.d) == 0 {
+		return true // the walk resets the empty map to nil
+	}
+	for _, head := range s.d {
+		if head == nil {
+			return true
+		}
+		if ts := head.stampTS(); abortedHead(ts) || ts <= watermark {
+			return true
+		}
+		for d := head; d.next != nil; d = d.next {
+			if d.next.stampTS() <= watermark {
+				return true
+			}
+		}
+	}
+	for _, head := range s.d {
+		retained := 1
+		for d := head; d.next != nil; d = d.next {
+			retained++
+		}
+		hist.Observe(retained)
+	}
+	return false
 }
 
 // stampTS returns the timestamp a label delta was committed at, from its shared
