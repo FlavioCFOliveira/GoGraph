@@ -683,3 +683,95 @@ python3 $L3/agg.py $L3/owner.elevated.tsv alloc_space line 40
 python3 $L3/agg.py $L3/owner.contention.tsv delay line 30
 python3 $L3/agg.py $L3/owner.repeat.tsv cpu summary
 ```
+
+# Campaign conclusion, 2026-10-12
+
+Sprint 367, rmp #3107. Built only from recorded evidence: sections 1–22, the commit messages
+`c794a1ed..8932f1f3`, and the rmp task logs cited per row. **No new measurement.**
+
+## 23. Final totals
+
+| measure (`elevated` sweep unless stated) | `c794a1ed` → `6b399a3b` → `7b8120df` | change across the sprint | source |
+|---|---|---|---|
+| module CPU | 383.88 → 249.06 → 233.24 s | −39.2% | §17 |
+| module allocation | 144.47 → 119.13 → 108.38 GiB | −25.0% | §17 |
+| module contention delay (`contention` pass) | 274.86 → 263.05 → 127.99 s | −53.4% (mostly parked wait, §18) | §17 |
+| total CPU / total allocation | 595.56 → 443.90 → 429.80 s / 160.96 → 135.67 → 125.22 GiB | −27.8% / −22.2% | §17 |
+
+After iteration 3 (**paired example-26 runs, not sweep totals**; units as recorded):
+
+| commit / task | example 26, paired | micro-benchmark | source |
+|---|---|---|---|
+| `a5f2668f` #3104 pooled lazy relationship values | total alloc 22.25/22.31 → 19.51/19.39 GB (−12.6%); lazy-rel alloc 2.8 GB → 0 | GoAPI/lazy −51.60% B/op, −3.41% time | #3104 |
+| `8932f1f3` #3106 streamed edge labels | total alloc 19.53/19.38 → 18.59/18.68 GB; label slice 0.64 GB → 0; CPU within run spread, not claimed | GoAPI/multitype −7.10% time, −15.2% B/op | #3106 |
+
+## 24. Cross-component chains
+
+| chain | waste observed | fix (task, commit) | measured after | residual, status |
+|---|---|---|---|---|
+| relationship materialisation: exec Expand → cypher row build → lpg slot scan / columns → expr values (row 26) | `buildRelationshipValueFromRow` 13.71 s (§3 R2), 14.99 s (§12); `slotLabelsForPair` 6.18 s; `GetEdgePropertyAsOf` 5.78 s (Q3); `edgeInstanceIdxFor` 1.51 s + `EdgeCreateCount` 1.50 + 1.49 s (§18) | #3080 `4d831e8e`; #3088 `4e9c48bb`; #3089 `d56bfbe6`; #3104 `a5f2668f`; #3106 `8932f1f3` | #3080 no move on row 26 (§12); 8.84 s, 5.02 GiB at iteration 3 (§19); lazy values and label slices 0 (§23) | id boxing U1, user-dropped; id→key→id U5 2.41 s, user-dropped (#3105); per-view index build 1.24/1.37 s, inherent (#3106) |
+| CSR pair cache → relationship type column | `buildRelTypeColumn` path 7.99 s, 2.81 GiB (U3) | measurement only, #3103 | 7 builds, each the first per Engine; 0 rebuilds (#3103) | inherent |
+| MVCC edge write → edge-property columns → pinned readers | `GrowSlotWithValue` 4.95 GiB (Q8) | #3090 `7e7b854a`; #3093 `ce609ce6` | 5 068.9 → 1 542.4 MiB (§18) | 48 B per-version block floor, accepted by the user (#3090) |
+| aggregation → node materialisation → lpg properties | `nodePropsToExprMap` 10.73 GiB, 3.43 s (Q6) | #2732 `280ce211` | 733 MiB, 0.23 s (§18) | node references through aggregation not carried (row contract), left as is (#2732) |
+| cached read: plan cache → physical build → index seek (row 35) | `buildReadPhysical` 6.35 GiB (R6), 6.18 GiB (Q7) | #3096/#3097 `3f8bddfc` | `copySchema` 1.19 → 0.10 GiB; throughput +22.5%, alloc/op −17.7% (§17, §18) | U2 5.55 GiB, backlog S3–S6 |
+| SET → constraint registry → lpg node-property shard locks (row 37) | `reserveSetPropertyGen` 1.79 s mutex + 1.85 s block (R8) | #3082 `546efbe8` | 1.11 s + 1.10 s (§12) | Q11 below threshold; shard lock inherent (U10, #3091) |
+| Cypher introspection and scan → lpg (row 25) | `PropertyKeysInUse` 6.08 s, 1.80 GiB (R5); `AllNodesScan.Init` 4.88 GiB (R7) | #3081 `1a8e25ae` | 0.54 s, < 0.5 MiB; 21 MiB (§12) | `AllNodesScan.Next` boxing (Q10), part of U1 |
+| checkpoint → snapshot writer (row 17) | 1 MiB `bufio` writers ≈ 360 MiB (R9) | #3083 `e71407c1` | row 17 0.50 → 0.16 GiB (§12) | none ranked |
+| csr projection → search analytics (PageRank, BiBFS) | transpose of a symmetric CSR 13.96 GiB, 3.24 s (R1); `IsSymmetric` 53 MiB (V3); intermediate directed CSR ≈ 0.27 GiB (P2) | #3078 `cfd64290`, `e7b12a60` | transpose 0 on row 20; row 20 alloc −47%; rows 09 + 33 536 → 366 MiB (§12) | one-pass build +27% CPU, accepted by the user (#3078) |
+| csr projection → diameter (row 11) | `bfsFarthest` 125.28 s flat (R4) + 9.8 s rescans (R3) | #3079 `4be967d2`; #3085 `6b399a3b` | 1.80 s; row 11 CPU −97% (§12) | Q15 below threshold; 600-cycle +203%, accepted (#3085) |
+| concurrent callers → PageRank workers → scheduler (row 20) | 151.04 + 30.70 s block (§4); 185.6 s (Q1) | #3086 `fc0f6807`; #3092 `7b8120df` | 60.13 s block (−68%); CPU and throughput unchanged (§18) | U12 idle wait |
+| WAL writer lifecycle → tests' cleanup | segment preparer alive at test end in 18/2 200 subtests (#3095) | #3095 `b737b3a2`, `3d1be4dd`, `138f7bc3` | 0/2 200 (#3095) | 19 sites left with stated reasons (#3095) |
+
+## 25. Cost moved between components
+
+| fix | where the cost went | figures | source |
+|---|---|---|---|
+| #3082 constraint lock | writers now queue on the node-property shard lock | registry site −39%; row 37 mutex total 15.57 → 15.70 s; shard lock 7.44 → 7.73 s | §12 |
+| #3089 slot index | new index build in `graph/lpg` | `buildSourceSlots` 1.69 s, 692 MiB; relationship builder alloc 4.58 → 5.02 GiB | §18, §19 |
+| #3096 seek once | the seek is built in the probe and handed off | `indexSeekWouldFire` 0.72 → 1.23 GiB | §18 |
+| #3078 one-pass projection | bytes traded for build CPU | −32.44% B/op, +27.09% sec/op | #3078 |
+| #3085 BoundingDiameters | vertex-transitive shapes pay more sweeps | 600-cycle 659 → 1 997 µs (+203%) | #3085 |
+| #3092 PageRank budget | parked wait removed, work unchanged | block −68%; CPU 100.36 → 101.81 s; 206 → 212 reads/s | §18 |
+
+## 26. Residual ledger
+
+| residual | decision | evidence |
+|---|---|---|
+| Q1 PageRank budget unused | fixed (#3092); remainder U12 idle | §18 |
+| Q2, Q3 per-pair scans | fixed in part (#3089): type 6.83 → 3.79 s, property 5.78 → 4.76 s | §18 |
+| Q4 string-key round trips | `EdgeCreateCount` removed (#3088); remainder = U5 | §18 |
+| Q5 handle read as position | bug, fixed (#3088) | #3088 |
+| Q6, Q8 | fixed (#2732, #3090) | §18 |
+| Q7 / U2 read build | S1 + S2 fixed (#3096/#3097); S3–S6 backlog: #3098 S3 row-bind and closures, #3099 S4 access-path cache, #3100 S5 build-object size, #3101 S6 shared operator tree | #2391, #3097; titles of #3099–#3101; sprint 367 DECISION 155 |
+| Q9 / U10 shard lock | inherent: cross-node share 1.13/1.35 s instrumented, ≈ 0.6–0.8 s scaled | #3091 |
+| whole-shard sweeps (`reclaimPropVersions`, abort-reclaim) | **undecided, not investigated**: 2.31/2.26 s in #3091's instrumented runs; not costed against the iteration-3 threshold | #3091 |
+| Q10–Q15, U8, U9 | below threshold | §13, §19 |
+| U1 id boxing (5.83 GiB), U7 string boxing (joins U1) | user-dropped (row-model change): measurement recorded, no task | §19; sprint 367 DECISION 155 |
+| U3 pair/type column builds | inherent (#3103) | #3103 |
+| U4 lazy relationship object | fixed (#3104) | #3104 |
+| U5 id → key → id (2.41 s, 1.03%) | user-dropped: needs exported API | #3105 |
+| U6 commit records; WAL replay per `24_*`; copy-on-write adjacency; bulk redo; Brandes, PageRank `runRange`, Johnson, WAL group sync | inherent | §7, §19 |
+| U11, U12 | idle | §19 |
+
+## 27. Significance verdict
+
+- **Threshold** (iteration 3, §19): 1% of module CPU = **2.33 s**, allocation = **1.08 GiB**,
+  contention = **1.28 s**. Noise: ±5% per row in iterations 1–2 (§10), ±10% in iteration 3 (§16).
+- **The last changes against it.** #3104 removed 2.8 GB in example 26 (paired), above the
+  allocation threshold. #3106 removed ≈ 0.8 GB (paired, about 0.76 GiB), **below** it, and its
+  CPU change is inside the run spread (#3106). #3103 found U3 inherent; #3105 dropped U5 at 1.03%.
+- **Verdict: example-driven optimisation of GoGraph has reached insignificant returns at
+  `8932f1f3`.** The last change is below the 1% threshold; every remaining module residual is
+  inherent, idle, below threshold, user-dropped (U1, U5), or in the backlog as design work
+  (S3–S6, #3098–#3101). One item is not decided: the whole-shard sweeps noted in #3091.
+
+## 28. Bugs found and claims corrected
+
+| item | what | regression guard | source |
+|---|---|---|---|
+| **#3088** | a Go-API edge was reported with a Cypher sibling's type after deletes: the stable handle was read as a CSR position | `cypher/edge_handle_instance_test.go` fails at `0dbd9452` | #3088 |
+| **#3093** | an aborted append could rewrite an edge-property cell a pinned reader still read (data race, 555 instead of 777) | `graph/lpg/edge_property_fused_rewrite_test.go`, 3 of 4 fail at `7e7b854a` | #3093 |
+| **#3095** | test-owned WAL writers outlived their test directory; not introduced by this sprint (26/2 200 at `c794a1ed`) | `TestEnginesB2WALClosedWhenTestEnds_3095` | #3095 |
+| #3089 correction | presence 2.02 → 0.69 s **not reproduced**: 2.30 → 1.81 s in the sweep | — | #3089, §18 |
+| #3090 correction | premise wrong: values already grew amortised; the copy was the per-version column headers (384 B for ≈ 12 B of value) | — | #3090 |
+| other refuted premises | #3080 step (b) O(1) slot read; #2732 original cause; #2391 recorded split; #3091 shard collision | — | task logs |
