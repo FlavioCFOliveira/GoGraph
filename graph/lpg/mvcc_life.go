@@ -41,6 +41,7 @@ package lpg
 import (
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
@@ -303,6 +304,27 @@ type nodeLifeShard struct {
 	// claim is recorded; counted in nodeLifeActive like the records.
 	claim map[graph.NodeID]commitStamp
 	mu    sync.RWMutex
+	// hasRec is false only while born and died are both nil, so
+	// [Graph.appendSuspects] can skip this shard without its read lock
+	// (rmp #3115). It is raised under mu BEFORE either map is allocated, so
+	// before any record exists, and lowered under mu only by
+	// [nodeLifeShard.dropRecordsIfEmpty] once both maps are nil. A stale true
+	// costs one lock and an empty walk; a false is never stale.
+	hasRec atomic.Bool
+}
+
+// dropRecordsIfEmpty nils born and died when they hold nothing and, once both
+// are nil, lowers hasRec. The caller must hold sh.mu for writing.
+func (sh *nodeLifeShard) dropRecordsIfEmpty() {
+	if len(sh.born) == 0 {
+		sh.born = nil
+	}
+	if len(sh.died) == 0 {
+		sh.died = nil
+	}
+	if sh.born == nil && sh.died == nil {
+		sh.hasRec.Store(false)
+	}
 }
 
 // nodeLifeShardFor selects the shard responsible for id.
@@ -465,6 +487,7 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive, unbornB
 	var overwrote bool
 	if alive {
 		if sh.born == nil {
+			sh.hasRec.Store(true) // before the record exists; see hasRec
 			sh.born = make(map[graph.NodeID]lifeStamp, 8)
 		}
 		var prev lifeStamp
@@ -473,6 +496,7 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive, unbornB
 		displaced = sh.setChurnHeld(true, id, held)
 	} else {
 		if sh.died == nil {
+			sh.hasRec.Store(true) // before the record exists; see hasRec
 			sh.died = make(map[graph.NodeID]lifeStamp, 8)
 		}
 		var prev lifeStamp
@@ -901,12 +925,7 @@ func (g *Graph[N, W]) reclaimNodeLife(watermark uint64) int {
 		if len(sh.claim) == 0 {
 			sh.claim = nil
 		}
-		if len(sh.born) == 0 {
-			sh.born = nil
-		}
-		if len(sh.died) == 0 {
-			sh.died = nil
-		}
+		sh.dropRecordsIfEmpty()
 		sh.mu.Unlock()
 	}
 	if freed > 0 {

@@ -312,6 +312,12 @@ type nodeLabelShard struct {
 	// including in graphs that never write. See mvcc_labels.go.
 	d  map[graph.NodeID]*nodeLabelDelta
 	mu sync.RWMutex
+	// hasD is false only while d is nil, so [Graph.appendSuspects] can skip
+	// this shard without its read lock (rmp #3115). It is raised under mu
+	// BEFORE d is allocated, so before any delta exists, and lowered under mu
+	// only by [nodeLabelShard.dropDeltasIfEmpty] when d is set back to nil. A
+	// stale true costs one lock and an empty walk; a false is never stale.
+	hasD atomic.Bool
 }
 
 // edgeLabelShard is the OVERFLOW half of the edge-label store, the edge

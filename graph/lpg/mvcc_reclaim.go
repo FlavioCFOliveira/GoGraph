@@ -107,9 +107,7 @@ func (g *Graph[N, W]) reclaimLabelVersions(watermark uint64) int {
 			}
 			hist.Observe(retained)
 		}
-		if len(sh.d) == 0 {
-			sh.d = nil // a shard with no history costs one nil check again
-		}
+		sh.dropDeltasIfEmpty() // a shard with no history costs one nil check again
 		sh.mu.Unlock()
 	}
 	if freed > 0 {
