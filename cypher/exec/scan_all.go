@@ -195,7 +195,7 @@ func (op *AllNodesScan) rowCountHint() (int, bool) {
 // P3): a columnar-aware parent drains the scan column-major, avoiding the
 // per-row [expr.Value] box [AllNodesScan.Next] pays.
 func (op *AllNodesScan) NewOutputChunk(capacity int) *Chunk {
-	return NewChunk(capacity, expr.KindInteger)
+	return newNodeIDChunk(capacity)
 }
 
 // FillChunk appends up to maxRows more NodeIDs, as unboxed int64, into column 0

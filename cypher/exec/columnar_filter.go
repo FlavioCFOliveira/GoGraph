@@ -185,6 +185,18 @@ func (op *ColumnarFilter) FillChunk(dst *Chunk, maxRows int) (int, error) {
 	return appended, nil
 }
 
+// Close returns the scratch batch to the node-scan chunk pool and closes the
+// child (rmp #3114). The scratch is owned by this operator alone — FillChunk
+// copies every passing row out of it — so nothing references it after Close; it
+// is cleared so a later Init/FillChunk cycle takes a fresh one.
+func (op *ColumnarFilter) Close() error {
+	releaseChunk(op.scratch)
+	op.scratch = nil
+	op.scratchPos = 0
+	op.scratchLen = 0
+	return op.Filter.Close()
+}
+
 // nodeIDColumnProducer marks ColumnarFilter as a [NodeIDColumnProducer]: it is a
 // column-preserving passthrough over a scan, so a node-variable column in its
 // output still carries the raw int64 NodeID the scan emitted.

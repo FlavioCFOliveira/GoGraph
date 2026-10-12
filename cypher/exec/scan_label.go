@@ -232,7 +232,7 @@ func (op *NodeByLabelScan) rowCountHint() (int, bool) {
 // (#1704 P3): a columnar-aware parent drains the scan column-major, avoiding the
 // per-row [expr.Value] box [NodeByLabelScan.Next] pays.
 func (op *NodeByLabelScan) NewOutputChunk(capacity int) *Chunk {
-	return NewChunk(capacity, expr.KindInteger)
+	return newNodeIDChunk(capacity)
 }
 
 // FillChunk appends up to maxRows more matching NodeIDs, as unboxed int64, into
