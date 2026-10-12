@@ -1107,3 +1107,202 @@ after-value. Module totals `c794a1ed` → `c52a6380` (section 38): CPU 383.88 �
 | #3118 | `7b2fd112` | contention ranking compared without a tie tolerance |
 
 - **Merge:** sprint 367 merged into `develop` at `4d1947e8`.
+
+# Laboratory iteration 6, 2026-10-12 — post-fix confirmation sweep at `8b089715`
+
+The iteration-5 sweep (sections 37 and 44) was re-run at HEAD `8b089715` to replace the derived
+Q12 estimate of section 45 with a measurement. Module code changed since `c52a6380` only in
+#3114 `3e2f9a2d` (`cypher/exec`: pooled node-id chunks) and #3115 `82c0dfb5` (`graph/lpg`:
+per-shard emptiness flags in `appendSuspects`). **No module code was changed.** Every number
+below was collected in this session.
+
+## 48. Method and environment (iteration 6)
+
+- Same driver, rows, scales, flags and owner reader as section 37, with these differences:
+  `$L6` = `/private/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/755b6bf2-7deb-4d58-a983-07059400361e/scratchpad/lab6`;
+  binaries rebuilt (`LAB_REBUILD=1`, 37 binaries, 26 s, outside every timed window); graph data
+  under `/Volumes/GoGraphRAM/lab6sweep` (deleted at the end); `GOCACHE` default (on disk);
+  `GOGRAPH_FSYNC_LATENCY=off`.
+- **Passes run:** `elevated` (CPU + heap) and `contention`. The `default` pass and the peak-RSS
+  pass were not run (section 51).
+- Host: Apple M4, 10 cores, Darwin 27.0.0 arm64, Go 1.27.2, tree clean. Load1: start 1.89 (top
+  processes `osascript` 37% + 11%, iTerm 21%, `sysmond` 11%, `claude` 10% of one core);
+  `elevated` 23:20–23:29, per-row load1 1.83–3.87; `contention` 23:29–23:33, per-row load1
+  2.54–5.25 (row 37 started at 4.97); row-37 A/B 23:33–23:34, load1 4.67–5.60; row-26 A/B
+  23:36–23:42, load1 2.55–3.14. At 23:35, after the row-37 A/B, `XProtectRemediator*` processes
+  were measured at 99% + 60% of a core; they were gone at 23:36. Their start time is unknown, so
+  the `contention` tail and the row-37 A/B may overlap them (section 51). Every row ran alone
+  within its pass.
+- **A/B**, interleaved, A = the iteration-5 binaries (`c52a6380`), B = HEAD: `$L6/sweep6.sh`
+  ran row 37 (3 + 3, `-contention 1`: CPU, heap, block, mutex); `$L6/repeat26.sh` ran row 26
+  (3 + 3, CPU and heap) to judge the row-26 sites that moved (section 50). Every run exited 0.
+- **Noise.** As section 37: a single-run per-row delta under ±10% is not a finding.
+- **Exit status** (read from the manifests): `elevated` row 31 exits 1 on the same
+  planner-statistics harness check as iterations 1–5 (identical message), `24_init`
+  `cpu-total-zero`; every other `elevated` row and every `contention` row PASS.
+
+## 49. Totals `c794a1ed` → `6b399a3b` → `7b8120df` → `ffeebf23` → `c52a6380` → `8b089715`
+
+| measure (`elevated` sweep unless stated) | iteration 1 → 2 → 3 → 4 → 5 → 6 | iteration 6 vs 5 | vs iteration 1 |
+|---|---|---|---|
+| module CPU | 383.88 → 249.06 → 233.24 → 232.74 → 237.77 → **233.10 s** | −1.96% | −39.3% |
+| module allocation | 144.47 → 119.13 → 108.38 → 105.17 → 103.20 → **102.33 GiB** | −0.85% (−0.87 GiB) | −29.2% |
+| module contention delay (`contention` pass) | 274.86 → 263.05 → 127.99 → 126.17 → 136.44 → **134.83 s** | −1.17% | −50.9% |
+| total CPU | 595.56 → 443.90 → 429.80 → 428.03 → 436.41 → 428.91 s | −1.72% | −28.0% |
+| total allocation | 160.96 → 135.67 → 125.22 → 121.89 → 119.89 → 119.14 GiB | −0.63% | −26.0% |
+| harness / unowned CPU | 54.57 / 157.11 → … → 55.99 / 142.65 → 55.77 / 140.04 s | −0.4% / −1.8% | — |
+
+**Thresholds** (recomputed on this sweep): 1% of module CPU = **2.33 s**, of module allocation =
+**1.02 GiB**, of module contention delay = **1.35 s**. Row 37 module allocation 7.16 → 6.47 GiB
+(−9.6%) carries the allocation drop. Per-row table: `$L6/compare6.md`.
+
+## 50. U8 and Q12 measured; residual ledger at HEAD
+
+**U8** `exec.NewChunk` (#3114):
+
+| source | `c52a6380` | `8b089715` |
+|---|---|---|
+| sweep, `elevated`, all rows | 1 141.4 MiB (row 37 1 127.5) | **143.8 MiB = 0.14 GiB (0.14%)** (row 37 135.0) |
+| row-37 A/B, per run | A 1 234.1 / 1 177.2 / 1 171.2 MiB | B 148.0 / 91.3 / 144.9 MiB |
+
+U8 is **below threshold, confirmed by measurement**; every B run is below every A run.
+
+**Q12** `lpg.appendSuspects` (#3115), row 37. #3115 moved the label-shard `RLock` from
+`mvcc_index.go:944` to `:947`; the life-shard `RLock` from `:954` to `:960`; `:971`/`:975` are
+the `idxDeferred` mutex `Lock`/`Unlock`.
+
+| measure | `c52a6380` (section 41) | `8b089715` sweep | A/B per run, A (`c52a6380`) → B (HEAD) |
+|---|---|---|---|
+| label-shard walk (`:944` → `:947`), block — the site section 41 ledgered | 1.57 s | **1.16 s (0.86%)** | 1.97 / 1.67 / 1.81 → 1.36 / 1.13 / 1.34 s |
+| life-shard walk (`:954` → `:960`), block | 0.53 s | 0.44 s | 0.43 / 0.26 / 0.80 → 0.58 / 0.49 / 0.22 s |
+| `idxDeferred` mutex (`:965/:969` → `:971/:975`), block + mutex | 0.01 + 0.01 s | 0.29 + 0.40 s | 0.16 + 0.09 / 0.11 + 0.16 / 0.05 + 0.05 → 0.05 + 0.05 / 0.06 + 0.06 / 0.95 + 1.00 s |
+| whole function, block + mutex | 2.21 s | **2.38 s (1.77%)** | 2.75 / 2.28 / 2.82 → 2.15 / 1.83 / 3.58 s |
+
+- The ledgered site (label-shard walk) fell: every B run is below every A run, and the sweep
+  figure is 1.16 s against 1.35 s. The repeats are 1.13–1.36 s: one of three is at the
+  threshold (+0.01 s). The ≈1.02 s derived in section 45 was not reproduced; the measured figure
+  is 1.16 s.
+- The whole function is **above threshold** (2.38 s). Its `idxDeferred` mutex share is bimodal:
+  0.01–0.25 s in most runs, about 2 s in one run per arm (iteration 5 B3 1.03 + 1.01 s, this
+  A/B B3 0.95 + 1.00 s). The life-shard reduction stated in section 45 (−35%) is not visible
+  in this A/B (A 0.26–0.80 s, B 0.22–0.58 s; ranges overlap).
+
+**Ledger re-check** against the section-49 thresholds (sweep figures at HEAD; section 41 for
+the iteration-5 values):
+
+| # | site (row) | cost at `8b089715` | vs threshold | decision |
+|---|---|---|---|---|
+| N1 | PageRank scratch `pagerank.go:423` / result vector `:297` (20) | 629.3 MiB / 1 406.7 MiB (1.34%) | scratch below; result above | fixed / inherent (unchanged) |
+| N2 | `revIndex.add` `reverse.go:134` + `:130` | 1 181.7 + 620.7 MiB = 1.76 GiB (1.72%) | above | inherent (#3112, unchanged) |
+| **N3** | `lpg.(*sourceSlots).pairRun` (26) | **2.59 s (1.11%)**; A/B A 2.70 / 2.81 / 2.74, B 2.19 / 2.56 / 2.59 s | **above** (5 of 6 repeats ≥ 2.33 s) | decided "below threshold" at 2.03 s (section 41), a low draw: the code is unchanged and the `c52a6380` binaries measure 2.70–2.81 s; **not re-decided** |
+| U8 | `exec.NewChunk` (37) | 0.14 GiB | below | **fixed** (#3114, confirmed) |
+| Q12 | `appendSuspects` label-shard walk (37) | 1.16 s; repeats 1.13–1.36 s | below in the sweep; marginal in repeats | fixed (#3115) |
+| **Q12′** | `appendSuspects`, whole function (37) | **2.38 s (1.77%)** | **above** | never ledgered at function level (2.21 s at iteration 5); **not decided** |
+| **Q11** | `reserveSetPropertyGen` `constraints.go:1269–1270` (37) | **1.21 s block + 1.28 s mutex = 2.49 s (1.85%)**; A/B A 1.29 / 2.14 / 1.93, B 2.60 / 1.44 / 1.64 s | **above** (each line alone is below) | decided "insignificant" at 1.11 + 1.10 s (section 13); absent from section 41; iteration 5 already measured 2.19 s; **not re-decided** |
+| U1, U7 | id boxing `expand.go:1284–1286` 3.45 GiB, `scan_label.go:206` 1.43, `scan_all.go:149` 1.00; `lpg.StringValue` 1.17 GiB | 7.05 GiB | above | user-dropped (unchanged) |
+| **new** | `exec.(*Expand).buildRow` flat CPU (26, 24_plandiff, 25) | **3.12 s (1.34%)**; row 26 A/B A 1.86 / 1.70 / 1.86, B 1.70 / 2.05 / 1.74 s | **above** (2.36 s at iteration 5, 0.99%) | **not decided**; hypothesis, not established: the CPU side of U1 (same function) |
+| U5 | `Mapper.Lookup` + `Mapper.Resolve` (26) | 1.34 + 1.15 = 2.49 s cumulative (1.07%) | above | user-dropped (unchanged) |
+| U2 | `buildReadPhysical` `api.go:2811` (35) | 1.67 GiB | above | backlog S3–S6 (unchanged) |
+| U6 | `mvcc.NewCommitInfo` | 1.45 GiB (1.41%) | above | inherent (unchanged) |
+| U10 | shard lock `property.go:391` / `:358`, `snapshot_read.go:217` (37) | 7.13 s mutex, 5.02 + 4.88 s block | above | inherent (unchanged) |
+| — | `txn.waitApplyTurn` 2.28 s, `wal.syncToLocked` 1.53 s (37) | — | above | inherent (unchanged) |
+| U11, U12, idle | vacuum `select` 17.29 s; PageRank parked `pagerank.go:925/989` 57.12 + 11.39 s; `diameter.go:203` 2.47; `serve.go:1562` 2.16; `mvcc_vacuum.go:755` 1.75; `isolationtest` 1.71 + 1.37 s | — | — | idle (unchanged) |
+| — | WAL replay per `24_*` (`recovery.go:2207` 4.47 GiB, `readFramePayload` 2.59, `wal.Decode` 1.52, `stringCodec.Decode` 1.52, `decodeV3` 1.32); search pools (`search.go:164` 3.83, `dijkstra.go:100` 2.18, `:463/:465` 1.79 + 1.82, `:505` 1.77 GiB); `adjlist.go:971` 2.71 + 1.17 GiB; bulk redo `txn.go:1379` 2.49 GiB; `johnsonPrepare` 1.23 GiB; kernels (Brandes 52.11 s, PageRank `runRange` 30.91, `dijkHeap.pop` 18.35, WAL group sync 8.50, `dijkstraCore` 7.60, BFS row 33 3.23, `dijkHeap.push` 3.08, `HungarianCtx` 2.88, `bfsScratch` 2.81 / 2.81 s) | — | — | inherent or tracked (unchanged) |
+
+Row 28's CPU split moved with no change in `search/` since `c52a6380`: `johnsonDijkstraSource`
+8.64 → 0.13 s flat, `dijkHeap.pop` 0.51 → 5.83 s, `dijkstraCoreWithWeights` 0.13 → 1.86 s,
+`dijkHeap.push` 0.14 → 1.32 s; row 28 module CPU 9.43 → 9.20 s. The work is the same; only its
+attribution moved. **Hypothesis, not established:** a different inlining decision in the rebuilt
+binary.
+
+No other module-owned site reaches a threshold: the next allocation sites are
+`buildRelationshipValueFromRow` `api.go:17020` 0.99 GiB (0.97%), `setEdgeLabelSlotsAtTx`
+0.94 GiB and `edgePropCols.clone` 0.93 GiB; every contention line not listed above is below
+1.35 s.
+
+## 51. Cross-component check (section 24 chains)
+
+| chain (section 24) | residual figure, `c52a6380` → `8b089715` (sweep) | A/B | moved? |
+|---|---|---|---|
+| relationship materialisation (26) | `buildRelationshipValueFromRow` cumulative 5.73 → 7.67 s, 0.97 → 0.99 GiB; `slotLabelsForPair` 0.31 → 0.27 s; `GetEdgePropertyAsOf` 0.38 → 0.34 s; `buildSourceSlots` 1.25 → 1.59 s; U5 2.41 → 2.49 s | `buildRelationshipValueFromRow` A 7.28 / 7.79 / 7.43, B 5.22 / 7.32 / 7.77 s; row 26 module CPU A 37.95–40.13, B 37.62–38.83 s | **no** (the sweep's 5.73 s was a low draw) |
+| CSR pair cache → type column (26) | `buildRelTypeColumn` cumulative 5.60 → 5.55 s | A 4.02–4.14, B 4.04–4.13 s (row 26 only) | no |
+| MVCC edge write → edge-property columns | `edgePropCols.GrowSlot` 264.5 → 250.5 MiB | — | no |
+| aggregation → node materialisation | `nodePropsToExprMap` 605.6 → 692.7 MiB, 0.36 → 0.33 s | — | no (below threshold, ±10% row noise) |
+| cached read → physical build (35) | `buildReadPhysical` 1.73 → 1.67 GiB; `copySchema` 174.5 → 181.0 MiB | — | no |
+| SET → constraint registry → shard locks (37) | Q11 2.19 → 2.49 s; U10 17.78 → 17.03 s | Q11 above | no move; Q11 above threshold (section 50) |
+| MVCC reclaim → shard locks (37) | `reclaimPropVersions` 0.23 → 0.25 s | — | no |
+| introspection and scan (25) | `PropertyKeysInUse` 0.54 → 0.50 s; `AllNodesScan.Init` 446.0 → 473.5 MiB | — | no |
+| checkpoint → snapshot writer (17) | row 17 module allocation 0.17 → 0.19 GiB | — | no |
+| csr projection → analytics (20, 09, 33) | transpose 0 → 0; rows 09 + 33 module allocation 3.12 → 3.12 GiB | — | no |
+| csr projection → diameter (11) | `bfsFarthest` 1.96 → 2.03 s; row 11 module CPU 2.34 → 2.31 s | — | no |
+| callers → PageRank workers (20) | parked block 68.73 → 68.51 s | — | no |
+| WAL writer lifecycle → tests | not covered by the sweep | — | not measured |
+
+**No chain moved.** The relationship-materialisation figure changed only in the single sweep
+run; the interleaved A/B shows no difference between `c52a6380` and HEAD.
+
+## 52. Verdict (iteration 6)
+
+This section supersedes the verdict of section 45, which remains as written.
+
+- **Moved since iteration 5:** module allocation −0.87 GiB (−0.85%), carried by row 37 and
+  attributed at site level to #3114 (`NewChunk` 1 141.4 → 143.8 MiB). Module CPU (−1.96%) and
+  module contention delay (−1.17%) are inside single-run noise. **No regression.**
+- **U8 is confirmed below threshold by measurement** (0.14 GiB against 1.02 GiB).
+- **Q12, the ledgered label-shard walk, is below threshold in the sweep** (1.16 s against
+  1.35 s) and marginal in the repeats (1.13 / 1.34 / 1.36 s). The derived ≈1.02 s of section 45
+  is replaced by the measured 1.16 s.
+- **Verdict: insignificant returns are NOT confirmed by measurement.** Four module-owned
+  residuals are above the 1% thresholds recomputed at HEAD, none decided against them:
+  - **Q11** `reserveSetPropertyGen` (row 37): 2.49 s block + mutex (1.85%); above threshold in
+    every A/B run.
+  - **Q12′** `appendSuspects` whole function (row 37): 2.38 s (1.77%), of which the
+    `idxDeferred` mutex is bimodal.
+  - **`Expand.buildRow` flat CPU**: 3.12 s (1.34%).
+  - **N3** `sourceSlots.pairRun` (row 26): 2.59 s (1.11%); its iteration-5 figure (2.03 s)
+    was a low draw.
+- None of the four grew because of a code change. N3 and Q11 do not move under A/B, and
+  `buildRow` does not move on row 26. They cross the threshold because the threshold shrinks
+  with the totals, iteration-5 draws were low, and per-line figures were ledgered where the
+  site's sum is larger. Every other residual is fixed, inherent, idle, below threshold,
+  user-dropped, or in the backlog.
+
+## 53. Limits (iteration 6)
+
+- Only the `elevated` and `contention` passes were run. The `default` pass, the peak-RSS pass
+  and the coverage passes were not, so this iteration gives no exit-status or peak-RSS
+  evidence for the `default` scales.
+- A/B covers rows 26 and 37 (3 + 3 each); every other row is one run per pass.
+- The `contention` tail and the row-37 A/B ran at load1 4.67–5.60. `XProtectRemediator`
+  processes were seen at 23:35 with an unknown start time. Block delay is wall-clock waiting,
+  so Q11, Q12 and Q12′ may be inflated in those runs. The A/B arms interleave, so the
+  comparison between them is protected; the absolute figures are not.
+- The threshold rule (1% of a shrinking total, one sweep run) puts sites within ±10% of the
+  threshold on either side from draw to draw. N3, Q12 and `buildRow` are within that band.
+- The row-28 attribution shift and the bimodal `idxDeferred` mutex wait are attributed to no
+  mechanism.
+
+## 54. Reproduction (iteration 6)
+
+```bash
+cd /Users/flaviocfo/dev/xumiga/GoGraph
+R=/Volumes/GoGraphRAM/lab6sweep
+for p in elevated contention; do
+  mkdir -p $R/$p/data-24 $R/$p/data-25 $L6/out/$p/25_software_house_api
+  ln -sfn $R/$p/data-24 $L6/out/$p/data-24
+  ln -sfn $R/$p/data-25 $L6/out/$p/25_software_house_api/data
+done
+mkdir -p $R/tmp; ln -sfn $R/tmp $L6/out/tmp
+$L6/sweep6.sh           # elevated (LAB_REBUILD=1), contention, interleaved A/B row 37 (-contention 1)
+$L6/repeat26.sh         # interleaved A/B row 26 (CPU and heap)
+$L6/owner/owner $L6/out/elevated/*/{cpu,heap}.pprof   > $L6/owner.elevated.tsv
+$L6/owner/owner $L6/out/contention/*/*.pprof          > $L6/owner.contention.tsv
+$L6/owner/owner $L6/repeat/37_*/*.pprof               > $L6/owner.repeat.tsv
+$L6/owner/owner $L6/repeat/26_*/{cpu,heap}.pprof      > $L6/owner.repeat26.tsv
+python3 $L6/compare6.py <scratchpad> > $L6/compare6.md  # section 49 totals, per-row table
+python3 $L6/q12.py $L6/owner.repeat.tsv $L6/owner.contention.tsv   # U8, Q12 per run
+python3 $L6/chains.py                                  # section 51 figures, lab5 vs lab6
+python3 $L6/agg.py $L6/owner.elevated.tsv {alloc_space line,cpu fn,cpu fncum} 40
+python3 $L6/agg.py $L6/owner.contention.tsv delay line 40
+rm -rf $R
+```
