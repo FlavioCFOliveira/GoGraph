@@ -198,6 +198,96 @@ func TestPageRank_BudgetConcurrentNoLeak(t *testing.T) {
 	}
 }
 
+// TestPageRank_PooledScratchBitIdentical guards the pooled one-shot scratch
+// vector (rmp #3111). Many concurrent one-shot calls, on the serial push path
+// (small graph), the parallel pull path (unbudgeted) and the budgeted path,
+// with MaxIterations of both parities so the final vector ends in either
+// buffer, must each return ranks bit-identical to a fresh, unpooled
+// [PageRanker] run, in a slice no other call shares; and no returned slice
+// may change after later calls have recycled the scratch.
+func TestPageRank_PooledScratchBitIdentical(t *testing.T) {
+	directed, symmetric := buildBudgetFixtures(t, 3000, 3)
+	small, _ := buildBudgetFixtures(t, 300, 3)
+	budget, err := NewPageRankBudget(runtime.GOMAXPROCS(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type variant struct {
+		name string
+		c    *csr.CSR[int64]
+		b    *PageRankBudget
+	}
+	variants := []variant{
+		{"serial", small, nil},
+		{"directed", directed, nil},
+		{"symmetric-budget", symmetric, budget},
+	}
+	// A tolerance no run reaches pins the iteration count to MaxIterations,
+	// so iterations 1..4 alternate which buffer holds the final vector.
+	const maxIters = 4
+	type ref struct {
+		ranks []float64
+		it    int
+	}
+	refs := make(map[string]ref)
+	for _, v := range variants {
+		for mi := 1; mi <= maxIters; mi++ {
+			opts := PageRankOptions{Damping: 0.85, MaxIterations: mi, Tolerance: 1e-300, Budget: v.b}
+			r, it, err := NewPageRanker(v.c).Run(context.Background(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refs[fmt.Sprintf("%s/%d", v.name, mi)] = ref{append([]float64(nil), r...), it}
+		}
+	}
+
+	const callers, rounds = 16, 4
+	type result struct {
+		key   string
+		ranks []float64
+		it    int
+		err   error
+	}
+	results := make([][]result, callers)
+	var wg sync.WaitGroup
+	for g := 0; g < callers; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for r := 0; r < rounds; r++ {
+				for k, v := range variants {
+					mi := 1 + (g+r+k)%maxIters
+					opts := PageRankOptions{Damping: 0.85, MaxIterations: mi, Tolerance: 1e-300, Budget: v.b}
+					ranks, it, err := PageRank(v.c, opts)
+					results[g] = append(results[g], result{fmt.Sprintf("%s/%d", v.name, mi), ranks, it, err})
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	seen := make(map[*float64]string)
+	for g := range results {
+		for i, res := range results[g] {
+			label := fmt.Sprintf("caller %d call %d (%s)", g, i, res.key)
+			if res.err != nil {
+				t.Fatalf("%s: %v", label, res.err)
+			}
+			// Every slice was returned before later calls recycled the scratch,
+			// so equality here also proves no later call mutated it.
+			want := refs[res.key]
+			assertRanksBitIdentical(t, label, res.ranks, res.it, want.ranks, want.it)
+			if prev, dup := seen[&res.ranks[0]]; dup {
+				t.Fatalf("%s: result shares its backing array with %s", label, prev)
+			}
+			seen[&res.ranks[0]] = label
+		}
+	}
+	if budget.InUse() != 0 {
+		t.Fatalf("InUse = %d after all calls, want 0", budget.InUse())
+	}
+}
+
 // BenchmarkPageRank_ConcurrentCallers measures throughput of N concurrent
 // one-shot PageRank callers on the row-20 shape (60 000-node BA, attach 4,
 // symmetric projection), unbudgeted (each call starts GOMAXPROCS workers)

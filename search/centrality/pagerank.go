@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"runtime"
 	"runtime/pprof"
+	"sync"
 	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -191,8 +193,10 @@ func DefaultPageRankOptions() PageRankOptions {
 // The sum over the slice equals 1.0 within numerical tolerance.
 //
 // Concurrency: PageRank is safe to invoke from any number of
-// goroutines on a snapshot CSR; the function allocates its working
-// buffers per call and does not share state.
+// goroutines on a snapshot CSR. It allocates the returned rank vector per
+// call and borrows its scratch rank vector from an internal pool that is
+// safe for concurrent use; the returned slice is caller-owned and is never
+// reused or mutated by a later call.
 //
 // Algorithm. The implementation is the textbook power-iteration form
 // with proper handling of dangling nodes (nodes with out-degree 0):
@@ -283,8 +287,17 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 		return make([]float64, n), 0, nil
 	}
 
-	cur := make([]float64, n)
-	next := make([]float64, n)
+	// cur starts as result, the caller-owned buffer: freshly allocated and
+	// therefore zero in every non-live slot. next is pooled scratch (rmp
+	// #3111) whose stale contents are never read, because both the serial
+	// seed loop and the parallel runRange overwrite every next[i] before any
+	// read. The per-iteration swap moves the final vector into either
+	// buffer; finishPageRankScratch always hands back result and returns the
+	// scratch to its pool, so a returned slice never aliases a pooled one.
+	result := make([]float64, n)
+	scratch := acquirePageRankScratch(n)
+	cur := result
+	next := *scratch
 	initRank := 1.0 / float64(live)
 	for i := 0; i < n; i++ {
 		if isLive[i] {
@@ -318,6 +331,7 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 	for iter := 1; iter <= opts.MaxIterations; iter++ {
 		if cerr := ctx.Err(); cerr != nil {
 			metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
+			releasePageRankScratch(scratch)
 			return nil, 0, cerr
 		}
 		// Dangling mass: sum of cur[i] for live nodes with no out-edges.
@@ -343,6 +357,7 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 			delta = engine.iterate(next, cur, isLive, outdeg, baseShare, opts.Damping)
 			if cerr := ctx.Err(); cerr != nil {
 				metrics.IncCounter("search.centrality.PageRankCtx.errors", 1)
+				releasePageRankScratch(scratch)
 				return nil, 0, cerr
 			}
 		} else {
@@ -378,10 +393,54 @@ func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions
 
 		cur, next = next, cur
 		if delta < opts.Tolerance {
-			return cur, iter, nil
+			return finishPageRankScratch(result, cur, scratch), iter, nil
 		}
 	}
-	return cur, opts.MaxIterations, nil
+	return finishPageRankScratch(result, cur, scratch), opts.MaxIterations, nil
+}
+
+// pageRankScratchPools recycles the one-shot PageRank scratch rank vector
+// across calls (rmp #3111). A one-shot run needs two n-length vectors: one is
+// returned to the caller and must be fresh, the other is pure scratch and is
+// borrowed from here. The pools are indexed by capacity class bits.Len(cap):
+// class k holds buffers whose capacity lies in [2^(k-1), 2^k), so a request
+// for n reuses any pooled buffer of its class that is large enough. The array
+// is fixed-size, so the number of pools is bounded, and every sync.Pool is
+// drained by the garbage collector, so idle scratch is reclaimed rather than
+// retained. Concurrency: sync.Pool is safe for concurrent use, and a buffer
+// is owned by exactly one run between acquire and release.
+var pageRankScratchPools [bits.UintSize + 1]sync.Pool
+
+// acquirePageRankScratch borrows a scratch vector of length n. Its contents
+// are unspecified: the caller must write every element before reading it.
+func acquirePageRankScratch(n int) *[]float64 {
+	if p, ok := pageRankScratchPools[bits.Len(uint(n))].Get().(*[]float64); ok && cap(*p) >= n {
+		*p = (*p)[:n]
+		return p
+	}
+	// Pool miss, or a pooled buffer of this class too small for n: the
+	// smaller buffer is left to the collector rather than re-pooled.
+	buf := make([]float64, n)
+	return &buf
+}
+
+// releasePageRankScratch returns a scratch vector to its capacity class.
+func releasePageRankScratch(p *[]float64) {
+	pageRankScratchPools[bits.Len(uint(cap(*p)))].Put(p)
+}
+
+// finishPageRankScratch ends a one-shot run whose final rank vector is cur,
+// which is either result (the fresh caller-owned buffer) or the pooled
+// scratch. It always returns result: when the iteration count left the final
+// vector in the scratch buffer, it is first copied into result bit for bit,
+// so the slice handed to the caller never aliases a pooled buffer. The
+// scratch is then released.
+func finishPageRankScratch(result, cur []float64, scratch *[]float64) []float64 {
+	if &cur[0] != &result[0] {
+		copy(result, cur)
+	}
+	releasePageRankScratch(scratch)
+	return result
 }
 
 // validatePageRankOptions rejects invalid float options and fills in the
