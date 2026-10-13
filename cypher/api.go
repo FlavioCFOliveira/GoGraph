@@ -1463,6 +1463,17 @@ type Engine struct {
 	// rmp #2936, nil in production.
 	constraintValidatedHookForTest func()
 	constraintDroppedHookForTest   func()
+	// beginTxGatesHookForTest runs in BeginTx after the constraint catalogue's
+	// generation is read and before the constraint gates are, so a test can
+	// register a constraint between the two (rmp #3127). TEST SEAM, set only by
+	// in-package tests before the engine is shared; nil in production.
+	beginTxGatesHookForTest func()
+	// delPropProbedHookForTest runs in a mutator adapter's DelNodeProperty after
+	// its present-state probe and before the removal, so a test can let a peer
+	// roll back an uncommitted removal between the two (rmp #3127). TEST SEAM,
+	// set only by in-package tests before the engine is shared; nil in
+	// production.
+	delPropProbedHookForTest func()
 	// dropCommitErrForTest, when set and returning an error, makes DROP
 	// CONSTRAINT treat its durable commit as failed with that error and run the
 	// rewind, WITHOUT poisoning the WAL, so a transaction open across the
@@ -6081,10 +6092,15 @@ type Result struct {
 	// read queries and write queries on an engine with no active constraints.
 	constraintReg *exec.ConstraintRegistry
 	g             *lpg.Graph[string, float64]
-	// conTxn is the transaction's DEFERRED UNIQUE releases (rmp #2366), applied by
-	// commitUnderBarrier and dropped by rollbackUnderBarrier. It is the mutator's, so
-	// it is nil for a read query and for a write on an engine with no constraints.
+	// conTxn is the transaction's DEFERRED UNIQUE releases (rmp #2366), owed by
+	// commitUnderBarrier, applied by [Result.applyOwedReleases] once the write
+	// bracket has published the transaction (rmp #3128), and dropped by
+	// rollbackUnderBarrier. It is the mutator's, so it is nil for a read query and
+	// for a write on an engine with no constraints.
 	conTxn *exec.ConstraintTxn
+	// releasesOwed is set by commitUnderBarrier on the success path: conTxn's
+	// releases are to be applied after publication (rmp #3128).
+	releasesOwed bool
 	// mvccG and wtx are how a durable write allocates its MVCC commit timestamp
 	// BEFORE the WAL fsync, so the timestamp is inside the durable record and
 	// recovery can derive the clock from the WAL rather than trust a persisted
@@ -7018,16 +7034,33 @@ func (r *Result) commitUnderBarrier() {
 	// Mark the WAL handled even when tx == nil (a store-less engine has no WAL to
 	// commit) so the idempotency guard above trips on a second call.
 	r.walHandled = true
-	// APPLY THE DEFERRED UNIQUE RELEASES (rmp #2366). A committed release frees its
-	// value here, alongside the index buffer and on the same durable-then-visible
-	// side of the barrier, so no peer can take the value before the graph has stopped
-	// holding it. A rolled-back transaction drops the same marks instead, in
-	// [Result.rollbackUnderBarrier], and touches nothing shared — which is the whole
-	// reason the release is deferred. See [exec.ConstraintTxn].
-	r.constraintReg.CommitTxn(r.conTxn)
+	// THE DEFERRED UNIQUE RELEASES ARE OWED, NOT APPLIED (rmp #2366, rmp #3128).
+	// This transaction is durable here but not yet visible: the bracket publishes
+	// it when it unwinds. Freeing a value now let a peer reserve it and publish
+	// first, so a snapshot between the two publications held the value twice —
+	// measured as a duplicate under a live UNIQUE constraint by
+	// TestConstraintDDLvsDML_NoViolationAdmitted. The releases are applied by
+	// [Result.applyOwedReleases] after publication; until then the value stays
+	// reserved and a peer writing it is refused. A rolled-back transaction drops
+	// the same marks instead, in [Result.rollbackUnderBarrier], and touches
+	// nothing shared. See [exec.ConstraintTxn].
+	r.releasesOwed = true
 	// Success: the transaction is keeping its writes; drop the undo log so its
 	// closures (and their captured pre-images) are released for GC.
 	r.undo = nil
+}
+
+// applyOwedReleases frees the UNIQUE values a committed autocommit statement
+// vacated (rmp #3128). The caller must call it after the write bracket has
+// published the transaction, and while it still holds the schema gate, so no
+// constraint DDL can rebuild a value-set between the publication and the
+// release. It does nothing when commitUnderBarrier owed nothing.
+func (r *Result) applyOwedReleases() {
+	if r == nil || !r.releasesOwed {
+		return
+	}
+	r.releasesOwed = false
+	r.constraintReg.CommitTxn(r.conTxn)
 }
 
 // rollbackUnderBarrier undoes a write query's eager in-memory mutations,
@@ -7074,6 +7107,7 @@ func (r *Result) rollbackUnderBarrier() {
 	// Belt and braces with the journaled unmarks the replay above already ran, which
 	// is what unwinds a single failed statement inside a still-live transaction.
 	r.conTxn.Reset()
+	r.releasesOwed = false
 	if r.buf != nil {
 		r.buf.Rollback()
 	}
@@ -21103,6 +21137,10 @@ func (e *Engine) runInTxAttempt(ctx context.Context, sess *lpg.Session[string, f
 		}
 		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
+	// The bracket has returned, so the transaction is published: only now may the
+	// values it vacated be taken by a peer (rmp #3128). The schema gate this
+	// statement holds keeps constraint DDL out until the release has landed.
+	r.applyOwedReleases()
 	// An in-barrier WAL fsync failure rolls the write back (in-memory undo
 	// replayed, index buffer and WAL transaction rolled back, all under the
 	// barrier) and records walErr: report it as a failed statement rather than
@@ -22271,6 +22309,9 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) error {
 	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
+	if a.eng != nil && a.eng.delPropProbedHookForTest != nil {
+		a.eng.delPropProbedHookForTest()
+	}
 	idxOld, idxHad := indexOldValue(a.g, a.wtx, a.buf, r.active() || fanout || statsActive, n, key)
 	// #2212: removing an absent property is a no-op and counts nothing.
 	var present bool
@@ -22289,7 +22330,7 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) error {
 	if present && took {
 		a.countPropertyRemoved()
 	}
-	r.recordDelNodeProperty(n, key, prev, had && took)
+	r.recordDelNodeProperty(n, key, prev, had, took)
 	if a.buf != nil && took {
 		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
@@ -23670,6 +23711,9 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) error {
 	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
+	if a.eng != nil && a.eng.delPropProbedHookForTest != nil {
+		a.eng.delPropProbedHookForTest()
+	}
 	idxOld, idxHad := indexOldValue(a.g, a.wtx, a.buf, r.active() || fanout || statsActive, n, key)
 	// #2212: removing an absent property is a no-op and counts nothing.
 	var present bool
@@ -23688,7 +23732,7 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) error {
 	if present && took {
 		a.countPropertyRemoved()
 	}
-	r.recordDelNodeProperty(n, key, prev, had && took)
+	r.recordDelNodeProperty(n, key, prev, had, took)
 	// rmp #2956: propagated, never discarded. The token gate at the top of this
 	// method refuses every name the WAL cannot carry before any write, so the
 	// in-memory write and this staged op succeed or fail together. Buffered only

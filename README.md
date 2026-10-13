@@ -5,27 +5,34 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.17.1`.** This is the project's **twenty-third
+**Current release: `v0.17.2`.** This is the project's **twenty-fourth
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.17.1` is a pre-1.0 **PATCH** release of **4 commits** — 2 changes and
-2 merges — from **one sprint**: 368 (*Rollback memory reclamation in
-graph.Mapper*). No exported identifier was added, removed or re-signed, no
-WAL or on-disk format changed, and `go.mod` and `go.sum` are unchanged from
-`v0.17.0`: the upgrade is a drop-in version bump.
+`v0.17.2` is a pre-1.0 **PATCH** release of **10 commits** — 8 changes and
+2 merges — from **one sprint**, 369 (*Bounded rollback latency and memory
+for cut write statements*), plus two stabilisation commits on the release
+branch. No exported identifier was added, removed or
+re-signed, no WAL or on-disk format changed, and `go.mod` and `go.sum` are
+unchanged from `v0.17.1`: the upgrade is a drop-in version bump.
 
-**Upgrade if you embed `v0.15.0`, `v0.16.0` or `v0.17.0`.** A write
-transaction that created nodes and then aborted as a whole — an autocommit
-statement cut by its context deadline, a failed or refused statement, or an
-explicit rollback — left the keys it had minted for `CREATE ()` interned in
-`graph.Mapper`, together with its write set. A cut `MATCH (a), (b), (c)
-CREATE ()` over 600 nodes left **1847.5 MB** live after GC; it now leaves
-**2.5 MB** (rmp #3119, #3120). New keys interned after such a rollback no
-longer re-create the released id range in memory: 1000 creates after it
-fell from **124.3 MB** to **2.9 MB** live (rmp #3121).
-`(*graph.Mapper).MaxNodeID` no longer counts holes trimmed from the end of
-a shard.
+**Upgrade if you embed `v0.17.1` or earlier.** A write statement cut by its
+context deadline rolled back in quadratic time: the rollback deleted each
+node the statement had created through the ordinary delete path, copying
+the whole tombstone bitmap once per node. A `MATCH (a), (b), (c) CREATE ()`
+over 600 nodes cut at 1 s returned **8.6 to 9.2 s** after its deadline and
+peaked at about **1.7 GB** of heap; it now returns about **1.4 s** after the
+deadline with a peak of about **0.75 GB** (rmp #3122, #3123). The rollback
+is now linear, at about 1 µs per created node.
+
+**Constraints now hold under concurrent writes and constraint DDL.** A
+`REMOVE` racing a peer's rolled-back removal could commit a node missing a
+property its `NOT NULL` constraint requires (rmp #3127), and a transaction
+freeing a `UNIQUE` value released it before it was visible, so readers could
+briefly see two holders (rmp #3128). One behaviour change: a concurrent
+write of a just-freed `UNIQUE` value, between the freeing transaction's
+commit decision and its visibility, is now refused with a constraint
+violation; a retry succeeds.
 
 The two compliance invariants remain in force: the module is **100 %
 openCypher TCK-compliant at the execution level** (**3 897/3 897
@@ -34,9 +41,9 @@ ACID-compliant**.
 
 The module uses the conventional Go path
 `github.com/FlavioCFOliveira/GoGraph` and is fetchable with
-`go get github.com/FlavioCFOliveira/GoGraph@v0.17.1`. See
+`go get github.com/FlavioCFOliveira/GoGraph@v0.17.2`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.17.1.md](release-notes/v0.17.1.md) for the full release
+[release-notes/v0.17.2.md](release-notes/v0.17.2.md) for the full release
 narrative, the behaviour changes a caller must know about, and what the
 release does **not** establish.
 

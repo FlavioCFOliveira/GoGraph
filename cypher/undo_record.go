@@ -341,20 +341,33 @@ func (m mutationUndo) recordSetNodeProperty(n, key string, prev lpg.PropertyValu
 	})
 }
 
-// recordDelNodeProperty records the inverse of deleting node property key. prev
-// (had) is the value captured before deletion; when it existed the inverse
-// re-sets it, otherwise the delete was a no-op and nothing is recorded.
-func (m mutationUndo) recordDelNodeProperty(n, key string, prev lpg.PropertyValue, had bool) {
-	if !had {
+// recordDelNodeProperty records a deletion of node property key. took is the
+// write's EFFECT: whether the removal wrote a version. prev (had) is the value
+// the adapter's pre-call probe read; when the removal took effect and the probe
+// found a value, the inverse re-sets it.
+//
+// # The touch follows the EFFECT, not the probe (rmp #3127)
+//
+// The probe reads the PRESENT state, outside the property shard's lock, so it
+// can read a peer's uncommitted removal that the peer then rolls back before
+// this write lands: the probe reports the property absent, and the removal
+// still deletes the committed value. Gating the touch on the probe then left
+// the node out of the commit-time existence check, and the removal committed
+// under a live NOT NULL constraint — measured, about 3 runs in 100 of
+// TestConstraintDDLvsDML_NoViolationAdmitted. The same race on labels was
+// closed the same way by rmp #2989. A touch the effect over-reports costs one
+// node's check; one it under-reports admits a violation.
+func (m mutationUndo) recordDelNodeProperty(n, key string, prev lpg.PropertyValue, had, took bool) {
+	if !took {
 		return
 	}
 	// Removing a property (including SET n.prop = null, a removal in the Cypher
 	// data model) can violate an existence constraint if the node still carries
 	// the constrained label in its final state, so record it for the commit-time
-	// check (#1754). Only a real removal (had=true) matters.
+	// check (#1754).
 	m.touchOnly(n)
 	m.noteConProp(n, key)
-	if !m.active() {
+	if !had || !m.active() {
 		return
 	}
 	m.undo.record(func() { _ = m.wv.SetNodeProperty(n, key, prev) })
