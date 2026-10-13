@@ -10,18 +10,24 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [0.17.2] — 2026-10-13
 
-**7 commits** — 5 non-merge commits and 2 merges — counted at `18ec0dc7`, the `develop` tip
-before release preparation: the back-merge of `v0.17.1` into `develop` (`2b96446d`) and sprint
-369, *Bounded rollback latency and memory for cut write statements* (5 commits, merged at
-`18ec0dc7`). 7 files changed, 530 insertions, 21 deletions
-(`git diff --shortstat v0.17.1..18ec0dc7`).
+**10 commits** — 8 non-merge commits and 2 merges — counted at `700eaed6`, the tip of
+`release/0.17.2`: the back-merge of `v0.17.1` into `develop` (`2b96446d`); sprint 369, *Bounded
+rollback latency and memory for cut write statements* (5 commits, merged at `18ec0dc7`); the
+release-preparation commit (`b87ec901`); and two stabilisation commits on the release branch, a
+test-only fix to a gauge sampler (`3b03915a`, rmp #3126) and the constraint fix below
+(`700eaed6`). 17 files changed, 1 262 insertions, 85 deletions
+(`git diff --shortstat v0.17.1..700eaed6`).
 
 **This is a PATCH release: no exported API change, no WAL or on-disk format change.** The only
 non-test Go files changed are four files of package `graph/lpg` (`lpg.go`,
-`mvcc_abort_reclaim.go`, `mvcc_abort_release.go`, `mvcc_abort_sides.go`); every declaration they
-add or change is unexported (`abortWithdrawsCreation`, `tombstoneAbortedBatch`, `idBatchBitmap`,
-`countSideStores`, and the `lifeWithdrawal` field `sizeHint` with its methods `tombstone` and
-`revive`). No file under `store/` changed. `go.mod` and `go.sum` are unchanged from `v0.17.1`.
+`mvcc_abort_reclaim.go`, `mvcc_abort_release.go`, `mvcc_abort_sides.go`) and four of package
+`cypher` (`api.go`, `exectx.go`, `undo_record.go`, `exec/constraints.go`). Every declaration they
+add or change is unexported: in `graph/lpg`, `abortWithdrawsCreation`, `tombstoneAbortedBatch`,
+`idBatchBitmap`, `countSideStores`, and the `lifeWithdrawal` field `sizeHint` with its methods
+`tombstone` and `revive`; in `cypher`, the `Engine` test seams `beginTxGatesHookForTest` and
+`delPropProbedHookForTest`, the `releasesOwed` fields of `Result` and `ExplicitTx`,
+`Result.applyOwedReleases`, and the signature of `recordDelNodeProperty`. No file under `store/`
+changed. `go.mod` and `go.sum` are unchanged from `v0.17.1`.
 
 ### Fixed
 
@@ -37,6 +43,26 @@ add or change is unexported (`abortWithdrawsCreation`, `tombstoneAbortedBatch`, 
   of about 0.75 GB, and about 7.1 s after a 5 s deadline with a peak of about 3 GB. The rollback is
   now linear, at about 1 µs per created node. The deadline itself was always noticed within
   microseconds.
+- **A `REMOVE` racing a peer's rolled-back removal can no longer commit a node without a
+  property its `NOT NULL` constraint requires (rmp #3127, `700eaed6`).** Present in v0.17.1 and
+  earlier. The removal decided whether to check the node at commit from a probe of the present
+  state; when that probe read a peer's uncommitted removal that the peer then rolled back, the
+  removal still deleted the committed value but skipped the commit-time check. The check now
+  follows the removal's effect. A second, narrower window is closed in the same commit: an
+  explicit transaction whose `BeginTx` straddled a constraint registration between its catalogue
+  reads skipped both the commit-time `NOT NULL` check and the straddler validation; `BeginTx` now
+  reads the constraint generation first.
+- **Readers can no longer briefly see two holders of a `UNIQUE` value (rmp #3128,
+  `700eaed6`).** Present in v0.17.1 and earlier. A transaction that freed a `UNIQUE` value
+  released it at its commit decision, before it was visible, so a peer could take the value and
+  publish first; a snapshot between the two publications held the value twice. The release is now
+  applied after publication, on the autocommit and the explicit-transaction path. **Behaviour
+  change:** a concurrent write of a just-freed `UNIQUE` value, inside the window between the
+  freeing transaction's commit decision and its visibility, is now refused with a constraint
+  violation; a retry succeeds.
+  The concurrency test that exposes both defects, `TestConstraintDDLvsDML_NoViolationAdmitted`,
+  failed 9 runs in 200 on v0.17.1 and 3 in 100 at `3b03915a`; after the fix it passed 1 000 of
+  1 000 runs, and 200 of 200 under `-race`.
 
 ### Performance
 

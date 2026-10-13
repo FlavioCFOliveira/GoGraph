@@ -9,9 +9,10 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.17.2` is a pre-1.0 **PATCH** release of **7 commits** — 5 changes and
-2 merges — from **one sprint**: 369 (*Bounded rollback latency and memory
-for cut write statements*). No exported identifier was added, removed or
+`v0.17.2` is a pre-1.0 **PATCH** release of **10 commits** — 8 changes and
+2 merges — from **one sprint**, 369 (*Bounded rollback latency and memory
+for cut write statements*), plus two stabilisation commits on the release
+branch. No exported identifier was added, removed or
 re-signed, no WAL or on-disk format changed, and `go.mod` and `go.sum` are
 unchanged from `v0.17.1`: the upgrade is a drop-in version bump.
 
@@ -23,6 +24,15 @@ over 600 nodes cut at 1 s returned **8.6 to 9.2 s** after its deadline and
 peaked at about **1.7 GB** of heap; it now returns about **1.4 s** after the
 deadline with a peak of about **0.75 GB** (rmp #3122, #3123). The rollback
 is now linear, at about 1 µs per created node.
+
+**Constraints now hold under concurrent writes and constraint DDL.** A
+`REMOVE` racing a peer's rolled-back removal could commit a node missing a
+property its `NOT NULL` constraint requires (rmp #3127), and a transaction
+freeing a `UNIQUE` value released it before it was visible, so readers could
+briefly see two holders (rmp #3128). One behaviour change: a concurrent
+write of a just-freed `UNIQUE` value, between the freeing transaction's
+commit decision and its visibility, is now refused with a constraint
+violation; a retry succeeds.
 
 The two compliance invariants remain in force: the module is **100 %
 openCypher TCK-compliant at the execution level** (**3 897/3 897
