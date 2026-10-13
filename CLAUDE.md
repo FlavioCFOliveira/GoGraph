@@ -592,7 +592,10 @@ Task execution is the natural continuation of planning. A **unit of work** is a 
 
 ### Work log — rmp comments
 
-**The `rmp` comment log is the tracking record of every task and every sprint while the work runs.** Write each entry when its event happens, never reconstructed at the close, through the `roadmap-manager` skill.
+**The `rmp` comment log is the tracking record of every task and every sprint while the work runs.** Each entry is written, through the `roadmap-manager` skill, **at the exact moment its event happens** — never batched, deferred to a report, or reconstructed at the close — and **in the correct place**: on the task the event belongs to, or on the sprint when it governs the sprint as a whole.
+
+- **The specialist sub-agent executing a task writes that task's comments itself, as the work happens** — every hypothesis, test, finding, and decision at the moment it occurs. Its brief must authorise and require this. Sub-agents write comments only; status transitions, sprint comments, and closing records stay with the coordinator (see [What the coordinator still owns](#every-task-is-developed-under-a-specialist-sub-agent)).
+- **The coordinator writes its own entries at the moment of its own events**: a user decision, a verification it ran, a gate result, a batch or sequencing choice.
 
 - **Sprint comments are high-level sprint management.** They record what governs the sprint as a whole: scope and sequencing decisions, batching, user decisions, carry-over, gate results, and the sprint's progress. They never carry a task's technical detail.
 - **Task comments are specific to that task's work.** They record what the work on that task discovered, tried, measured, and decided.
