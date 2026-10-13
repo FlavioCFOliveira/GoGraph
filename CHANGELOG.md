@@ -6,6 +6,23 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+[Unreleased]: https://github.com/FlavioCFOliveira/GoGraph/compare/v0.17.2...HEAD
+
+## [0.17.2] — 2026-10-13
+
+**7 commits** — 5 non-merge commits and 2 merges — counted at `18ec0dc7`, the `develop` tip
+before release preparation: the back-merge of `v0.17.1` into `develop` (`2b96446d`) and sprint
+369, *Bounded rollback latency and memory for cut write statements* (5 commits, merged at
+`18ec0dc7`). 7 files changed, 530 insertions, 21 deletions
+(`git diff --shortstat v0.17.1..18ec0dc7`).
+
+**This is a PATCH release: no exported API change, no WAL or on-disk format change.** The only
+non-test Go files changed are four files of package `graph/lpg` (`lpg.go`,
+`mvcc_abort_reclaim.go`, `mvcc_abort_release.go`, `mvcc_abort_sides.go`); every declaration they
+add or change is unexported (`abortWithdrawsCreation`, `tombstoneAbortedBatch`, `idBatchBitmap`,
+`countSideStores`, and the `lifeWithdrawal` field `sizeHint` with its methods `tombstone` and
+`revive`). No file under `store/` changed. `go.mod` and `go.sum` are unchanged from `v0.17.1`.
+
 ### Fixed
 
 - **A write statement cut by its context deadline no longer takes many times its deadline to
@@ -29,7 +46,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
   197 B per id instead of 307. A large `DELETE` rollback was measured linear and is unchanged
   (rmp #3124).
 
-[Unreleased]: https://github.com/FlavioCFOliveira/GoGraph/compare/v0.17.1...HEAD
+[0.17.2]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.17.2
 
 ## [0.17.1] — 2026-10-13
 
