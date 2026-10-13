@@ -410,8 +410,8 @@ func (g *Graph[N, W]) finishLifeWithdrawal(lw *lifeWithdrawal) int {
 	if lw.freed > 0 {
 		g.nodeLifeActive.Add(-int64(lw.freed))
 	}
+	g.tombstoneAbortedBatch(lw.toTombstone)
 	for _, t := range lw.toTombstone {
-		g.tombstoneAborted(t.id)
 		if t.unborn {
 			// The node existed only by the aborted transaction's creation:
 			// a first birth, or a create-then-delete pair (rmp #2947, see
@@ -462,6 +462,138 @@ func (g *Graph[N, W]) tombstoneAborted(id graph.NodeID) {
 	g.tombstones.Store(next)
 	g.tombstoneMu.Unlock()
 	g.BumpTopoGeneration()
+}
+
+// tombstoneAbortedBatch is [Graph.tombstoneAborted] for every node in ts, with
+// one copy of the tombstone bitmap per batch of ids rather than one per id
+// (rmp #3122, #3123).
+//
+// The bitmap is copy-on-write — readers load it without a lock — so every flip
+// copies it whole. One flip per withdrawn creation therefore cost O(N) per node
+// and O(N^2) per abort: measured at v0.17.1, the rollback of a statement cut
+// after creating 1.45 million nodes copied 1.45 million bitmaps, 42 GB in all,
+// and the collector cycles that garbage forced dominated the rollback. Batches
+// are sized as [Graph.releaseNeverBorn] sizes its own: at least
+// [releaseBatchMin] ids and never more than about 256 copies, so tombstoneMu is
+// never held for one copy of an unbounded batch.
+//
+// The churn gate of every node in a batch is pinned before the batch's flip, as
+// [Graph.tombstoneAborted] pins one node's before its own; pinning earlier only
+// over-counts, the safe direction. A node already tombstoned is left alone, as
+// there. Each batch is published by one atomic store, so a reader sees either
+// none or all of its flips.
+func (g *Graph[N, W]) tombstoneAbortedBatch(ts []lifeTombstone) {
+	if len(ts) == 1 {
+		g.tombstoneAborted(ts[0].id)
+		return
+	}
+	batch := max(releaseBatchMin, len(ts)/256)
+	for start := 0; start < len(ts); start += batch {
+		chunk := ts[start:min(start+batch, len(ts))]
+		for _, t := range chunk {
+			if !g.IsTombstonedStored(t.id) {
+				// See [Graph.tombstoneAborted].
+				g.pinChurnForDivergentBag(t.id, false)
+			}
+		}
+		g.tombstoneMu.Lock()
+		cur := g.tombstones.Load()
+		var next *roaring64.Bitmap
+		added := 0
+		for _, t := range chunk {
+			if cur != nil && cur.Contains(uint64(t.id)) {
+				continue
+			}
+			if next == nil {
+				if cur == nil {
+					next = roaring64.New()
+				} else {
+					next = cur.Clone()
+				}
+			}
+			if next.CheckedAdd(uint64(t.id)) {
+				added++
+			}
+		}
+		if added > 0 {
+			// Counter first, bitmap second — see [Graph.removeNodeInfo] (rmp #2687).
+			g.tombstoneActive.Add(int64(added))
+			g.tombstones.Store(next)
+		}
+		g.tombstoneMu.Unlock()
+		if added > 0 {
+			g.BumpTopoGeneration()
+		}
+	}
+}
+
+// abortWithdrawsCreation reports whether removing id, as an inverse in the undo
+// replay of transaction tx, may be left to tx's abort: the removal would leave
+// exactly the state the abort's withdrawal leaves on its own, so replaying it
+// only adds work the abort then takes back (rmp #3122, #3123).
+//
+// # When it holds
+//
+// tx is aborting as a whole — its owner abandoned it ([WriteTx.Abandon]) and is
+// replaying its undo log ([WriteTx.EnterUndo]) — and id's whole life record is
+// one birth by tx itself: a first creation or the revival of an unborn key
+// ([lifeStamp.unbornBefore]), which no record displaced, with no death and no
+// existence claim beside it, and its label bag is empty. [Graph.endWrite] then
+// aborts tx, because abandon is set, and [lifeWithdrawal.withdrawLocked] takes a
+// lone aborted birth of a node that was not alive before to exactly the end
+// state the replayed removal and that withdrawal reach together: the birth
+// record gone, the id unborn and tombstoned. With an empty bag there is no
+// label-bitmap entry for the removal to strip, and no churn to hold.
+//
+// A transaction whose undo replays a failure WITHOUT aborting is not abandoned,
+// and a replay on the panic path runs before anything abandons it, so both keep
+// the physical removal.
+//
+// # Why it is safe to leave the node alive until the withdrawal
+//
+// The birth record stays tx's, in flight, until [Graph.abortRecord] marks it
+// aborted: a snapshot reader cannot see it at any point, and a writer that
+// reaches the id meets it as a conflict, as it did for the whole of the
+// statement. The removal would have tombstoned the id earlier inside the same
+// bracket, and the withdrawal still does so before the bracket ends.
+//
+// # What it saves, measured
+//
+// At v0.17.1 the replay of a statement cut after creating 1.45 million nodes
+// recorded a death, an exclusive adjacency claim and two write-set entries per
+// node, and copied the tombstone bitmap once per node: 6.8 s of the 8.8 s the
+// statement overran a one-second deadline, with live heap growing from 484 MB to
+// 865 MB while the rollback ran. The abort then withdrew the same records again.
+//
+// Memgraph aborts a created vertex the same way: its abort walks the
+// transaction's own deltas and, for the delta that created a vertex, sets the
+// vertex's deleted flag and queues it for the collector in one batch, writing
+// no new delta (InMemoryStorage::InMemoryAccessor::Abort,
+// src/storage/v2/inmemory/storage.cpp, memgraph master 1aae3aa1, read
+// 2026-10-13).
+func (g *Graph[N, W]) abortWithdrawsCreation(id graph.NodeID, tx *writeCtx) bool {
+	if tx == nil || !tx.abandon || !tx.undoing.Load() || !g.mvccArmed {
+		return false
+	}
+	rec := tx.tx.OpenRecord()
+	if rec == nil {
+		return false
+	}
+	if g.nodeLabelBagLids(id) != nil {
+		return false
+	}
+	sh := g.nodeLifeShardFor(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	born, ok := sh.born[id]
+	if !ok || born.info != rec || !born.unbornBefore || born.wasAlive || born.displaced != nil {
+		return false
+	}
+	if _, ok := sh.died[id]; ok {
+		return false
+	}
+	_, claimed := sh.claim[id]
+	return !claimed
 }
 
 // reviveAborted clears id from the bitmap without recording a birth instant,
