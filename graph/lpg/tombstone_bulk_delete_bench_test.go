@@ -28,7 +28,7 @@ const bulkDeleteBatch = 2_000
 // would have left, which is all the timed section depends on.
 func buildDeleteGraph(tb testing.TB, preloaded int) (*Graph[string, float64], []string) {
 	tb.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	total := preloaded + bulkDeleteBatch
 	ids := make([]graph.NodeID, 0, preloaded)
 	live := make([]string, 0, bulkDeleteBatch)

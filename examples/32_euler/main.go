@@ -1,6 +1,10 @@
 // Example 32_euler — Eulerian circuits over a route-inspection network, using
 // Hierholzer's algorithm on both an undirected and a directed graph.
 //
+// The network is stored once, one directed relationship per street. The
+// directed pass reads it as is; the undirected pass reads the symmetric
+// projection built by [csr.CSR.BuildSymmetric].
+//
 // The scenario is route inspection (the "Chinese postman" setting): a fleet
 // must traverse every street of a network exactly once and return to the
 // depot. Such a tour exists precisely when the network has an Eulerian
@@ -153,8 +157,14 @@ func reportEuler(ctx context.Context, w io.Writer, cfg config, cycles [][]int, d
 	if directed {
 		kind = "directed"
 	}
-	a, edges := buildGraph(cfg, cycles, directed)
+	a, edges := buildGraph(cfg, cycles)
+	// Every street is stored once, as one directed relationship. The directed
+	// pass reads that CSR as is; the undirected pass reads its symmetric
+	// projection, where each street is reachable from both endpoints.
 	c := csr.BuildFromAdjList(a)
+	if !directed {
+		c = c.BuildSymmetric()
+	}
 
 	fmt.Fprintf(w, "%s.streets=%d\n", kind, edges)
 
@@ -239,7 +249,7 @@ func verifyTrail(c *csr.CSR[struct{}], trail []graph.NodeID, directed bool) bool
 // define the network: a base ring through a random permutation of all nodes,
 // then cfg.loops extra simple cycles over random subsets, each accepted only if
 // every one of its streets is new. The cycle set is a pure function of the seed
-// and is shared by the undirected and directed builds so the two graphs have
+// and is shared by the undirected and directed passes so the two graphs have
 // the same street layout.
 func generateCycles(ctx context.Context, cfg config) [][]int {
 	//nolint:gosec // G404: a seeded math/rand is intentional; the example must
@@ -309,17 +319,18 @@ func distinctAdjacent(cyc []int) bool {
 }
 
 // buildGraph materialises the cycle set into an adjlist and returns the graph
-// plus the number of distinct streets. When directed, each cycle is oriented
-// one way (i -> i+1), so every node's in-degree equals its out-degree; when
-// undirected, adjlist mirrors each street. When cfg.broken is set, TWO
+// plus the number of distinct streets. Each street is stored once, as one
+// directed relationship that orients its cycle one way (i -> i+1), so every
+// node's in-degree equals its out-degree; the undirected pass reads the same
+// relationships through the symmetric projection. When cfg.broken is set, TWO
 // vertex-disjoint streets of the base ring are omitted: closing a single
 // street would only turn the circuit into an Eulerian PATH (two odd-degree
 // vertices — a route that no longer returns to the depot), which Hierholzer
 // still finds; closing two disjoint streets leaves four odd-degree vertices
 // (directed: two surplus sources and two surplus sinks), so no Eulerian trail
 // exists at all and the module must report ErrNoEulerian.
-func buildGraph(cfg config, cycles [][]int, directed bool) (*adjlist.AdjList[int, struct{}], int) {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: directed})
+func buildGraph(cfg config, cycles [][]int) (*adjlist.AdjList[int, struct{}], int) {
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	edges := 0
 	for ci, cyc := range cycles {
 		for i := range cyc {

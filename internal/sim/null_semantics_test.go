@@ -16,7 +16,7 @@ import (
 // and a4→a1 (aged-to-aged, invisible to the OPTIONAL MATCH probe).
 func buildNullSemanticsFixture(t *testing.T) (*EngineAdapter, *GraphOracle) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	a := NewEngineAdapter(cypher.NewEngine(g))
 	o := NewGraphOracle()
 	ctx := context.Background()

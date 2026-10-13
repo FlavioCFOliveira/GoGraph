@@ -45,7 +45,7 @@ func synthKeyForLabel(tb testing.TB, g *lpg.Graph[string, float64], label string
 // return ErrDeleteNodeHasRelationships; alice must still exist afterwards.
 func TestDelete_RejectsNodeWithRelationships(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -100,7 +100,7 @@ func TestDelete_RejectsNodeWithRelationships(t *testing.T) {
 // for a node that has an incoming (not outgoing) edge.
 func TestDelete_RejectsBobWithIncomingEdge(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

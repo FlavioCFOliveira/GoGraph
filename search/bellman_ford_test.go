@@ -83,7 +83,7 @@ func TestBellmanFord_RandomisedAgainstDijkstra(t *testing.T) {
 		for i := 0; i < e; i++ {
 			edges = append(edges, weightedEdge{r.IntN(n), r.IntN(n), int64(r.IntN(50) + 1)})
 		}
-		c, a := buildWeightedCSRCfg(t, edges, adjlist.Config{Directed: true, Multigraph: true})
+		c, a := buildWeightedCSRCfg(t, edges, adjlist.Config{})
 		src := r.IntN(n)
 		srcID, _ := a.Mapper().Lookup(src)
 		gotBF, err := BellmanFord(c, srcID)
@@ -116,7 +116,7 @@ func TestBellmanFord_RandomisedAgainstDijkstra(t *testing.T) {
 // through it (SPFA's `cand < dist[nb]` against NaN is always false).
 func TestBellmanFord_NaN(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 1.0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestBellmanFord_NaN(t *testing.T) {
 // ErrInvalidInput.
 func TestBellmanFord_Inf(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, math.Inf(1)); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestBellmanFord_Inf(t *testing.T) {
 		t.Fatalf("+Inf err=%v, want ErrInvalidInput", err)
 	}
 
-	a2 := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a2 := adjlist.New[int, float64](adjlist.Config{})
 	if err := a2.AddEdge(0, 1, math.Inf(-1)); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestBellmanFord_IntegerSkipsValidation(t *testing.T) {
 }
 
 func BenchmarkBellmanFord_10kVertices(b *testing.B) {
-	a := adjlist.New[uint32, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[uint32, int64](adjlist.Config{})
 	const universe = 1 << 14 // 16384 nodes
 	for i := uint32(0); i < uint32(universe); i++ {
 		if err := a.AddNode(i); err != nil {

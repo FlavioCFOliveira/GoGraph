@@ -47,7 +47,7 @@ var fxDepts = []string{"Engineering", "Sales", "Marketing", "Finance"}
 // graph and its CSR snapshot; no index manager is attached.
 func buildEmployeeGraph(tb testing.TB, n int, seed int64) (*lpg.Graph[string, int64], *csr.CSR[int64]) {
 	tb.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // G404: math/rand seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	for i := range n {
 		key := fmt.Sprintf("p%d", i)

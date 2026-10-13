@@ -14,7 +14,7 @@ import (
 // collapsing to an empty graph body (#1439).
 func TestWrite_IsolatedNodesOnly(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	ids := []string{"alpha", "beta", "gamma"}
 	for _, id := range ids {
 		if err := a.AddNode(id); err != nil {
@@ -39,7 +39,7 @@ func TestWrite_IsolatedNodesOnly(t *testing.T) {
 // not duplicated as redundant bare statements (#1439).
 func TestWrite_IsolatedNodeAlongsideEdges(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("x", "y", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

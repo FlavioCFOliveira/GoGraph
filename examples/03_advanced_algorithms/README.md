@@ -16,8 +16,9 @@ A seeded synthetic network chosen so all four algorithms produce meaningful,
 dramatically non-uniform results from one graph. The generator builds `C`
 **Barabási–Albert scale-free communities** (preferential attachment, so a few
 high-degree hubs dominate each community) and joins them **only through
-dedicated low-degree bridge nodes wired in a ring**. The graph is undirected;
-edge weights are positive with spread.
+dedicated low-degree bridge nodes wired in a ring**. Each edge is stored once,
+as one directed relationship, and the algorithms read the undirected view
+produced by `csr.CSR.BuildSymmetric`; edge weights are positive with spread.
 
 The topology was chosen on the advice of the `graph-theory-expert` sub-agent,
 and it makes two centralities disagree on purpose:
@@ -54,7 +55,7 @@ go run ./examples/03_advanced_algorithms -communities 8 -nodes 500 -ba-attach 3 
 | `-top-k` | how many top betweenness / PageRank nodes to report | `5` | `5` |
 | `-seed` | RNG seed (fixes the data shape exactly) | `1` | `7` |
 
-The default is `4*25 + 4 = 104` nodes and ~196 undirected edges, so the
+The default is `4*25 + 4 = 104` nodes and ~196 edges, so the
 `O(V*E)` Brandes pass runs in microseconds — fast and deterministic for the
 regression test. The observable-scale run is ~4 000 nodes and ~12 000 edges,
 where the per-algorithm cost (especially Brandes) becomes visible.
@@ -91,8 +92,8 @@ pagerank.top5=29
 
 Node ids `100`–`103` are the four bridge nodes: they are exactly the top-4
 betweenness nodes (cut vertices) and never appear in the PageRank top-5. The
-`edges.total` is `392` because the immutable CSR counts each undirected edge as
-two directed entries. Interleaved with the facts, the example also prints
+`edges.total` is `392` because the symmetric projection holds each stored
+relationship as two directed entries, one per endpoint. Interleaved with the facts, the example also prints
 volatile telemetry lines, for example:
 
 ```
@@ -115,8 +116,8 @@ the hubs still top PageRank).
 
 ## Key APIs
 
-- `graph/adjlist.New` / `AdjList.AddEdge` — build the mutable undirected weighted graph.
-- `graph/csr.BuildFromAdjList` — freeze the builder into the immutable CSR snapshot shared by every algorithm.
+- `graph/adjlist.New` / `AdjList.AddEdge` — build the mutable weighted graph, one directed relationship per edge.
+- `graph/csr.BuildFromAdjList` / `CSR.BuildSymmetric` — freeze the builder into an immutable CSR snapshot and project it to the symmetric (undirected) snapshot shared by every algorithm.
 - `graph/csr.CSR.LiveNodes` — enumerate NodeIDs with an incident edge, for the name-/value-resolved top-k report.
 - `search.BFS` / `search.BFSCtx` — breadth-first traversal in non-decreasing depth order.
 - `search.Dijkstra` / `search.DijkstraCtx` — single-source shortest paths over non-negative weights.

@@ -26,7 +26,7 @@ import (
 // not a string).
 func TestEdgeDate_CreateReadBackNonNull(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -70,7 +70,7 @@ func TestEdgeDate_CreateReadBackNonNull(t *testing.T) {
 // value — i.e. the memory win is actually realised, not just the semantics.
 func TestEdgeDate_StoredAsInt32EpochDay(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (a:P {name:'a'})`)
@@ -118,7 +118,7 @@ func TestEdgeDate_StoredAsInt32EpochDay(t *testing.T) {
 // via the typed Date ordering.)
 func TestEdgeDate_OrderByChronological(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -173,7 +173,7 @@ func TestEdgeDate_OrderByChronological(t *testing.T) {
 // columnar tier).
 func TestEdgeDate_SetThenUpdate(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

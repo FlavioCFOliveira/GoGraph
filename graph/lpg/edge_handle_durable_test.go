@@ -16,7 +16,7 @@ import (
 
 func newDurableGraph(t *testing.T) *Graph[string, float64] {
 	t.Helper()
-	return New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	return New[string, float64](adjlist.Config{})
 }
 
 // TestHasEdgeHandle_PresentAbsent confirms HasEdgeHandle reports true only

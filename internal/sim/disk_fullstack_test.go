@@ -25,7 +25,7 @@ import (
 // 0->1->...->(n-1), plus its CSR, ready to hand to the snapshot writers.
 func buildSnapshotGraph(t *testing.T, n int) (*lpg.Graph[string, float64], *csr.CSR[float64]) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		if err := g.AddNode(nodeKey(i)); err != nil {
 			t.Fatalf("AddNode %d: %v", i, err)

@@ -29,7 +29,7 @@ import (
 // large label of which a handful of rows satisfy the predicate.
 func buildSkewGraph(t testing.TB, nA, nB, hits int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < nA; i++ {
 		k := fmt.Sprintf("a%d", i)
 		mustNode(t, g, k, "A", "x", int64(i+2))
@@ -319,7 +319,7 @@ func TestJoinReorderStats_BareShapesUnchangedByRefresh(t *testing.T) {
 func TestJoinReorderStats_NonMCVLiteral_NoSwap(t *testing.T) {
 	// 40 heavy values at 12 rows each fill the k = 32 MCV list; the target value
 	// 9999 appears 3 times and is not in it.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	id := 0
 	for v := 0; v < 40; v++ {
 		for r := 0; r < 12; r++ {
@@ -652,7 +652,7 @@ func TestReorderSwapWins_CertifiedIntervalIsOneSided(t *testing.T) {
 // y, so `b.y = <one value>` is an MCV-exact single row.
 func buildRangeSkewGraph(t testing.TB, nA, nB int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < nA; i++ {
 		mustNode(t, g, fmt.Sprintf("a%d", i), "A", "x", int64(i))
 	}

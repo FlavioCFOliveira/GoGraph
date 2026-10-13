@@ -52,7 +52,7 @@ func TestApplyDurable_WaiterParksUntilTheBlockerEnds(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			g := newDirectTxGraph(t, true)
+			g := newDirectTxGraph(t)
 			requireNoErr(t, g.AddNode("x"))
 			release, blockerDone := holdDurable(t, g, c.end)
 
@@ -94,7 +94,7 @@ func TestApplyDurable_WaiterParksUntilTheBlockerEnds(t *testing.T) {
 }
 
 func TestApplyDurable_WaitersAreServedInArrivalOrder(t *testing.T) {
-	g := newDirectTxGraph(t, true)
+	g := newDirectTxGraph(t)
 	requireNoErr(t, g.AddNode("x"))
 	release, blockerDone := holdDurable(t, g, func() error { return nil })
 
@@ -140,7 +140,7 @@ func TestApplyDurable_WaitersAreServedInArrivalOrder(t *testing.T) {
 }
 
 func TestDirectWrite_ParksOnABoundedCommit(t *testing.T) {
-	g := newDirectTxGraph(t, true)
+	g := newDirectTxGraph(t)
 	requireNoErr(t, g.AddNode("x"))
 	release, blockerDone := holdDurable(t, g, func() error { return nil })
 	done := make(chan error, 1)

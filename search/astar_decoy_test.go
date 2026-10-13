@@ -25,7 +25,7 @@ func TestAStar_DecoyGraph(t *testing.T) {
 
 	// Nodes: 0 (src), 1-4 (dead-end branch), 5-7 (correct path),
 	// 8-9 (longer alternate path), 10 (goal).
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	addEdge := func(from, to int, w float64) {
 		t.Helper()
 		if err := a.AddEdge(from, to, w); err != nil {

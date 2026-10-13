@@ -62,7 +62,7 @@ import (
 // bareGraph builds n nodes and e edges carrying no labels and no properties.
 func bareGraph(t *testing.T, n, e int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		if err := g.AddNode(fmt.Sprintf("n%d", i)); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -160,7 +160,7 @@ func TestEmptyRegistry_WalkIsSkipped(t *testing.T) {
 // a future change that short-circuits too eagerly fails here.
 func TestEmptyRegistry_OutputIsUnchanged(t *testing.T) {
 	mk := func(nodeAttrs, edgeAttrs bool) *lpg.Graph[string, float64] {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		for i := 0; i < 500; i++ {
 			k := fmt.Sprintf("n%d", i)
 			if err := g.AddNode(k); err != nil {

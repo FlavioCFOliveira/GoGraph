@@ -58,7 +58,6 @@ func TestRandom_RGG_Invariants(t *testing.T) {
 				t.Fatalf("Build: %v", err)
 			}
 			assertOrder(t, g, uint64(c.n))
-			assertDirected(t, g, false)
 			if hasSelfLoop(g) {
 				t.Fatal("graph contains a self-loop, violating the simple-graph contract")
 			}
@@ -391,7 +390,7 @@ func TestRandom_RGG_Golden_N5_R50_D3(t *testing.T) {
 // family contracts.
 func TestRandom_RGG_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	g, err := RGG(10, 30, 2, 42).Build(cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -410,7 +409,7 @@ func TestRandom_RGG_PreservesMaxShardCapacity(t *testing.T) {
 // Watts-Strogatz / Barabási-Albert / Erdős-Rényi shard-full tests.
 func TestRandom_RGG_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: false, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	if err := buildRGG(g, 300, 100, 2, 1); err == nil {
 		t.Fatal("buildRGG(g, 300, 100, 2, 1) with MaxShardCapacity=1 returned nil error, want adjlist.ErrShardFull")

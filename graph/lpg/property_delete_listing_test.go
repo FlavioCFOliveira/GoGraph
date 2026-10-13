@@ -34,7 +34,7 @@ func TestLPG_Property_DeleteListing(t *testing.T) {
 
 	t.Run("DelNodeProperty/Path", func(t *testing.T) {
 		t.Parallel()
-		testDelNodeProperty(t, shapegen.Path(8, true))
+		testDelNodeProperty(t, shapegen.Path(8))
 	})
 
 	t.Run("DelNodeProperty/Star", func(t *testing.T) {
@@ -44,7 +44,7 @@ func TestLPG_Property_DeleteListing(t *testing.T) {
 
 	t.Run("DelEdgeProperty/Path", func(t *testing.T) {
 		t.Parallel()
-		testDelEdgeProperty(t, shapegen.Path(8, true))
+		testDelEdgeProperty(t, shapegen.Path(8))
 	})
 
 	t.Run("DelEdgeProperty/Star", func(t *testing.T) {
@@ -59,7 +59,7 @@ func TestLPG_Property_DeleteListing(t *testing.T) {
 
 	t.Run("NodeLabels/Path", func(t *testing.T) {
 		t.Parallel()
-		testNodeLabels(t, shapegen.Path(8, true))
+		testNodeLabels(t, shapegen.Path(8))
 	})
 
 	t.Run("NodeLabels/Star", func(t *testing.T) {

@@ -81,7 +81,7 @@ func TestWriteWithProps_ConcurrentWriterDoesNotDeadlock(t *testing.T) {
 		}
 	}
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, k := range keysInShard("tall", reentryTallShard, reentryTallHeight) {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode %s: %v", k, err)

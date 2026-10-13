@@ -43,7 +43,7 @@ const mergeProbePopulation = 512
 // companion serves the numeric probe.
 func newMergeProbeEngine(t *testing.T, disableIndexSeek bool) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < mergeProbePopulation; i++ {
 		n := fmt.Sprintf("n%d", i)
 		mustNoErr(t, g.AddNode(n))
@@ -382,7 +382,7 @@ func TestMergeIndexProbe_ConcurrentCommitsNeverHideAMatch(t *testing.T) {
 		keys    = 8
 		writers = 4
 	)
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < nodes; i++ {
 		n := fmt.Sprintf("c%d", i)
 		mustNoErr(t, g.AddNode(n))
@@ -518,7 +518,7 @@ func TestMergeIndexProbe_IndexCreatedInsideAnOpenTransaction(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			eng := NewEngine(g)
 			run := func(q string) {
 				res, err := eng.RunAny(ctx, q, nil)

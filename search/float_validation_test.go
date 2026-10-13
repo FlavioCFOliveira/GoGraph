@@ -31,7 +31,7 @@ import (
 // dst is the mapper-translated NodeID for vertex 2.
 func buildPoisonedCSR(t *testing.T, poison float64) (c *csr.CSR[float64], src, dst graph.NodeID) {
 	t.Helper()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 1.0); err != nil {
 		t.Fatalf("AddEdge(0->1): %v", err)
 	}
@@ -51,14 +51,14 @@ func buildPoisonedCSR(t *testing.T, poison float64) (c *csr.CSR[float64], src, d
 // the poisoned edge is enough.
 func buildPoisonedCSRUndirected(t *testing.T, poison float64) (c *csr.CSR[float64], src graph.NodeID) {
 	t.Helper()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 1.0); err != nil {
 		t.Fatalf("AddEdge(0-1): %v", err)
 	}
 	if err := a.AddEdge(1, 2, poison); err != nil {
 		t.Fatalf("AddEdge(1-2): %v", err)
 	}
-	c = csr.BuildFromAdjList(a)
+	c = csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ = a.Mapper().Lookup(0)
 	return c, src
 }
@@ -294,7 +294,7 @@ func TestFloatValidation_Johnson(t *testing.T) {
 // regression that broke compilation for non-float W.
 func TestFloatValidation_IntegerSkipsGate(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 5); err != nil {
 		t.Fatalf("AddEdge(0->1): %v", err)
 	}

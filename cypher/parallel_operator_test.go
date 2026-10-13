@@ -31,7 +31,7 @@ import (
 // each with a distinct "name" property (item00 … item19).
 func newDeterminismGraph(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for i := 0; i < 20; i++ {
 		name := "item" + itoa(i/10) + itoa(i%10) // zero-padded to 2 digits

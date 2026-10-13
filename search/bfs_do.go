@@ -19,11 +19,9 @@ import (
 // speedups on power-law graphs at the cost of one extra full scan
 // per direction switch.
 //
-// The implementation expects c to be symmetric (typical for
-// undirected graphs built with [adjlist.Config.Directed]=false).
-// For a directed graph callers should pre-build a symmetric CSR
-// containing both edges and their reverses; the v1 algorithm does
-// not maintain a separate in-edge CSR.
+// The implementation expects c to be symmetric: callers build it with
+// [csr.CSR.BuildSymmetric], which holds every edge and its reverse; the
+// v1 algorithm does not maintain a separate in-edge CSR.
 //
 // Memory: visited and frontier bitmaps and the cur/next list slices
 // are acquired from a pool; in the steady state BFSDirectionOpt is

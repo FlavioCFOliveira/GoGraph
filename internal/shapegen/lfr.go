@@ -86,7 +86,7 @@ import (
 //
 // The generator constructs the underlying [adjlist.Config] from the
 // caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, and
-// forces cfg.Directed=false and cfg.Multigraph=false: the LFR
+// stores each undirected edge as ONE directed arc, in the orientation the generator enumerates it: the LFR
 // benchmark is an undirected simple graph by definition.
 //
 // # Ground-truth community labels
@@ -219,8 +219,6 @@ func LFR(n, gammaPercent, betaPercent, avgDeg, maxDeg, minCom, maxCom, muPercent
 			{Name: "mu", Min: 0, Max: 100, Default: 30},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildLFR(g, n, gammaPercent, betaPercent, avgDeg, maxDeg, minCom, maxCom, muPercent, seed)
 		},

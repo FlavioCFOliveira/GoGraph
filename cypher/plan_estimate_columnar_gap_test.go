@@ -64,7 +64,7 @@ const (
 // planner is sure of and no figure at all.
 func seedEstimateGapGraph(t *testing.T) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	add := func(key, tag string) {
 		t.Helper()
 		if err := g.AddNode(key); err != nil {

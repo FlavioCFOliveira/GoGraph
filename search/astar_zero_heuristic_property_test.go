@@ -31,7 +31,7 @@ func TestProperty_AStar_ZeroHeuristic_EqualsDijkstra(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		n := rapid.IntRange(5, 20).Draw(rt, "n")
 
-		a := adjlist.New[int, float64](adjlist.Config{Directed: true, Multigraph: true})
+		a := adjlist.New[int, float64](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			if err := a.AddNode(i); err != nil {
 				rt.Fatalf("AddNode(%d): %v", i, err)

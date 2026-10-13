@@ -48,7 +48,10 @@ func BiBFS[W any](c *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) 
 // checked at every alternation between the forward and backward
 // frontier expansion; on cancellation returns (nil, wrapped ctx.Err()).
 //
-// On undirected (symmetric) input it walks c in both directions; on
+// On undirected (symmetric) input it walks c in both directions. The
+// symmetry test is O(1) on a CSR marked symmetric by construction
+// ([csr.CSR.KnownSymmetric], e.g. a [csr.CSR.BuildSymmetric] result) and an
+// O(V + E) hash-set scan otherwise; on
 // directed input it builds the reverse CSR once and delegates to
 // [BiBFSOnCtx]. The internal reverse build is O(V + E); callers
 // running BiBFS many times on the same graph should hoist the build

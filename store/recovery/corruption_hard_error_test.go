@@ -25,7 +25,7 @@ func writeNCommittedNodes(t *testing.T, dir string, n int) []string {
 	// The tests over this fixture damage the log by byte offset: a single-file
 	// log (see frameBoundaries).
 	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -190,6 +190,11 @@ func TestRecovery_UnsupportedRecordVersion_IsHardError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	// A well-formed WAL frame (correct CRC) whose transaction payload begins
 	// with 0x7F — not OpRecordV1 (0x00), V2 (0xFE), or V3 (0xFD) — so the
 	// frame survives the WAL reader but Decode rejects its content.

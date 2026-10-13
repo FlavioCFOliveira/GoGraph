@@ -22,7 +22,7 @@ func TestHopcroftKarp_Isolated_RightSide(t *testing.T) {
 	const nActive = nRight - nIsolated // 20
 
 	// Pre-intern left vertices then all right vertices (including isolated).
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	for i := 0; i < mLeft; i++ {
 		if err := a.AddNode(fmt.Sprintf("L%05d", i)); err != nil {
 			t.Fatalf("AddNode L%05d: %v", i, err)

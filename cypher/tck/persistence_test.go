@@ -2,6 +2,7 @@ package tck_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -83,6 +84,11 @@ func persistAndRecover(t *testing.T, dir string, g *lpg.Graph[string, float64]) 
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	store := txn.NewStoreWithCodec[string, float64](g, w, txn.NewStringCodec())
 	tx := store.Begin()
 	g.AdjList().Mapper().Walk(func(_ graph.NodeID, nodeKey string) bool {
@@ -128,7 +134,7 @@ func TestTCKPersistence_LabelSurvivesRestart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// Create 50 Person nodes with name properties.
@@ -159,7 +165,7 @@ func TestTCKPersistence_MultiLabelSurvivesRestart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	labels := []string{"Person", "City", "Company"}
@@ -187,7 +193,7 @@ func TestTCKPersistence_EmptyGraphSurvivesRestart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	recEng := persistAndRecover(t, dir, g)
 
@@ -207,7 +213,12 @@ func newWALEngine(t *testing.T, dir string) (*cypher.Engine, *wal.Writer) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -317,7 +328,7 @@ func TestTCKPersistence_TemporalValuesSurviveSnapshotAndWAL(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// Create one node carrying a Date property and one carrying a DateTime.

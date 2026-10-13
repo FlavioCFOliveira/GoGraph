@@ -13,7 +13,7 @@ import (
 func TestHopcroftKarp_PerfectMatching(t *testing.T) {
 	t.Parallel()
 	// Bipartite: left {0,1,2}, right {3,4,5}; identity matching.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	// Pre-intern left vertices first so they get the low NodeIDs.
 	for i := 0; i < 6; i++ {
 		if err := a.AddNode(i); err != nil {
@@ -63,7 +63,7 @@ func TestHopcroftKarp_PerfectMatching(t *testing.T) {
 
 func TestHopcroftKarp_NoEdges(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		if err := a.AddNode(i); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -82,7 +82,7 @@ func TestHopcroftKarp_NoEdges(t *testing.T) {
 // suite, which only exercised the partial bipartite case.
 func TestHopcroftKarp_CompleteBipartite_K3x4(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	left := []string{"L0", "L1", "L2"}
 	right := []string{"R0", "R1", "R2", "R3"}
 	for _, l := range left {
@@ -105,7 +105,7 @@ func TestHopcroftKarp_CompleteBipartite_K3x4(t *testing.T) {
 // vertex has no edges, so the maximum matching is at most 1.
 func TestHopcroftKarp_HallCounterexample(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	// Left {L0, L1, L2}; right {R0}. Only L0 and L1 connect to R0;
 	// L2 has no neighbours. By Hall's theorem the matching has at
 	// most 1 (only R0 is reachable from any left vertex).
@@ -142,7 +142,7 @@ func TestHopcroftKarp_HallCounterexample(t *testing.T) {
 func TestHopcroftKarp_DeepChain(t *testing.T) {
 	t.Parallel()
 	const n = 4000
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	// Pre-intern lefts first to keep them in the low NodeID range.
 	for i := 0; i < n; i++ {
 		if err := a.AddNode(fmt.Sprintf("L%05d", i)); err != nil {
@@ -178,7 +178,7 @@ func TestHopcroftKarp_DeepChain(t *testing.T) {
 // of the recursive baseline (task #131 acceptance).
 func BenchmarkHopcroftKarp_Bipartite(b *testing.B) {
 	const n = 512
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		if err := a.AddNode(fmt.Sprintf("L%05d", i)); err != nil {
 			b.Fatalf("AddNode: %v", err)
@@ -207,7 +207,7 @@ func BenchmarkHopcroftKarp_Bipartite(b *testing.B) {
 // possible bipartite graph (one edge) yields a matching of size 1.
 func TestHopcroftKarp_SingleEdge(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	if err := a.AddEdge("L", "R", struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestHopcroftKarp_SingleEdge(t *testing.T) {
 // Regression gate for the index-out-of-range panic in bfsLayer (task #1433).
 func TestHopcroftKarp_nLeftExceedsMaxNodeID_ReturnsErrInvalidInput(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	if err := a.AddEdge("L", "R", struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestHopcroftKarp_nLeftExceedsMaxNodeID_ReturnsErrInvalidInput(t *testing.T)
 // negative nLeft is also rejected (task #1433).
 func TestHopcroftKarp_nLeftNegative_ReturnsErrInvalidInput(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	if err := a.AddEdge("L", "R", struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

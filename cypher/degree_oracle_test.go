@@ -57,7 +57,7 @@ type degreeFixture struct {
 func buildDegreeFixture(t *testing.T, seed int64, nodes, edges int) *degreeFixture {
 	t.Helper()
 	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // deterministic fixture, not security
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	key := func(i int) string { return fmt.Sprintf("n%d", i) }
 	for i := 0; i < nodes; i++ {

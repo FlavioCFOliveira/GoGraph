@@ -18,20 +18,19 @@ import (
 // to avoid re-evaluating constructors on every rapid iteration.
 //
 // Some entries are undirected by construction (CompleteBipartite,
-// BarabasiAlbert, WattsStrogatz): their Build methods ignore the
-// caller's cfg.Directed flag and force Directed=false. The size
-// assertions account for this via a.Directed().
+// BarabasiAlbert, WattsStrogatz): their Build methods store each edge as
+// one directed arc, so the CSR holds exactly the stored arcs.
 var shapes = []shapegen.Shape[int, int64]{
 	shapegen.EmptyGraph(),
 	shapegen.SingleNode(),
-	shapegen.SingleEdge(true, false, false), // directed K2
+	shapegen.SingleEdge(false, false), // directed K2
 	shapegen.ParallelDigon(2),
 	shapegen.IsolatedOnly(5),
 	shapegen.Cycle(5, true),              // directed cycle
 	shapegen.Complete(4, true),           // directed K4
-	shapegen.CompleteBipartite(3, 3),     // undirected (forces cfg.Directed=false)
-	shapegen.BarabasiAlbert(50, 2, 42),   // undirected (forces cfg.Directed=false)
-	shapegen.WattsStrogatz(20, 4, 30, 0), // undirected (forces cfg.Directed=false)
+	shapegen.CompleteBipartite(3, 3),     // undirected: one arc per edge
+	shapegen.BarabasiAlbert(50, 2, 42),   // undirected: one arc per edge
+	shapegen.WattsStrogatz(20, 4, 30, 0), // undirected: one arc per edge
 }
 
 // adjlistNeighbours returns the sorted slice of NodeIDs that adj
@@ -61,15 +60,9 @@ func csrNeighbours(c *csr.CSR[int64], id graph.NodeID) []graph.NodeID {
 }
 
 // expectedCSRSize returns the number of directed arcs stored in the
-// CSR built from a. For a directed AdjList, Size() already counts
-// directed arcs. For an undirected AdjList, Size() counts undirected
-// edges once, but BuildFromAdjList stores both (u,v) and (v,u), so
-// the CSR's arc count is 2*Size().
+// CSR built from a: Size() counts every stored arc once.
 func expectedCSRSize(a *adjlist.AdjList[int, int64]) uint64 {
-	if a.Directed() {
-		return a.Size()
-	}
-	return 2 * a.Size()
+	return a.Size()
 }
 
 // checkEdgePreservation asserts that for every node in a, the CSR
@@ -98,7 +91,7 @@ func TestCSR_BuildFromAdjList_PreservesEdges_Rapid(t *testing.T) {
 		idx := rapid.IntRange(0, len(shapes)-1).Draw(rt, "shape_idx")
 		shape := shapes[idx]
 
-		g, err := shape.Build(adjlist.Config{Directed: true})
+		g, err := shape.Build(adjlist.Config{})
 		if err != nil {
 			rt.Fatalf("Build(%s): %v", shape.Name(), err)
 		}
@@ -111,8 +104,8 @@ func TestCSR_BuildFromAdjList_PreservesEdges_Rapid(t *testing.T) {
 		}
 		wantSize := expectedCSRSize(a)
 		if c.Size() != wantSize {
-			rt.Errorf("shape=%s Size mismatch: csr=%d want=%d (adjlist.Size=%d directed=%v)",
-				shape.Name(), c.Size(), wantSize, a.Size(), a.Directed())
+			rt.Errorf("shape=%s Size mismatch: csr=%d want=%d (adjlist.Size=%d)",
+				shape.Name(), c.Size(), wantSize, a.Size())
 		}
 
 		checkEdgePreservation(rt, shape.Name(), a, c)
@@ -129,7 +122,7 @@ func TestCSR_BuildFromAdjList_PreservesEdges_Shapes(t *testing.T) {
 		shape := shape
 		t.Run(shape.Name(), func(t *testing.T) {
 			t.Parallel()
-			g, err := shape.Build(adjlist.Config{Directed: true})
+			g, err := shape.Build(adjlist.Config{})
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}
@@ -141,8 +134,8 @@ func TestCSR_BuildFromAdjList_PreservesEdges_Shapes(t *testing.T) {
 			}
 			wantSize := expectedCSRSize(a)
 			if c.Size() != wantSize {
-				t.Errorf("Size mismatch: csr=%d want=%d (adjlist.Size=%d directed=%v)",
-					c.Size(), wantSize, a.Size(), a.Directed())
+				t.Errorf("Size mismatch: csr=%d want=%d (adjlist.Size=%d)",
+					c.Size(), wantSize, a.Size())
 			}
 
 			checkEdgePreservation(t, shape.Name(), a, c)

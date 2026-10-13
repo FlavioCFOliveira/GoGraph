@@ -27,7 +27,7 @@ func TestSetIndexManagerConcurrentRace(t *testing.T) {
 	// unfixed binary.
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	g := lpg.New[int, float64](adjlist.Config{Directed: true})
+	g := lpg.New[int, float64](adjlist.Config{})
 
 	// Two managers to alternate between (nil is also valid).
 	mgr1 := index.NewManager()

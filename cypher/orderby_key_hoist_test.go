@@ -59,7 +59,7 @@ const hoistReproduction = `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary
 // assumed.
 func hoistGraph(t testing.TB, n int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(key); err != nil {

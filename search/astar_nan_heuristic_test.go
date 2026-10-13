@@ -26,7 +26,7 @@ type linear3Graph struct {
 // not be used because the mapper assigns sparse, shard-padded NodeIDs.
 func buildLinear3(tb testing.TB) linear3Graph {
 	tb.Helper()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 1.0); err != nil {
 		tb.Fatalf("AddEdge(0→1): %v", err)
 	}

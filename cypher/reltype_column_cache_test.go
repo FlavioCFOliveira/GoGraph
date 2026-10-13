@@ -78,7 +78,7 @@ func withRelTypeColumnProbe(t *testing.T, fn func()) *relTypeColumnProbe {
 
 func newRelTypeColumnEngine(t *testing.T) (*lpg.Graph[string, float64], *cypher.Engine) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return g, cypher.NewEngine(g)
 }
 
@@ -272,7 +272,7 @@ func TestRelTypeColumn_InvalidatesOnDirectStoreWrite(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

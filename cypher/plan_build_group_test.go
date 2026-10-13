@@ -228,7 +228,7 @@ func TestPlanBuildGroupPanickingLeaderReleasesWaiters(t *testing.T) {
 func TestBuildPlanCacheEntryRoutesThroughTheGroup(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	e := NewEngine(g)
 
 	const q = "MATCH (n) RETURN n"
@@ -256,7 +256,7 @@ func TestBuildPlanCacheEntryRoutesThroughTheGroup(t *testing.T) {
 func TestConcurrentFirstExecutionsAgree(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range 20 {
 		id := string(rune('a' + i))
 		if err := g.AddNode(id); err != nil {
@@ -338,7 +338,7 @@ func (e errSentinel) Error() string { return string(e) }
 func TestBuildPlanCacheEntryDoesNotAdoptABuildFromBeforeAClear(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	e := NewEngine(g)
 
 	const q = "MATCH (n) RETURN n"

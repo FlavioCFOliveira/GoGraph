@@ -68,7 +68,7 @@ import (
 // enough to interleave a whole transaction against.
 func schemaGateSeed(tb testing.TB, n int) *lpg.Graph[string, float64] {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("k%d", i)
 		if err := g.SetNodeLabel(key, "Person"); err != nil {
@@ -263,7 +263,7 @@ func TestExplicitTx_SchemaGateExcludesAutocommitButNotATransaction(t *testing.T)
 	} {
 		t.Run(tc.arm, func(t *testing.T) {
 			t.Parallel()
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			e := NewEngine(g)
 			ctx := context.Background()
 
@@ -361,7 +361,7 @@ func TestSchemaGate_DDLDoesNotHoldTheGateAcrossWriterAdmission(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	defer func() { _ = wr.Close() }() // test teardown
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, wr, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -604,7 +604,7 @@ func (c *backfillStallCtx) releaseOnce() { c.rel.Do(func() { close(c.release) })
 // range-scan access paths.
 func schemaGateSeedTyped(tb testing.TB, n int) *lpg.Graph[string, float64] {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("k%d", i)
 		if err := g.SetNodeLabel(key, "Person"); err != nil {

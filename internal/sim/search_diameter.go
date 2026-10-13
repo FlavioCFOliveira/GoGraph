@@ -30,9 +30,9 @@ type diameterFixture struct {
 //
 // Diameter expects a symmetric (undirected) CSR, which [symCSRFromEdges] builds.
 // The true diameter is the maximum finite eccentricity over all sources, from a
-// from-scratch BFS ([bfsDistancesFromAdj]) that shares no code with the 2-sweep
-// / iFUB estimator under test. Fixed sizes plus one seed-derived size per shape
-// keep the fixtures varied yet bounded.
+// from-scratch BFS ([bfsDistancesFromAdj]) that shares no code with the
+// BoundingDiameters implementation under test. Fixed sizes plus one
+// seed-derived size per shape keep the fixtures varied yet bounded.
 func diameterViolations(tick int64) []Violation {
 	seed := NewSeed(uint64(tick) ^ diameterSalt)
 	var vs []Violation

@@ -14,7 +14,7 @@ import (
 // behaviour where the trail slice grew via standard append).
 func BenchmarkHierholzer_LargeEulerian(b *testing.B) {
 	const n = 1 << 12 // 4k segments
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		base := i * 4
 		if err := a.AddEdge(base, base+1, struct{}{}); err != nil {
@@ -40,7 +40,7 @@ func BenchmarkHierholzer_LargeEulerian(b *testing.B) {
 
 func TestHierholzer_Cycle(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		if err := a.AddEdge(i, (i+1)%4, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -62,7 +62,7 @@ func TestHierholzer_Cycle(t *testing.T) {
 
 func TestHierholzer_NoEulerianTwoSinks(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestHierholzer_NoEulerianTwoSinks(t *testing.T) {
 
 func TestHierholzer_Disconnected(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 3; i++ {
 		if err := a.AddEdge(i, (i+1)%3, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)

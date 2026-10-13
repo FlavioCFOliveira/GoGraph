@@ -251,7 +251,7 @@ func TestParallelScanProject_SmallGraphStaysSerial(t *testing.T) {
 // yields zero rows on both paths (the fused path declines: live count 0 is not >
 // threshold).
 func TestParallelScanProject_EmptyGraph(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	on := NewEngineWithOptions(g, EngineOptions{ParallelScanThreshold: 0})
 	got := drainSortedPS(t, on, `MATCH (n) RETURN n.v AS v`)
 	if len(got) != 0 {

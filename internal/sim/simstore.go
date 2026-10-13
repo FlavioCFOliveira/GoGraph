@@ -106,24 +106,16 @@ type simStoreConfig struct {
 // one would. It is used by the standalone SimStore tests.
 func defaultSimStoreConfig() simStoreConfig {
 	return simStoreConfig{
-		graphConfig: adjlist.Config{Directed: true, Multigraph: true},
+		graphConfig: adjlist.Config{},
 		maxTxnOps:   0, // 0 -> txn.DefaultMaxTxnOps, the production default.
 	}
 }
 
-// simulatorStoreConfig is the shape the crash-mode [Simulator] drives. It is a
-// SIMPLE directed graph (Multigraph: false), matching both the simulator's
-// non-crash in-memory engine and the [GraphOracle]'s edge model, which keys an
-// edge by (src, dst, label) and so collapses parallel edges. A multigraph here
-// would let two CREATE (a)-[:KNOWS]->(b) statements on the same pair produce two
-// engine edges where the oracle models one, a spurious count divergence after
-// recovery. Keeping the durable store simple makes the oracle a faithful model
-// of the engine across a crash. A scenario whose oracle DOES model edges per
-// instance (edge-properties, rmp #2449) opts into a multigraph via
-// [Config.Multigraph], which [New] applies on top of this base shape.
+// simulatorStoreConfig is the shape the crash-mode [Simulator] drives: the
+// directed multigraph every graph is.
 func simulatorStoreConfig() simStoreConfig {
 	return simStoreConfig{
-		graphConfig: adjlist.Config{Directed: true, Multigraph: false},
+		graphConfig: adjlist.Config{},
 		maxTxnOps:   0,
 	}
 }
@@ -438,12 +430,11 @@ type recoveredSchema struct {
 //   - Full-stack mode (cfg.dir != "") with a published snapshot at dir/snapshot:
 //     the FULL snapshot+WAL path ([recovery.OpenFS]) reconstructs the graph from
 //     the self-sufficient snapshot and replays the WAL tail (dir/wal) on top. The
-//     snapshot carries the persisted graph config, so the simple/multigraph shape
-//     is preserved across the checkpoint+crash boundary.
+//     snapshot carries the persisted graph config, so the weightless shape is
+//     preserved across the checkpoint+crash boundary.
 //   - Otherwise (no snapshot, or legacy WAL-only mode): the WAL-only core
 //     ([recovery.ReplayWAL]) replays the committed prefix into a graph built with
-//     cfg.graphConfig — the only place the simulator's SIMPLE shape is asserted
-//     when no snapshot has yet persisted that config.
+//     cfg.graphConfig.
 //
 // In every case the benign torn WAL tail is truncated to the last durable frame
 // boundary BEFORE the caller reopens for append (auditor finding F1), and

@@ -207,7 +207,7 @@ func TestEngine_Expand_NoEdges(t *testing.T) {
 
 func TestEngine_Expand_WithEdges(t *testing.T) {
 	// Directed graph: A→B, A→C — MATCH (n)-[r]->(m) RETURN n,m must return 2 rows.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddEdge("A", "B", 1.0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

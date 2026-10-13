@@ -7,20 +7,14 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
-// TestAdjList_Accessors covers Mapper, Directed, Multigraph, and
+// TestAdjList_Accessors covers Mapper and
 // MaxNodeID. These are trivial reflection helpers but they sit on
 // the public surface so their behaviour must be pinned.
 func TestAdjList_Accessors(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	if a.Mapper() == nil {
 		t.Fatal("Mapper() returned nil")
-	}
-	if !a.Directed() {
-		t.Fatal("Directed() returned false for Directed:true config")
-	}
-	if !a.Multigraph() {
-		t.Fatal("Multigraph() returned false for Multigraph:true config")
 	}
 	if got := a.MaxNodeID(); got != 0 {
 		t.Fatalf("empty AdjList MaxNodeID = %d, want 0", got)
@@ -39,25 +33,12 @@ func TestAdjList_Accessors(t *testing.T) {
 	}
 }
 
-// TestAdjList_AccessorsDefault covers the false-returning branches of
-// Directed and Multigraph on the zero Config.
-func TestAdjList_AccessorsDefault(t *testing.T) {
-	t.Parallel()
-	a := New[string, int](Config{})
-	if a.Directed() {
-		t.Fatal("Directed() returned true for zero Config")
-	}
-	if a.Multigraph() {
-		t.Fatal("Multigraph() returned true for zero Config")
-	}
-}
-
 // TestAdjList_LoadEntry_AllPaths covers every documented branch of
 // LoadEntry: a node that has never had outgoing edges, a node with
 // outgoing edges, and an out-of-range NodeID.
 func TestAdjList_LoadEntry_AllPaths(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	mustAddEdge(t, a, "a", "b", 7)
 	mustAddEdge(t, a, "a", "c", 8)
 	mustAddNode(t, a, "solitary")
@@ -85,7 +66,7 @@ func TestAdjList_LoadEntry_AllPaths(t *testing.T) {
 // edge membership — while it right-sizes the backing arrays underneath.
 func TestAdjList_Compact_PreservesObservableState(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	mustAddEdge(t, a, "a", "b", 1)
 	beforeOrder := a.Order()
 	beforeSize := a.Size()

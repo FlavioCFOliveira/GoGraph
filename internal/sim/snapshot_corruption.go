@@ -171,7 +171,7 @@ func snapshotCorruptionComponents() []snapshotCorruptionComponent {
 // makes edgehandles.bin present in the published image.
 func snapshotCorruptionStoreConfig() simStoreConfig {
 	return simStoreConfig{
-		graphConfig: adjlist.Config{Directed: true, Multigraph: true},
+		graphConfig: adjlist.Config{},
 		dir:         defaultCheckpointDir,
 	}
 }

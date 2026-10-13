@@ -50,7 +50,7 @@ func TestAggregationPreProjection_DoesNotMaterialiseAnUnnamedRelationship(t *tes
 	const nodes = 2000
 	const outDegree = 4
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	for i := 0; i < nodes; i++ {

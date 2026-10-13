@@ -23,7 +23,7 @@ import (
 // walks every node, and the unversioned form reads each node's LIVE entry, so a
 // commit landing mid-walk lands in the image for the nodes not yet visited.
 func TestWalkEdgeHandlesAsOf_IgnoresLaterCommits(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	for _, n := range []string{"a", "b", "c"} {
 		if err := g.AddNode(n); err != nil {
@@ -71,7 +71,7 @@ func TestWalkEdgeHandlesAsOf_IgnoresLaterCommits(t *testing.T) {
 // TestForEachPairOverflowRelTypeByIDAsOf_IgnoresLaterCommits asserts the pair's
 // overflow relationship types are reported as of the snapshot.
 func TestForEachPairOverflowRelTypeByIDAsOf_IgnoresLaterCommits(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {
@@ -123,7 +123,7 @@ func TestForEachPairOverflowRelTypeByIDAsOf_IgnoresLaterCommits(t *testing.T) {
 // ordering and the present-time form gets it free from the bitmap while this one
 // gets it from the mapper walk.
 func TestTombstonedIDsAsOf_ReportsTheSnapshotsDeadSet(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	for _, n := range []string{"a", "b", "c", "d"} {
 		if err := g.AddNode(n); err != nil {

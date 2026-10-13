@@ -16,7 +16,7 @@ import (
 // snapshot and CRC-corruption tests below.
 func buildFullSnapshot(t *testing.T) string {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	adj := g.AdjList()
 	pairs := [][2]string{{"a", "b"}, {"b", "c"}, {"c", "a"}}
 	for _, p := range pairs {

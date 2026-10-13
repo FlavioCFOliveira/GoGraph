@@ -32,7 +32,7 @@ import (
 // buildDiamond constructs "a"→"b"→"d" and "a"→"c"→"d".
 func buildDiamond(tb testing.TB) (*lpg.Graph[string, float64], *cypher.Engine) {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "c", "d"} {
 		if err := g.AddNode(n); err != nil {
 			tb.Fatalf("AddNode %q: %v", n, err)
@@ -52,7 +52,7 @@ func buildDiamond(tb testing.TB) (*lpg.Graph[string, float64], *cypher.Engine) {
 // buildLollipop constructs "a"→"b"→"c"→"b".
 func buildLollipop(tb testing.TB) (*lpg.Graph[string, float64], *cypher.Engine) {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "c"} {
 		if err := g.AddNode(n); err != nil {
 			tb.Fatalf("AddNode %q: %v", n, err)

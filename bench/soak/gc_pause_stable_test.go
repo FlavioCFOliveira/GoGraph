@@ -76,7 +76,7 @@ func TestGCPause_Stable(t *testing.T) {
 
 	// ── Build seed graph for background workload ──────────────────────────────
 	const graphN = 1024
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	rng := rand.New(rand.NewPCG(13, 17)) //nolint:gosec // deterministic
 	for i := range graphN {
 		if err := a.AddNode(i); err != nil {

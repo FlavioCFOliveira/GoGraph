@@ -14,7 +14,7 @@ import (
 // DOT. The output is a digraph whose body lists "src -> dst" with the
 // weight as the edge label; pipe it through `dot -Tsvg` to visualise.
 func ExampleWrite() {
-	g := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	g := adjlist.New[string, int64](adjlist.Config{})
 	_ = g.AddEdge("a", "b", 5)
 
 	var buf bytes.Buffer
@@ -32,7 +32,7 @@ func ExampleWrite() {
 // emits one line per edge in an internal NodeID order, so the example
 // sorts the body lines before printing to keep the output stable.
 func ExampleWrite_multiEdge() {
-	g := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	g := adjlist.New[string, int64](adjlist.Config{})
 	_ = g.AddEdge("a", "b", 1)
 	_ = g.AddEdge("b", "c", 2)
 

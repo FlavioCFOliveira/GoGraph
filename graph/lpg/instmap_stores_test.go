@@ -19,7 +19,7 @@ const parallelEdges = smallInstMax + 4 // 12: four instances past promotion
 
 func newParallelGraph(t *testing.T) *Graph[string, float64] {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode a: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestInstanceStores_RemoveEdgeDropsEveryInstance(t *testing.T) {
 func TestHandleStores_PopulatedInBothStorageModes(t *testing.T) {
 	for _, multigraph := range []bool{true, false} {
 		t.Run(fmt.Sprintf("multigraph=%t", multigraph), func(t *testing.T) {
-			g := New[string, float64](adjlist.Config{Directed: true, Multigraph: multigraph})
+			g := New[string, float64](adjlist.Config{})
 			for _, n := range []string{"a", "b"} {
 				if err := g.AddNode(n); err != nil {
 					t.Fatalf("AddNode %s: %v", n, err)

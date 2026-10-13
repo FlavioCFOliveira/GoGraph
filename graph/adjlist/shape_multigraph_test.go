@@ -73,7 +73,7 @@ func TestAdjList_Multigraph_RemoveOneOfMany(t *testing.T) {
 func TestAdjList_Multigraph_InsertionOrder(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 
 	for _, w := range []int64{10, 20, 30} {
 		if err := a.AddEdge(0, 1, w); err != nil {
@@ -106,7 +106,7 @@ func TestAdjList_Multigraph_StarParallel(t *testing.T) {
 	const n = 5 // number of leaves
 	const k = 3 // parallel edges per leaf
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 
 	for leaf := 1; leaf <= n; leaf++ {
 		for i := 0; i < k; i++ {
@@ -141,7 +141,7 @@ func TestAdjList_Multigraph_CycleParallel(t *testing.T) {
 	const n = 4 // cycle length
 	const p = 3 // parallel copies per arc
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 
 	for i := 0; i < n; i++ {
 		for j := 0; j < p; j++ {
@@ -172,7 +172,7 @@ func TestAdjList_Multigraph_PropertyBased(t *testing.T) {
 		n := rapid.IntRange(0, 10).Draw(rt, "n")
 		m := rapid.IntRange(1, 50).Draw(rt, "m")
 
-		a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+		a := adjlist.New[int, int64](adjlist.Config{})
 
 		// edgeCount[src][dst] tracks how many times AddEdge(src, dst) was called.
 		type endpoint struct{ src, dst int }
@@ -208,4 +208,14 @@ func TestAdjList_Multigraph_PropertyBased(t *testing.T) {
 			}
 		}
 	})
+}
+
+// degree returns the out-degree of u in a: the number of slots
+// Neighbours(u) yields, parallel edges counted once each.
+func degree(a *adjlist.AdjList[int, int64], u int) int {
+	d := 0
+	for range a.Neighbours(u) {
+		d++
+	}
+	return d
 }

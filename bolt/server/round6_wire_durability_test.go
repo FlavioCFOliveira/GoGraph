@@ -15,6 +15,7 @@ package server_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,7 +42,7 @@ func walEngineAt(t *testing.T, walPath string) (*cypher.Engine, func()) {
 	t.Helper()
 
 	// Recover any prior committed state from the WAL image (no-op on first open).
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if fileExists(walPath) {
 		res, err := recovery.Open[string, float64](filepath.Dir(walPath), recovery.Options[string, float64]{
 			Codec:       txn.NewStringCodec(),
@@ -60,6 +61,11 @@ func walEngineAt(t *testing.T, walPath string) (*cypher.Engine, func()) {
 	if err != nil {
 		t.Fatalf("wal.Open(%s): %v", walPath, err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

@@ -83,10 +83,9 @@ func TestStructured_Hypercube_Invariants(t *testing.T) {
 				wantSize = uint64(d) * uint64(1<<(d-1))
 			}
 			assertSize(t, g, wantSize)
-			assertDirected(t, g, false)
 			// d-regular: every node has degree d.
 			for v := 0; v < 1<<d; v++ {
-				if got := degreeOut(g, v); got != d {
+				if got := degreeUndirected(g, v); got != d {
 					t.Fatalf("Q_%d: deg(%d) = %d, want %d", d, v, got, d)
 				}
 			}
@@ -167,7 +166,6 @@ func TestStructured_Grid_Invariants(t *testing.T) {
 				}
 				assertOrder(t, g, uint64(p.m*p.n))
 				assertSize(t, g, expectedGridSize(p.m, p.n, eight))
-				assertDirected(t, g, false)
 				if p.m >= 1 && p.n >= 1 && !eight {
 					// Diameter of the 4-neighbour grid is (m-1) + (n-1).
 					assertDiameter(t, "Grid4", g, uint64((p.m-1)+(p.n-1)))
@@ -246,10 +244,9 @@ func TestStructured_Torus_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(p.m*p.n))
 			assertSize(t, g, 2*uint64(p.m)*uint64(p.n))
-			assertDirected(t, g, false)
 			// 4-regular: every node has degree 4.
 			for v := 0; v < p.m*p.n; v++ {
-				if got := degreeOut(g, v); got != 4 {
+				if got := degreeUndirected(g, v); got != 4 {
 					t.Fatalf("T_{%d,%d}: deg(%d) = %d, want 4", p.m, p.n, v, got)
 				}
 			}
@@ -313,11 +310,10 @@ func TestStructured_Rook_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(n*n))
 			assertSize(t, g, uint64(n*n)*uint64(n-1))
-			assertDirected(t, g, false)
 			// 2(n-1)-regular: every node has degree 2(n-1).
 			for v := 0; v < n*n; v++ {
 				want := 2 * (n - 1)
-				if got := degreeOut(g, v); got != want {
+				if got := degreeUndirected(g, v); got != want {
 					t.Fatalf("R_%d: deg(%d) = %d, want %d", n, v, got, want)
 				}
 			}
@@ -377,10 +373,9 @@ func TestStructured_Mobius_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(2*n))
 			assertSize(t, g, uint64(3*n))
-			assertDirected(t, g, false)
 			// 3-regular.
 			for v := 0; v < 2*n; v++ {
-				if got := degreeOut(g, v); got != 3 {
+				if got := degreeUndirected(g, v); got != 3 {
 					t.Fatalf("M_%d: deg(%d) = %d, want 3", n, v, got)
 				}
 			}
@@ -435,7 +430,6 @@ func TestStructured_Ladder_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(2*n))
 			assertSize(t, g, uint64(3*n-2))
-			assertDirected(t, g, false)
 		})
 	}
 }
@@ -486,9 +480,8 @@ func TestStructured_Prism_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(2*n))
 			assertSize(t, g, uint64(3*n))
-			assertDirected(t, g, false)
 			for v := 0; v < 2*n; v++ {
-				if got := degreeOut(g, v); got != 3 {
+				if got := degreeUndirected(g, v); got != 3 {
 					t.Fatalf("Y_%d: deg(%d) = %d, want 3", n, v, got)
 				}
 			}
@@ -550,7 +543,6 @@ func TestStructured_Theta_Invariants(t *testing.T) {
 			}
 			assertOrder(t, g, uint64(tr.a+tr.b+tr.c-1))
 			assertSize(t, g, uint64(tr.a+tr.b+tr.c))
-			assertDirected(t, g, false)
 		})
 	}
 }
@@ -622,7 +614,7 @@ func TestStructured_Properties_RapidSweep(t *testing.T) {
 			}
 			// d-regular.
 			for v := 0; v < 1<<d; v++ {
-				if got := degreeOut(g, v); got != d {
+				if got := degreeUndirected(g, v); got != d {
 					t.Fatalf("d=%d: deg(%d) = %d, want %d", d, v, got, d)
 				}
 			}
@@ -693,7 +685,7 @@ func TestStructured_Properties_RapidSweep(t *testing.T) {
 // mirroring the trivial- and classic-family contracts.
 func TestStructured_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	for _, tc := range []struct {
 		name string
 		s    Shape[int, int64]

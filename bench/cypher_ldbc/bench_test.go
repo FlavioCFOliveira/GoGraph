@@ -35,7 +35,7 @@ var benchGraph *lpg.Graph[string, float64]
 
 // TestMain seeds the benchmark graph and runs all tests/benchmarks.
 func TestMain(m *testing.M) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < seedSize; i++ {
 		key := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(key); err != nil {
@@ -107,7 +107,7 @@ func benchmarkQuery(b *testing.B, queryFile string) {
 	// starts from the same cardinality base.
 	var g *lpg.Graph[string, float64]
 	if write {
-		g = lpg.New[string, float64](adjlist.Config{Directed: true})
+		g = lpg.New[string, float64](adjlist.Config{})
 	} else {
 		g = benchGraph
 	}
@@ -182,7 +182,7 @@ func TestCypherLDBC_AllQueriesRun(t *testing.T) {
 			// mutation across parallel tests.
 			var g *lpg.Graph[string, float64]
 			if q.write {
-				g = lpg.New[string, float64](adjlist.Config{Directed: true})
+				g = lpg.New[string, float64](adjlist.Config{})
 			} else {
 				g = benchGraph
 			}

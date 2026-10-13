@@ -60,7 +60,7 @@ const existsWriteBaseSID = 100000
 // fixture itself can never be the source of a missing property or a stray edge.
 func newExistsWriteFixture(t *testing.T, n int) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	e := cypher.NewEngine(g)
 	for i := range n {
 		q := fmt.Sprintf(`CREATE (:P {sid:%d})`, existsWriteBaseSID+i)

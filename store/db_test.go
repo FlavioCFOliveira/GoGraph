@@ -40,7 +40,12 @@ func newStack(t *testing.T, cfg checkpoint.Config) (*stack, context.CancelFunc) 
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := wlog.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	st := txn.NewStoreWithCodec(g, wlog, txn.NewStringCodec())
 	if cfg.Dir == "" {
 		cfg.Dir = dir
@@ -249,6 +254,11 @@ func TestDBClose_NoCheckpointer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := wlog.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	db := store.New(wlog) // no checkpointer
 	if err := db.CloseCtx(context.Background()); err != nil {
 		t.Fatalf("db.Close (WAL-only): %v", err)

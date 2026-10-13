@@ -501,7 +501,7 @@ func TestExistsWhereBodyProjection_TCKShapesPreserved(t *testing.T) {
 // mirroring the TCK harness's "Given an empty graph / And having executed".
 func tckShapeEngine(t *testing.T, setup string) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := NewEngine(g)
 	res, err := eng.RunAny(context.Background(), setup, nil)

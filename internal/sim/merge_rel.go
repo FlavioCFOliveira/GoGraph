@@ -54,13 +54,19 @@ func (o *GraphOracle) applyMergeKnowsN(params map[string]any) OracleResult {
 	if !srcOK || !dstOK {
 		return OracleResult{Committed: true} // MATCH found nothing.
 	}
-	k := edgeKey{src: srcID, dst: dstID, label: "KNOWS"}
-	if e, exists := o.edges[k]; exists {
-		//nolint:forcetypeassert // the oracle writes Properties["n"] only as int64 (the MERGE creation path in this file), so the ON MATCH increment reads back an int64
-		e.Properties["n"] = e.Properties["n"].(int64) + 1 // ON MATCH SET r.n=r.n+1
+	// MERGE matches every KNOWS relationship of the pair, each one a row, and
+	// ON MATCH sets each; only a pair with none creates one.
+	if matched := o.edgeInstances(srcID, dstID, "KNOWS"); len(matched) > 0 {
+		for _, k := range matched {
+			e := o.edges[k]
+			n, _ := e.Properties["n"].(int64) // a KNOWS a CREATE added carries no n: null + 1 stays null
+			if _, has := e.Properties["n"]; has {
+				e.Properties["n"] = n + 1 // ON MATCH SET r.n=r.n+1
+			}
+		}
 		return OracleResult{Committed: true}
 	}
-	o.edges[k] = &EdgeState{SrcID: srcID, DstID: dstID, Label: "KNOWS", Properties: map[string]any{"n": int64(1)}}
+	o.edges[o.newInstKey(srcID, dstID, "KNOWS")] = &EdgeState{SrcID: srcID, DstID: dstID, Label: "KNOWS", Properties: map[string]any{"n": int64(1)}}
 	return OracleResult{Committed: true, EdgesCreated: 1}
 }
 

@@ -22,7 +22,7 @@ import (
 // and both Person labels.
 func TestCreate_MultiPattern_ThreePatterns(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -54,7 +54,7 @@ func TestCreate_MultiPattern_ThreePatterns(t *testing.T) {
 // verifies that all 10 are present and no extra nodes were created.
 func TestCreate_MultiPattern_TenNodes(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

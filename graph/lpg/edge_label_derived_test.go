@@ -24,7 +24,7 @@ func eqStrings(a, b []string) bool { return slices.Equal(a, b) }
 // overflow.
 func TestEdgeLabel_Derived_SingleLabel(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestEdgeLabel_Derived_SingleLabel(t *testing.T) {
 // labels — the first inline, the second in overflow — unioned by EdgeLabels.
 func TestEdgeLabel_Derived_MultiLabel(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestEdgeLabel_Derived_MultiLabel(t *testing.T) {
 // (dedup across slots), never doubled.
 func TestEdgeLabel_Derived_MultigraphSharedType(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge #1: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestEdgeLabel_Derived_MultigraphSharedType(t *testing.T) {
 // types on parallel edges: the union is the set of distinct types.
 func TestEdgeLabel_Derived_MultigraphDistinctTypes(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge #1: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestEdgeLabel_Derived_MultigraphDistinctTypes(t *testing.T) {
 // reside in overflow once it can no longer live in a slot.
 func TestEdgeLabel_Orphan_SetThenRemoveAfterEdgeGone(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -215,8 +215,8 @@ func TestAddEdgeLabeled_EquivalentToAddThenSet(t *testing.T) {
 		{"c", "a", "FOLLOWS"},
 	}
 
-	twoStep := lpg.New[string, int64](adjlist.Config{Directed: true})
-	fused := lpg.New[string, int64](adjlist.Config{Directed: true})
+	twoStep := lpg.New[string, int64](adjlist.Config{})
+	fused := lpg.New[string, int64](adjlist.Config{})
 	for _, e := range edges {
 		if err := twoStep.AddEdge(e.src, e.dst, 0); err != nil {
 			t.Fatalf("two-step AddEdge: %v", err)
@@ -255,7 +255,7 @@ func TestAddEdgeLabeled_EquivalentToAddThenSet(t *testing.T) {
 // not disturb the multi-label machinery.
 func TestAddEdgeLabeled_ThenAddSecondLabel(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdgeLabeled("a", "b", 0, "X"); err != nil {
 		t.Fatalf("AddEdgeLabeled: %v", err)
 	}
@@ -274,28 +274,12 @@ func TestAddEdgeLabeled_ThenAddSecondLabel(t *testing.T) {
 	}
 }
 
-// TestAddEdgeLabeled_Undirected verifies the fused labelled insertion on an
-// undirected graph reports the type from both endpoints' perspective.
-func TestAddEdgeLabeled_Undirected(t *testing.T) {
-	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: false})
-	if err := g.AddEdgeLabeled("a", "b", 0, "PEER"); err != nil {
-		t.Fatalf("AddEdgeLabeled: %v", err)
-	}
-	if got := sortedEdgeLabels(g, "a", "b"); !eqStrings(got, []string{"PEER"}) {
-		t.Fatalf("EdgeLabels(a,b) = %v, want [PEER]", got)
-	}
-	if got := sortedEdgeLabels(g, "b", "a"); !eqStrings(got, []string{"PEER"}) {
-		t.Fatalf("EdgeLabels(b,a) = %v, want [PEER]", got)
-	}
-}
-
 // TestEdgeLabel_RelationshipTypesInUse covers the introspection enumerator over
 // the new representation: it must dedup across inline slots and overflow and
 // drop types whose only bearing edge was removed.
 func TestEdgeLabel_RelationshipTypesInUse(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge a->b #1: %v", err)
 	}

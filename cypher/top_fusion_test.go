@@ -316,7 +316,7 @@ func TestFusedTopRejectsHostileSkip(t *testing.T) {
 // needs its own test.
 func TestFusedTopStillFiresWrites(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 
 	res, err := eng.RunInTx(context.Background(),
@@ -364,7 +364,7 @@ func TestFusedTopStillFiresWrites(t *testing.T) {
 // result budget cannot make the fixture itself fail to build.
 func seedPeopleWithOptions(t *testing.T, n, buckets int, opts *EngineOptions) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	seed := NewEngine(g)
 	for i := 0; i < n; i++ {
 		r, err := seed.RunInTx(context.Background(),

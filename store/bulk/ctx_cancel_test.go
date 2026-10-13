@@ -14,7 +14,7 @@ import (
 // error type explicitly; this test adds both guarantees.
 func TestLoader_CtxCancelPreCancelled(t *testing.T) {
 	t.Parallel()
-	l := New(Options{Directed: true})
+	l := New(Options{})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel
 
@@ -41,7 +41,7 @@ func TestLoader_CtxCancelPreCancelled(t *testing.T) {
 func TestLoader_CtxCancelMidDrain(t *testing.T) {
 	t.Parallel()
 
-	l := New(Options{Directed: true})
+	l := New(Options{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

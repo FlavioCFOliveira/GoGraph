@@ -623,7 +623,7 @@ const checkEvery = 8
 func buildNetwork(ctx context.Context, cfg config) (*network, time.Duration, error) {
 	start := time.Now()
 
-	adj := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	adj := adjlist.New[int, int64](adjlist.Config{})
 	//nolint:gosec // G404: a seeded math/rand is intentional here — the example
 	// must reproduce a fixed dataset for a given -seed; crypto/rand would defeat that.
 	rng := rand.New(rand.NewSource(cfg.seed))

@@ -24,7 +24,7 @@ func TestCheckpoint_Cadence_TimeBased(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("x", "y", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestCheckpoint_Cadence_ForcedTrigger(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("p", "q", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

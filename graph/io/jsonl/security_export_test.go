@@ -25,7 +25,7 @@ func TestSec_IO_JSONLExportEscapesHostileID(t *testing.T) {
 	// it inside one string token.
 	hostile := "evil\x01\"}\n{\"type\":\"node\",\"id\":\"injected\\"
 
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddNode(hostile); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestSec_IO_JSONLExportEscapesHostileID(t *testing.T) {
 	}
 
 	// Round-trip: the exact bytes must come back, with no "injected" node.
-	got, _, err := jsonl.ReadInto(bytes.NewReader(buf.Bytes()), adjlist.Config{Directed: true})
+	got, _, err := jsonl.ReadInto(bytes.NewReader(buf.Bytes()), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadInto: %v", err)
 	}

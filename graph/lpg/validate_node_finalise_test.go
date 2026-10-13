@@ -23,7 +23,7 @@ func TestValidateNode_RequiredPropertyEnforced(t *testing.T) {
 	t.Parallel()
 
 	newGraphWithSchema := func() *lpg.Graph[string, int64] {
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		s := schema.New(g.Registry(), g.PropertyKeys())
 		if _, err := s.RegisterProperty("email", lpg.PropString); err != nil {
 			t.Fatalf("RegisterProperty email: %v", err)
@@ -140,7 +140,7 @@ func TestValidateNode_NodeValidatorDispatch(t *testing.T) {
 
 	t.Run("no validator installed returns nil", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		if err := g.AddNode("n"); err != nil {
 			t.Fatalf("AddNode: %v", err)
 		}
@@ -151,7 +151,7 @@ func TestValidateNode_NodeValidatorDispatch(t *testing.T) {
 
 	t.Run("validator without NodeValidator returns nil", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		g.SetValidator(propOnlyValidator{})
 		if err := g.AddNode("n"); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -163,7 +163,7 @@ func TestValidateNode_NodeValidatorDispatch(t *testing.T) {
 
 	t.Run("NodeValidator verdict is returned", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		g.SetValidator(rejectAllValidator{})
 		if err := g.AddNode("n"); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -175,7 +175,7 @@ func TestValidateNode_NodeValidatorDispatch(t *testing.T) {
 
 	t.Run("unknown key returns nil", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		g.SetValidator(rejectAllValidator{})
 		// "ghost" was never interned: nothing to finalise, so no rejection.
 		if err := g.ValidateNode("ghost"); err != nil {

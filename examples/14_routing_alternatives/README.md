@@ -29,8 +29,10 @@ A two-way road network laid out on a plane. The dataset is a **seeded
 k-nearest-neighbour (k-NN) spatial graph**: `-nodes` points are drawn
 uniformly at random from `[0, scale]²`, and each point is linked to its `k`
 (`-neighbours`) nearest neighbours by an edge weighted with the integer
-Euclidean distance between them. Each undirected road is stored as two
-opposite directed arcs. A deterministic component-merge repair pass then adds
+Euclidean distance between them. Each two-way road is stored once, as one
+directed relationship, and the routing algorithms read the symmetric
+projection built by `csr.CSR.BuildSymmetric`, where every road is traversable
+in both directions. A deterministic component-merge repair pass then adds
 the fewest extra edges needed to guarantee a single connected component for
 **any** seed, so the source can always reach the destination. The source is
 the node nearest the `(0,0)` corner and the destination the node nearest the
@@ -174,10 +176,12 @@ the build/heap figures show the in-memory footprint of a larger CSR snapshot.
 
 ## Key APIs
 
-- `graph/adjlist.New` / `AdjList.AddEdge` / `AdjList.Compact` — build, then
-  tighten, the mutable weighted directed road graph.
-- `graph/csr.BuildFromAdjList` — freeze the builder into an immutable CSR
-  snapshot for queries.
+- `graph/adjlist.New` / `AdjList.HasEdge` / `AdjList.AddEdge` / `AdjList.Compact`
+  — build, then tighten, the mutable weighted road graph, one directed
+  relationship per two-way road.
+- `graph/csr.BuildFromAdjList` / `CSR.BuildSymmetric` — freeze the builder into
+  an immutable CSR snapshot and project it to the symmetric (two-way) snapshot
+  the queries read.
 - `graph/csr.CSR.NeighboursByID` — public out-neighbour iterator used by the
   expansion counter.
 - `graph.Mapper.Lookup` / `graph.Mapper.Resolve` — translate between

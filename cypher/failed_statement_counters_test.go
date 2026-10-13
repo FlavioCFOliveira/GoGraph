@@ -126,7 +126,7 @@ func TestFailedStatementReportsNoCounters_WALStore(t *testing.T) {
 // newFailedCountersEngine returns a seeded engine, WAL-backed when w is non-nil.
 func newFailedCountersEngine(t *testing.T, w *wal.Writer) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	var eng *cypher.Engine
 	if w == nil {
 		eng = cypher.NewEngine(g)

@@ -326,7 +326,7 @@ func runWithProgress(ctx context.Context, w, progressW io.Writer, cfg config) er
 	// constant weight 1 that nothing ever reads. Dropping the per-edge weight
 	// column (W=float64) saves 8 B/edge of dead memory; the build is otherwise
 	// identical (addEdge still passes weight 1, which is accepted and ignored).
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Weightless: true})
+	g := lpg.New[string, float64](adjlist.Config{Weightless: true})
 	prog.phase("build: creating nodes and edges")
 	stats, err := build(ctx, g, cfg, prog)
 	if err != nil {
@@ -1635,7 +1635,7 @@ func columnarExercise(ctx context.Context, cfg config, w io.Writer) error {
 		return fmt.Errorf("working-set config: %w", err)
 	}
 
-	cg := lpg.New[string, float64](adjlist.Config{Directed: true, Weightless: true})
+	cg := lpg.New[string, float64](adjlist.Config{Weightless: true})
 	if _, err := build(ctx, cg, ccfg, nil); err != nil {
 		return fmt.Errorf("working-set build: %w", err)
 	}
@@ -2284,7 +2284,7 @@ func buildPopulation(ctx context.Context, seed int64, n int) (*lpg.Graph[string,
 	//nolint:gosec // G404: a seeded math/rand fixes the reputation distribution for a
 	// given -seed; crypto/rand would defeat the reproducibility this benchmark needs.
 	rng := rand.New(rand.NewSource(seed))
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Weightless: true})
+	g := lpg.New[string, float64](adjlist.Config{Weightless: true})
 	for i := 0; i < n; i++ {
 		if i%checkEvery == 0 {
 			if err := ctx.Err(); err != nil {
@@ -2628,7 +2628,7 @@ func cyclicRun(ctx context.Context, eng *cypher.Engine, be *cyclicBackend, q str
 // exactly equal on a regular graph, so whatever the contrast shows here carries no
 // degree-skew advantage at all.
 func buildRing(ctx context.Context, n, degree int) (*lpg.Graph[string, float64], error) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	keys := make([]string, n)
 	for i := 0; i < n; i++ {
 		if i%checkEvery == 0 {

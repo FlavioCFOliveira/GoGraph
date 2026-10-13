@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/waltest"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -38,8 +40,13 @@ func TestCheckpointDurability_NonStringKeysCodecTruncates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 
-	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, int64](adjlist.Config{})
 	opts := txn.Options[int64, int64]{
 		Codec:       txn.NewInt64Codec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -91,8 +98,8 @@ func TestCheckpointDurability_NonStringKeysCodecTruncates(t *testing.T) {
 	if !res.SnapshotHit {
 		t.Fatal("SnapshotHit = false, want true")
 	}
-	if res.SnapshotSchemaVersion != 4 {
-		t.Errorf("SnapshotSchemaVersion = %d, want 4 (self-sufficient v4 snapshot)", res.SnapshotSchemaVersion)
+	if res.SnapshotSchemaVersion != snapshot.ManifestVersion {
+		t.Errorf("SnapshotSchemaVersion = %d, want %d (self-sufficient snapshot)", res.SnapshotSchemaVersion, snapshot.ManifestVersion)
 	}
 	if res.WALOps != 0 {
 		t.Fatalf("WALOps = %d, want 0 (state must come from the snapshot alone)", res.WALOps)
@@ -130,8 +137,13 @@ func TestCheckpointDurability_UUIDKeysCodecTruncates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 
-	g := lpg.New[[16]byte, int64](adjlist.Config{Directed: true})
+	g := lpg.New[[16]byte, int64](adjlist.Config{})
 	opts := txn.Options[[16]byte, int64]{
 		Codec:       txn.NewUUIDCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

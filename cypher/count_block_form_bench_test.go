@@ -88,7 +88,7 @@ func blockFormGraph(tb testing.TB, rows int) *lpg.Graph[string, float64] {
 	if g, ok := blockFormGraphs.Load(rows); ok {
 		return g.(*lpg.Graph[string, float64])
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 
 	for i := 0; i < rows; i++ {

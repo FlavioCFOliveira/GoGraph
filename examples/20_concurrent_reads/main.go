@@ -27,10 +27,12 @@
 //   - The high-degree hubs create heavy adjacency fan-out, so each read
 //     does real CPU work — the point of a concurrency benchmark.
 //
-// Edges are undirected (an [adjlist.AdjList] with Directed:false mirrors
-// every insertion) and carry an integer weight in [1, weightMax] drawn
-// from the seeded RNG. Integer weights keep Dijkstra free of NaN/Inf
-// concerns and make distance sums exact.
+// Edges are undirected: each is stored once, as one directed relationship
+// in an [adjlist.AdjList], and every reader works on the symmetric
+// projection built by [csr.CSR.BuildSymmetric], which makes each
+// relationship reachable from both endpoints. Edges carry an integer
+// weight in [1, weightMax] drawn from the seeded RNG. Integer weights keep
+// Dijkstra free of NaN/Inf concerns and make distance sums exact.
 //
 // # Evidence — the lock-free read contract
 //
@@ -50,6 +52,11 @@
 //     counterparts (exact for the partition and the triangle count, within a
 //     float tolerance for betweenness), with the speedup reported as
 //     telemetry.
+//   - The PageRank worker budget: one [centrality.PageRankBudget] of
+//     GOMAXPROCS slots is shared by every PageRank call of the run, so
+//     concurrent readers never start more than GOMAXPROCS PageRank workers
+//     between them. Its capacity, and its in-use count after each sweep
+//     level (always 0: every run returns its slots), are telemetry.
 //   - Live heap, so a reader can see the immutable snapshot is shared,
 //     not copied per worker.
 //
@@ -230,7 +237,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 		return fmt.Errorf("target node %d not interned", cfg.nodes-1)
 	}
 
-	c := csr.BuildFromAdjList(g)
+	c := csr.BuildSymmetricFromAdjList(g) // one stored relationship per edge, read undirected
 
 	fmt.Fprintf(w, "nodes.count=%d\n", c.Order())
 	fmt.Fprintf(w, "edges.directed=%d\n", c.Size())
@@ -240,10 +247,28 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "# mem.heap_growth=%s\n", humanBytes(built.HeapAlloc-base.HeapAlloc))
 	fmt.Fprintf(w, "# mem.num_gc=%d\n", built.NumGC-base.NumGC)
 
+	// One PageRank worker budget for the whole run, shared by every
+	// PageRank call: the reference read, every concurrent reader at every
+	// sweep level. Without it each concurrent caller would start its own
+	// GOMAXPROCS-sized worker pool, so N readers would oversubscribe the
+	// cores N-fold and park on the per-iteration barrier. With it the
+	// readers together never run more than GOMAXPROCS PageRank workers; a
+	// reader that finds fewer than two free slots runs single-threaded on
+	// its own goroutine instead of waiting. Every read is still checked
+	// against the reference below, so the budget cannot change an answer
+	// unnoticed.
+	budget, err := centrality.NewPageRankBudget(runtime.GOMAXPROCS(0))
+	if err != nil {
+		return fmt.Errorf("pagerank budget: %w", err)
+	}
+	prOpts := centrality.DefaultPageRankOptions()
+	prOpts.Budget = budget
+	fmt.Fprintf(w, "# pagerank.budget.capacity=%d\n", budget.Capacity())
+
 	// Single-threaded reference: the source of truth every concurrent read
 	// must reproduce. Computing it once, sequentially, anchors the
 	// correctness claim.
-	ref, err := readOnce(c, src, dst, cfg.topK)
+	ref, err := readOnce(c, src, dst, cfg.topK, prOpts)
 	if err != nil {
 		return fmt.Errorf("reference read: %w", err)
 	}
@@ -256,7 +281,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	// Run the identical workload at a sweep of worker counts, verifying
 	// every concurrent read agrees with the reference and surfacing the
 	// throughput at each level as telemetry.
-	agreed, err := sweep(ctx, w, c, cfg, src, dst, ref)
+	agreed, err := sweep(ctx, w, c, cfg, src, dst, ref, prOpts)
 	if err != nil {
 		return fmt.Errorf("sweep: %w", err)
 	}
@@ -319,7 +344,7 @@ func reportParallelEquivalence(ctx context.Context, w io.Writer, c *csr.CSR[int6
 		if err != nil {
 			return fmt.Errorf("betweenness subgraph: %w", err)
 		}
-		betCSR = csr.BuildFromAdjList(bg)
+		betCSR = csr.BuildSymmetricFromAdjList(bg)
 	}
 	t0 = time.Now()
 	serialBet, err := centrality.BetweennessCtx(ctx, betCSR)
@@ -389,8 +414,9 @@ type readResult struct {
 // readOnce performs one full mixed read over c: a Dijkstra src->dst
 // distance, a BFS reach count from src, and the PageRank top-k node set.
 // It is the unit of work every reader repeats and the function that
-// computes the single-threaded reference. It takes no lock on c.
-func readOnce(c *csr.CSR[int64], src, dst graph.NodeID, topK int) (readResult, error) {
+// computes the single-threaded reference. It takes no lock on c. prOpts
+// carries the run's shared PageRank worker budget.
+func readOnce(c *csr.CSR[int64], src, dst graph.NodeID, topK int, prOpts centrality.PageRankOptions) (readResult, error) {
 	d, err := search.Dijkstra(c, src)
 	if err != nil {
 		return readResult{}, fmt.Errorf("dijkstra: %w", err)
@@ -406,7 +432,7 @@ func readOnce(c *csr.CSR[int64], src, dst graph.NodeID, topK int) (readResult, e
 		return true
 	})
 
-	ranks, _, err := centrality.PageRank(c, centrality.DefaultPageRankOptions())
+	ranks, _, err := centrality.PageRank(c, prOpts)
 	if err != nil {
 		return readResult{}, fmt.Errorf("pagerank: %w", err)
 	}
@@ -474,7 +500,12 @@ func topKByRank(ranks []float64, k int) []graph.NodeID {
 // readers over one immutable snapshot), set -cap-to-cpus=false so the sweep
 // climbs all the way to -workers regardless of the core count — the lock-free
 // read contract must hold no matter how many readers pile on.
-func sweep(ctx context.Context, w io.Writer, c *csr.CSR[int64], cfg config, src, dst graph.NodeID, ref readResult) (bool, error) {
+//
+// Every level shares prOpts.Budget, so the PageRank workers of all readers
+// together never exceed its capacity. After each level the budget's in-use
+// count is reported; it must be 0, because every reader has joined and each
+// PageRank run returns its slots on every exit path.
+func sweep(ctx context.Context, w io.Writer, c *csr.CSR[int64], cfg config, src, dst graph.NodeID, ref readResult, prOpts centrality.PageRankOptions) (bool, error) {
 	maxWorkers := cfg.workers
 	if cfg.capToCPUs {
 		if procs := runtime.GOMAXPROCS(0); procs < maxWorkers {
@@ -487,7 +518,7 @@ func sweep(ctx context.Context, w io.Writer, c *csr.CSR[int64], cfg config, src,
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
-		reads, elapsed, agreed, err := runLevel(ctx, c, cfg, workers, src, dst, ref)
+		reads, elapsed, agreed, err := runLevel(ctx, c, cfg, workers, src, dst, ref, prOpts)
 		if err != nil {
 			return false, err
 		}
@@ -497,6 +528,7 @@ func sweep(ctx context.Context, w io.Writer, c *csr.CSR[int64], cfg config, src,
 		fmt.Fprintf(w, "# scale.workers_%d.reads=%d\n", workers, reads)
 		fmt.Fprintf(w, "# scale.workers_%d.elapsed=%s\n", workers, elapsed.Round(time.Microsecond))
 		fmt.Fprintf(w, "# scale.workers_%d.throughput=%.0f reads/s\n", workers, rate(reads, elapsed))
+		fmt.Fprintf(w, "# scale.workers_%d.pagerank_budget_in_use=%d\n", workers, prOpts.Budget.InUse())
 	}
 	return allAgreed, nil
 }
@@ -507,7 +539,7 @@ func sweep(ctx context.Context, w io.Writer, c *csr.CSR[int64], cfg config, src,
 // Every goroutine joins before runLevel returns (on completion or
 // cancellation), so the example leaks no goroutines. It returns the total
 // reads performed, the wall-clock elapsed, and whether every read agreed.
-func runLevel(ctx context.Context, c *csr.CSR[int64], cfg config, workers int, src, dst graph.NodeID, ref readResult) (int64, time.Duration, bool, error) {
+func runLevel(ctx context.Context, c *csr.CSR[int64], cfg config, workers int, src, dst graph.NodeID, ref readResult, prOpts centrality.PageRankOptions) (int64, time.Duration, bool, error) {
 	// Each worker performs cfg.iterations mixed reads, so the per-level
 	// work scales with the worker count and the throughput curve reflects
 	// how well concurrent reads scale.
@@ -529,7 +561,7 @@ func runLevel(ctx context.Context, c *csr.CSR[int64], cfg config, workers int, s
 				if i%ctxCheckEvery == 0 && ctx.Err() != nil {
 					return
 				}
-				got, err := readOnce(c, src, dst, cfg.topK)
+				got, err := readOnce(c, src, dst, cfg.topK, prOpts)
 				if err != nil {
 					e := fmt.Errorf("worker read: %w", err)
 					firstErr.CompareAndSwap(nil, &e)
@@ -564,7 +596,8 @@ const ctxCheckEvery = 4
 // ─────────────────────────────────────────────────────────────────────────────
 
 // generate builds the Barabási-Albert preferential-attachment network
-// described by cfg into a fresh undirected AdjList, single-threaded so
+// described by cfg into a fresh AdjList, one directed relationship per
+// undirected edge, single-threaded so
 // the seeded RNG draws in a fixed order (and the data shape is
 // reproducible for a given -seed). It starts from a connected path core
 // of cfg.seedCore nodes, then each subsequent node attaches cfg.attach
@@ -576,7 +609,7 @@ const ctxCheckEvery = 4
 // [1, weightMax]. The build honours ctx cancellation on a periodic check.
 func generate(ctx context.Context, cfg config) (*adjlist.AdjList[int, int64], error) {
 	rng := newRNG(cfg.seed)
-	g := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	g := adjlist.New[int, int64](adjlist.Config{})
 
 	// repeated holds each node once per incident edge endpoint, so a
 	// uniform index into it samples a node with probability proportional

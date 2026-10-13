@@ -307,7 +307,7 @@ func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitSta
 	if err != nil {
 		return commitStats{}, rollbackStats{}, fmt.Errorf("wal.Open: %w", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions(g, wl, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

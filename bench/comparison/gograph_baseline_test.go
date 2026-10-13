@@ -22,7 +22,7 @@ const (
 
 func buildComparisonGraph(tb testing.TB) (c *csr.CSR[int64], src graph.NodeID) {
 	tb.Helper()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	r := rand.New(rand.NewPCG(31, 1)) //nolint:gosec // deterministic seed
 	for i := 0; i < cmpN; i++ {
 		if err := a.AddNode(i); err != nil {

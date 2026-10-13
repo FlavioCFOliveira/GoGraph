@@ -130,7 +130,7 @@ func TestJSONL_PropertyKindRoundtrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			g := lpg.New[string, int64](adjlist.Config{Directed: true})
+			g := lpg.New[string, int64](adjlist.Config{})
 			if err := g.AddNode("n"); err != nil {
 				t.Fatalf("AddNode: %v", err)
 			}
@@ -143,7 +143,7 @@ func TestJSONL_PropertyKindRoundtrip(t *testing.T) {
 				t.Fatalf("WriteWithProps: %v", err)
 			}
 
-			g2, _, err := jsonl.ReadWithProps(strings.NewReader(buf.String()), adjlist.Config{Directed: true})
+			g2, _, err := jsonl.ReadWithProps(strings.NewReader(buf.String()), adjlist.Config{})
 			if err != nil {
 				t.Fatalf("ReadWithProps: %v", err)
 			}

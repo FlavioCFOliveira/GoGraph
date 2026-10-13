@@ -34,7 +34,7 @@ import (
 // one production builds.
 func inljSeed(tb testing.TB, n int) *cypher.Engine {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for i := 0; i < n; i++ {
 		name := fmt.Sprintf("n%d", i)

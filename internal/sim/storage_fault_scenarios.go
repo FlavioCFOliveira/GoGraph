@@ -791,9 +791,8 @@ type ioFormat struct {
 // edge set. CSV uses the default options (comma, no header, the default byte
 // cap); JSONL takes the same adjacency config.
 func ioRoundTripFormats() []ioFormat {
-	cfg := adjlist.Config{Directed: true, Multigraph: false}
+	cfg := adjlist.Config{}
 	csvOpts := csv.DefaultOptions()
-	csvOpts.Directed = true
 	return []ioFormat{
 		{
 			name: "csv",
@@ -883,7 +882,7 @@ func runIORoundTripFault(ctx context.Context, seed uint64) (*SimReport, error) {
 // for the GraphML round-trip: nodes g0..g3 each carry the label GNode and an
 // integer property w, joined by a fixed edge set.
 func graphmlModel() (*lpg.Graph[string, int64], []string) {
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	keys := []string{"g0", "g1", "g2", "g3"}
 	for i, k := range keys {
 		_ = g.AddNode(k)
@@ -1109,7 +1108,7 @@ func ioExportFaultFailsClean(f ioFormat, model *adjlist.AdjList[string, int64], 
 // int64 weights and no isolated nodes, so the CSV edge-list round-trip is a
 // faithful reproduction test.
 func buildDeterministicAdjList(s *Seed) (*adjlist.AdjList[string, int64], error) {
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true, Multigraph: false})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	order := 40 + s.IntN(24) // 40..63 nodes
 	for src := 0; src < order; src++ {
 		deg := 1 + s.IntN(4) // 1..4 out-edges (no isolated nodes)

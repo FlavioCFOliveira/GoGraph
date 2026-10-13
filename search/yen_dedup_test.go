@@ -25,7 +25,7 @@ import (
 // while round 2 spur nodes can regenerate one of them again.
 func buildDiamondPlus(t *testing.T) (*csr.CSR[int64], *adjlist.AdjList[int, int64]) {
 	t.Helper()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	edges := [][3]int{{0, 1, 1}, {0, 2, 1}, {1, 3, 1}, {2, 3, 1}, {3, 4, 1}, {1, 4, 1}, {2, 4, 1}}
 	for _, e := range edges {
 		if err := a.AddEdge(e[0], e[1], int64(e[2])); err != nil {

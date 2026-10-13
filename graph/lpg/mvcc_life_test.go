@@ -31,7 +31,7 @@ func lifePair[N comparable, W any](g *Graph[N, W], id graph.NodeID) (born lifeSt
 // with the node's id.
 func lifeGraph(t *testing.T) (*Graph[string, float64], graph.NodeID) {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: false})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	if err := g.ApplyVersioned(func(tx WriteTx) error {
 		if err := g.Writer(tx).AddNode("a"); err != nil {
@@ -148,7 +148,7 @@ func TestNodeLife_RolledBackDeleteSurvivesAnUnrelatedDelete(t *testing.T) {
 // transaction, and it comes back PERMANENTLY, because the pair no longer heals.
 func TestNodeLife_InTxCreateDeleteRecreateStaysInvisible(t *testing.T) {
 	ctx := context.Background()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: false})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	// One committed node so the graph is not empty and the reader's snapshot is
 	// a real instant rather than the beginning of time.
@@ -327,7 +327,7 @@ func TestNodeLife_RepeatedDeleteReviveKeepsTheTransactionsPriorState(t *testing.
 // Both directions are driven from a zero gate: a birth on a fresh graph, and a
 // death after every life record has been reclaimed.
 func TestNodeLife_GateIsRaisedBeforeTheRecordIsObservable(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: false})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	if !g.mvccArmed {
 		t.Fatal("setup: the graph is not MVCC-armed, so no life record is ever written")
@@ -397,7 +397,7 @@ func lifeRecordCount[N comparable, W any](g *Graph[N, W]) int64 {
 // so the overwritten one was never subtracted, the gate never returned to zero,
 // and [MVCCStats.NodeLifeRecords] over-reported.
 func TestNodeLife_GateCountsRecordsNotWrites(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: false})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	// Pinned so the direct writes' own reclamation frees nothing mid-sequence.
 	hold := g.BeginRead()

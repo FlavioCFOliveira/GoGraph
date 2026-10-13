@@ -4,6 +4,209 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+[Unreleased]: https://github.com/FlavioCFOliveira/GoGraph/compare/v0.17.0...HEAD
+
+## [0.17.0] — 2026-10-13
+
+**53 commits** — 50 non-merge commits and 3 merges — counted at `e91d42b2`, the `develop` tip
+before release preparation. **Two sprints delivered this window:** 366, *Drop undirected
+relations and simple graphs* (6 commits, merged at `c794a1ed`), and 367, *Performance and
+Efficiency Laboratory 261009* (41 commits, merged at `4d1947e8`); 3 documentation commits follow
+the last merge. 1 560 files changed, 19 571 insertions, 9 450 deletions
+(`git diff --shortstat v0.16.0..e91d42b2`).
+
+**This release breaks the exported API and changes the on-disk format.** Undirected graphs and
+simple (non-multigraph) graphs are no longer supported: every graph is a directed multigraph, as
+in Neo4j and Memgraph (rmp #3071 to #3074). Measured by parsing every non-test Go file outside
+`internal/`, `examples/`, `cmd/` and any `gen/`, `tck/` or `testdata/` directory at both
+`v0.16.0` and `e91d42b2`, and diffing the rendered declarations — a **superset** of the API
+surface [docs/semver.md](docs/semver.md) defines: 5 152 exported declarations before, 5 162
+after. **14 were removed, 1 changed signature and 24 were added**; one of the 24,
+`cypher/exec.(*ColumnarFilter).Close`, redeclares a method the type already had through
+embedding. Under
+[docs/semver.md](docs/semver.md) a `0.y.z` release absorbs breaking changes in the MINOR digit.
+`go.mod` and `go.sum` are unchanged from `v0.16.0`.
+
+### Changed — BREAKING: directed multigraph only
+
+- **Every graph is a directed multigraph.** `graph/adjlist.AdjList` stores each edge as one
+  directed relationship, and every `AddEdge` appends a new edge with its own handle, so parallel
+  edges and self-loops are always kept. The zero value `adjlist.Config{}`, which built an
+  undirected simple graph, now builds a directed multigraph. A repeated `AddEdge` between the same
+  ordered pair now adds a parallel edge (`fec95062`).
+- **Removed exported API:**
+  - `graph/adjlist`: `Config.Directed`, `Config.Multigraph`, `(*AdjList).Directed()` and
+    `(*AdjList).Multigraph()` (`fec95062`).
+  - `graph/io/csv`: `Options.Directed` and `Options.Multigraph`; `DefaultOptions` no longer sets
+    `Directed` (`fec95062`).
+  - `store/bulk`: `Options.Directed` and `Options.Multigraph` (`fec95062`).
+  - `store/bulkimport`: `Options.Directed` and `Options.Multigraph` (`fec95062`).
+  - `store/csrfile`: `FixtureSpec.Multigraph` (`fec95062`).
+  - `store/snapshot`: `GraphConfig.Directed` and `GraphConfig.Multigraph` (`fec95062`).
+  - `cypher`: `ErrParallelEdgeInSimpleGraph`; every `CREATE` adds a relationship (`bed4de53`).
+  - `cmd/gograph-import`: the `-undirected` and `-simple` flags (`fec95062`).
+- **Re-signed:** `graph/adjlist.Writer.AppendEdge` returns `error` instead of `(bool, error)`; the
+  boolean reported a simple graph's skipped duplicate (`fec95062`).
+- **Interchange formats (`fec95062`).** The GraphML readers (`ReadInto`, `ReadWithProps` and their
+  variants) read each `<edge>` as one directed relationship from `source` to `target`, whatever
+  the `<graph>` `edgedefault` attribute declares, `"undirected"` included. The GraphML writers
+  always emit `edgedefault="directed"`, and the DOT writer always emits a `digraph`.
+- **Upgrading code:**
+  - Delete `Directed` and `Multigraph` from every `adjlist.Config`, `csv.Options`,
+    `bulk.Options`, `bulkimport.Options` and `csrfile.FixtureSpec` literal, and `-undirected` and
+    `-simple` from every `gograph-import` invocation.
+  - For undirected analytics, build the CSR and read its symmetric projection,
+    `c.BuildSymmetric()` (see *Added*).
+  - For undirected Cypher semantics, write undirected patterns: `MATCH (a)-[r]-(b)` matches a
+    relationship in either direction, and `MERGE (a)-[r:T]-(b)` matches either direction and,
+    when none exists, creates one from `a` to `b`. `CREATE` refuses an undirected relationship.
+  - Code that relied on a simple graph to de-duplicate a repeated `AddEdge` must not repeat the
+    insertion.
+
+### Changed — BREAKING: on-disk format
+
+- **`store/snapshot.ManifestVersion` is 5 (was 4) and is stamped on every manifest this build
+  writes**, including the CSR-only and mapper-less ones previously stamped 1 and 2. A version-5
+  `graph_config` carries neither `"directed"` nor `"multigraph"`. Versions 1 to 4 still load.
+  `v0.16.0` and earlier builds refuse a version-5 manifest with `snapshot.ErrManifestUnsupported`
+  (`fec95062`).
+- **Legacy stores are migrated by the first clean recovery (`fec95062`).** For a store whose
+  snapshot manifest declares `"directed": false` or `"multigraph": false`, recovery replays the
+  WAL above the snapshot with the old engine's semantics, then:
+  - **Undirected:** folds each edge to one relationship oriented from the lower node id to the
+    higher; a self-loop is kept once. When the two directions of an edge hold different values
+    for the same property key, or different relationship types, recovery returns an error
+    wrapping `recovery.ErrLegacyMirrorConflict` that names the conflicting edges, and the
+    directory is left unchanged. A value held in one direction only is kept.
+  - **Simple:** skips each duplicate insertion the old engine skipped, keeping its edge handle
+    reserved.
+  - Before `Open` returns, it publishes a current-format snapshot and folds the WAL under it. This
+    needs write access to the directory, the operating-system filesystem
+    (`recovery.ErrLegacyMigrationUnsupportedFS` otherwise) and a non-nil `Options.Codec`
+    (`recovery.ErrLegacyMigrationNeedsCodec` otherwise). An unclean recovery does not rewrite the
+    directory. A crash during the rewrite leaves either the legacy store, which the next open
+    migrates again, or the migrated one.
+  - A migrated store cannot be opened by `v0.16.0` or any earlier build. Take a copy of the store
+    directory before the first open if a downgrade must remain possible.
+- **The legacy shape is read from the snapshot manifest only.** A store directory with no
+  `snapshot/manifest.json` records no graph shape, so recovery replays its WAL with
+  directed-multigraph semantics and migrates nothing (`store/recovery/recovery.go`,
+  `legacyReplayOf`).
+- **A directed multigraph store written by `v0.16.0` opens without migration.** Its version-4
+  manifest still loads; the first checkpoint this build takes writes a version-5 manifest, after
+  which `v0.16.0` refuses the directory. The WAL format is unchanged in this release.
+
+### Added
+
+- **`graph/csr.(*CSR).BuildSymmetric`** returns the undirected projection of a CSR: each non-loop
+  arc yields itself and its mirror with the same weight and handle, a self-loop is kept once, and
+  parallel arcs and reciprocal pairs are never merged (`11b2ddd1`).
+- `store/snapshot`: `LegacyShape` (with `Any`), `LoadedSnapshot.Legacy`,
+  `GraphConfig.UnmarshalJSON`, `VerifySnapshotReadable`, `SelfSufficient` and
+  `ErrPublishedLegacyShape` (`fec95062`).
+- `store/recovery`: `ErrLegacyMirrorConflict`, `ErrLegacyMigrationUnsupportedFS` and
+  `ErrLegacyMigrationNeedsCodec` (`fec95062`).
+- **`graph/csr.BuildSymmetricFromAdjList`** builds the symmetric projection directly from an
+  adjacency list, without the intermediate directed CSR (rmp #3078, `e7b12a60`).
+- **`graph/csr.(*CSR).KnownSymmetric`** reports in O(1) whether a CSR was returned by
+  `BuildSymmetric` or `BuildSymmetricFromAdjList` (rmp #3078, `cfd64290`).
+- **`search/centrality.PageRankBudget`**, `NewPageRankBudget`, `(*PageRankBudget).Capacity`,
+  `(*PageRankBudget).InUse` and the field `PageRankOptions.Budget`: a caller-owned, lock-free
+  pool of PageRank worker slots shared by concurrent calls. A run takes the slots it can without
+  blocking and runs on a single worker when fewer than two are free; a nil `Budget` keeps the
+  previous behaviour, and ranks are bit-identical across budgets (rmp #3086, `fc0f6807`).
+- **`graph.(*Mapper).AppendIDs`**, `graph.MapperCursor` and `(MapperCursor).Done`: append node
+  ids in `Walk` order in bounded batches from a cursor, holding each shard's read lock only while
+  its ids are copied (rmp #3081, `1a8e25ae`).
+
+### Changed
+
+- **`cypher/exec.(*ColumnarFilter).Close`** is now declared on `ColumnarFilter` itself; before,
+  the method was promoted from the embedded `Filter`. It returns the operator's scratch batch to
+  the node-scan chunk pool, then closes the child. The method set is unchanged
+  (rmp #3114, `3e2f9a2d`).
+- **`graph/csr.(*CSR).BuildReverse` returns the receiver itself** when `KnownSymmetric` reports
+  true, instead of a copy; both are immutable (rmp #3078, `cfd64290`).
+- **`search.DiameterCtx` computes the exact diameter with BoundingDiameters** (Takes and Kosters,
+  CIKM 2011) instead of an iFUB level walk, running sweeps in batches of `GOMAXPROCS` above 1 024
+  vertices. The result, the seed rule and the disconnected-graph and cancellation contracts are
+  unchanged. Vertex-transitive shapes need one sweep per vertex: a 600-vertex cycle is 203 %
+  slower; the O(n(n+m)) worst case is unchanged (rmp #3085, `6b399a3b`).
+
+### Fixed
+
+- **`graph/lpg`: an edge-property append never rewrites a cell a pinned reader can see.** After a
+  `WithdrawTx` rollback restored a pre-image, a later append to a block with more than two
+  columns or a bool column could overwrite a cell a lock-free reader of the aborted entry was
+  still reading: a data race and a changed value. Appends now write in place only at the column's
+  own high-water mark (rmp #3093, `ce609ce6`).
+- **`cypher`: a Go API edge is no longer reported with a Cypher sibling's relationship type.**
+  The stable edge handle on a row was read as a CSR slot position, so after deletes on a node pair
+  holding both Cypher-created and Go API edges, a Go API edge could take the type of a sibling
+  (rmp #3088, `4e9c48bb`).
+
+### Performance
+
+Figures are development-time measurements recorded by the commit that shipped each change,
+against that commit's own control. They are not additive.
+
+- **Sprint 367 laboratory, whole-campaign totals.** Profiling every example in the `elevated`
+  sweep, from `c794a1ed` (iteration 1) to `8b089715` (iteration 6): module-attributed CPU
+  383.88 s → 233.10 s (−39.3 %), module-attributed allocation 144.47 GiB → 102.33 GiB (−29.2 %),
+  module contention delay 274.86 s → 134.83 s (−50.9 %), one run per row. Source:
+  [docs/campaign-lab-2026-10-09.md](docs/campaign-lab-2026-10-09.md), section 49; methodology in
+  sections 1, 37 and 48; limits in section 53.
+- **Symmetric CSR (rmp #3078).** PageRank and BiBFS read a known-symmetric CSR as its own
+  transpose: `PageRank_PowerLaw50KSymmetric` −34.87 % sec/op, −87.10 % B/op;
+  `BiBFS_PowerLawSymmetric` −99.31 % sec/op, −92.10 % B/op (`cfd64290`).
+  `BuildSymmetricFromAdjList` trades CPU for memory against
+  `BuildFromAdjList(adj).BuildSymmetric()`: −32.44 % B/op, −30.77 % allocs/op, +27.09 % sec/op
+  (`e7b12a60`).
+- **Diameter.** Sweeps reuse the eccentricity and reset only visited vertices:
+  `Diameter_CycleSerialLevels` −22.72 % sec/op (rmp #3079, `4be967d2`). BoundingDiameters:
+  example 11 diameter CPU 125.64 s → 1.48 s, `Social20k` −99.6 % (rmp #3085, `6b399a3b`).
+- **PageRank.** With a 10-slot budget, throughput +11.2 % at 256 callers and +11.1 % at 1 024,
+  block delay −94.6 % at 64 callers (rmp #3086, `fc0f6807`). The scratch iteration vector is
+  pooled: `ConcurrentCallers` B/op −12 % to −38 %, no ns/op regression (rmp #3111, `29fb8dc5`).
+- **Cypher read path.** The per-pair edge type union is read only when no instance record
+  answers: Cypher-created edges −31.22 % sec/op (rmp #3080, `4d831e8e`). `PropertyKeysInUse`
+  reads key presence only: −89.3 % time, 100 026 → 27 allocs/op; `AllNodesScan` streams ids in
+  512-id batches: example 25 `Init` allocation 4.40 GiB → 20 MiB (rmp #3081, `1a8e25ae`). A
+  cached read builds its probed seek once and reuses memoised layouts: `BenchmarkCachedPointRead`
+  −19.28 % sec/op, 82 → 61 allocs/op (rmp #3096, #3097, `3f8bddfc`). Aggregations no longer
+  materialise whole nodes per row: `CountDistinctNode` −74.30 % sec/op, −74.47 % allocs/op
+  (rmp #2732, `280ce211`). Lazy relationship values are borrowed from the pooled row context:
+  −51.60 % B/op (rmp #3104, `a5f2668f`). Edge labels stream into the type pick:
+  −7.10 % sec/op, −22.2 % allocs/op (rmp #3106, `8932f1f3`). Counted label scans draw pooled
+  node-id chunks: `CountRowsChunk_FilteredSmall` −50.55 % sec/op, −94.85 % B/op (rmp #3114,
+  `3e2f9a2d`).
+- **LPG engine.** A `ReadView` indexes a high-degree source's slots: Go API relationship
+  projection −75.9 % (lazy), −65.0 % (eager), −78.4 % (presence) sec/op (rmp #3089, `d56bfbe6`).
+  Edge-property column versions share append buffers: `FusedEdgeInsert` degree 1 024 −11.48 %
+  sec/op, −22.95 % B/op (rmp #3090, `7e7b854a`). The version-reclaim sweep checks a shard under
+  its read lock first: example 37 waiters' delay at the sweep, median 1 187 ms → 104 ms
+  (rmp #3108, `590d85f3`). Index-suspect collection skips empty shards: example 37
+  `appendSuspects` CPU −51 % (rmp #3115, `82c0dfb5`).
+- **Constraints.** Writes to unconstrained (label, key) pairs no longer take the constraint
+  registry lock: example 37 site delay about −47 % (median, n=3) (rmp #3082, `546efbe8`).
+- **Snapshot.** Checkpoint capture writes through 4 KiB buffers: `BenchmarkCaptureAndWriteSnapshot`
+  B/op −55.48 % (accounts3k), −6.78 % (accounts50k), sec/op unchanged; on-disk bytes unchanged
+  (rmp #3083, `e71407c1`).
+
+### Removed
+
+- `adjlist.Config.Directed`, `adjlist.Config.Multigraph`, `(*adjlist.AdjList).Directed`,
+  `(*adjlist.AdjList).Multigraph`, `csv.Options.Directed`, `csv.Options.Multigraph`,
+  `bulk.Options.Directed`, `bulk.Options.Multigraph`, `bulkimport.Options.Directed`,
+  `bulkimport.Options.Multigraph`, `csrfile.FixtureSpec.Multigraph`,
+  `snapshot.GraphConfig.Directed`, `snapshot.GraphConfig.Multigraph`,
+  `cypher.ErrParallelEdgeInSimpleGraph`, and the `gograph-import` flags `-undirected` and
+  `-simple`; see *Changed — BREAKING: directed multigraph only*.
+
+[0.17.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.17.0
+
 ## [0.16.0] — 2026-10-09
 
 **167 commits** — 164 non-merge commits and 3 sprint merges — counted at `60c90d73`, the

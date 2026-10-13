@@ -46,7 +46,7 @@ func inFlightEntries(t *txWaitTable) int {
 func TestApplyDurable_CancelledWaiterReturnsPromptly(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
-	g := newDirectTxGraph(t, true)
+	g := newDirectTxGraph(t)
 	requireNoErr(t, g.AddNode("x"))
 	release, blockerDone := holdDurable(t, g, func() error { return nil })
 
@@ -115,7 +115,7 @@ func TestApplyDurable_CancelledWaiterReturnsPromptly(t *testing.T) {
 }
 
 func TestApplyDurable_DoneContextRunsNothing(t *testing.T) {
-	g := newDirectTxGraph(t, true)
+	g := newDirectTxGraph(t)
 	requireNoErr(t, g.AddNode("x"))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

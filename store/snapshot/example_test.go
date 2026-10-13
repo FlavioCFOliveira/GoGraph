@@ -22,7 +22,7 @@ func Example() {
 	defer func() { _ = os.RemoveAll(dir) }()
 
 	// A small labelled, weighted graph plus its frozen CSR snapshot.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("alice", "bob", 7); err != nil {
 		panic(err)
 	}
@@ -54,12 +54,12 @@ func Example() {
 	fmt.Printf("label strings=%d\n", len(loaded.Labels.Strings))
 
 	// Output:
-	// manifest version=4
+	// manifest version=5
 	// csr edges=1
 	// label strings=1
 }
 
-// ExampleWriteSnapshotCSR shows the lighter, CSR-only (v1) path: it
+// ExampleWriteSnapshotCSR shows the lighter, CSR-only path: it
 // writes just the adjacency and reads it straight back with Open.
 func ExampleWriteSnapshotCSR() {
 	dir, err := os.MkdirTemp("", "snapshot-csr-example")
@@ -68,7 +68,7 @@ func ExampleWriteSnapshotCSR() {
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		panic(err)
 	}
@@ -90,6 +90,6 @@ func ExampleWriteSnapshotCSR() {
 	fmt.Printf("csr edges=%d\n", len(loaded.CSR.Edges))
 
 	// Output:
-	// manifest version=1
+	// manifest version=5
 	// csr edges=2
 }

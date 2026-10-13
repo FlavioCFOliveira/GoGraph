@@ -18,7 +18,7 @@ import (
 // task #127; at this scale the per-vertex map allocation cost
 // dominates total wall-clock time and the win is most visible.
 func BenchmarkLeiden_RandomGraph(b *testing.B) {
-	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	const n = 100_000
 	r := rand.New(rand.NewPCG(29, 31)) //nolint:gosec // deterministic benchmark RNG
 	// Plant two clusters with denser intra-cluster edges so Leiden has
@@ -37,7 +37,7 @@ func BenchmarkLeiden_RandomGraph(b *testing.B) {
 			b.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -50,7 +50,7 @@ func BenchmarkLeiden_RandomGraph(b *testing.B) {
 // The per-vertex map[int]int allocation was the v1.0 hot-path
 // bottleneck.
 func BenchmarkLabelPropagation_RandomGraph(b *testing.B) {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	const n = 4096
 	r := rand.New(rand.NewPCG(41, 43)) //nolint:gosec // deterministic benchmark RNG
 	for i := 0; i < 8*n; i++ {
@@ -58,7 +58,7 @@ func BenchmarkLabelPropagation_RandomGraph(b *testing.B) {
 			b.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -68,7 +68,7 @@ func BenchmarkLabelPropagation_RandomGraph(b *testing.B) {
 
 func TestLeiden_TwoCliques(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	// Two K4 cliques joined by a single bridge.
 	for i := 0; i < 4; i++ {
 		for j := i + 1; j < 4; j++ {
@@ -87,7 +87,7 @@ func TestLeiden_TwoCliques(t *testing.T) {
 	if err := a.AddEdge(3, 4, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	p := Leiden(c, DefaultLeidenOptions())
 	// Traag-Waltman Leiden separates two strongly-internally-connected
 	// cliques across a single bridge edge: modularity gain on moving
@@ -127,7 +127,7 @@ func TestLeiden_TwoCliques(t *testing.T) {
 // keeps.
 func TestLeiden_DisconnectedComponents(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	// Two fully-disjoint K3 cliques.
 	for i := 0; i < 3; i++ {
 		for j := i + 1; j < 3; j++ {
@@ -143,7 +143,7 @@ func TestLeiden_DisconnectedComponents(t *testing.T) {
 			}
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	p := Leiden(c, DefaultLeidenOptions())
 	if p.NumCommunities != 2 {
 		t.Fatalf("Leiden on disjoint K3+K3 found %d communities, want 2", p.NumCommunities)
@@ -152,7 +152,7 @@ func TestLeiden_DisconnectedComponents(t *testing.T) {
 
 func TestLabelPropagation_TwoCliques(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		for j := i + 1; j < 4; j++ {
 			if err := a.AddEdge(i, j, struct{}{}); err != nil {
@@ -170,7 +170,7 @@ func TestLabelPropagation_TwoCliques(t *testing.T) {
 	if err := a.AddEdge(3, 4, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	p := LabelPropagation(c, DefaultLabelPropagationOptions())
 	if p.NumCommunities < 1 {
 		t.Fatalf("LabelPropagation found 0 communities")
@@ -179,8 +179,8 @@ func TestLabelPropagation_TwoCliques(t *testing.T) {
 
 func TestLeiden_Empty(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
-	c := csr.BuildFromAdjList(a)
+	a := adjlist.New[int, struct{}](adjlist.Config{})
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	p := Leiden(c, DefaultLeidenOptions())
 	if p.NumCommunities != 0 {
 		t.Fatalf("empty: %+v", p)

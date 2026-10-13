@@ -22,7 +22,7 @@ import (
 
 // newProcTestGraph creates a new directed graph for procedure tests.
 func newProcTestGraph() *lpg.Graph[string, float64] {
-	return lpg.New[string, float64](adjlist.Config{Directed: true})
+	return lpg.New[string, float64](adjlist.Config{})
 }
 
 // collectProc drains a Result and returns all rows as []map[string]string for

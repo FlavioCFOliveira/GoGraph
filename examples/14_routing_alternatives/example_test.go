@@ -6,6 +6,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // testConfig is a smaller version of the default specification: the same
@@ -44,11 +47,12 @@ func TestRun(t *testing.T) {
 		t.Errorf("graph.nodes = %d, want %d", got, cfg.nodes)
 	}
 
-	// Each undirected k-NN/repair edge is stored as two directed arcs, so
-	// the edge total is positive and bounded above by 2 * nodes * neighbours
-	// plus the handful of repair arcs (repair adds at most nodes-1 merges,
-	// each two arcs). The simple graph collapses symmetric duplicates, so the
-	// realised total is at or below the loose upper bound.
+	// Each k-NN/repair road is stored once and appears as two directed arcs
+	// in the symmetric projection, so the edge total is positive and bounded
+	// above by 2 * nodes * neighbours plus the handful of repair arcs (repair
+	// adds at most nodes-1 roads, each two arcs). A mutual k-NN pair is
+	// stored once, so the realised total is at or below the loose upper
+	// bound.
 	edges := facts["graph.edges"]
 	if hi := int64(2 * cfg.nodes * (cfg.neighbours + 1)); edges <= 0 || edges > hi {
 		t.Errorf("graph.edges = %d, want within (0,%d]", edges, hi)
@@ -220,4 +224,36 @@ func factLines(out string) string {
 		keep = append(keep, line)
 	}
 	return strings.Join(keep, "\n")
+}
+
+// TestBuildStoresEachRoadOnce guards the directed-multigraph storage model:
+// each two-way road must be stored as exactly one relationship, in one
+// direction, because every AddEdge stores a new relationship and the
+// routing algorithms read the symmetric projection. A mutual k-NN pair
+// (offered twice) or a reverse arc stored explicitly would appear as a
+// repeated unordered pair here.
+func TestBuildStoresEachRoadOnce(t *testing.T) {
+	net, _, err := buildNetwork(context.Background(), testConfig())
+	if err != nil {
+		t.Fatalf("buildNetwork: %v", err)
+	}
+	c := csr.BuildFromAdjList(net.adj)
+	offsets, edges := c.VerticesSlice(), c.EdgesSlice()
+	seen := make(map[[2]graph.NodeID]bool, len(edges))
+	for u := graph.NodeID(0); u < c.MaxNodeID(); u++ {
+		for e := offsets[u]; e < offsets[u+1]; e++ {
+			lo, hi := u, edges[e]
+			if lo > hi {
+				lo, hi = hi, lo
+			}
+			key := [2]graph.NodeID{lo, hi}
+			if seen[key] {
+				t.Fatalf("road %d-%d is stored more than once", lo, hi)
+			}
+			seen[key] = true
+		}
+	}
+	if sym := c.BuildSymmetric(); sym.Size() != 2*c.Size() {
+		t.Errorf("symmetric projection holds %d arcs, want %d (two per road)", sym.Size(), 2*c.Size())
+	}
 }

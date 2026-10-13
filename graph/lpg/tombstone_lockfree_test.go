@@ -16,7 +16,7 @@ import (
 // as the previous map-backed representation did.
 func TestTombstoneLockfree_LivenessUnchanged(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 
 	const n = 6
 	ids := make(map[string]graph.NodeID, n)
@@ -126,7 +126,7 @@ func TestTombstoneLockfree_ConcurrentScanDuringDelete(t *testing.T) {
 		readers = 8
 		rounds  = 3000
 	)
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	ids := make([]graph.NodeID, n)
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%d", i)

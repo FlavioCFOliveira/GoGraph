@@ -121,7 +121,7 @@ func overlap[N comparable, W any](t *testing.T, g *Graph[N, W], bodyA func(tx Wr
 // ApplyVersioned bracket the ambient slot is occupied by a live transaction rather
 // than empty.
 func TestOverlap_DeferredIndexRemovalChargedToItsOwnTransaction(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestOverlap_DeferredIndexRemovalChargedToItsOwnTransaction(t *testing.T) {
 // to every reader and unreclaimable by every reclaimer, with -race silent on it
 // because every field involved is atomic.
 func TestOverlap_TransactionsDoNotStealEachOthersState(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode %q: %v", n, err)
@@ -255,7 +255,7 @@ func TestOverlap_TransactionsDoNotStealEachOthersState(t *testing.T) {
 // identity off the graph produced a FALSE conflict between goroutines writing
 // disjoint nodes.
 func TestOverlap_WriterViewOfSeesOwnWriteNotTheOthers(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode %q: %v", n, err)

@@ -23,7 +23,7 @@ import (
 
 func seedInEdge(t *testing.T) *Graph[string, int64] {
 	t.Helper()
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	seed := g.beginLabelTx()
 	if err := seed.addEdge("x", "d", 1); err != nil {
 		t.Fatalf("seed addEdge: %v", err)

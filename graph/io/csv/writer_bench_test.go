@@ -13,7 +13,7 @@ import (
 // edge; the weight string remains the encoding/csv []string floor.
 func BenchmarkWriteCSV(b *testing.B) {
 	const n = 200_000
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		if err := a.AddEdge(fmt.Sprintf("n%07d", i), fmt.Sprintf("n%07d", (i+1)%n), int64(i%97+1)); err != nil {
 			b.Fatalf("AddEdge: %v", err)
@@ -35,7 +35,7 @@ func BenchmarkWriteCSV(b *testing.B) {
 // so this benchmark's allocs/op must stay flat regardless of n.
 func BenchmarkWriteCSV_LargeWeights(b *testing.B) {
 	const n = 200_000
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		// Weights well above the 0..99 cache so FormatInt would allocate.
 		w := int64(100_000 + i*7)

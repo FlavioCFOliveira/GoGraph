@@ -145,7 +145,7 @@ func TestSec_Cypher_Procs_NoSideEffectNamespaces(t *testing.T) {
 // genuine read, not a stub masking a side effect or an unbounded scan.
 func TestSec_Cypher_Procs_IntrospectionCallsAreBounded(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// CALL forms that the engine supports for each introspection procedure.

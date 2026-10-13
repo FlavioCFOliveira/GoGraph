@@ -48,7 +48,7 @@ import (
 // built from a snapshot describes that snapshot's graph, and keeps describing it while
 // later transactions commit.
 func TestGeneration_BuiltAtAnInstantAgreesWithAnMVCCReadOfIt(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	const before = 6

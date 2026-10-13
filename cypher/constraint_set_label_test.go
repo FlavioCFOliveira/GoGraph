@@ -65,7 +65,7 @@ import (
 // setup statements, each in its own transaction.
 func newLabelConstraintEngine(t *testing.T, setup ...string) (*cypher.Engine, context.Context) {
 	t.Helper()
-	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 	ctx := context.Background()
 	for _, q := range setup {
 		mustRunTx(t, ctx, eng, q)

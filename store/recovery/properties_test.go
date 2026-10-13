@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"bytes"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -40,7 +41,12 @@ func TestRecovery_PropertiesSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	tx := store.Begin()
@@ -169,7 +175,12 @@ func TestRecovery_V1SnapshotPropertiesEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	tx := store.Begin()
 	if err := tx.AddEdge("alice", "bob", 0); err != nil {

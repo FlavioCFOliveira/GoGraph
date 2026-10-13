@@ -44,7 +44,7 @@ import (
 // quadratic and would dominate the measurement.
 func newMergeBenchEngine(b *testing.B, hot, cold int) *cypher.Engine {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	for i := 0; i < hot; i++ {
 		n := fmt.Sprintf("h%d", i)

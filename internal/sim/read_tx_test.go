@@ -20,7 +20,7 @@ import (
 // ([cypher.Engine.BeginReadTx]) rejects every writing/DDL statement with the
 // typed [cypher.ErrWriteInReadOnlyTx], applies nothing, and still serves reads.
 func TestReadTx_RejectsWrites(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	if _, err := eng.RunInTxAny(ctx, "CREATE (:N {id:1})", nil); err != nil {
@@ -74,7 +74,7 @@ func TestReadTx_NoDirtyReads(t *testing.T) {
 	const batches = 200
 	const readers = 6
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	createBatch := "CREATE (:N),(:N),(:N),(:N),(:N)" // 5 nodes, one atomic transaction
 

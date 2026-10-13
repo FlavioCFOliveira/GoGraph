@@ -24,7 +24,7 @@ import (
 // forbids) and in a different relative order.
 func TestOrderBy_CrossTypeGlobalSortOrder_2809(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	ctx := context.Background()
 	setup, err := eng.RunAny(ctx, `CREATE (:A {k: 1})-[:R]->(:B)`, nil)

@@ -34,7 +34,7 @@ import (
 //
 // The generator constructs the underlying [adjlist.Config] from the
 // caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, and
-// forces cfg.Directed=false and cfg.Multigraph=false: the
+// stores each undirected edge as ONE directed arc, in the orientation the generator enumerates it: the
 // Barabási-Albert model is an undirected simple graph (no parallel
 // edges, no self-loops) by definition.
 //
@@ -86,8 +86,7 @@ func (s barabasiAlbertBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], e
 // proportional to their current degree (Barabási & Albert,
 // "Emergence of Scaling in Random Networks", Science 286(5439),
 // 1999). The graph is undirected and simple (no parallel edges,
-// no self-loops); cfg.Directed and cfg.Multigraph are overridden
-// to false.
+// no self-loops); each edge is stored as one directed arc.
 //
 // The PRNG is a deterministically-seeded [math/rand/v2.PCG], so
 // every (n, m0, seed) tuple yields the same byte-for-byte adjacency.
@@ -162,8 +161,6 @@ func BarabasiAlbert(n int, m0 int, seed uint64) Shape[int, int64] {
 			{Name: "m0", Min: 1, Max: 50, Default: 3},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildBarabasiAlbert(g, n, m0, seed)
 		},

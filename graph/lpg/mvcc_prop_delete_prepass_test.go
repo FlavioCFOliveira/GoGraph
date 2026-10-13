@@ -123,7 +123,7 @@ func TestPropDeletePrePass_OutcomeParity(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g := New[string, float64](adjlist.Config{Directed: true})
+			g := New[string, float64](adjlist.Config{})
 			for _, n := range []string{"bare", "held"} {
 				if err := g.AddNode(n); err != nil {
 					t.Fatalf("AddNode(%s): %v", n, err)
@@ -154,7 +154,7 @@ func TestPropDeletePrePass_OutcomeParity(t *testing.T) {
 // one: the pre-pass must report a refusal, and must do so WITHOUT the exclusive
 // lock.
 func TestPropDeletePrePass_RefusalIsSettledUnderTheSharedLock(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.AddNode("n"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestPropDeletePrePass_RefusalIsSettledUnderTheSharedLock(t *testing.T) {
 // delete is then accepted and the transaction commits, which is the lost
 // refusal this pins.
 func TestPropDeletePrePass_NoOpDeleteStillCrossChecksNodeLife(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	for _, n := range []string{"n", "other"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%s): %v", n, err)
@@ -246,7 +246,7 @@ func TestPropDeletePrePass_NoOpDeleteStillCrossChecksNodeLife(t *testing.T) {
 // delete-when-empty contract survives; this asserts the contract itself, which
 // is the observable half.
 func TestPropDeletePrePass_EmptyingABagStillDropsTheEntry(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.AddNode("n"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestPropDeletePrePass_ConcurrentAbsentDeletesLoseNoWrite(t *testing.T) {
 		writers = 8
 		rounds  = 200
 	)
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	names := make([]string, nodes)
 	for i := range names {
 		names[i] = "n" + string(rune('a'+i%26)) + string(rune('0'+i/26))

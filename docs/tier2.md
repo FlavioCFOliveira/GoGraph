@@ -91,7 +91,7 @@ right primitive for unmapping the old Tier 2 file.
 ## Producing a Tier 2 file
 
 ```go
-g := lpg.New[string, int64](adjlist.Config{Directed: true})
+g := lpg.New[string, int64](adjlist.Config{})
 // ... populate ...
 c := csr.BuildFromAdjList(g.AdjList())
 if _, err := csrfile.WriteToFile("/data/graph.csr", c); err != nil {

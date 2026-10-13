@@ -290,7 +290,7 @@ func inljRunWithoutINLJ(t *testing.T, eng *Engine, q string, params map[string]a
 // AC3 names, in both directions.
 func inljFixtureGraph(t *testing.T, n, mod int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%d", i)
@@ -477,7 +477,7 @@ func TestIndexNestedLoopJoin_DeclinesWithoutFullNumericCoverage(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			g.SetIndexManager(index.NewManager())
 			for i := 0; i < n; i++ {
 				key := fmt.Sprintf("n%d", i)

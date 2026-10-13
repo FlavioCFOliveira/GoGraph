@@ -37,7 +37,7 @@ func TestCheckpoint_WriterStallBoundedByCapture(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -138,7 +138,7 @@ func TestCheckpoint_Phase3HoldsNoCommitLock_LargeSuffix(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec: txn.NewStringCodec(), WeightCodec: txn.NewInt64WeightCodec(),
 	})

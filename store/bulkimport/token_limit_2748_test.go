@@ -40,7 +40,7 @@ func TestBulkImport_RefusesOverLongTokensBeforePublish_2748(t *testing.T) {
 			t.Parallel()
 			dir := filepath.Join(t.TempDir(), "store")
 			_, err := bulkimport.ImportInto[int64](context.Background(), dir,
-				bulkimport.Options{Directed: true, Multigraph: true}, c.nodes, c.edges)
+				bulkimport.Options{}, c.nodes, c.edges)
 			if !errors.Is(err, lpg.ErrTokenTooLong) {
 				t.Fatalf("ImportInto = %v, want lpg.ErrTokenTooLong", err)
 			}
@@ -56,7 +56,7 @@ func TestBulkImport_RefusesOverLongTokensBeforePublish_2748(t *testing.T) {
 // usable for the next record.
 func TestBulkImport_RefusedRecordAddsNothing_2748(t *testing.T) {
 	t.Parallel()
-	b := bulkimport.New[int64](bulkimport.Options{Directed: true, Multigraph: true})
+	b := bulkimport.New[int64](bulkimport.Options{})
 	long := strings.Repeat("L", lpg.MaxTokenLen+1)
 	err := b.AddNode(bulkimport.Node{Key: "x", Labels: []string{"Ok"},
 		Properties: map[string]lpg.PropertyValue{"p": lpg.Int64Value(1), long: lpg.Int64Value(2)}})

@@ -13,13 +13,17 @@ import (
 // using the provided edge list. Nodes are keyed by int (0-based).
 func buildFloat64CSR(tb testing.TB, edges []float64Edge, directed bool) (*csr.CSR[float64], *adjlist.AdjList[int, float64]) {
 	tb.Helper()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: directed})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	for _, e := range edges {
 		if err := a.AddEdge(e.from, e.to, e.w); err != nil {
 			tb.Fatalf("AddEdge(%d→%d, %v): %v", e.from, e.to, e.w, err)
 		}
 	}
-	return csr.BuildFromAdjList(a), a
+	c := csr.BuildFromAdjList(a)
+	if !directed {
+		c = c.BuildSymmetric()
+	}
+	return c, a
 }
 
 type float64Edge struct {

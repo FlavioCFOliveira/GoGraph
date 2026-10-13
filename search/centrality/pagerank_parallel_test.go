@@ -16,7 +16,7 @@ import (
 // exercised.
 func buildLargePowerLaw(t testing.TB, n int) *csr.CSR[int64] {
 	t.Helper()
-	g, err := shapegen.BarabasiAlbert(n, 4, 99).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.BarabasiAlbert(n, 4, 99).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("BarabasiAlbert.Build: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestPageRank_ParallelCancellation(t *testing.T) {
 // serial path (no-regression gate) and under GOMAXPROCS>1 the parallel
 // win.
 func BenchmarkPageRank_PowerLaw50K(b *testing.B) {
-	g, err := shapegen.BarabasiAlbert(50000, 8, 7).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.BarabasiAlbert(50000, 8, 7).Build(adjlist.Config{})
 	if err != nil {
 		b.Fatalf("BarabasiAlbert.Build: %v", err)
 	}
@@ -127,7 +127,7 @@ func BenchmarkPageRank_PowerLaw50K(b *testing.B) {
 // repeated run on the same CSR to allocate materially less than the
 // one-shot PageRank (which rebuilds the reverse structure every call).
 func BenchmarkPageRanker_PowerLaw50K_Repeated(b *testing.B) {
-	g, err := shapegen.BarabasiAlbert(50000, 8, 7).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.BarabasiAlbert(50000, 8, 7).Build(adjlist.Config{})
 	if err != nil {
 		b.Fatalf("BarabasiAlbert.Build: %v", err)
 	}

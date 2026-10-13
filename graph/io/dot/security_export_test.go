@@ -58,7 +58,7 @@ func TestSec_IO_DOTExportQuotesHostileIDs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+			a := adjlist.New[string, int64](adjlist.Config{})
 			if err := a.AddEdge(tc.id, "safe", 0); err != nil {
 				t.Fatalf("AddEdge: %v", err)
 			}

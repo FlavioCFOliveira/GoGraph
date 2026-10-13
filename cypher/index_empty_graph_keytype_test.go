@@ -35,7 +35,7 @@ func TestCreateIndexEmptyGraph_IntegerParamMatches(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// CREATE INDEX over the EMPTY graph — the hash index defaults to string-keyed.
@@ -84,7 +84,7 @@ func TestCreateIndexEmptyGraph_IntegerParamMatches_WhereForm(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(ctx, `CREATE INDEX l_p2 FOR (n:L) ON (n.p)`, nil)

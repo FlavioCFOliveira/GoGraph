@@ -48,7 +48,7 @@ import (
 // is why the writers use a property write on their own key: each carries a distinct
 // key so nothing they do can conflict.
 func TestNoWriterSerialiser_AutocommitWritesGenuinelyOverlap(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -137,7 +137,7 @@ func TestNoWriterSerialiser_AutocommitWritesGenuinelyOverlap(t *testing.T) {
 // trivially — at which point it should be strengthened into the liveness assertion
 // rmp #2305's AC4 asks for.
 func TestNoWriterSerialiser_AnIdleTransactionDoesNotStallAutocommitUnboundedly(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	tx, err := eng.BeginTx(context.Background())
@@ -194,7 +194,7 @@ func TestNoWriterSerialiser_AnIdleTransactionDoesNotStallAutocommitUnboundedly(t
 // serialization error here would mean the conflict predicate is refusing disjoint
 // writers — which would be a defect, not the price of concurrency.
 func TestNoWriterSerialiser_ConcurrentWritersDoNotFalselyConflict(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

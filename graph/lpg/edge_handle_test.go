@@ -12,7 +12,7 @@ import (
 // start at 1 (0 is the no-handle sentinel).
 func TestGraph_AddEdgeH_Monotone(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 
 	var prev uint64
 	for i := 0; i < 8; i++ {
@@ -38,7 +38,7 @@ func TestGraph_AddEdgeH_Monotone(t *testing.T) {
 // larger value, never the deleted edge's handle.
 func TestGraph_EdgeHandle_NeverReusedAfterDelete(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 
 	h1, err := g.AddEdgeH("a", "b", 0)
 	if err != nil {
@@ -70,7 +70,7 @@ func TestGraph_EdgeHandle_NeverReusedAfterDelete(t *testing.T) {
 // parallel edge's handle.
 func TestGraph_EdgeLabelsByHandle_RoundTrip(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 
 	h1, err := g.AddEdgeH("a", "b", 0)
 	if err != nil {
@@ -110,7 +110,7 @@ func TestGraph_EdgeLabelsByHandle_RoundTrip(t *testing.T) {
 // handle, even though the adjacency slot was compacted.
 func TestGraph_EdgeLabelsByHandle_SurvivesSiblingDelete(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 
 	h1, _ := g.AddEdgeH("a", "b", 0)
 	h2, _ := g.AddEdgeH("a", "b", 0)
@@ -134,7 +134,7 @@ func TestGraph_EdgeLabelsByHandle_SurvivesSiblingDelete(t *testing.T) {
 // TestGraph_EdgePropertiesByHandle_RoundTrip verifies the property analogue.
 func TestGraph_EdgePropertiesByHandle_RoundTrip(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 
 	h, err := g.AddEdgeH("a", "b", 0)
 	if err != nil {
@@ -161,7 +161,7 @@ func TestGraph_EdgePropertiesByHandle_RoundTrip(t *testing.T) {
 // is dropped while a sibling handle's survives.
 func TestGraph_RemoveEdgeInstanceByHandle(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 
 	h1, _ := g.AddEdgeH("a", "b", 0)
 	h2, _ := g.AddEdgeH("a", "b", 0)
@@ -188,7 +188,7 @@ func TestGraph_RemoveEdgeInstanceByHandle(t *testing.T) {
 // edge's per-handle type.
 func TestGraph_PairFullDelete_ClearsHandleStore(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 
 	h1, _ := g.AddEdgeH("a", "b", 0)
 	if err := g.SetEdgeLabelByHandle("a", "b", h1, "USES"); err != nil {
@@ -208,7 +208,7 @@ func TestGraph_PairFullDelete_ClearsHandleStore(t *testing.T) {
 // handle.
 func TestGraph_FirstEdgeHandle(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 
 	// Unknown pair: not present.
 	if h, ok := g.FirstEdgeHandle("a", "b"); ok || h != 0 {
@@ -247,7 +247,7 @@ func TestGraph_FirstEdgeHandle(t *testing.T) {
 // carries a handle and FirstEdgeHandle always finds one.
 func TestGraph_PlainAddEdgeStillHasAnIdentity(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
@@ -265,7 +265,7 @@ func TestGraph_PlainAddEdgeStillHasAnIdentity(t *testing.T) {
 // produces a contiguous, unique set under concurrent writers.
 func TestGraph_AddEdgeH_Concurrent(t *testing.T) {
 	t.Parallel()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 
 	const writers, perWriter = 8, 64
 	var wg sync.WaitGroup

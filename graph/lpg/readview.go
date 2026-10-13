@@ -40,6 +40,8 @@ package lpg
 // each is marked below so none is mistaken for a finished one.
 
 import (
+	"sync/atomic"
+
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
@@ -51,11 +53,30 @@ import (
 //
 // The zero value is not usable; obtain one from [Graph.ReadAt].
 //
-// Safe for concurrent use, on the same terms as the underlying graph: the view
-// is immutable once created and the snapshot it holds is immutable too.
+// A view is LOGICALLY immutable: the graph and the snapshot it is bound to never
+// change, so every read answers as of the same instant. It also carries an
+// internal, bounded read cache: one slot index for the last high-degree source
+// whose per-pair relationship-type reads built it (see edge_source_slots.go). The
+// cache is swapped atomically, every cached index is immutable, and an index is
+// used only after verifying it still describes the entry the view resolves, so
+// the cache changes no answer — only the cost of finding a pair's slots.
+//
+// Safe for concurrent use, on the same terms as the underlying graph. Readers
+// sharing one view share the cache; readers alternating between sources keep
+// the uncached scan rather than rebuild the index per read.
+//
+// A view must not be copied after first use (it holds atomics).
 type ReadView[N comparable, W any] struct {
 	g    *Graph[N, W]
 	snap *Snapshot
+
+	// slots is the cached slot index; lastSrc is the source (plus one) of the
+	// last uncached per-pair read and lastHits its consecutive read count; smallSrc is the last source (plus one) found
+	// below the indexing floor. See [ReadView.cachedSlots].
+	slots    atomic.Pointer[sourceSlots]
+	lastSrc  atomic.Uint64
+	lastHits atomic.Uint32
+	smallSrc atomic.Uint64
 }
 
 // ReadAt binds g to snap, returning a view whose every read is resolved at that
@@ -143,17 +164,35 @@ func (v *ReadView[N, W]) NodePropertiesByIDFunc(id graph.NodeID, visit func(name
 // EdgeLabels returns the pair's derived relationship-type union at this view's
 // instant.
 func (v *ReadView[N, W]) EdgeLabels(src, dst N) []string {
-	return v.g.EdgeLabelsAsOf(src, dst, v.snap)
+	srcID, dstID, ok := v.pairIDs(src, dst)
+	if !ok {
+		return nil
+	}
+	return v.EdgeLabelsByID(srcID, dstID)
 }
 
 // EdgeLabelsByID is [ReadView.EdgeLabels] keyed by NodeIDs.
+//
+// For a high-degree source the pair's slots are found through the view's slot
+// index instead of a scan of every slot; the answer is identical.
 func (v *ReadView[N, W]) EdgeLabelsByID(srcID, dstID graph.NodeID) []string {
+	if s := v.cachedSlots(srcID); s != nil {
+		if out, ok := v.edgeLabelsBySlots(s, dstID); ok {
+			return out
+		}
+	}
 	return v.g.EdgeLabelsByIDAsOf(srcID, dstID, v.snap)
 }
 
 // ForEachEdgeLabelByID streams the pair's derived type union at this view's
-// instant.
+// instant: the names [ReadView.EdgeLabelsByID] returns, in the same order,
+// without building the result slice. Like EdgeLabelsByID it finds a
+// high-degree source's pair through the view's slot index; the answer is
+// identical.
 func (v *ReadView[N, W]) ForEachEdgeLabelByID(srcID, dstID graph.NodeID, visit func(name string)) {
+	if s := v.cachedSlots(srcID); s != nil && v.forEachEdgeLabelBySlots(s, dstID, visit) {
+		return
+	}
 	v.g.ForEachEdgeLabelByIDAsOf(srcID, dstID, v.snap, visit)
 }
 
@@ -196,25 +235,70 @@ func (v *ReadView[N, W]) HasEdgeHandleLabelRecordByID(srcID, dstID graph.NodeID,
 
 // EdgeProperties returns the pair's coalesced properties at this view's
 // instant.
+//
+// Like every per-pair property read below, it finds a high-degree source's pair
+// slots through the view's slot index when the source's type reads
+// ([ReadView.EdgeLabelsByID]) have built one, instead of a scan; the answer is
+// identical. A property read never builds an index itself.
 func (v *ReadView[N, W]) EdgeProperties(src, dst N) map[string]PropertyValue {
-	return v.g.EdgePropertiesAsOf(src, dst, v.snap)
+	var out map[string]PropertyValue
+	v.ForEachEdgeProperty(src, dst, func(name string, pv PropertyValue) {
+		if out == nil {
+			out = make(map[string]PropertyValue, 2)
+		}
+		out[name] = pv // latest dst-matching slot wins
+	})
+	return out
 }
 
 // ForEachEdgeProperty streams the pair's coalesced properties at this view's
 // instant.
 func (v *ReadView[N, W]) ForEachEdgeProperty(src, dst N, visit func(name string, pv PropertyValue)) {
-	v.g.ForEachEdgePropertyAsOf(src, dst, v.snap, visit)
+	srcID, dstID, ok := v.pairIDs(src, dst)
+	if !ok {
+		return
+	}
+	if s := v.indexedSlots(srcID); s != nil && v.forEachEdgePropertyBySlots(s, dstID, visit) {
+		return
+	}
+	v.g.ForEachEdgePropertyByIDAsOf(srcID, dstID, v.snap, visit)
 }
 
 // GetEdgeProperty returns the pair's coalesced value under key at this view's
 // instant.
 func (v *ReadView[N, W]) GetEdgeProperty(src, dst N, key string) (PropertyValue, bool) {
+	srcID, dstID, ok := v.pairIDs(src, dst)
+	if !ok {
+		return PropertyValue{}, false
+	}
+	keyID, ok := v.g.pkeys.Lookup(key)
+	if !ok {
+		return PropertyValue{}, false
+	}
+	if s := v.indexedSlots(srcID); s != nil {
+		if pv, found, current := v.edgePropertyBySlots(s, dstID, keyID); current {
+			return pv, found
+		}
+	}
 	return v.g.GetEdgePropertyAsOf(src, dst, key, v.snap)
 }
 
 // EdgeHasProperty reports storage presence of a non-null-mapping value at this
 // view's instant.
 func (v *ReadView[N, W]) EdgeHasProperty(src, dst N, key string) bool {
+	srcID, dstID, ok := v.pairIDs(src, dst)
+	if !ok {
+		return false
+	}
+	keyID, ok := v.g.pkeys.Lookup(key)
+	if !ok {
+		return false
+	}
+	if s := v.indexedSlots(srcID); s != nil {
+		if has, current := v.edgeHasPropertyBySlots(s, dstID, keyID); current {
+			return has
+		}
+	}
 	return v.g.EdgeHasPropertyAsOf(src, dst, key, v.snap)
 }
 

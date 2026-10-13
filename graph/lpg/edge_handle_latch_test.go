@@ -19,7 +19,7 @@ import (
 
 func newMultigraph(t *testing.T) *Graph[string, float64] {
 	t.Helper()
-	return New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	return New[string, float64](adjlist.Config{})
 }
 
 // TestHandlePropLatch_FalseOnFreshGraph is the precondition the whole

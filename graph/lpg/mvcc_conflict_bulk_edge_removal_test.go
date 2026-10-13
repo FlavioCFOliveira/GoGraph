@@ -36,7 +36,7 @@ import (
 // must be refused, must leave the adjacency EXACTLY as it found it — A's
 // pending arc included — and must be unable to commit.
 func TestConflict_AdjacencyBulkRemovalRefusedByConcurrentAppend(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "c"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%s): %v", n, err)
@@ -88,7 +88,7 @@ func TestConflict_AdjacencyBulkRemovalRefusedByConcurrentAppend(t *testing.T) {
 // [Graph.removeAllEdgesFromInfo] that returned false unconditionally would pass
 // the refusal test.
 func TestConflict_AdjacencyBulkRemovalAppliesWithoutAConcurrentWriter(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "c"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%s): %v", n, err)

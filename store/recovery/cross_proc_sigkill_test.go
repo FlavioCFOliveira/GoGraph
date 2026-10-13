@@ -43,7 +43,7 @@ func init() {
 			return 1
 		}
 
-		g := lpg.New[int, int64](adjlist.Config{Directed: true})
+		g := lpg.New[int, int64](adjlist.Config{})
 		s := txn.NewStoreWithCodec[int, int64](g, w, txn.NewIntCodec())
 
 		ctx := context.Background()

@@ -38,9 +38,6 @@ type FixtureSpec struct {
 	Edges uint64
 	// Seed is the PCG seed (any uint64).
 	Seed uint64
-	// Multigraph allows parallel edges; without it duplicates are
-	// silently collapsed.
-	Multigraph bool
 }
 
 // validate reports whether [BuildFixture] can build a graph that meets s,
@@ -51,8 +48,8 @@ type FixtureSpec struct {
 // large. Edges is therefore unbounded — every value yields a correct graph,
 // merely slowly — and the cases that merely LOOK degenerate are accepted:
 // Vertices == 0 with Edges == 0 is the empty graph; Edges may exceed the
-// number of distinct (src, dst) pairs, the surplus collapsing exactly as
-// [FixtureSpec.Multigraph] documents; self-loops are drawn like any other
+// number of distinct (src, dst) pairs, the surplus becoming parallel
+// edges; self-loops are drawn like any other
 // pair; and every Seed is valid, zero included.
 //
 // It is a separate, total predicate rather than an inline check because the
@@ -112,7 +109,7 @@ func BuildFixture(spec FixtureSpec) (*csr.CSR[struct{}], error) {
 	if err := spec.validate(); err != nil {
 		return nil, err
 	}
-	a := adjlist.New[uint32, struct{}](adjlist.Config{Directed: true, Multigraph: spec.Multigraph})
+	a := adjlist.New[uint32, struct{}](adjlist.Config{})
 	for i := uint64(0); i < spec.Vertices; i++ {
 		// G115: spec.validate rejected Vertices > math.MaxUint32 above, and i < spec.Vertices, so this conversion is exact
 		if err := a.AddNode(uint32(i)); err != nil {

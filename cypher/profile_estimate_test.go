@@ -178,7 +178,7 @@ func TestProfileEstimate_EstimateSitsBesideTheMeasurementAndAgreesWhenExact(t *t
 // count is what the query actually returned.
 func seedSkewedGroupGraph(t *testing.T) (e *Engine, warmCount int) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	add := func(key, grp string) {
 		t.Helper()
 		if err := g.AddNode(key); err != nil {
@@ -550,7 +550,7 @@ func countEstimatedNodes(n *exec.PlanNode) int {
 // no-estimate glyph would hide exactly the prediction a reader of an empty result
 // most wants to check.
 func TestProfileEstimate_EveryEstimatedNodeShapeReachesThePhysicalPlan(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	e := NewEngine(g)
 	t.Cleanup(func() { _ = e.Close() })
 	ctx := context.Background()

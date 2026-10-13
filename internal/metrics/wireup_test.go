@@ -3,6 +3,7 @@ package metrics_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -24,7 +25,7 @@ import (
 // section. We use string-keyed nodes with int64 weights so the
 // generic Store instantiation matches the recovery harness.
 func newSmokeGraph() *lpg.Graph[string, int64] {
-	return lpg.New[string, int64](adjlist.Config{Directed: true})
+	return lpg.New[string, int64](adjlist.Config{})
 }
 
 // countingBackend records every metric event so the wire-up smoke
@@ -75,7 +76,7 @@ func (c *countingBackend) counterFor(name string) uint64 {
 // a valid source NodeID for traversal-driven tests.
 func buildSmokeCSR(t *testing.T) (*csr.CSR[int64], graph.NodeID) {
 	t.Helper()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < 6; i++ {
 		if err := a.AddNode(i); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -144,7 +145,7 @@ func driveCentralitySample(t *testing.T, be *countingBackend, c *csr.CSR[int64])
 // driveCSVSample exercises the graph/io/csv writer with context.
 func driveCSVSample(t *testing.T, be *countingBackend) {
 	t.Helper()
-	csvAdj := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	csvAdj := adjlist.New[string, int64](adjlist.Config{})
 	if err := csvAdj.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -162,6 +163,11 @@ func driveWALSample(t *testing.T, be *countingBackend, walPath string) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	expectLatency(t, be, "store.wal.Open")
 
 	if err := w.Append([]byte("payload")); err != nil {

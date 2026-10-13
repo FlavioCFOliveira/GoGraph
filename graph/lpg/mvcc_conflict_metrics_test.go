@@ -67,7 +67,7 @@ func installRecorder(t *testing.T) *recordingBackend {
 // a contention rate needs) against one per refused write (which scales with transaction
 // size and cannot be divided by a commit count).
 func TestMVCCMetrics_ConflictSeriesMoves(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)

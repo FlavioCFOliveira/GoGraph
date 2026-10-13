@@ -918,34 +918,30 @@ func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, t
 
 // appendHopInstances appends one candidate reaching toID for every stored
 // relationship instance between fromKey and toKey, in the hop's permitted
-// direction(s), whose own type and properties satisfy the hop. An instance is
-// visited once even when both directions list it — a self-loop, or an
-// undirected graph's mirror slot, which shares its relationship's handle.
+// direction(s), whose own type and properties satisfy the hop. A self-loop,
+// which both directions list, is visited once: the reverse order is skipped
+// when it is the forward order already read. Storage is directed (rmp #3072),
+// so no other instance is listed by both orders.
 func (op *MergePattern) appendHopInstances(out []hopCandidate, fromKey, toKey string, toID graph.NodeID, hop *mergePatternHop, hopProps []propLiteral) []hopCandidate {
 	checkForward, checkReverse := hop.directions()
-	start := len(out)
 	if checkForward {
-		out = op.appendDirectedInstances(out, start, fromKey, toKey, toID, true, hop, hopProps)
+		out = op.appendDirectedInstances(out, fromKey, toKey, toID, true, hop, hopProps)
 	}
 	if checkReverse && (fromKey != toKey || !checkForward) {
-		out = op.appendDirectedInstances(out, start, toKey, fromKey, toID, false, hop, hopProps)
+		out = op.appendDirectedInstances(out, toKey, fromKey, toID, false, hop, hopProps)
 	}
 	return out
 }
 
 // appendDirectedInstances is [MergePattern.appendHopInstances] for the stored
 // order (src, dst). fwd records whether that order runs from the hop's source
-// position to its target. Candidates from out[start:] with the same non-zero
-// handle are not appended twice.
-func (op *MergePattern) appendDirectedInstances(out []hopCandidate, start int, src, dst string, toID graph.NodeID, fwd bool, hop *mergePatternHop, hopProps []propLiteral) []hopCandidate {
+// position to its target.
+func (op *MergePattern) appendDirectedInstances(out []hopCandidate, src, dst string, toID graph.NodeID, fwd bool, hop *mergePatternHop, hopProps []propLiteral) []hopCandidate {
 	if op.handleBuf == nil {
 		op.handleBuf = op.handleArr[:0]
 	}
 	op.handleBuf = op.mutator.EdgeHandles(src, dst, op.handleBuf[:0])
 	for _, h := range op.handleBuf {
-		if h != 0 && candidateHasHandle(out[start:], h) {
-			continue
-		}
 		if !relInstanceHasType(op.mutator, src, dst, h, hop.relType) {
 			continue
 		}
@@ -955,16 +951,6 @@ func (op *MergePattern) appendDirectedInstances(out []hopCandidate, start int, s
 		out = append(out, hopCandidate{node: toID, handle: h, fwd: fwd})
 	}
 	return out
-}
-
-// candidateHasHandle reports whether cands already holds handle.
-func candidateHasHandle(cands []hopCandidate, handle uint64) bool {
-	for i := range cands {
-		if cands[i].handle == handle {
-			return true
-		}
-	}
-	return false
 }
 
 // resolveBound reads a bound chain position's NodeID from childRow, and

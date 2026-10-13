@@ -269,7 +269,7 @@ func TestLazy_LabelPredicateConjunction(t *testing.T) {
 // Deleted-flag check fires. This proves the lazy path cannot smuggle a stale
 // read past an in-statement deletion.
 func TestLazy_DeletedEntityViaScalarPath(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

@@ -488,9 +488,10 @@ type recoveredImage struct {
 //
 // The graph shape is whatever the image declares. [recovery.OpenCtx] honours the
 // snapshot manifest's persisted graph_config when it carries one and falls back
-// to its documented no-config default (Multigraph: true) when it does not, so a
-// pre-config prior image can rebuild as a multigraph where the writer had a
-// simple graph. That is a real property of the image, not a harness artefact, and
+// to its documented no-config default when it does not. Every graph is a
+// multigraph, so a prior image whose writer had a simple graph rebuilds as the
+// multigraph it already was. That is a real property of the image, not a harness
+// artefact, and
 // it is why the upgrade contract compares NODE counts — which no adjacency
 // configuration can change — and reports edge counts rather than asserting them.
 // The comparison is also like-for-like: the prior release's own self-recovery

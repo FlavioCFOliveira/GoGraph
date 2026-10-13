@@ -50,7 +50,7 @@ import (
 // deterministic to order by.
 func dstLabelFixture(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < 12; i++ {
 		k := "u" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

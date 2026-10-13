@@ -50,7 +50,7 @@ func TestCheckpoint_NestedPropertyListIsRefusedAtCommit_2783(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithCodec[string, float64](g, w, txn.NewStringCodec())
 
 	tx := st.Begin()

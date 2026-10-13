@@ -170,9 +170,9 @@ dense cores widen.
 
 ## Key APIs
 
-- `graph/adjlist.New` / `AdjList.AddEdge` — build the mutable undirected backbone from the single link list.
+- `graph/adjlist.New` / `AdjList.AddEdge` — build the mutable backbone from the single link list, one directed relationship per link.
 - `graph.Mapper` — intern site names into compact `NodeID`s for SPOF resolution.
-- `graph/csr.BuildFromAdjList` — freeze the backbone into an immutable CSR snapshot for the structural analysis.
+- `graph/csr.BuildFromAdjList` / `CSR.BuildSymmetric` — freeze the backbone into an immutable CSR snapshot and project it to the symmetric (undirected) snapshot the structural analysis reads.
 - `search.HopcroftTarjanBCCCtx` — locate articulation points and bridges (single points of failure) in O(V + E), context-aware.
 - `search.WCCCtx` / `search.WCCParallelCtx` — weakly-connected-component count before and after the bridge is severed; the parallel variant must reproduce the serial partition.
 - `search/flow.NewNetwork` / `Network.AddEdge` / `flow.MaxFlowCtx` — Dinic's max-flow, used as the authoritative oracle cross-checked against the example's in-line residual solver, which also exposes the residual graph used to derive the minimum cut.

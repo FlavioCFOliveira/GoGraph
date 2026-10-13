@@ -546,7 +546,7 @@ func TestCountStore_SurfaceShapesAdjudicated(t *testing.T) {
 	if src == 0 {
 		t.Fatal("the model holds no KNOWS edge")
 	}
-	delete(o.edges, edgeKey{label: csRelKnows, src: src, dst: dst})
+	delete(o.edges, o.instanceKey(edgeKey{label: csRelKnows, src: src, dst: dst}))
 	vs := CheckCypherSurface(6, o, f.sm.engine)
 	ops := make(map[string]struct{}, len(vs))
 	for _, v := range vs {
@@ -620,7 +620,7 @@ func TestCountStore_CellsBoundFormula(t *testing.T) {
 func TestCountStore_AnchorSwapRetainsAnonymousSourceRows(t *testing.T) {
 	build := func(disableSwap bool) *EngineAdapter {
 		t.Helper()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{DisableAnchorSwap: disableSwap})
 		ea := NewEngineAdapter(eng)
 		ctx := context.Background()

@@ -58,7 +58,7 @@ func scalarCount(t *testing.T, eng *cypher.Engine, q string, params map[string]e
 // for, and requires the seek and the predicate over the SAME property to agree.
 func TestIndexSeek_SelfContradictionUnderConcurrentWrites(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

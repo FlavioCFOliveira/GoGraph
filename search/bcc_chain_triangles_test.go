@@ -34,7 +34,7 @@ func TestHopcroftTarjanBCC_ChainTriangles(t *testing.T) {
 
 	const k = 5 // number of triangles
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 
 	// Build k triangles. Triangle i uses vertices {2i, 2i+1, 2i+2}.
 	// The last triangle uses vertex 2*(k-1) as the shared entry point.
@@ -49,7 +49,7 @@ func TestHopcroftTarjanBCC_ChainTriangles(t *testing.T) {
 		}
 	}
 
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	res := HopcroftTarjanBCC(c)
 
 	if len(res.Components) != k {

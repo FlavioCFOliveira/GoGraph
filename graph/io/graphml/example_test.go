@@ -13,7 +13,7 @@ import (
 // graph to XML with Write, then unmarshal it back with ReadInto and
 // confirm the structure survived.
 func ExampleWrite() {
-	src := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	src := adjlist.New[string, int64](adjlist.Config{})
 	_ = src.AddEdge("a", "b", 7)
 	_ = src.AddEdge("b", "c", 9)
 
@@ -42,7 +42,7 @@ func ExampleWrite() {
 // WriteWithProps serialises node properties as <data> elements and
 // ReadWithProps restores them, so a typed property recovers its value.
 func ExampleWriteWithProps() {
-	src := lpg.New[string, int64](adjlist.Config{Directed: true})
+	src := lpg.New[string, int64](adjlist.Config{})
 	_ = src.AddEdge("alice", "bob", 1)
 	_ = src.SetNodeProperty("alice", "age", lpg.Int64Value(30))
 

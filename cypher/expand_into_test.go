@@ -36,7 +36,7 @@ import (
 // It returns the graph and the adjacency as a plain Go map, which is the oracle.
 func intoRing(t *testing.T, n, degree int) (*lpg.Graph[string, float64], map[int][]int) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	keys := make([]string, n)
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("n%04d", i)
@@ -164,7 +164,7 @@ func TestExpandInto_TriangleMatchesOracle(t *testing.T) {
 // enumerating the edges between the pair would collapse this to one.
 func TestExpandInto_ParallelEdgesPreserveCardinality(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -209,7 +209,7 @@ func TestExpandInto_ParallelEdgesPreserveCardinality(t *testing.T) {
 // inbound and undirected forms of a closing hop.
 func TestExpandInto_SelfLoopAndDirections(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode: %v", err)

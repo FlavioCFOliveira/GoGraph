@@ -30,13 +30,13 @@ import (
 // secBuildSmallCSR returns a small undirected CSR for worker-bound tests.
 func secBuildSmallCSR(tb testing.TB, n int) *csr.CSR[struct{}] {
 	tb.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i+1 < n; i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			tb.Fatalf("AddEdge: %v", err)
 		}
 	}
-	return csr.BuildFromAdjList(a)
+	return csr.BuildFromAdjList(a).BuildSymmetric()
 }
 
 // TestSec_Core_BrandesWorkerCountClamped asserts that requesting far more
@@ -120,7 +120,7 @@ func TestSec_Core_BrandesRepeatedCancelNoLeak(t *testing.T) {
 		cycles  = 50
 		workers = 16
 	)
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 3*n; i++ {
 		// deterministic-ish spread without importing math/rand: a simple
 		// linear-congruential walk keeps the graph dense enough to give
@@ -131,7 +131,7 @@ func TestSec_Core_BrandesRepeatedCancelNoLeak(t *testing.T) {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 
 	for i := 0; i < cycles; i++ {
 		ctx, cancel := context.WithCancel(context.Background())

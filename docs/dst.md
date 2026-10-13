@@ -856,15 +856,16 @@ engine acknowledges the COMMIT, so parity holds at every tick.
 
 The generator never draws a `KNOWS` pair the engine's PRESENT adjacency
 already holds — the committed model plus **every** open session's uncommitted
-workspace. The engine's parallel-edge guard reads the live adjacency and is
-blind to the writing transaction's snapshot, and the simulator's store is a
-simple graph, so a duplicate ordered pair comes back as
-`cypher.ErrParallelEdgeInSimpleGraph`. The harness concedes only
-`mvcc.ErrSerializationConflict`, so that error aborts the whole run. Consulting only the committed model
+workspace. The rule was introduced while the simulator's store was a simple
+graph, on which a duplicate ordered pair came back as
+`cypher.ErrParallelEdgeInSimpleGraph`; consulting only the committed model
 and the drawing session's own workspace missed pairs another session held
 uncommitted and aborted 2 of the first 300 seeds at `Ticks=60, Sessions=4`
-(rmp #2695). A *bare* self-loop is legal on a simple graph and is still drawn;
-only a duplicate — self or not — is excluded. The gate is
+(rmp #2695). Since `v0.17.0` every graph is a directed multigraph and that
+sentinel no longer exists, but the oracle still models at most one `KNOWS`
+edge per ordered pair: its edge comparison reports an engine pair holding
+more than one edge as a Consistency violation. A *bare* self-loop is still
+drawn; only a duplicate — self or not — is excluded. The gate is
 `internal/sim/mvcc_sessions_parallel_edge_test.go`.
 
 Isolation checkers (`internal/sim/mvcc_isolation.go`, rmp #2436) run inside

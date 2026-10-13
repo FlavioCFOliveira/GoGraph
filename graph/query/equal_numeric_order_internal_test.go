@@ -417,7 +417,7 @@ func TestSeek_NumericEqualityIsResidualFiltered(t *testing.T) {
 func TestSeek_NumericEqualityResidualIsExactAtTheBoundary(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	values := map[string]int64{"exact": twoTo62, "above": tckBigIntA, "below": tckBigIntB}
 	ids := make([]uint64, 0, len(values))
 	for key, v := range values {

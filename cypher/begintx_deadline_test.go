@@ -44,7 +44,7 @@ import (
 // beginTxFixture builds a small engine with a few nodes to read.
 func beginTxFixture(t *testing.T) (*lpg.Graph[string, float64], *cypher.Engine) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	res, err := eng.RunAny(context.Background(),
 		`UNWIND range(1, 64) AS i CREATE (:P {id: i})`, nil)

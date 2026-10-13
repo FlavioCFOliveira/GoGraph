@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -116,6 +117,11 @@ func TestOpen_NormalWALUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open on a regular WAL path = %v, want nil", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

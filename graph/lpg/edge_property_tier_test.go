@@ -12,7 +12,7 @@ import (
 // surface for every kind, asserting the columnar tier preserves value identity.
 func TestEdgePropTier_PerKindRoundTripPublic(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestEdgePropTier_PerKindRoundTripPublic(t *testing.T) {
 // exactly as the old single-bag store did.
 func TestEdgePropTier_LastWriteWinsAcrossKinds(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -71,49 +71,13 @@ func TestEdgePropTier_LastWriteWinsAcrossKinds(t *testing.T) {
 	}
 }
 
-// TestEdgePropTier_UndirectedBothDirections asserts that on an undirected graph a
-// property set on (a,b) is observable from both endpoint orders, since the
-// undirected edge is two adjacency slots (forward + mirror) and the value fans
-// out to the dst-matching slot in each direction.
-func TestEdgePropTier_UndirectedBothDirections(t *testing.T) {
-	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: false})
-	if err := g.AddEdge("a", "b", 0); err != nil {
-		t.Fatalf("AddEdge: %v", err)
-	}
-	// Set under the (a,b) order.
-	g.mustSet(t, "a", "b", "since", Int64Value(2020))
-	// Set under the (b,a) order — both directions independently carry the value.
-	g.mustSet(t, "b", "a", "weight", Int64Value(5))
-
-	ab := g.EdgeProperties("a", "b")
-	ba := g.EdgeProperties("b", "a")
-	if i, ok := g.GetEdgeProperty("a", "b", "since"); !ok {
-		t.Fatalf("a->b since missing")
-	} else if v, _ := i.Int64(); v != 2020 {
-		t.Fatalf("a->b since = %d", v)
-	}
-	if i, ok := g.GetEdgeProperty("b", "a", "weight"); !ok {
-		t.Fatalf("b->a weight missing")
-	} else if v, _ := i.Int64(); v != 5 {
-		t.Fatalf("b->a weight = %d", v)
-	}
-	// Each direction has exactly the property set on it.
-	if _, ok := ab["since"]; !ok {
-		t.Fatalf("a->b missing since: %v", ab)
-	}
-	if _, ok := ba["weight"]; !ok {
-		t.Fatalf("b->a missing weight: %v", ba)
-	}
-}
-
 // TestEdgePropTier_MultigraphCoalesce asserts the per-pair latest-wins coalesce
 // across parallel edges: a property set on the pair is visible regardless of how
 // many parallel edges connect them, and removing one parallel edge keeps the
 // property while any edge survives.
 func TestEdgePropTier_MultigraphCoalesce(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	// Two parallel a->b edges.
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge 1: %v", err)
@@ -161,7 +125,7 @@ func TestEdgePropTier_MultigraphCoalesce(t *testing.T) {
 // others intact (the edge↔property binding survives a delete).
 func TestEdgePropTier_DeletePreservesOtherKeys(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -193,7 +157,7 @@ func TestEdgePropTier_DeletePreservesOtherKeys(t *testing.T) {
 // surviving (src,dst)->value map.
 func TestEdgePropTier_BindingSurvivesCompaction(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	dsts := []string{"b", "c", "d", "e", "f"}
 	oracle := map[string]int64{}
 	for i, d := range dsts {
@@ -228,7 +192,7 @@ func TestEdgePropTier_BindingSurvivesCompaction(t *testing.T) {
 // overhead. We reach into the columnar block to assert the bitmap is omitted.
 func TestEdgePropTier_DensePathNoValidityBitmap(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -270,7 +234,7 @@ func TestEdgePropTier_FullScanPropertyBased(t *testing.T) {
 func runPublicOracle(t *testing.T, seed int64) {
 	t.Helper()
 	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // G404: math/rand seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	nodes := []string{"a", "b", "c"}
 	keys := []string{"k1", "k2"}
 	// oracle[pair] = the coalesced per-pair property map; present iff >=1 edge.
@@ -356,7 +320,7 @@ func runPublicOracle(t *testing.T, seed int64) {
 // it, and no such tier exists in the implementation.
 func TestEdgePropTier_HeterogeneousKindAcrossEdges(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	dsts := []string{"b", "c", "d", "e", "f"}
 	for _, d := range dsts {
 		if err := g.AddEdge("a", d, 0); err != nil {

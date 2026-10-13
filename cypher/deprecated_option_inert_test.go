@@ -52,7 +52,7 @@ var inertOptionQueries = []string{
 // types and a node with several incoming arcs.
 func buildInertOptionFixture(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	keys := []string{"a", "b", "c", "d"}
 	for _, k := range keys {
 		if err := g.AddNode(k); err != nil {

@@ -74,7 +74,7 @@ func TestMemPressure_NonVacuous(t *testing.T) {
 // in-budget read still succeeds. This is the "degrade, never fail catastrophically"
 // guarantee.
 func TestMemPressure_GracefulDegradation(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{
 		MaxResultRows:   memPressureMaxResultRows,
 		MaxCollectItems: memPressureMaxCollectItems,

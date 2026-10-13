@@ -27,11 +27,11 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
-// newMultigraphEngine builds a directed multigraph engine — the openCypher
+// newParallelEdgeEngine builds a directed multigraph engine — the openCypher
 // storage model that keeps parallel relationships as distinct instances.
-func newMultigraphEngine(t *testing.T) *cypher.Engine {
+func newParallelEdgeEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return cypher.NewEngine(g)
 }
 
@@ -104,7 +104,7 @@ func runScalarProp(t *testing.T, eng *cypher.Engine, query string) (expr.Value, 
 // TestMergePattern_ParallelEdgeMultiplicity_TwoParallel is the #1875 repro.
 func TestMergePattern_ParallelEdgeMultiplicity_TwoParallel(t *testing.T) {
 	t.Parallel()
-	eng := newMultigraphEngine(t)
+	eng := newParallelEdgeEngine(t)
 
 	execWrite(t, eng, `CREATE (a:A), (b:B)`)
 	execWrite(t, eng, `MATCH (a:A),(b:B) CREATE (a)-[:T]->(b)`)
@@ -141,7 +141,7 @@ func TestMergePattern_ParallelEdgeMultiplicity_TwoParallel(t *testing.T) {
 // TestMergePattern_ParallelEdgeMultiplicity_Triple covers three parallel edges.
 func TestMergePattern_ParallelEdgeMultiplicity_Triple(t *testing.T) {
 	t.Parallel()
-	eng := newMultigraphEngine(t)
+	eng := newParallelEdgeEngine(t)
 
 	execWrite(t, eng, `CREATE (a:A), (b:B)`)
 	execWrite(t, eng, `MATCH (a:A),(b:B) CREATE (a)-[:T]->(b)`)
@@ -168,7 +168,7 @@ func TestMergePattern_ParallelEdgeMultiplicity_Triple(t *testing.T) {
 // the same 2 the equivalent MATCH does — not all 3.
 func TestMergePattern_ParallelEdgeMultiplicity_MixedTypesFiltered(t *testing.T) {
 	t.Parallel()
-	eng := newMultigraphEngine(t)
+	eng := newParallelEdgeEngine(t)
 
 	execWrite(t, eng, `CREATE (a:A), (b:B)`)
 	execWrite(t, eng, `MATCH (a:A),(b:B) CREATE (a)-[:T]->(b)`)
@@ -190,7 +190,7 @@ func TestMergePattern_ParallelEdgeMultiplicity_MixedTypesFiltered(t *testing.T) 
 // one, ON CREATE fires, and count(r) is 1.
 func TestMergePattern_MergeCreatesWhenNoneMatch(t *testing.T) {
 	t.Parallel()
-	eng := newMultigraphEngine(t)
+	eng := newParallelEdgeEngine(t)
 
 	execWrite(t, eng, `CREATE (a:A), (b:B)`)
 

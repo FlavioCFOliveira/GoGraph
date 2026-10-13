@@ -52,10 +52,7 @@ const minLabelScanBenchQuery = "MATCH (n:Common:Rare) RETURN n.k AS k"
 // which the first mlsRarePop also carry :Rare. Every node has a unique integer
 // key "k" so the projection does real per-row work under both plans.
 func buildMinLabelScanBenchGraph() *lpg.Graph[string, float64] {
-	// Multigraph:true is behaviour-neutral here — the fixture creates no edges,
-	// let alone parallel ones — and silences the engine's non-multigraph
-	// construction warning so the benchmark output stays clean.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < mlsCommonPop; i++ {
 		k := fmt.Sprintf("n%d", i)
 		_ = g.AddNode(k)

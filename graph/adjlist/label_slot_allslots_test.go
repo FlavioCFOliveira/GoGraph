@@ -20,7 +20,7 @@ import (
 // slot, and returns the list with the two endpoint ids.
 func threeParallel(t *testing.T) (*AdjList[string, int], graph.NodeID, graph.NodeID, graph.NodeID) {
 	t.Helper()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	for i := 0; i < 3; i++ {
 		if err := a.AddEdge("a", "b", 1); err != nil {
 			t.Fatalf("AddEdge(a,b): %v", err)
@@ -82,7 +82,7 @@ func TestAdjList_SetEdgeLabelSlotsAt_SkipsIndexesThatNoLongerMatch(t *testing.T)
 // a call that writes nothing must neither allocate a column nor publish an entry.
 func TestAdjList_SetEdgeLabelSlotsAt_NoWriteNoColumn(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestAdjList_ClearEdgeLabelSlotsValue_ClearsEveryMatchingSlot(t *testing.T) 
 // contract on the clear side.
 func TestAdjList_ClearEdgeLabelSlotsValue_NoColumnIsNoOp(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

@@ -2,6 +2,7 @@ package bulk
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -46,7 +47,7 @@ func TestSequencing_BulkCheckpointSnapshotRecovery(t *testing.T) {
 		edges = append(edges, Edge{Src: src, Dst: dst, Weight: int64(i + 11)})
 	}
 
-	l := New(Options{OutputPath: outPath, Directed: true})
+	l := New(Options{OutputPath: outPath})
 	if err := l.AddBatch(edges); err != nil {
 		t.Fatalf("AddBatch: %v", err)
 	}
@@ -59,7 +60,7 @@ func TestSequencing_BulkCheckpointSnapshotRecovery(t *testing.T) {
 	}
 
 	// Phase 2: reconstruct LPG from the same edge list.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, e := range edges {
 		if err := g.AddEdge(e.Src, e.Dst, e.Weight); err != nil {
 			t.Fatalf("AddEdge(%s->%s): %v", e.Src, e.Dst, err)
@@ -72,6 +73,11 @@ func TestSequencing_BulkCheckpointSnapshotRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 
 	var mu sync.Mutex
 	cp := checkpoint.New[string, int64](

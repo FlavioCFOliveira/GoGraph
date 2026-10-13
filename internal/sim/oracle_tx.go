@@ -324,11 +324,6 @@ func (t *OracleTx) ApplyCreateKnows(params map[string]any) OracleResult {
 	if !t.visible(a) || !t.visible(b) {
 		return t.record(tmplCreateKnows, params, OracleResult{Committed: true})
 	}
-	for _, e := range t.edges {
-		if e.a == a && e.b == b {
-			return t.record(tmplCreateKnows, params, OracleResult{Committed: true}) // idempotent re-create
-		}
-	}
 	t.edges = append(t.edges, pendingEdge{a: a, b: b, props: map[string]any{}})
 	return t.record(tmplCreateKnows, params, OracleResult{Committed: true, EdgesCreated: 1})
 }
@@ -507,7 +502,7 @@ func (t *OracleTx) Commit() error {
 		p.nodes[p.byName[name]].Properties["age"] = t.ageSet[name]
 	}
 	for _, e := range t.edges {
-		k := edgeKey{src: p.byName[e.a], dst: p.byName[e.b], label: "KNOWS"}
+		k := p.newInstKey(p.byName[e.a], p.byName[e.b], "KNOWS")
 		p.edges[k] = &EdgeState{SrcID: k.src, DstID: k.dst, Label: "KNOWS", Properties: e.props}
 	}
 	p.ops = append(p.ops, t.ops...)

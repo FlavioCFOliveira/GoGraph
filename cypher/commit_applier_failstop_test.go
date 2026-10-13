@@ -54,7 +54,7 @@ func TestCommitApplier_PanicFailStopsTheEngine(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			var eng *Engine
 			dir := t.TempDir()
 			var wr *wal.Writer
@@ -64,6 +64,11 @@ func TestCommitApplier_PanicFailStopsTheEngine(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+					if err := wr.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+						t.Errorf("wal.Close: %v", err)
+					}
+				})
 				st := txn.NewStoreWithOptions[string, float64](g, wr, txn.Options[string, float64]{
 					Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec(),
 				})

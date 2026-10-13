@@ -14,7 +14,7 @@ import (
 // nodes carrying sku values, returning the engine and adapter.
 func seedIndexedGraph(t *testing.T) *EngineAdapter {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -67,7 +67,7 @@ func TestCheckIndexConsistency_CleanWhenInSync(t *testing.T) {
 // path), which is the schema-chaos scenario's core stressor.
 func TestCheckIndexConsistency_CleanAfterDDLChurn(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

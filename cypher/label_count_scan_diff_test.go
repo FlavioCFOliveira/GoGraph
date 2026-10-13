@@ -75,7 +75,7 @@ func labelCountEngines(g *lpg.Graph[string, float64]) (on, off *Engine) {
 // and from a multi-label pattern.
 func buildLabelCountGraph(t *testing.T, n int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range n {
 		k := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(k); err != nil {
@@ -231,7 +231,7 @@ func TestLabelCount_OptionalMatchNullDeclines(t *testing.T) {
 	// 100 :Item nodes; even-indexed ones KNOW an :Other node. count(b) over the
 	// optional expansion must be 50 (odd-indexed items bind b to null, excluded),
 	// never the 100-row count.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range 100 {
 		k := fmt.Sprintf("i%d", i)
 		if err := g.AddNode(k); err != nil {

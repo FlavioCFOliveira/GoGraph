@@ -24,7 +24,7 @@ func statsTestSource(e *Engine) *lpgLabelResolver {
 // the engine and the exact ground-truth counts.
 func seedPersonGraph(t *testing.T, n int, heavyFrac float64) (e *Engine, heavyCount, ltHeavy int64) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("p%d", i)
 		if err := g.AddNode(key); err != nil {
@@ -165,7 +165,7 @@ func TestStats_RangeEstimateAndCertifiedError(t *testing.T) {
 // but round to the same float64, and the histogram boundary comparison must honour
 // the exact order.
 func TestStats_IntFloatLargeMagnitudeBoundary(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	const big = int64(1) << 53
 	// 200 nodes at 2^53, 200 at 2^53+1.
 	for i := 0; i < 400; i++ {
@@ -206,7 +206,7 @@ func TestStats_IntFloatLargeMagnitudeBoundary(t *testing.T) {
 // histogram's in-domain total, so a range estimate is a fraction of the non-NaN
 // rows (a range predicate yields null on NaN).
 func TestStats_NaNExcludedFromNumerator(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	// 100 finite values in [0,100), plus 50 NaN.
 	for i := 0; i < 150; i++ {
 		key := fmt.Sprintf("m%d", i)

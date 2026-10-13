@@ -55,7 +55,7 @@ func TestExplicitTxRollbackAborts_2973(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			e := cypher.NewEngine(g)
 			if c.ddl != "" {
 				res, err := e.Run(ctx, c.ddl, nil)

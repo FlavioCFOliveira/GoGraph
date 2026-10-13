@@ -84,6 +84,11 @@ func TestResultNewStoreCapped_ClampsProducerToReplayCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	// The mistake: ask for no producer bound at all while recovery keeps one.
 	st := res.NewStoreCapped(w, clampTestOpts(), txn.MaxTxnOpsUnlimited)
 
@@ -258,7 +263,12 @@ func TestProducerCapAboveReplayCap_HazardIsReal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	// Producer bound deliberately looser than the replay bound.
 	st := txn.NewStoreWithOptionsCapped(g, w, clampTestOpts(), txn.MaxTxnOpsUnlimited)
 

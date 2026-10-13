@@ -77,7 +77,10 @@ func (g *Graph[N, W]) EdgeLabelsByIDAsOf(srcID, dstID graph.NodeID, snap *Snapsh
 	// Collect the distinct label ids from the inline slots and the overflow
 	// under the shard RLock, then resolve names. A small set deduplicates the
 	// two sources; the common single-label case touches it once.
-	var ids []LabelID
+	// A pair carries a handful of distinct types; the stack buffer holds the
+	// common case without a per-read allocation (rmp #3106).
+	var idBuf [4]LabelID
+	ids := idBuf[:0]
 	seen := func(lid LabelID) bool {
 		for _, x := range ids {
 			if x == lid {

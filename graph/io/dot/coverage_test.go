@@ -12,7 +12,7 @@ import (
 // TestWrite_QuoteWithDoubleQuote covers the '\' branch in quote().
 func TestWrite_QuoteWithSpecialChars(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge(`has"quote`, `has\backslash`, 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestIsSimpleID_StartsWithDigit(t *testing.T) {
 // TestWriteCtx_ContextCancelled covers the ctx.Err() path in WriteCtx.
 func TestWriteCtx_ContextCancelled(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	// Add enough nodes to ensure the loop runs at least once.
 	for i := range 5 {
 		src := string(rune('a' + i))

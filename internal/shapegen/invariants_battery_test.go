@@ -38,7 +38,7 @@ func mustBuild(t *testing.T, s shapegen.Shape[int, int64]) *lpg.Graph[int, int64
 // TestInvariants_AssertConnected_OnShapegen runs AssertConnected on shapes
 // that are connected by construction.
 func TestInvariants_AssertConnected_OnShapegen(t *testing.T) {
-	invariants.AssertConnected[int, int64](t, mustBuild(t, shapegen.Path(12, false)))
+	invariants.AssertConnected[int, int64](t, mustBuild(t, shapegen.Path(12)))
 	invariants.AssertConnected[int, int64](t, mustBuild(t, shapegen.Cycle(10, false)))
 	invariants.AssertConnected[int, int64](t, mustBuild(t, shapegen.Star(8, true)))
 }
@@ -46,13 +46,13 @@ func TestInvariants_AssertConnected_OnShapegen(t *testing.T) {
 // TestInvariants_AssertDAG_OnShapegen runs AssertDAG on directed acyclic
 // shapes (a directed path edges i->i+1 carries no cycle).
 func TestInvariants_AssertDAG_OnShapegen(t *testing.T) {
-	invariants.AssertDAG[int, int64](t, mustBuild(t, shapegen.Path(16, true)))
+	invariants.AssertDAG[int, int64](t, mustBuild(t, shapegen.Path(16)))
 }
 
 // TestInvariants_AssertBipartite_OnShapegen runs AssertBipartite on shapes
 // that are 2-colourable: a path, an EVEN cycle, and a star.
 func TestInvariants_AssertBipartite_OnShapegen(t *testing.T) {
-	invariants.AssertBipartite[int, int64](t, mustBuild(t, shapegen.Path(12, false)))
+	invariants.AssertBipartite[int, int64](t, mustBuild(t, shapegen.Path(12)))
 	invariants.AssertBipartite[int, int64](t, mustBuild(t, shapegen.Cycle(8, false)))
 	invariants.AssertBipartite[int, int64](t, mustBuild(t, shapegen.Star(9, false)))
 }
@@ -61,8 +61,8 @@ func TestInvariants_AssertBipartite_OnShapegen(t *testing.T) {
 // independent builds of the same deterministic shape; their topology must be
 // identical.
 func TestInvariants_AssertShapeEqual_OnShapegen(t *testing.T) {
-	a := mustBuild(t, shapegen.Path(20, false))
-	b := mustBuild(t, shapegen.Path(20, false))
+	a := mustBuild(t, shapegen.Path(20))
+	b := mustBuild(t, shapegen.Path(20))
 	invariants.AssertShapeEqual[int, int64](t, a, b)
 
 	c := mustBuild(t, shapegen.BalancedBinary(4))
@@ -77,14 +77,14 @@ func TestInvariants_AssertShapeEqual_OnShapegen(t *testing.T) {
 // an explicit unit-weighted graph where the bound is meaningful.
 func TestInvariants_AssertDistanceBound_OnUnitPath(t *testing.T) {
 	const n = 8
-	g := lpg.New[int, int64](adjlist.Config{Directed: false})
+	g := lpg.New[int, int64](adjlist.Config{})
 	for i := 0; i < n-1; i++ {
 		if err := g.AddEdge(i, i+1, 1); err != nil {
 			t.Fatalf("AddEdge(%d->%d): %v", i, i+1, err)
 		}
 	}
 
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 	src, ok := g.AdjList().Mapper().Lookup(0)
 	if !ok {
 		t.Fatal("source node 0 not found in mapper")

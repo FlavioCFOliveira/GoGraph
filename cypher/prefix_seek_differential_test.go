@@ -73,7 +73,7 @@ var pfxExtra = []string{
 // test itself wrote, independently of anything the engine does.
 func buildPrefixDiffGraph(t *testing.T) (*lpg.Graph[string, float64], map[string]string) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	truth := make(map[string]string, pfxDiffPop+len(pfxExtra))
 
 	add := func(key, label string) {
@@ -601,7 +601,7 @@ func TestPrefixSeekRapid(t *testing.T) {
 		).Draw(rt, "values")
 		prefix := rapid.StringOfN(rapid.SampledFrom([]rune(pfxRapidAlphabet)), 0, 4, -1).Draw(rt, "prefix")
 
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		truth := make(map[string]string, pop)
 		for i, v := range vals {
 			key := fmt.Sprintf("r%05d", i)

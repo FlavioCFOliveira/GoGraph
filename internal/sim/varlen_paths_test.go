@@ -193,7 +193,7 @@ func TestVarlenPaths_SensitivityToWrongReference(t *testing.T) {
 		perturb func(o *GraphOracle)
 	}{
 		{"missing KNOWS edge", func(o *GraphOracle) {
-			delete(o.edges, edgeKey{src: o.byName["b"], dst: o.byName["c"], label: "KNOWS"})
+			delete(o.edges, o.instanceKey(edgeKey{src: o.byName["b"], dst: o.byName["c"], label: "KNOWS"}))
 		}},
 		{"phantom KNOWS edge", func(o *GraphOracle) {
 			src, dst := o.byName["d"], o.byName["b"]
@@ -201,7 +201,7 @@ func TestVarlenPaths_SensitivityToWrongReference(t *testing.T) {
 				&EdgeState{SrcID: src, DstID: dst, Label: "KNOWS", Properties: map[string]any{}}
 		}},
 		{"dropped self-loop", func(o *GraphOracle) {
-			delete(o.edges, edgeKey{src: o.byName["c"], dst: o.byName["c"], label: "KNOWS"})
+			delete(o.edges, o.instanceKey(edgeKey{src: o.byName["c"], dst: o.byName["c"], label: "KNOWS"}))
 		}},
 		{"phantom FOLLOWS edge", func(o *GraphOracle) {
 			src, dst := o.byName["b"], o.byName["c"]

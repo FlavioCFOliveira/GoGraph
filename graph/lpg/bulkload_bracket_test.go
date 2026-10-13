@@ -72,7 +72,7 @@ func bulkLoadKey(i int) string {
 // returns the graph. The two arms differ in NOTHING but the bracket.
 func buildBulk(t *testing.T, bracketed bool) *Graph[string, float64] {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	for i := 0; i < bulkLoadNodes; i++ {
 		if err := g.AddNode(bulkLoadKey(i)); err != nil {
 			t.Fatalf("AddNode %d: %v", i, err)
@@ -232,7 +232,7 @@ func TestApplyAtomicallyTx_AlsoOpensTheWindow(t *testing.T) {
 
 	// ApplyAtomicallyTx arm, built identically but through the Tx bracket.
 	runtime.GC()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	for i := 0; i < bulkLoadNodes; i++ {
 		if err := g.AddNode(bulkLoadKey(i)); err != nil {
 			t.Fatalf("AddNode %d: %v", i, err)

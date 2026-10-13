@@ -153,7 +153,7 @@ func TestOrdering_PreservesSlotIdentity_Rapid(t *testing.T) {
 		dstSpace := rapid.IntRange(1, 12).Draw(rt, "dstSpace")
 		useHandles := rapid.Bool().Draw(rt, "useHandles")
 
-		a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+		a := adjlist.New[int, int64](adjlist.Config{})
 		h := uint64(0)
 		for s := 0; s < nSrc; s++ {
 			deg := rapid.IntRange(0, maxDeg).Draw(rt, "degree")
@@ -177,20 +177,16 @@ func TestOrdering_PreservesSlotIdentity_Rapid(t *testing.T) {
 
 // TestOrdering_ConfigurationMatrix covers every adjacency configuration that
 // changes which parallel columns exist, since the ordering must permute exactly the
-// ones present: undirected (mirrored edges), weightless (nil weights column),
-// non-multigraph (no parallel edges), and the handle-less variant of each.
+// ones present: weightless (nil weights column), and the handle-less variant
+// of each.
 func TestOrdering_ConfigurationMatrix(t *testing.T) {
 	t.Parallel()
 	for _, cfg := range []struct {
 		name string
 		cfg  adjlist.Config
 	}{
-		{"directed-multigraph", adjlist.Config{Directed: true, Multigraph: true}},
-		{"directed-simple", adjlist.Config{Directed: true}},
-		{"undirected-multigraph", adjlist.Config{Multigraph: true}},
-		{"undirected-simple", adjlist.Config{}},
-		{"directed-multigraph-weightless", adjlist.Config{Directed: true, Multigraph: true, Weightless: true}},
-		{"undirected-weightless", adjlist.Config{Weightless: true}},
+		{"weighted", adjlist.Config{}},
+		{"weightless", adjlist.Config{Weightless: true}},
 	} {
 		for _, withHandles := range []bool{false, true} {
 			name := cfg.name
@@ -202,12 +198,11 @@ func TestOrdering_ConfigurationMatrix(t *testing.T) {
 				a := adjlist.New[int, int64](adjlist.Config(cfg.cfg))
 				h := uint64(0)
 				// Descending destinations past the cutoff so ordering must work,
-				// plus repeated destinations to exercise parallel runs where the
-				// configuration permits them.
+				// plus repeated destinations to exercise parallel runs.
 				for s := 0; s < 4; s++ {
 					for d := 60; d >= 0; d-- {
 						reps := 1
-						if cfg.cfg.Multigraph && d%7 == 0 {
+						if d%7 == 0 {
 							reps = 3
 						}
 						for r := 0; r < reps; r++ {
@@ -235,7 +230,7 @@ func TestOrdering_ConfigurationMatrix(t *testing.T) {
 // reused), and the CSR built afterwards must still be ordered and faithful.
 func TestOrdering_SurvivesCompaction(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	// Three parallel edges to each of 40 destinations, inserted descending.
 	handleOf := map[[2]int][]uint64{}
 	h := uint64(0)

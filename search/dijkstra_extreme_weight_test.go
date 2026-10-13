@@ -32,7 +32,7 @@ func TestDijkstra_ExtremeFloat64Weights(t *testing.T) {
 		const n = 8 // nodes 0..7
 		const w = 1e308
 
-		a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+		a := adjlist.New[int, float64](adjlist.Config{})
 		for i := 0; i < n-1; i++ {
 			if err := a.AddEdge(i, i+1, w); err != nil {
 				t.Fatalf("AddEdge(%d→%d): %v", i, i+1, err)
@@ -66,7 +66,7 @@ func TestDijkstra_ExtremeFloat64Weights(t *testing.T) {
 		const n = 8 // nodes 0..7
 		const w = 1e-308
 
-		a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+		a := adjlist.New[int, float64](adjlist.Config{})
 		for i := 0; i < n-1; i++ {
 			if err := a.AddEdge(i, i+1, w); err != nil {
 				t.Fatalf("AddEdge(%d→%d): %v", i, i+1, err)

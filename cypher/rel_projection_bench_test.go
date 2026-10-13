@@ -3,10 +3,11 @@ package cypher_test
 // rel_projection_bench_test.go — empirical evidence for task #1574.
 //
 // It isolates the cost of reconstructing expr.RelationshipValue per result row
-// in the projection path (buildRelationshipValueFromRow → edgeHandleAtFwdPos /
-// edgeInstanceIdxFor). Before #1574 each of those helpers rebuilt the entire
-// forward CSR (O(V+E)) per row, making `MATCH (a)-[r]->(b) RETURN r` cost
-// O(R·(V+E)) per query and dominating heap allocations in the DST profile.
+// in the projection path (buildRelationshipValueFromRow). Before #1574 the
+// position-to-handle helpers that path called each rebuilt the entire forward
+// CSR (O(V+E)) per row, making `MATCH (a)-[r]->(b) RETURN r` cost O(R·(V+E))
+// per query and dominating heap allocations in the DST profile. Those helpers
+// are gone (rmp #2317 and #3088): the row now carries the stable handle.
 //
 // The benchmark seeds a multigraph (so both the stable-handle path and the
 // parallel-edge instance-idx path are exercised) once, outside the timer, then
@@ -30,14 +31,14 @@ import (
 // all created via CREATE so each edge carries a stable handle. The result is a
 // relationship-dense multigraph whose `MATCH (a)-[r]->(b) RETURN r` returns
 // roughly nNodes*fanout*2 rows.
-// newRelBenchEngine builds an engine over a MULTIGRAPH and seeds it with
+// newRelBenchEngine builds an engine over a fresh graph and seeds it with
 // [seedRelGraph].
 //
 // Construction and seeding are ONE call because they are one contract, and
 // splitting them is what broke these benchmarks (rmp #2068). seedRelGraph
-// deliberately creates two edges between the same endpoint pair, so it requires
-// `Multigraph: true`; the callers built their graph with the general-purpose
-// newBenchGraph, which is plain directed. The engine correctly refused the
+// deliberately creates two edges between the same endpoint pair, so it required
+// multigraph storage; the callers built their graph with the general-purpose
+// newBenchGraph, which was then a simple graph. The engine correctly refused the
 // second CREATE — openCypher requires multigraph semantics for a parallel
 // relationship — and every benchmark that used the pair failed in its seed loop,
 // so five benchmarks gated nothing for a month while still appearing in the
@@ -53,7 +54,7 @@ import (
 // [TestRelBenchFixtureAcceptsParallelEdges] puts the fixture on the short layer.
 func newRelBenchEngine(b testing.TB, nNodes, fanout int) *cypher.Engine {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	seedRelGraph(b, eng, nNodes, fanout)
 	return eng
@@ -93,9 +94,8 @@ func benchmarkRelProjection(b *testing.B, nNodes, fanout int) {
 	// count(r) is the DST checker's per-tick sampled-edge probe. To evaluate
 	// the aggregate the executor builds the row context for EVERY matched edge,
 	// which reconstructs the full RelationshipValue per row
-	// (buildRelationshipValueFromRow → edgeHandleAtFwdPos / edgeInstanceIdxFor).
-	// That per-row path is exactly what #1574 targets; this query reproduces
-	// the profile's dominant allocator faithfully.
+	// (buildRelationshipValueFromRow). That per-row path is exactly what #1574
+	// targeted.
 	const q = "MATCH (a)-[r]->(b) RETURN count(r)"
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -161,12 +161,12 @@ func BenchmarkScalarFilterProjection(b *testing.B) {
 // on every run, and nothing said so, because `go test` compiles benchmarks but
 // does not RUN them. A benchmark broken this way gates nothing AND reports
 // nothing — it still appears in the suite, so it reads as coverage that is not
-// there. This test drives the same fixture through the same seed, so pointing it
-// back at a non-multigraph fails here, in `make ci`, rather than silently.
+// there. This test drives the same fixture through the same seed, so a fixture
+// that loses a parallel edge fails here, in `make ci`, rather than silently.
 //
 // It asserts the relationship count rather than merely that the seed returned:
-// seedRelGraph writes TWO edges per (i, fanout) step, and only a multigraph keeps
-// both, so a fixture that silently kept one would halve this number.
+// seedRelGraph writes TWO edges per (i, fanout) step, so a fixture that silently
+// kept one would halve this number.
 func TestRelBenchFixtureAcceptsParallelEdges(t *testing.T) {
 	const nNodes, fanout = 8, 2
 	eng := newRelBenchEngine(t, nNodes, fanout)

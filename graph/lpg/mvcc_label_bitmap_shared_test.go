@@ -21,7 +21,7 @@ import (
 // than the fixture's history.
 func sharedBitmapRig(t *testing.T, n int) (*Graph[string, float64], LabelID) {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	for i := 0; i < n; i++ {
 		name := string(rune('a'+i%26)) + string(rune('a'+i/26))

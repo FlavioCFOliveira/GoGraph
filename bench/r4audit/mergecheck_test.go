@@ -17,7 +17,7 @@ import (
 // node (behaving like MATCH), an early exit would silently drop rows and the
 // recommendation is wrong.
 func TestMergeBindsAllMatches(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{`CREATE (:X {v: 1})`, `CREATE (:X {v: 1})`, `CREATE (:X {v: 1})`} {
 		res, err := eng.RunAny(context.Background(), q, nil)

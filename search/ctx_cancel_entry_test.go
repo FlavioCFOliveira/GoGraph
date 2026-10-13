@@ -83,7 +83,7 @@ func deadContext(tb testing.TB) context.Context {
 // 100). Also returns the NodeIDs of vertices 0 and 7.
 func buildDirectedChain8(tb testing.TB) (*csr.CSR[int64], graph.NodeID, graph.NodeID) {
 	tb.Helper()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < entryCancelNodes-1; i++ {
 		if err := a.AddEdge(i, i+1, 1); err != nil {
 			tb.Fatalf("AddEdge(%d,%d): %v", i, i+1, err)
@@ -109,13 +109,13 @@ func buildDirectedChain8(tb testing.TB) (*csr.CSR[int64], graph.NodeID, graph.No
 // coreness 2 for all eight.
 func buildUndirectedRing8(tb testing.TB) (*csr.CSR[struct{}], *adjlist.AdjList[int, struct{}]) {
 	tb.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < entryCancelNodes; i++ {
 		if err := a.AddEdge(i, (i+1)%entryCancelNodes, struct{}{}); err != nil {
 			tb.Fatalf("AddEdge(%d,%d): %v", i, (i+1)%entryCancelNodes, err)
 		}
 	}
-	return csr.BuildFromAdjList(a), a
+	return csr.BuildFromAdjList(a).BuildSymmetric(), a
 }
 
 // buildDirectedRing8 returns a CSR over the directed 8-cycle
@@ -123,7 +123,7 @@ func buildUndirectedRing8(tb testing.TB) (*csr.CSR[struct{}], *adjlist.AdjList[i
 // so Kahn's algorithm starts with an empty queue and emits nothing.
 func buildDirectedRing8(tb testing.TB) *csr.CSR[struct{}] {
 	tb.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < entryCancelNodes; i++ {
 		if err := a.AddEdge(i, (i+1)%entryCancelNodes, struct{}{}); err != nil {
 			tb.Fatalf("AddEdge(%d,%d): %v", i, (i+1)%entryCancelNodes, err)
@@ -375,7 +375,7 @@ func TestTopologicalSortCtx_CancelBeatsCycle(t *testing.T) {
 // cancellation under a dead one.
 func TestTopologicalSortCtx_CancelOnAcyclic(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < entryCancelNodes-1; i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -405,7 +405,7 @@ func TestTopologicalSortCtx_CancelOnAcyclic(t *testing.T) {
 // entered at least once.
 func buildNegativeCycleRing8(tb testing.TB) *csr.CSR[int64] {
 	tb.Helper()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < entryCancelNodes; i++ {
 		if err := a.AddEdge(i, (i+1)%entryCancelNodes, -1); err != nil {
 			tb.Fatalf("AddEdge(%d,%d): %v", i, (i+1)%entryCancelNodes, err)

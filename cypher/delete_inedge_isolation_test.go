@@ -89,7 +89,7 @@ type inEdgeOutcome struct {
 
 func inEdgeGraph(t *testing.T, withEdge bool) (*cypher.Engine, *lpg.Graph[string, float64]) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	q := "CREATE (:X {k: 'x'}), (:D {k: 'd'})"
 	if withEdge {

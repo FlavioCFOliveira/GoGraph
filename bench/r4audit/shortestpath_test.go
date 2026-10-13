@@ -19,7 +19,7 @@ import (
 // shape the round-3 head-to-head measured shortestPath on: average degree 10.
 func spSeed(t *testing.T, n, degree int) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("n%d", i)

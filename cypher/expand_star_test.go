@@ -19,7 +19,7 @@ import (
 // buildStar constructs a directed star with one hub and nSpokes spokes.
 func buildStar(tb testing.TB, nSpokes int) (*lpg.Graph[string, float64], *cypher.Engine) {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	hub := "hub"
 	if err := g.AddNode(hub); err != nil {

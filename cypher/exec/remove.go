@@ -404,11 +404,11 @@ func resolveRelBindingFromRow(rc *RelCols, row Row, mut GraphMutator) (resolvedE
 		return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoint NodeIDs (%d, %d)", graph.NodeID(srcIV), graph.NodeID(dstIV))
 	}
 	// The endpoint columns carry TRAVERSAL order; the reverse hop of an
-	// undirected pattern, or the mirror slot of an undirected graph, swaps them
-	// relative to how the relationship is stored, and every edge mutator is
-	// keyed by the stored order. Normalised exactly as the SET path's
-	// [resolveRelBinding] does (rmp #2945, the REMOVE twin of #2817) — without
-	// it the removal targeted the empty mirror order and did nothing.
+	// undirected pattern swaps them relative to how the relationship is stored,
+	// and every edge mutator is keyed by the stored order. Normalised exactly as
+	// the SET path's [resolveRelBinding] does (rmp #2945, the REMOVE twin of
+	// #2817) — without it the removal targeted the unstored order and did
+	// nothing.
 	handle := resolveRelHandle(rc, row, srcKey, dstKey, mut)
 	stKey, enKey := relStorageDirection(mut, srcKey, dstKey, handle)
 	return resolvedEntity{

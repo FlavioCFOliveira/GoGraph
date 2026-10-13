@@ -30,7 +30,7 @@ import (
 // its WAL ("" for the in-memory wiring).
 func straddleEngine(t *testing.T, walBacked bool) (*Engine, string, *wal.Writer) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if !walBacked {
 		return NewEngine(g), "", nil
 	}

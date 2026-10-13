@@ -262,12 +262,7 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 		if len(sh.claim) == 0 {
 			sh.claim = nil
 		}
-		if len(sh.born) == 0 {
-			sh.born = nil
-		}
-		if len(sh.died) == 0 {
-			sh.died = nil
-		}
+		sh.dropRecordsIfEmpty()
 		sh.mu.Unlock()
 	}
 	return g.finishLifeWithdrawal(&lw)
@@ -283,12 +278,7 @@ func (g *Graph[N, W]) reclaimAbortedLifeOf(ids []graph.NodeID) int {
 		sh := g.nodeLifeShardFor(id)
 		sh.mu.Lock()
 		lw.withdrawLocked(sh, id)
-		if len(sh.born) == 0 {
-			sh.born = nil
-		}
-		if len(sh.died) == 0 {
-			sh.died = nil
-		}
+		sh.dropRecordsIfEmpty()
 		if len(sh.claim) == 0 {
 			sh.claim = nil
 		}

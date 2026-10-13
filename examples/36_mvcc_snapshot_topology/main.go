@@ -271,7 +271,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	}
 	base := readMem()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// An index on :Hub(id) so the observation query anchors by seek rather than

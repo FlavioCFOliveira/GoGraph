@@ -21,7 +21,7 @@ import (
 // the node stayed in L's bitmap after every record about it was reclaimed, and
 // every present-time label scan returned a node that does not carry L.
 func TestRemoveNodeLabel_NoOpLeavesThePendingRemovalAlone(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	if err := g.AddNode("a"); err != nil {
 		t.Fatal(err)

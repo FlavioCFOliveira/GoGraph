@@ -34,7 +34,7 @@ func TestRetireHold_GateRaisedAcrossStripAndFlip(t *testing.T) {
 			name = "one transaction"
 		}
 		t.Run(name, func(t *testing.T) {
-			g := New[string, float64](adjlist.Config{Directed: true})
+			g := New[string, float64](adjlist.Config{})
 			t.Cleanup(func() { _ = g.Close() })
 			if err := g.AddNode("a"); err != nil {
 				t.Fatal(err)

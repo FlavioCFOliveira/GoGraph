@@ -462,7 +462,7 @@ func parseGraphalyticsEdgeList(root, name string) (*lpg.Graph[int64, struct{}], 
 		return nil, fmt.Errorf("shapegen: open %s: %w", ePath, err)
 	}
 	defer func() { _ = ef.Close() }()
-	g := lpg.New[int64, struct{}](adjlist.Config{Directed: true})
+	g := lpg.New[int64, struct{}](adjlist.Config{})
 	// Vertices.
 	vs := bufio.NewScanner(vf)
 	vs.Buffer(make([]byte, 0, 64*1024), 1<<20)

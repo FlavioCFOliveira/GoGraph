@@ -67,8 +67,6 @@ func TestBulkLoadOracle_NoGoroutineLeak(t *testing.T) {
 // degenerated — an empty fixture, a fault that never bit, a cap that was never
 // crossed, a crash that changed nothing — passes the happy test above and fails
 // here.
-//
-//nolint:gocyclo // one linear oracle: build the fixture, run the bulk load, then assert every non-vacuity clause in sequence.
 func TestBulkLoadOracle_NonVacuous(t *testing.T) {
 	t.Parallel()
 	sc := bulkLoadOracleScenario()
@@ -85,9 +83,9 @@ func TestBulkLoadOracle_NonVacuous(t *testing.T) {
 		ev.fixture.selfLoops, ev.fixture.reversedPairs)
 	for i := range ev.configs {
 		c := ev.configs[i]
-		t.Logf("config %-18s entries=%4d dropped=%3d mirrored=%4d modelSize=%4d closedForm=%4d "+
+		t.Logf("config %-18s entries=%4d modelSize=%4d closedForm=%4d "+
 			"seqBytes=%d parBytes=%d byteIdentical=%t sliceIdentical=%t",
-			c.name, c.entries, c.dupsDropped, c.mirrored, c.modelSize, c.closedFormSize,
+			c.name, c.entries, c.modelSize, c.closedFormSize,
 			c.seqBytes, c.parBytes, c.byteIdentical, c.sliceIdentical)
 	}
 	t.Logf("streaming: drainClean=%d drainCancelled=%d rowsAfterCancel=%d ctxErr=%t batchRows=%d",
@@ -118,9 +116,9 @@ func TestBulkLoadOracle_NonVacuous(t *testing.T) {
 			ev.fixture.duplicatePairs, ev.fixture.selfLoops, ev.fixture.reversedPairs)
 	}
 
-	// --- All four configurations ran, and each behaved as its config implies. ---
-	if len(ev.configs) != 4 {
-		t.Fatalf("%d configurations adjudicated, want 4", len(ev.configs))
+	// --- The configuration ran, and behaved as a multigraph. ---
+	if len(ev.configs) != 1 {
+		t.Fatalf("%d configurations adjudicated, want 1", len(ev.configs))
 	}
 	byName := map[string]bulkOracleConfigEvidence{}
 	for i := range ev.configs {
@@ -131,21 +129,6 @@ func TestBulkLoadOracle_NonVacuous(t *testing.T) {
 	if dm := byName["directed-multi"]; dm.modelSize != uint64(len(ev.fixture.edges)) {
 		t.Errorf("directed multigraph stored %d entries for %d records, want equality",
 			dm.modelSize, len(ev.fixture.edges))
-	}
-	// Mirroring must roughly double an undirected load, and dedup must shrink a
-	// simple one. Asserting the ORDERING rather than the exact numbers keeps this
-	// robust across seeds while still catching a configuration that was ignored.
-	if byName["undirected-multi"].modelSize <= byName["directed-multi"].modelSize {
-		t.Errorf("undirected multigraph (%d) did not exceed directed multigraph (%d): mirroring never happened",
-			byName["undirected-multi"].modelSize, byName["directed-multi"].modelSize)
-	}
-	if byName["directed-simple"].modelSize >= byName["directed-multi"].modelSize {
-		t.Errorf("directed simple (%d) did not undercut directed multigraph (%d): dedup never happened",
-			byName["directed-simple"].modelSize, byName["directed-multi"].modelSize)
-	}
-	if byName["undirected-simple"].modelSize >= byName["undirected-multi"].modelSize {
-		t.Errorf("undirected simple (%d) did not undercut undirected multigraph (%d)",
-			byName["undirected-simple"].modelSize, byName["undirected-multi"].modelSize)
 	}
 	for i := range ev.configs {
 		c := ev.configs[i]
@@ -356,7 +339,7 @@ func TestBulkLoadOracle_Deterministic(t *testing.T) {
 func TestBulkLoadOracle_CheckerDiscriminates(t *testing.T) {
 	t.Parallel()
 	edges := buildBulkOracleFixture(NewSeed(0xB0142488), false).edges
-	model := buildBulkOracleModel(edges, true, true)
+	model := buildBulkOracleModel(edges)
 	want := model.expect()
 
 	// The control: the model's own shape, rebuilt as a CSR, must PASS. Without
@@ -665,8 +648,8 @@ func TestBulkLoadOracle_ForgedChecksumIsCaughtByContent(t *testing.T) {
 //
 // The scenario's header states that `Loader.buildParallel` — the multi-goroutine
 // fan-out — is unreachable from outside package `bulk`, because
-// `csrDirectEligible()` is matched first and is unconditionally true for a
-// directed load: it requires `MaxShardCapacity == 0`, and [bulk.Options] exposes
+// `csrDirectEligible()` is matched first and is unconditionally true for any
+// load: it requires `MaxShardCapacity == 0`, and [bulk.Options] exposes
 // no shard-capacity knob. That reasoning depends entirely on the field set of
 // [bulk.Options].
 //
@@ -682,7 +665,7 @@ func TestBulkLoadOracle_ParallelFanOutStillUnreachable(t *testing.T) {
 		got = append(got, ty.Field(i).Name)
 	}
 	sort.Strings(got)
-	want := []string{"Directed", "ExpectNodes", "MaxRows", "Multigraph", "OutputPath", "Parallel"}
+	want := []string{"ExpectNodes", "MaxRows", "OutputPath", "Parallel"}
 	if !slices.Equal(got, want) {
 		t.Errorf("bulk.Options fields changed: got %v, want %v.\n\n"+
 			"The bulk-load-oracle scenario documents that Loader.buildParallel's goroutine fan-out is "+

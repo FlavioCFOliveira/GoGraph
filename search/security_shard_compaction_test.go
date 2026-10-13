@@ -42,7 +42,7 @@ func TestSec_Core_TransitiveClosureSparseNodeSpace(t *testing.T) {
 
 	const n = 40
 	keys := secShardCompactionKeys(n)
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	// A directed chain: key[i] -> key[i+1]. Reachable(i, j) iff i <= j.
 	for i := 0; i+1 < n; i++ {
 		if err := a.AddEdge(keys[i], keys[i+1], struct{}{}); err != nil {
@@ -124,7 +124,7 @@ func TestSec_Core_WCCSparseNodeSpace(t *testing.T) {
 
 	const n = 30
 	keys := secShardCompactionKeys(n)
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	// Two disjoint chains: [0..n/2) and [n/2..n). Expect K = 2 components.
 	half := n / 2
 	for i := 0; i+1 < half; i++ {
@@ -207,7 +207,7 @@ func TestSec_Core_KruskalSparseNodeSpace(t *testing.T) {
 	// Undirected, encoded symmetric: a connected spanning chain with
 	// extra weighted edges. AddEdge on an undirected adjlist stores both
 	// directions internally.
-	a := adjlist.New[string, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := 0; i+1 < n; i++ {
 		if err := a.AddEdge(keys[i], keys[i+1], int64(i+1)); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -217,7 +217,7 @@ func TestSec_Core_KruskalSparseNodeSpace(t *testing.T) {
 	if err := a.AddEdge(keys[0], keys[n-1], 100); err != nil {
 		t.Fatalf("AddEdge chord: %v", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	if uint64(c.MaxNodeID()) <= c.Order() {
 		t.Fatalf("MaxNodeID()=%d not greater than Order()=%d; sparse-space "+
 			"precondition broken", uint64(c.MaxNodeID()), c.Order())

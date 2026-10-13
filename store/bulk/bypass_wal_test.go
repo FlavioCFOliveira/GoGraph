@@ -33,7 +33,7 @@ func TestLoader_BypassesWAL(t *testing.T) {
 	preSize := pre.Size()
 
 	outPath := filepath.Join(dir, "graph.csr")
-	l := New(Options{OutputPath: outPath, Directed: true})
+	l := New(Options{OutputPath: outPath})
 	edges := []Edge{
 		{Src: "a", Dst: "b", Weight: 1},
 		{Src: "b", Dst: "c", Weight: 2},

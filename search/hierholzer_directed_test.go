@@ -15,7 +15,7 @@ import (
 func TestHierholzer_Directed(t *testing.T) {
 	t.Parallel()
 	// Directed C4: 0→1→2→3→0
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	edges := [][2]int{{0, 1}, {1, 2}, {2, 3}, {3, 0}}
 	for _, e := range edges {
 		if err := a.AddEdge(e[0], e[1], int64(1)); err != nil {

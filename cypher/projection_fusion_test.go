@@ -53,7 +53,7 @@ import (
 // multigraph, because one fixture creates two parallel relationships between one
 // endpoint pair and openCypher requires multigraph semantics for that.
 func newFusionGraph() *lpg.Graph[string, float64] {
-	return lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	return lpg.New[string, float64](adjlist.Config{})
 }
 
 // fusionRelRows is the row count every counter assertion below is stated per. It

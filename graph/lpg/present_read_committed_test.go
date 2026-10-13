@@ -149,7 +149,7 @@ func presentReadings(g *Graph[string, float64]) string {
 // presentReadFixture builds the committed state the in-flight commit changes.
 func presentReadFixture(t *testing.T) *Graph[string, float64] {
 	t.Helper()
-	g := newDirectTxGraph(t, true)
+	g := newDirectTxGraph(t)
 	for _, k := range []string{"n", "b", "rm"} {
 		requireNoErr(t, g.AddNode(k))
 	}
@@ -283,7 +283,7 @@ func TestPresentReads_ReadYourOwnWritesThroughTheTransaction(t *testing.T) {
 // BenchmarkPresentRead_CommittedHead measures the direct accessors' fast path
 // — the newest version committed — which must allocate nothing.
 func BenchmarkPresentRead_CommittedHead(b *testing.B) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	_ = g.AddNode("n")
 	_ = g.AddNode("b")

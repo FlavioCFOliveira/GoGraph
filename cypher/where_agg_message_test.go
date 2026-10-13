@@ -15,7 +15,7 @@ import (
 )
 
 func TestAggregationInWhereMessage_1806(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	_, err := eng.Run(context.Background(), `MATCH (n) WHERE count(n) > 1 RETURN n`, nil)
 	if err == nil {

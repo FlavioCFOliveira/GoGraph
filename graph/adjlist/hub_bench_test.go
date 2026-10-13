@@ -36,7 +36,7 @@ import (
 // simple-graph duplicate-detection scan so the benchmark isolates the
 // backing-array growth cost.
 func buildHub(n int) (*adjlist.AdjList[string, float64], string) {
-	a := adjlist.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[string, float64](adjlist.Config{})
 	_ = a.AddNode("hub")
 	for i := range n {
 		leaf := fmt.Sprintf("l%d", i)

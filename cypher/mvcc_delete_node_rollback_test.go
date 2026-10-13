@@ -94,7 +94,7 @@ func TestMVCCDeleteNodeRollback_DoesNotResurrectPeerDeletedNode(t *testing.T) {
 					detachRollbackOutcome(aCommits), detachRollbackOutcome(bCommits),
 					map[bool]string{true: "A-finishes-first", false: "B-finishes-first"}[aFirst])
 				t.Run(name, func(t *testing.T) {
-					g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+					g := lpg.New[string, float64](adjlist.Config{})
 					eng := cypher.NewEngine(g)
 					if _, err := eng.RunInTxAny(ctx,
 						"CREATE (:P {n:'K'})-[:R]->(:P {n:'X'}), (:P {n:'C'})", nil); err != nil {

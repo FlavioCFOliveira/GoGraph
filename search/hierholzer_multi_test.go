@@ -17,10 +17,7 @@ func TestHierholzerUndirected_Multigraph(t *testing.T) {
 	// C3 with doubled edges:
 	// 0-1 (×2), 1-2 (×2), 0-2 (×2)
 	// Degrees: 0→4, 1→4, 2→4 — all even.
-	a := adjlist.New[int, int64](adjlist.Config{
-		Directed:   false,
-		Multigraph: true,
-	})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for _, pair := range [3][2]int{{0, 1}, {1, 2}, {0, 2}} {
 		for rep := 0; rep < 2; rep++ {
 			if err := a.AddEdge(pair[0], pair[1], int64(1)); err != nil {
@@ -28,7 +25,7 @@ func TestHierholzerUndirected_Multigraph(t *testing.T) {
 			}
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	circuit, err := HierholzerUndirected(c)
 	if err != nil {
 		t.Fatalf("HierholzerUndirected: %v", err)

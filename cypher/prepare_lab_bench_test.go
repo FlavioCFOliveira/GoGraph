@@ -93,7 +93,7 @@ func labBenchName(id string) string { return strings.ReplaceAll(id, "/", "-") }
 // consults the index manager to infer parameter types, and an empty graph has
 // no indexes, which is stated as a limit of the method.
 func newLabEngine() *Engine {
-	return NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+	return NewEngine(lpg.New[string, float64](adjlist.Config{}))
 }
 
 // Sinks. Assigned from every benchmark body so the compiler cannot delete the

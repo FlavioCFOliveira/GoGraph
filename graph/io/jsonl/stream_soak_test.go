@@ -25,7 +25,7 @@ func TestJSONL_Stream100MB_Bounded(t *testing.T) {
 	const n = 500_000
 
 	// Build a directed path graph: n0→n1→n2→…→n(N-1).
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := range n {
 		if err := a.AddNode(fmt.Sprintf("n%d", i)); err != nil {
 			t.Fatalf("AddNode n%d: %v", i, err)
@@ -70,7 +70,7 @@ func TestJSONL_Stream100MB_Bounded(t *testing.T) {
 	}
 	defer rf.Close()
 
-	b, rows, err := jsonl.ReadInto(rf, adjlist.Config{Directed: true})
+	b, rows, err := jsonl.ReadInto(rf, adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadInto: %v", err)
 	}

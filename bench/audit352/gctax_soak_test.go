@@ -69,7 +69,7 @@ func TestGCTax_ResidentGraph(t *testing.T) {
 
 	t.Logf("%-10s %10s %12s %14s %14s %14s %14s", "nodes", "degree", "GC ms", "GC ms/1k node", "heap objects", "obj/node", "heapAlloc MB")
 	for _, n := range []int{50_000, 200_000, 800_000} {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			k := fmt.Sprintf("n%d", i)
 			must(g.AddNode(k))

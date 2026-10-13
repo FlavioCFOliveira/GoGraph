@@ -62,7 +62,7 @@ func seedNodeXY(ctx context.Context, t *testing.T, eng *cypher.Engine) {
 // cleared and only a remains.
 func TestWithSetWholeEntityReplace_MapLiteral(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	seedNodeXY(ctx, t, eng)
@@ -91,7 +91,7 @@ func TestWithSetWholeEntityReplace_MapLiteral(t *testing.T) {
 // `WITH n SET n = $p` shape, with the parameter resolving to a map.
 func TestWithSetWholeEntityReplace_Param(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	seedNodeXY(ctx, t, eng)
@@ -119,7 +119,7 @@ func TestWithSetWholeEntityReplace_Param(t *testing.T) {
 // state the bug lived in.
 func TestWithSetWholeEntityReplace_DeepContext(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -151,7 +151,7 @@ func TestWithSetWholeEntityReplace_DeepContext(t *testing.T) {
 // the fix accidentally routing `+=` through the replace path.
 func TestWithSetAppend_KeepsExisting(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	seedNodeXY(ctx, t, eng)
@@ -178,7 +178,7 @@ func TestWithSetAppend_KeepsExisting(t *testing.T) {
 // change and still targets a single property.
 func TestWithSetProperty_StillWorks(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	seedNodeXY(ctx, t, eng)

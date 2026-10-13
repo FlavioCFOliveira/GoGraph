@@ -39,7 +39,7 @@ func lazyPropGraph() *lpg.Graph[string, float64] {
 	if propBenchGraph != nil {
 		return propBenchGraph
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < propSeedSize; i++ {
 		key := fmt.Sprintf("p%d", i)
 		if err := g.AddNode(key); err != nil {

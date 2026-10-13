@@ -23,7 +23,7 @@ import (
 func TestDijkstra_DisconnectedForest(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	addE := func(from, to int, w float64) {
 		if err := a.AddEdge(from, to, w); err != nil {
 			t.Fatalf("AddEdge(%d→%d, %v): %v", from, to, w, err)

@@ -10,7 +10,7 @@ import (
 
 func TestTopologicalSort_LinearDAG(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 5; i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -40,7 +40,7 @@ func TestTopologicalSort_LinearDAG(t *testing.T) {
 func TestTopologicalSort_DiamondDAG(t *testing.T) {
 	t.Parallel()
 	edges := [][2]int{{0, 1}, {0, 2}, {1, 3}, {2, 3}}
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for _, e := range edges {
 		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -65,7 +65,7 @@ func TestTopologicalSort_DiamondDAG(t *testing.T) {
 
 func TestTopologicalSort_DetectsCycle(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

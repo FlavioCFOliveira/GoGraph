@@ -13,7 +13,7 @@ import (
 
 func TestPageRank_Star(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 1; i <= 5; i++ {
 		if err := a.AddEdge(i, 0, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -52,7 +52,7 @@ func TestPageRank_Star(t *testing.T) {
 
 func TestPageRank_EmptyGraph(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	c := csr.BuildFromAdjList(a)
 	path := filepath.Join(t.TempDir(), "empty.csr")
 	if _, err := csrfile.WriteToFile(path, c); err != nil {
@@ -73,7 +73,7 @@ func TestPageRank_EmptyGraph(t *testing.T) {
 // star total rank conserves to 1.0 and the dangling sink dominates.
 func TestPageRank_MassConservation_Star(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 1; i <= 5; i++ {
 		if err := a.AddEdge(i, 0, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -114,7 +114,7 @@ func TestPageRank_MassConservation_Star(t *testing.T) {
 // reference implementation.)
 func TestPageRank_MatchesInMemory(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 8; i++ {
 		if err := a.AddEdge(i, (i+1)%8, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)

@@ -85,12 +85,12 @@ func setallEngines(t *testing.T, fn func(t *testing.T, eng *cypher.Engine)) {
 	t.Helper()
 	t.Run("InMemory", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		fn(t, cypher.NewEngine(g))
 	})
 	t.Run("WalStore", func(t *testing.T) {
 		t.Parallel()
-		fn(t, walMultigraphEngine(t))
+		fn(t, walParallelEdgeEngine(t))
 	})
 }
 

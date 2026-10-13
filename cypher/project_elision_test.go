@@ -171,7 +171,7 @@ func TestProjectElision_ResultsAreUnchanged(t *testing.T) {
 // them in a different order.
 func seedRelated(t *testing.T, n int) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	for i := 0; i < n; i++ {
 		mustRun(t, eng, fmt.Sprintf("CREATE (:P {name: 'p%d', age: %d})", i, i))

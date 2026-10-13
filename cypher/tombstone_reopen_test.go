@@ -13,6 +13,7 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -91,7 +92,12 @@ func TestCypher_DeleteSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
-	g1 := lpg.New[string, float64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w1.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g1 := lpg.New[string, float64](adjlist.Config{})
 	runCypherCheckpointClose(t, dir, g1, w1, `CREATE (a:Spec {key:'auth'})`)
 
 	// open 2: MATCH (n) DETACH DELETE n
@@ -103,6 +109,11 @@ func TestCypher_DeleteSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open2 wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	runCypherCheckpointClose(t, dir, res2.Graph, w2, `MATCH (n) DETACH DELETE n`)
 
 	// open 3: MATCH (n) RETURN count(n) ⇒ 0, and id(n) returns no rows.
@@ -144,7 +155,12 @@ func TestCypher_DeleteThenRecreateAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
-	g1 := lpg.New[string, float64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w1.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g1 := lpg.New[string, float64](adjlist.Config{})
 	runCypherCheckpointClose(t, dir, g1, w1, `CREATE (a:Spec {key:'auth'})`)
 
 	res2, err := recovery.Open[string, float64](dir, tombRecOpts())
@@ -155,6 +171,11 @@ func TestCypher_DeleteThenRecreateAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open2 wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	runCypherCheckpointClose(t, dir, res2.Graph, w2, `MATCH (n {key:'auth'}) DETACH DELETE n`)
 
 	res3, err := recovery.Open[string, float64](dir, tombRecOpts())
@@ -165,6 +186,11 @@ func TestCypher_DeleteThenRecreateAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open3 wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w3.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	runCypherCheckpointClose(t, dir, res3.Graph, w3, `CREATE (a:Spec {key:'auth'})`)
 
 	res4, err := recovery.Open[string, float64](dir, tombRecOpts())

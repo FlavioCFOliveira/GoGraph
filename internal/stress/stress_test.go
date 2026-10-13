@@ -23,7 +23,7 @@ import (
 // Dijkstra over a shared immutable CSR for a fixed wall-clock
 // budget. The race detector catches any shared-state mutation.
 func TestStress_MixedReadWorkload(t *testing.T) {
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < 1000; i++ {
 		a.AddEdge(i, (i+1)%1000, int64(i%10+1))
 		if i%5 == 0 {

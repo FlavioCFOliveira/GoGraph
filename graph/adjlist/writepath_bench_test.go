@@ -15,7 +15,7 @@ func BenchmarkWritePath_BulkBuild(b *testing.B) {
 		b.Run(benchName(d), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+				a := adjlist.New[int, int64](adjlist.Config{})
 				for k := 1; k <= d; k++ {
 					_ = a.AddEdge(0, k, int64(k))
 				}
@@ -31,7 +31,7 @@ func BenchmarkWritePath_ManyShards(b *testing.B) {
 	const edges = 4096
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+		a := adjlist.New[int, int64](adjlist.Config{})
 		for k := 0; k < edges; k++ {
 			_ = a.AddEdge(k, k+1, 1)
 		}
@@ -50,7 +50,7 @@ func BenchmarkWritePath_BulkBuildWindowed(b *testing.B) {
 		b.Run(benchName(d), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+				a := adjlist.New[int, int64](adjlist.Config{})
 				a.BeginCommit()
 				for k := 1; k <= d; k++ {
 					_ = a.AddEdge(0, k, int64(k))
@@ -68,7 +68,7 @@ func BenchmarkWritePath_ManyShardsWindowed(b *testing.B) {
 	const edges = 4096
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+		a := adjlist.New[int, int64](adjlist.Config{})
 		a.BeginCommit()
 		for k := 0; k < edges; k++ {
 			_ = a.AddEdge(k, k+1, 1)

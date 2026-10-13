@@ -71,7 +71,7 @@ func TestConflict_AbortedStampKeepsDisplacedCommit(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+			g := New[string, int64](adjlist.Config{})
 			for _, n := range []string{"hub", "x", "y"} {
 				if err := g.AddNode(n); err != nil {
 					t.Fatalf("AddNode(%s): %v", n, err)

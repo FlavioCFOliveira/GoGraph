@@ -16,6 +16,7 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -53,6 +54,11 @@ func bhWriteCycle(t *testing.T, dir string, snap bool, queries ...string) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	store := txn.NewStoreWithOptions[string, float64](res.Graph, w, bhStoreOpts())
 	eng := cypher.NewEngineWithStore(store)
 	for _, q := range queries {

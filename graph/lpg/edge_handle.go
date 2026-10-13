@@ -33,10 +33,7 @@ package lpg
 // edgeHandleLabelShards / edgeHandlePropShards key per-CREATE label and
 // property sets by (edgeKey, handle). They mirror the (edgeKey, idx)
 // instance stores in edge_instance_labels.go / edge_instance_props.go; the
-// idx stores remain as the simple-graph fallback (where parallel CREATEs
-// collapse onto one slot and the read path falls back to the per-pair
-// union), while the handle stores are the authoritative per-instance
-// surface in multigraph mode.
+// handle stores are the authoritative per-instance surface.
 //
 // # Concurrency
 //
@@ -528,8 +525,7 @@ func (g *Graph[N, W]) EdgePropertyByHandleAsOf(src, dst N, handle uint64, key st
 // occurrence and compacts the handle column in lock-step. The boolean
 // reports whether such a slot exists AND carries a non-zero handle; it is
 // false when either endpoint is unknown, no src→dst edge exists, or the
-// matched slot has the 0 "no handle" sentinel (a simple-graph or
-// pre-Stage-2 edge).
+// matched slot has the 0 "no handle" sentinel (a pre-Stage-2 edge).
 //
 // It lets the write-query transaction-undo log capture the identity of the
 // exact parallel edge instance a DELETE is about to remove, so the inverse
@@ -733,18 +729,12 @@ func (g *Graph[N, W]) delEdgePropertyByHandleInfo(src, dst N, handle uint64, key
 // [Graph.RemoveEdgeInstance]; used by DELETE to drop one logical edge
 // while leaving sibling handles untouched. No-op when handle is 0.
 //
-// On an undirected graph the records are cleared under BOTH directions of the
-// pair, because they live under whichever direction the metadata was written
-// through — normally the creation direction — while a removal may name the
-// relationship through its mirror (rmp #2887).
-//
 // RemoveEdgeInstanceByHandle is safe for concurrent use.
 //
 // It runs as a single-operation transaction (rmp #2947): it refuses with an
 // error wrapping [ErrDirectWriteConflict], and changes nothing, while another
-// transaction holds an uncommitted write on the instance's per-handle records, in either
-// direction. The refusal is retryable. See
-// [ErrDirectWriteConflict].
+// transaction holds an uncommitted write on the instance's per-handle records.
+// The refusal is retryable. See [ErrDirectWriteConflict].
 //
 // The error return is a breaking change: RemoveEdgeInstanceByHandle used to
 // return nothing.
@@ -755,8 +745,8 @@ func (g *Graph[N, W]) RemoveEdgeInstanceByHandle(src, dst N, handle uint64) erro
 	})
 }
 
-// removeEdgeInstanceByHandleInfo is [Graph.RemoveEdgeInstanceByHandle] inside write transaction tx; tx is
-// nil only on a graph whose versioning substrate is disarmed. See [writeCtx].
+// removeEdgeInstanceByHandleInfo is [Graph.RemoveEdgeInstanceByHandle] inside
+// write transaction tx; tx is nil only on a graph whose versioning substrate is disarmed. See [writeCtx].
 func (g *Graph[N, W]) removeEdgeInstanceByHandleInfo(src, dst N, handle uint64, tx *writeCtx) {
 	if handle == 0 {
 		return
@@ -769,31 +759,14 @@ func (g *Graph[N, W]) removeEdgeInstanceByHandleInfo(src, dst N, handle uint64, 
 	if !ok {
 		return
 	}
-	k := edgeKey{src: srcID, dst: dstID}
-	g.dropHandleRecords(k, handle, tx, false)
-	// THE MIRROR KEY TOO, on an undirected graph (rmp #2887). The per-handle
-	// records are keyed by the DIRECTED pair they were written under, while the
-	// adjacency retires both mirror slots whichever direction the removal names:
-	// RemoveEdgeByHandle(b, a, h) cleared only (b, a) and left h's creation-
-	// direction (a, b) labels and properties behind — in autocommit and in a
-	// write transaction alike — for a handle the adjacency no longer holds.
-	//
-	// Only a record that EXISTS is versioned here. The mirror key normally holds
-	// none, and recording a version for an absent record would make an idempotent
-	// cleanup a write that can collide with a concurrent writer of that key.
-	if !g.adj.Directed() && srcID != dstID {
-		g.dropHandleRecords(edgeKey{src: dstID, dst: srcID}, handle, tx, true)
-	}
+	g.dropHandleRecords(edgeKey{src: srcID, dst: dstID}, handle, tx)
 }
 
 // dropHandleRecords removes handle's labels and properties stored under the
 // directed pair k, recording a version on each store it changes so a concurrent
-// snapshot and a rollback both see the pre-image. When onlyIfPresent is set a
-// store holding no record for handle is left untouched and unversioned;
-// otherwise a store holding any record for the pair is versioned even when
-// handle carries none, which is the behaviour the creation-direction clear has
-// always had.
-func (g *Graph[N, W]) dropHandleRecords(k edgeKey, handle uint64, tx *writeCtx, onlyIfPresent bool) {
+// snapshot and a rollback both see the pre-image. A store holding any record for
+// the pair is versioned even when handle carries none.
+func (g *Graph[N, W]) dropHandleRecords(k edgeKey, handle uint64, tx *writeCtx) {
 	key := edgeHandleKey{pair: k, handle: handle}
 	{
 		sh := g.edgeHandleLabelShardFor(k)
@@ -809,8 +782,7 @@ func (g *Graph[N, W]) dropHandleRecords(k edgeKey, handle uint64, tx *writeCtx, 
 			return
 		}
 		if im, ok := sh.m[k]; ok {
-			_, has := im.get(handle)
-			if (has || !onlyIfPresent) && g.pushHandleLabelVersion(sh, k, handle, tx) {
+			if g.pushHandleLabelVersion(sh, k, handle, tx) {
 				im.del(handle)
 				if im.len() == 0 {
 					delete(sh.m, k)
@@ -830,8 +802,7 @@ func (g *Graph[N, W]) dropHandleRecords(k edgeKey, handle uint64, tx *writeCtx, 
 			return
 		}
 		if im, ok := sh.m[k]; ok {
-			_, has := im.get(handle)
-			if (has || !onlyIfPresent) && g.pushHandlePropVersion(sh, k, handle, tx) {
+			if g.pushHandlePropVersion(sh, k, handle, tx) {
 				im.del(handle)
 				if im.len() == 0 {
 					delete(sh.m, k)

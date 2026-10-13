@@ -47,7 +47,7 @@ func inMemTypes(t *testing.T, eng *cypher.Engine) []string {
 // surface their own type via the handle read path (single engine, no reopen).
 func TestInMemory_ParallelTypedEdges_HandlePath(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -75,7 +75,7 @@ func TestInMemory_ParallelTypedEdges_HandlePath(t *testing.T) {
 // transaction and are appended in immediate succession.
 func TestInMemory_ParallelTypedEdges_SingleCreate(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -98,7 +98,7 @@ func TestInMemory_ParallelTypedEdges_SingleCreate(t *testing.T) {
 // slot compaction shifted positions.
 func TestInMemory_DeleteSibling_SurvivorKeepsType(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

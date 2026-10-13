@@ -30,7 +30,7 @@ func secIOReadJSONL(t *testing.T, in string) (rows int, err error) {
 			t.Fatalf("JSONL reader panicked on hostile input: %v", r)
 		}
 	}()
-	_, n, e := jsonl.ReadInto(strings.NewReader(in), adjlist.Config{Directed: true})
+	_, n, e := jsonl.ReadInto(strings.NewReader(in), adjlist.Config{})
 	return n, e
 }
 
@@ -90,7 +90,7 @@ func TestSec_IO_JSONLReadRepelsListPropertyRecursion(t *testing.T) {
 			t.Fatalf("list-recursion line panicked: %v", r)
 		}
 	}()
-	g, _, err := jsonl.ReadWithProps(strings.NewReader(b.String()), adjlist.Config{Directed: true})
+	g, _, err := jsonl.ReadWithProps(strings.NewReader(b.String()), adjlist.Config{})
 	if err == nil {
 		t.Fatalf("deeply nested list property accepted: want a parse error")
 	}
@@ -138,7 +138,7 @@ func TestSec_IO_JSONLReadByteCapBoundary(t *testing.T) {
 
 	// At cap: accepted.
 	g, rows, err := jsonl.ReadIntoCappedCtx(context.Background(),
-		strings.NewReader(doc), adjlist.Config{Directed: true}, capBytes)
+		strings.NewReader(doc), adjlist.Config{}, capBytes)
 	if err != nil {
 		t.Fatalf("at-cap stream rejected: err=%v, want nil", err)
 	}
@@ -149,7 +149,7 @@ func TestSec_IO_JSONLReadByteCapBoundary(t *testing.T) {
 	// One byte over: rejected at the crossing byte.
 	over := doc + "x"
 	g2, _, err2 := jsonl.ReadIntoCappedCtx(context.Background(),
-		strings.NewReader(over), adjlist.Config{Directed: true}, capBytes)
+		strings.NewReader(over), adjlist.Config{}, capBytes)
 	if !errors.Is(err2, jsonl.ErrInputTooLarge) {
 		t.Fatalf("over-cap stream: err=%v, want ErrInputTooLarge", err2)
 	}
@@ -178,7 +178,7 @@ func TestSec_IO_JSONLReadLineTooLong(t *testing.T) {
 			t.Fatalf("over-long line panicked: %v", rec)
 		}
 	}()
-	g, _, err := jsonl.ReadIntoCappedCtx(context.Background(), r, adjlist.Config{Directed: true}, 0)
+	g, _, err := jsonl.ReadIntoCappedCtx(context.Background(), r, adjlist.Config{}, 0)
 	if !errors.Is(err, jsonl.ErrLineTooLong) {
 		t.Fatalf("err = %v, want ErrLineTooLong", err)
 	}
@@ -231,7 +231,7 @@ func TestSec_IO_JSONLReadWellFormedNestedListBounded(t *testing.T) {
 	// A bounded, well-formed nested list decodes successfully; the guarantee
 	// under test is "no panic, bounded work", so either a clean decode or a
 	// typed error is acceptable — a crash is not.
-	g, _, err := jsonl.ReadWithProps(strings.NewReader(b.String()), adjlist.Config{Directed: true})
+	g, _, err := jsonl.ReadWithProps(strings.NewReader(b.String()), adjlist.Config{})
 	if err != nil && g != nil {
 		t.Errorf("graph must be nil on error, got %v", g)
 	}

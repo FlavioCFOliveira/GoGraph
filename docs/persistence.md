@@ -518,9 +518,18 @@ and only present when at least one secondary index registered with
 
 ## Snapshot file format
 
-The manifest schema is versioned. `snapshot.ManifestVersion` (the
-highest schema this build emits) is **3**. The build understands all
-three versions transparently:
+The manifest schema is versioned. `snapshot.ManifestVersion` is **5**:
+it is the highest version this build understands and the version it
+stamps on **every** manifest it writes, whatever components the snapshot
+carries. Which components a snapshot carries is read from its file list,
+never from its version. The loader accepts versions 1 to 5; versions 1 to
+4 are only read, with the meaning the builds that wrote them gave them.
+Version 5 is version 4 for a store in which every graph is a directed
+multigraph: its `graph_config` carries neither `"directed"` nor
+`"multigraph"`. Builds up to and including `v0.16.0` refuse a version-5
+manifest with `snapshot.ErrManifestUnsupported`. Version 4 is what
+`v0.16.0` wrote with a mapper that may carry holes. The component shapes
+below keep the version numbers older builds stamped on them:
 
 - **v1** — `csr.bin` only. Written by the legacy
   `snapshot.WriteSnapshotCSR` / `WriteSnapshotCSRCtx` helpers. The
@@ -564,8 +573,8 @@ without losing it; the checkpointer refuses to truncate when the graph has
 either and the snapshot does not carry the matching component (see
 [Checkpoint policy](#checkpoint-policy)).
 
-`snapshot.LoadManifest` accepts all three versions; a manifest whose
-version exceeds `ManifestVersion` (4 or higher) surfaces
+`snapshot.LoadManifest` accepts versions 1 to 5; a manifest whose
+version exceeds `ManifestVersion` (6 or higher) surfaces
 `snapshot.ErrManifestUnsupported`. The high-level
 `snapshot.LoadSnapshotFull` reads every shape and returns empty
 `LabelsReadback` / `PropertiesReadback` / `MapperReadback` /
@@ -720,17 +729,24 @@ form bit-identical to pre-extension v2 snapshots.
 above are shown compacted for readability.)
 
 A v3 manifest is a v2 manifest with an extra `mapper.bin` entry in
-`files`. The `version` field is bumped to `3` only when `mapper.bin`
-is present; the writer stamps `2` for non-string-keyed snapshots that
-omit the mapper. `snapshot/csr.bin`, `labels.bin`, and
-`properties.bin` are byte-identical across v2 and v3.
+`files`. Builds before rmp #3072 stamped `3` only when `mapper.bin` was
+present and `2` for non-string-keyed snapshots that omitted the mapper;
+this build stamps `5` on both. `snapshot/csr.bin`, `labels.bin`, and
+`properties.bin` are byte-identical across v2 and v3. The example above
+is a manifest an older build wrote: its `graph_config` still carries the
+legacy `directed` and `multigraph` keys.
 
-**`graph_config` (optional).** The originating graph's `directed` /
-`multigraph` / `weightless` shape, so recovery reconstructs the same adjacency
-variant. It is a pointer with `omitempty`, so it is absent from every snapshot
-written before the field existed and from the legacy CSR-only writer, which has
-no live graph to read; a reader that finds it absent defaults to the historical
-recovery behaviour (`Directed: true, Multigraph: true`).
+**`graph_config` (optional).** The originating graph's `weightless` shape, so
+recovery reconstructs the same adjacency variant. It is a pointer with
+`omitempty`, so it is absent from every snapshot written before the field
+existed and from the legacy CSR-only writer, which has no live graph to read; a
+reader that finds it absent reconstructs a weighted directed multigraph. This
+build never writes the `directed` or `multigraph` keys. The decoder still reads
+them from a manifest an older build wrote: `"directed": false` or
+`"multigraph": false` marks a legacy undirected or simple store
+(`snapshot.LoadedSnapshot.Legacy`), which recovery migrates to a directed
+multigraph on its first clean open (see `store/recovery/legacy_store.go` and
+the `## [0.17.0]` entry of [CHANGELOG.md](../CHANGELOG.md)).
 `adjlist.Config.MaxShardCapacity` is deliberately **not** persisted — it is a
 runtime growth bound, and re-imposing it could make recovery itself fail with
 `adjlist.ErrShardFull` while replaying data that legitimately exceeds the cap.
@@ -2039,4 +2055,4 @@ change that intentionally bumps the on-disk shape, and add a fresh
 
 ---
 
-*Last reviewed: 2026-10-09 against commit `60c90d730ebdd6fb3168614de4b92d78bf4d6ca4`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-10-13 against commit `e91d42b2e916c8667bb7df3d238c6db417d42143`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

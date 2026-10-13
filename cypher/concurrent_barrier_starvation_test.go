@@ -44,7 +44,7 @@ func runWithDeadline(t *testing.T, d time.Duration, what string, fn func()) {
 // watchdog would fire. A clean completion is evidence the barrier is released on
 // every error path.
 func TestConcurrent_AggregatorCapInBarrier_NoDeadlock(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{MaxCollectItems: 8})
 	ctx := context.Background()
 
@@ -134,7 +134,7 @@ func TestConcurrent_ParallelBackfill_NoStarvation(t *testing.T) {
 		t.Skip("parallel backfill needs >= 2 GOMAXPROCS to engage; serial path covered elsewhere")
 	}
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

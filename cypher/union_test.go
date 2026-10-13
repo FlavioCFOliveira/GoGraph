@@ -23,7 +23,7 @@ import (
 // engine's CREATE path is exercised identically to the other suites.
 func newUnionGraph(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	setup := []string{
@@ -97,7 +97,7 @@ func TestUnionAll_TwoBranches_NoDedup(t *testing.T) {
 // Expected: alice (deduped), bob, charlie, matrix, inception → 5 rows.
 func TestUnion_DedupAcrossLabels(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// Persons: alice, bob. Actors: alice (duplicate), charlie.
@@ -144,7 +144,7 @@ func TestUnion_DedupAcrossLabels(t *testing.T) {
 //   - Total UNION ALL: 4 rows (alice appears twice).
 func TestUnionAll_PreservesDuplicates(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	for _, q := range []string{

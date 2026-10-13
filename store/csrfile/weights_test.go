@@ -37,7 +37,7 @@ func TestReader_WeightsRaw_Uint64(t *testing.T) {
 // nil when the file carries no weights.
 func TestReader_WeightsRaw_Unweighted(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	if err := a.AddEdge("a", "b", struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestReader_WeightsRaw_Unweighted(t *testing.T) {
 // values intact.
 func TestReader_WeightsFloat64(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, float64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 1.5); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

@@ -40,7 +40,7 @@ func TestTokenLength_WireCodeOnEveryEngine_2956(t *testing.T) {
 	}{
 		{"wal", newWALEngine},
 		{"in-memory", func(*testing.T) *cypher.Engine {
-			return cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+			return cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 		}},
 	}
 	for _, e := range engines {

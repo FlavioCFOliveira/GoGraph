@@ -28,10 +28,10 @@ package exec
 //     handle per logical edge across both directions, so this recovers the exact
 //     instance and is delete-stable. Mirrors [Expand.lookupFwdEdgePosByHandle].
 //
-//   - Positional-ordinal (fallback when either CSR lacks handles — a simple
-//     graph or a legacy snapshot). The k-th reverse (fwdSrc->revUID) slot pairs
-//     with the k-th forward (fwdSrc->revUID) slot. A simple graph has exactly
-//     one slot per pair, so this degenerates to the original first-match scan.
+//   - Positional-ordinal (fallback when either CSR lacks handles — a pre-handle
+//     snapshot). The k-th reverse (fwdSrc->revUID) slot pairs with the k-th
+//     forward (fwdSrc->revUID) slot. A pair with one slot degenerates to the
+//     original first-match scan.
 //
 // Entry ^uint64(0) marks "unresolved" (an out-of-range vertex or a missing
 // forward counterpart); callers fall back to the synthetic reverse position in
@@ -95,7 +95,7 @@ const unresolvedFwdPos = ^uint64(0)
 // forward-CSR position of the SAME physical edge, or [unresolvedFwdPos] when the
 // slot has no resolvable forward counterpart.
 //
-// fwdHandles/revHandles may be nil (a simple graph or legacy snapshot); when
+// fwdHandles/revHandles may be nil (a pre-handle snapshot); when
 // either is nil the positional-ordinal fallback is used instead of the
 // handle-exact pairing.
 //

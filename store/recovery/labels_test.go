@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -36,7 +37,12 @@ func TestRecovery_LabelsSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	commits := []struct{ src, dst, nodeLabel, edgeLabel string }{
@@ -115,7 +121,12 @@ func TestRecovery_V1SnapshotStillRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	tx := store.Begin()
 	if err := tx.SetNodeLabel("alice", "Person"); err != nil {

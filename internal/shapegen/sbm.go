@@ -40,7 +40,7 @@ import (
 //
 // Each generator constructs the underlying [adjlist.Config] from the
 // caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, and
-// forces cfg.Directed=false and cfg.Multigraph=false: both block-model
+// stores each undirected edge as ONE directed arc, in the orientation the generator enumerates it: both block-model
 // constructions are undirected simple graphs by definition. The
 // "no self-loop" invariant holds because the pair iteration ranges over
 // i < j only; the "no parallel edge" invariant holds because each
@@ -249,8 +249,6 @@ func SBM(blockSizes []int, probPercent [][]int, seed uint64) Shape[int, int64] {
 	return sbmBase{
 		name: "random.sbm",
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildSBM(g, ownedSizes, ownedProb, seed)
 		},

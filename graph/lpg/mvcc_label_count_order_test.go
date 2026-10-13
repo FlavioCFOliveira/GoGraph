@@ -19,7 +19,7 @@ import (
 func newLabelsCountProbeGraph(t *testing.T, seeded, spare int) (*Graph[string, float64], []LabelID) {
 	t.Helper()
 	ctx := context.Background()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	for i := 0; i < seeded+spare; i++ {
 		if err := g.AddNode(fmt.Sprintf("n%d", i)); err != nil {
 			t.Fatalf("AddNode(n%d): %v", i, err)

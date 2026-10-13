@@ -44,7 +44,7 @@ import (
 // decrement placed there would leak a writer per empty bracket for the life of the
 // process.
 func TestMVCCStats_WriterGaugeRisesInsideABracketAndReturnsToZero(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	if got := g.MVCCStats().Write.Writers; got != 0 {
@@ -88,7 +88,7 @@ func TestMVCCStats_WriterGaugeRisesInsideABracketAndReturnsToZero(t *testing.T) 
 // brackets would put commits above the number of instants the clock ever allocated and
 // silently deflate every rate computed from it.
 func TestMVCCStats_CommitsCountPublishedInstantsOnly(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	for i := 0; i < 20; i++ {
@@ -123,7 +123,7 @@ func TestMVCCStats_CommitsCountPublishedInstantsOnly(t *testing.T) {
 // the abort it became, where its record is marked. Both are needed and they are not
 // the same number in general: a transaction can abort without conflicting.
 func TestMVCCStats_ConflictIsCountedAsBothAConflictAndAnAbort(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
@@ -180,7 +180,7 @@ func TestMVCCStats_ConflictIsCountedAsBothAConflictAndAnAbort(t *testing.T) {
 // collapses to nothing and the histogram is empty — which is also this test's
 // negative control, asserted at the end.
 func TestMVCCStats_ChainDepthReportsRetainedDepth(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
@@ -234,7 +234,7 @@ func TestMVCCStats_ChainDepthReportsRetainedDepth(t *testing.T) {
 // That is exactly what it did report before rmp #2312: the horizon holds a writer's
 // snapshot too (rmp #2299), and the field was called ActiveReaders.
 func TestMVCCStats_ActiveReadersExcludesWriters(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	var snapshots, readers, writers int

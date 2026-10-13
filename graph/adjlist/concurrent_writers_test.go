@@ -15,7 +15,7 @@ import (
 func findShardNKeys(t *testing.T, shard byte, n int) []int {
 	t.Helper()
 	const shardMask = 0xFF
-	probe := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	probe := adjlist.New[int, struct{}](adjlist.Config{})
 	keys := make([]int, 0, n)
 	for i := 0; len(keys) < n && i < 10_000_000; i++ {
 		id := probe.Mapper().Intern(i)
@@ -39,7 +39,7 @@ func TestAdjList_ConcurrentWriters_SizeConsistency(t *testing.T) {
 		edgesEach  = 1000
 	)
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 
 	var wg sync.WaitGroup
 	var perGoroutine [goroutines]atomic.Int64
@@ -81,7 +81,7 @@ func TestAdjList_ConcurrentWriters_CrossShardNoDeadlock(t *testing.T) {
 		edgesEach  = 500
 	)
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 
 	done := make(chan struct{})
 	var wg sync.WaitGroup
@@ -122,7 +122,7 @@ func TestAdjList_ConcurrentWriters_ShardIndependence(t *testing.T) {
 	shard0 := findShardNKeys(t, 0, keysPerShard)
 	shard255 := findShardNKeys(t, 255, keysPerShard)
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 
 	var wg sync.WaitGroup
 	wg.Add(2)

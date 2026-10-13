@@ -15,7 +15,7 @@ func TestReadIntoCtx_ContextCancelled(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err := ReadIntoCtx(ctx, strings.NewReader("alice,bob,0\n"), Options{Directed: true})
+	_, _, err := ReadIntoCtx(ctx, strings.NewReader("alice,bob,0\n"), Options{})
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
@@ -25,7 +25,7 @@ func TestReadIntoCtx_ContextCancelled(t *testing.T) {
 // written=0 when the edge loop starts, so the check fires immediately.
 func TestWriteCtx_ContextCancelled(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestWriteCtx_ContextCancelled(t *testing.T) {
 // TestWriteCtx_HasHeader covers the opts.HasHeader branch in WriteCtx.
 func TestWriteCtx_HasHeader(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("alice", "bob", 42); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

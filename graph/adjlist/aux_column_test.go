@@ -100,7 +100,7 @@ func auxOf(a *AdjList[string, int], src graph.NodeID) *fakeAux {
 // stays the same length as neighbours.
 func TestAux_GrowAcrossAppends(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdge("s", "d0", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestAux_GrowAcrossAppends(t *testing.T) {
 // aligned with neighbours.
 func TestAux_FusedAppendViaFactoryAndGrow(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	// The factory builds a single-present-slot fakeAux of the requested length
 	// (the new slot is the last one, length-1) carrying the payload int.
 	a.SetAuxFactory(func(length int, payload any) AuxColumn {
@@ -195,7 +195,7 @@ func TestAux_FusedAppendViaFactoryAndGrow(t *testing.T) {
 // slot present.
 func TestAux_FusedAppendAfterAbsentGrow(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	a.SetAuxFactory(func(length int, payload any) AuxColumn {
 		f := &fakeAux{vals: make([]int, length), present: make([]bool, length)}
 		f.vals[length-1] = payload.(int)
@@ -231,48 +231,11 @@ func TestAux_FusedAppendAfterAbsentGrow(t *testing.T) {
 	}
 }
 
-// TestAux_FusedPayloadIsDirectional asserts the fused payload is stamped only on
-// the FORWARD (src) entry, not the undirected MIRROR (dst,src) entry: edge
-// properties are stored directionally (matching UpdateEntryAux / the higher
-// layer's per-source SetEdgeProperty), while the label IS symmetric. This keeps a
-// fused undirected write observationally identical to the two-step build.
-func TestAux_FusedPayloadIsDirectional(t *testing.T) {
-	t.Parallel()
-	a := New[string, int](Config{Directed: false, Multigraph: true})
-	a.SetAuxFactory(func(length int, payload any) AuxColumn {
-		f := &fakeAux{vals: make([]int, length), present: make([]bool, length)}
-		f.vals[length-1] = payload.(int)
-		f.present[length-1] = true
-		return f
-	})
-	if err := a.AddEdgeLabeledWithProp("a", "b", 0, uint32(3), 42); err != nil {
-		t.Fatalf("AddEdgeLabeledWithProp: %v", err)
-	}
-	// Forward a->b carries the payload.
-	aID, _ := a.Mapper().Lookup("a")
-	fwd := auxOf(a, aID)
-	if fwd == nil || len(fwd.vals) != 1 || !fwd.present[0] || fwd.vals[0] != 42 {
-		t.Fatalf("forward entry missing fused payload: %v", fwd)
-	}
-	// Mirror b->a carries NO aux column (the payload is directional).
-	bID, _ := a.Mapper().Lookup("b")
-	if mir := a.LoadEntryAux(bID); mir != nil {
-		t.Fatalf("mirror entry carries an aux column (payload must be directional): %v", mir)
-	}
-	// The label IS symmetric: both directions carry label 3.
-	if labs := labelsOf(t, a, "a"); len(labs) != 1 || labs[0] != 3 {
-		t.Fatalf("forward label = %v, want [3]", labs)
-	}
-	if labs := labelsOf(t, a, "b"); len(labs) != 1 || labs[0] != 3 {
-		t.Fatalf("mirror label = %v, want [3] (label is symmetric)", labs)
-	}
-}
-
 // TestAux_CompactAcrossRemoval drives a real RemoveEdge and asserts CompactSlot
 // excised the right slot, preserving the surviving slots' values and binding.
 func TestAux_CompactAcrossRemoval(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	dsts := []string{"d0", "d1", "d2", "d3"}
 	for i, d := range dsts {
 		if err := a.AddEdge("s", d, i); err != nil {
@@ -324,7 +287,7 @@ func TestAux_CompactAcrossRemoval(t *testing.T) {
 // nothing).
 func TestAux_NilUntilSet(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	if err := a.AddEdge("s", "d0", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -345,7 +308,7 @@ func TestAux_NilUntilSet(t *testing.T) {
 // (it has no slack notion) while trimming the topology arrays.
 func TestAux_CarriedByTrim(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 	// Build with growth slack: several appends over-allocate the backing arrays.
 	for i := 0; i < 5; i++ {
 		if err := a.AddEdge("s", "d", i); err != nil { // parallel edges to same dst
@@ -382,7 +345,7 @@ func TestAux_CarriedByTrim(t *testing.T) {
 // fn in a way that publishes) for a source with no adjacency entry.
 func TestAux_UpdateNoEntry(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true})
+	a := New[string, int](Config{})
 	a.Mapper().Intern("lonely") // interned but no edge → no entry
 	srcID, _ := a.Mapper().Lookup("lonely")
 	called := false

@@ -37,7 +37,7 @@ func buildLDBCProxy(tb testing.TB) (
 	tb.Helper()
 
 	const n = 1000
-	g = lpg.New[int, int64](adjlist.Config{Directed: true})
+	g = lpg.New[int, int64](adjlist.Config{})
 
 	for i := range n {
 		if err := g.AddNode(i); err != nil {

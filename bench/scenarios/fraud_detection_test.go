@@ -39,7 +39,7 @@ func TestFraudDetection_KHopTriangleLeiden(t *testing.T) {
 		fraudNode = 0
 	)
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 
 	addClique := func(lo, hi int) {
 		for i := lo; i <= hi; i++ {
@@ -62,7 +62,7 @@ func TestFraudDetection_KHopTriangleLeiden(t *testing.T) {
 		}
 	}
 
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric() // the clusters are undirected
 
 	// --- k-hop BFS (depth ≤ 2) from fraudNode ---
 	fraudID, ok := a.Mapper().Lookup(fraudNode)

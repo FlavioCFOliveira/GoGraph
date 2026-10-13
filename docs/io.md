@@ -24,7 +24,7 @@ string slot the reader expects) until the generic surface lands.
 | Format     | Reader | Writer | Package                  | Notes                                 |
 |------------|--------|--------|--------------------------|---------------------------------------|
 | CSV        | ✓      | ✓      | `graph/io/csv`           | `src,dst[,weight]` rows; `#` comments |
-| GraphML    | ✓      | ✓      | `graph/io/graphml`       | XML; directed / undirected; weights   |
+| GraphML    | ✓      | ✓      | `graph/io/graphml`       | XML; directed edges; weights          |
 | DOT        |        | ✓      | `graph/io/dot`           | Graphviz text; for visualisation      |
 | JSON Lines | ✓      | ✓      | `graph/io/jsonl`         | `{type: node\|edge, …}` per line      |
 
@@ -63,9 +63,10 @@ The reader accepts the conventional shape:
 </graphml>
 ```
 
-`edgedefault="undirected"` selects the matching adjacency-list
-configuration. Other attributes on `<node>` / `<edge>` /
-`<graph>` are accepted and ignored.
+Each `<edge>` is read as one directed relationship from `source` to
+`target`; the `<graph>` `edgedefault` attribute, `"undirected"` included, is
+not consulted. The writers always emit `edgedefault="directed"`. Other
+attributes on `<node>` / `<edge>` / `<graph>` are accepted and ignored.
 
 GraphML declares `attr.type` per `<key>`, not per value. When a property
 name carries the *same* kind on every node, the writer emits a single
@@ -80,11 +81,10 @@ so this is transparent and back-compatible with single-key files.
 
 ## DOT (Graphviz)
 
-DOT is write-only in v1. The exporter emits a `digraph G` (or
-`graph G` for undirected), one `<id> -> <id> [label="<w>"]` edge
-per row, with the weight label omitted when zero. Identifiers
-containing non-alphanumeric characters are double-quoted with
-proper escaping.
+DOT is write-only in v1. The exporter emits a `digraph G` with one
+`<id> -> <id> [label="<w>"]` edge per stored edge, with the weight
+label omitted when zero. Identifiers containing non-alphanumeric
+characters are double-quoted with proper escaping.
 
 ```go
 dot.Write(os.Stdout, g)

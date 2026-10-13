@@ -26,7 +26,7 @@ import (
 // directed A-KNOWS->B edge and runs an undirected MATCH from A. The
 // engine must emit exactly one binding for B.
 func TestMatch_Undirected_SingleEdgePair_NoDuplicate(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -74,7 +74,7 @@ RETURN friend.id`
 // test: it pins the engine's behaviour when the data model legitimately
 // has parallel edges in opposite directions.
 func TestMatch_Undirected_BothDirections_DistinctEdges(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

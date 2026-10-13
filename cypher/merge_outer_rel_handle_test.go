@@ -59,7 +59,7 @@ type handleCollisionFixture struct {
 // its ordinary write path rather than the test reaching past it.
 func newHandleCollisionFixture(t *testing.T) *handleCollisionFixture {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// Two decoys: node ids start at 0 and 0 is the reserved "no handle" sentinel,

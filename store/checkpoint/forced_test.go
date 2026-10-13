@@ -23,7 +23,7 @@ func TestCheckpoint_ForcedCheckpoint(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, e := range [][2]string{{"u", "v"}, {"v", "w"}, {"w", "u"}} {
 		if err := g.AddEdge(e[0], e[1], 0); err != nil {
 			t.Fatalf("AddEdge(%s->%s): %v", e[0], e[1], err)

@@ -27,7 +27,7 @@ func TestCSR_CrossProcess_ByteEqual(t *testing.T) {
 	shape := shapegen.BarabasiAlbert(1000, 3, 42)
 
 	buildCSR := func() *csr.CSR[int64] {
-		g, err := shape.Build(adjlist.Config{Directed: true})
+		g, err := shape.Build(adjlist.Config{})
 		if err != nil {
 			t.Fatalf("Build: %v", err)
 		}

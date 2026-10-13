@@ -20,7 +20,7 @@ import (
 // commit timestamp exists at all.
 func commitTSGraph(t *testing.T) *Graph[string, float64] {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	g.armMVCC()
 	return g
 }
@@ -167,7 +167,7 @@ func TestAllocateCommitTS_RecycledStateCarriesNoStaleTimestamp(t *testing.T) {
 // answers, so a durable caller can invoke it unconditionally.
 func TestAllocateCommitTS_ZeroWhenThereIsNothingToStamp(t *testing.T) {
 	// Disarmed graph: no MVCC clock, so no instant.
-	disarmed := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	disarmed := New[string, float64](adjlist.Config{})
 	if got := disarmed.AllocateCommitTS(WriteTx{}); got != 0 {
 		t.Fatalf("AllocateCommitTS on a disarmed graph = %d, want 0", got)
 	}

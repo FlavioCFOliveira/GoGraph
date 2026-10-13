@@ -27,16 +27,16 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
-// walMultigraphEngine returns a WAL-backed engine over a fresh directed
+// walParallelEdgeEngine returns a WAL-backed engine over a fresh directed
 // multigraph, exercising the walMutatorAdapter write path.
-func walMultigraphEngine(t *testing.T) *cypher.Engine {
+func walParallelEdgeEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
 	w, err := wal.Open(filepath.Join(t.TempDir(), "wal"))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -92,5 +92,5 @@ func TestRemoveParallelEdge_InMemory_CountersPerInstance(t *testing.T) {
 // per-pair gate.
 func TestRemoveParallelEdge_WalStore_CountersPerInstance(t *testing.T) {
 	t.Parallel()
-	removePerInstanceCounters(t, walMultigraphEngine(t))
+	removePerInstanceCounters(t, walParallelEdgeEngine(t))
 }

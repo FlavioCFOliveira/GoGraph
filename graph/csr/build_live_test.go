@@ -30,7 +30,7 @@ func arcs(c *csr.CSR[float64]) [][2]graph.NodeID {
 }
 
 func TestBuildLive_NoGhostEdgesAfterTombstone_1790(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"a", "b", "c"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode %s: %v", k, err)
@@ -81,7 +81,7 @@ func TestBuildLive_NilFilterMatchesRaw_1790(t *testing.T) {
 	// committed one without visiting it, so the nil fast path is kept only
 	// where no record exists; the contract asserted here is the build outcome,
 	// and that every node reads live.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"x", "y", "z"} {
 		_ = g.AddNode(k)
 	}

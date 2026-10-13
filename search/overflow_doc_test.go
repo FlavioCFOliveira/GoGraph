@@ -14,7 +14,7 @@ import (
 // along the chain.
 func int32PathCSR(t *testing.T, n int, perHop int32) (*csr.CSR[int32], []graph.NodeID) {
 	t.Helper()
-	a := adjlist.New[int, int32](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int32](adjlist.Config{})
 	for i := 0; i < n-1; i++ {
 		if err := a.AddEdge(i, i+1, perHop); err != nil {
 			t.Fatalf("AddEdge(%d->%d): %v", i, i+1, err)

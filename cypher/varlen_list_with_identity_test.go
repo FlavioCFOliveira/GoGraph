@@ -38,7 +38,7 @@ import (
 // vliEngine returns an in-memory multigraph engine after running writes.
 func vliEngine(t *testing.T, writes ...string) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range writes {
 		mustRunWrite(t, eng, q)

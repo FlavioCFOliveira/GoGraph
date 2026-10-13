@@ -55,7 +55,7 @@ import (
 // isolated (:C), the anchor of the OPTIONAL MATCH shapes that bind NULL.
 func bndEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ipExec(t, eng, `CREATE (:A {n: 1})-[:R {w: 1}]->(:B {n: 2}), (:C)`)
 	return eng
@@ -258,7 +258,7 @@ func TestRebindingBoundary_UnwindRebindsTheName(t *testing.T) {
 // else, the graph of the #2921 report.
 func bndParallelEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ipExec(t, eng, `CREATE (a:X)-[:R {w: 1}]->(b:Y), (a)-[:R {w: 2}]->(b)`)
 	return eng

@@ -97,7 +97,7 @@ func TestCheckOpCounters_HappyPathScriptedSequence(t *testing.T) {
 			Params: map[string]any{"a": "Bob-1", "b": "Zed"}}},
 		{"MERGE relationship that matches increments", Op{Kind: OpMerge, Cypher: tmplMergeKnowsN,
 			Params: map[string]any{"a": "Bob-1", "b": "Zed"}}},
-		// Alice has one incident edge (Alice->Bob): -nodes 1, -relationships 1.
+		// Alice has two incident edges (the parallel Alice->Bob pair): -nodes 1, -relationships 2.
 		{"DETACH DELETE with an incident edge", Op{Kind: OpDelete, Cypher: tmplDetachDelete,
 			Params: map[string]any{"name": "Alice-1"}}},
 		{"DETACH DELETE miss applies nothing", Op{Kind: OpDelete, Cypher: tmplDetachDelete,
@@ -109,18 +109,15 @@ func TestCheckOpCounters_HappyPathScriptedSequence(t *testing.T) {
 		runStep(t, sm, s.name, s.op)
 
 		if s.name == "create edge Alice->Bob" {
-			// A duplicate CREATE of the same simple-graph edge is REJECTED by the
-			// engine (openCypher parallel-edge semantics need a multigraph), so it
-			// reaches the check as an uncommitted op and is skipped — the oracle
-			// stays frozen and no violation fires.
+			// Every graph is a multigraph (rmp #3072): a second CREATE of the same
+			// pair commits and adds a parallel relationship, and the oracle predicts
+			// exactly that effect.
+			before := sm.oracle.EdgeCount()
 			dup := Op{Kind: OpCreate, Cypher: tmplCreateKnows,
 				Params: map[string]any{"a": "Alice-1", "b": "Bob-1"}}
-			committed, counters := sm.executeCounted(context.Background(), dup)
-			if committed {
-				t.Fatal("duplicate simple-graph edge CREATE unexpectedly committed")
-			}
-			if vs := CheckOpCounters(1, dup, committed, counters, sm.oracle); len(vs) > 0 {
-				t.Fatalf("rejected duplicate edge CREATE fired the counters check: %v", vs)
+			runStep(t, sm, "duplicate edge CREATE adds a parallel relationship", dup)
+			if got := sm.oracle.EdgeCount(); got != before+1 {
+				t.Fatalf("oracle edge count after the duplicate CREATE = %d, want %d", got, before+1)
 			}
 		}
 	}

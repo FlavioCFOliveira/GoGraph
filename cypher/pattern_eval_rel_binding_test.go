@@ -67,7 +67,7 @@ var rbParams = map[string]expr.Value{"w": expr.IntegerValue(2), "nw": expr.Null,
 
 func rbEngine(t *testing.T, fx rbFixture) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	qs := make([]string, 0, 1+len(fx.edges))
 	qs = append(qs, `CREATE (:N {k:'a'}), (:N {k:'b'}), (:N {k:'c'})`)

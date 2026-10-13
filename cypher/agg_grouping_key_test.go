@@ -17,7 +17,7 @@ import (
 )
 
 func TestCompoundGroupingKey_1803(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{`CREATE (:N {a:1})`, `CREATE (:N {a:1})`, `CREATE (:N {a:2})`} {
 		r, err := eng.RunInTx(context.Background(), q, nil)

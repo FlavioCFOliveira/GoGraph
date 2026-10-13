@@ -117,7 +117,7 @@ func TestAutocommitWrite_HonoursDeadlineBehindHeldSchemaGate(t *testing.T) {
 					dir string
 					w   *wal.Writer
 				)
-				g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+				g := lpg.New[string, float64](adjlist.Config{})
 				if wiring == "memory" {
 					e = NewEngine(g)
 				} else {

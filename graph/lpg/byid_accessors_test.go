@@ -24,7 +24,7 @@ func mustNoErr(t *testing.T, err error) {
 }
 
 func TestNodePropertiesByID_MatchesByKey(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	mustNoErr(t, g.AddNode("empty"))
 	mustNoErr(t, g.AddNode("one"))
 	mustNoErr(t, g.SetNodeProperty("one", "name", StringValue("Alice")))
@@ -61,7 +61,7 @@ func TestNodePropertiesByID_MatchesByKey(t *testing.T) {
 // Cypher result-materialisation path relies on to build expr.MapValue directly
 // without the intermediate map[string]PropertyValue (#1502).
 func TestNodePropertiesByIDFunc_MatchesByID(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	mustNoErr(t, g.AddNode("empty"))
 	mustNoErr(t, g.AddNode("one"))
 	mustNoErr(t, g.SetNodeProperty("one", "name", StringValue("Alice")))
@@ -107,7 +107,7 @@ func TestNodePropertiesByIDFunc_MatchesByID(t *testing.T) {
 // TestNodeLabelsByID_MatchesByKey verifies the NodeID-keyed label accessor
 // matches the external-key accessor (order-independent).
 func TestNodeLabelsByID_MatchesByKey(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	mustNoErr(t, g.AddNode("none"))
 	mustNoErr(t, g.AddNode("single"))
 	mustNoErr(t, g.SetNodeLabel("single", "Person"))

@@ -343,7 +343,7 @@ func countFeasible(cost []float64, threshold float64) int {
 // the matching cardinality is exactly the number of staffed workers. This
 // mirrors the convention in search/hopcroft_karp_test.go.
 func maxFeasibleMatching(ctx context.Context, cfg config, cost []float64, threshold float64) (search.Matching, error) {
-	adj := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	adj := adjlist.New[int, struct{}](adjlist.Config{})
 
 	// Intern every worker, then every task, so both partitions exist
 	// before any edge references them. Worker keys are 0..workers-1 and

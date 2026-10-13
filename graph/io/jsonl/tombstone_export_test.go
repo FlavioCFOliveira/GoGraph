@@ -20,7 +20,7 @@ import (
 func TestJSONL_TombstonedNodeNotExported(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "dead"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%q): %v", n, err)
@@ -59,7 +59,7 @@ func TestJSONL_TombstonedNodeNotExported(t *testing.T) {
 		t.Fatalf("output references the tombstoned node:\n%s", out)
 	}
 
-	imported, _, err := jsonl.ReadWithProps(strings.NewReader(out), adjlist.Config{Directed: true})
+	imported, _, err := jsonl.ReadWithProps(strings.NewReader(out), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadWithProps: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestJSONL_TombstonedNodeNotExported(t *testing.T) {
 func TestJSONL_DeleteThenRecreateExportsOnce(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("dead"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestJSONL_DeleteThenRecreateExportsOnce(t *testing.T) {
 		t.Fatalf("revived node exported %d times, want 1:\n%s", got, out)
 	}
 
-	imported, _, err := jsonl.ReadWithProps(strings.NewReader(out), adjlist.Config{Directed: true})
+	imported, _, err := jsonl.ReadWithProps(strings.NewReader(out), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadWithProps: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestJSONL_DeleteThenRecreateExportsOnce(t *testing.T) {
 func TestJSONL_OnlyTombstonedNodesExportsNothing(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, n := range []string{"x", "y"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%q): %v", n, err)
@@ -146,7 +146,7 @@ func TestJSONL_OnlyTombstonedNodesExportsNothing(t *testing.T) {
 		t.Fatalf("written = %d records for a fully-tombstoned graph, want 0:\n%s", written, buf.String())
 	}
 
-	imported, _, err := jsonl.ReadWithProps(strings.NewReader(buf.String()), adjlist.Config{Directed: true})
+	imported, _, err := jsonl.ReadWithProps(strings.NewReader(buf.String()), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadWithProps: %v", err)
 	}

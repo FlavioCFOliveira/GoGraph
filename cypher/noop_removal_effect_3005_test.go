@@ -69,7 +69,7 @@ func TestRefusedNodeRemoval_LeavesStatisticsUnchanged_3005(t *testing.T) {
 	t.Parallel()
 	for engName, open := range map[string]func(t *testing.T) *Engine{
 		"memory": func(t *testing.T) *Engine {
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			for _, err := range []error{
 				g.AddNode("n0"), g.SetNodeLabel("n0", "P"), g.SetNodeProperty("n0", "p", lpg.Int64Value(1)),
 			} {

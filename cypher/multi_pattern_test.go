@@ -27,7 +27,7 @@ import (
 
 // newDirectedTestGraph creates a directed labelled property graph for the tests.
 func newDirectedTestGraph() *lpg.Graph[string, float64] {
-	return lpg.New[string, float64](adjlist.Config{Directed: true})
+	return lpg.New[string, float64](adjlist.Config{})
 }
 
 // nodeID looks up the interned NodeID for a node name.

@@ -25,6 +25,7 @@ package recovery_test
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -67,6 +68,11 @@ func commitEpoch(t *testing.T, dir string, n, keyBase int) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := wr.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	st := res.NewStore(wr, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -225,7 +231,7 @@ func TestReplayWAL_RestoresTheMVCCClockFloor(t *testing.T) {
 			t.Errorf("reader Close: %v", cerr)
 		}
 	}()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	res, err := recovery.ReplayWAL[string, float64](
 		context.Background(), r, g,
 		txn.NewStringCodec(), txn.NewFloat64WeightCodec(), txn.DefaultMaxTxnOps)

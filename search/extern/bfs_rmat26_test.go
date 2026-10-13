@@ -20,7 +20,7 @@ func TestBFS_RMATScale20_Nightly(t *testing.T) {
 	testlayers.RequireNightly(t)
 
 	path := filepath.Join(t.TempDir(), "rmat20.csr")
-	loader := bulk.New(bulk.Options{OutputPath: path, Directed: true})
+	loader := bulk.New(bulk.Options{OutputPath: path})
 	rmat.Generate(rmat.Spec{
 		Scale:      20,
 		EdgeFactor: 16,

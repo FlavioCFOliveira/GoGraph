@@ -66,8 +66,9 @@ package exec
 //
 // No goroutines, no channels, no per-row allocation: the child's row is read and
 // discarded, and the single output row comes from a fixed backing buffer. The
-// column-major drain ([CountRows.drainChunk]) allocates ONE [Chunk] per execution,
-// sized to [DefaultChunkCapacity], and reuses it across every batch.
+// column-major drain ([CountRows.drainChunk]) takes ONE [Chunk] per execution,
+// sized to [DefaultChunkCapacity], reuses it across every batch, and returns a
+// pooled shape to the node-scan chunk pool when the drain ends (rmp #3114).
 //
 // # Concurrency contract
 //
@@ -189,6 +190,9 @@ func (op *CountRows) drain() error {
 // column-major.
 func (op *CountRows) drainChunk(cp ChunkProducer) error {
 	dst := cp.NewOutputChunk(DefaultChunkCapacity)
+	// dst never leaves this drain and no producer retains it past FillChunk, so
+	// it is recycled for the next statement (rmp #3114).
+	defer releaseChunk(dst)
 	for {
 		if err := op.ctx.Err(); err != nil {
 			return err

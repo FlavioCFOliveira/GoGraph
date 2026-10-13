@@ -8,6 +8,7 @@ package cypher
 // Layer: short.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -46,7 +47,12 @@ func TestWALEngine_OpenWriteCloseIsFDFlat(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			st := txn.NewStoreWithOptions[string, float64](lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}), wr, opts)
+			t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+				if err := wr.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+					t.Errorf("wal.Close: %v", err)
+				}
+			})
+			st := txn.NewStoreWithOptions[string, float64](lpg.New[string, float64](adjlist.Config{}), wr, opts)
 			db := store.New(wr, store.WithQuiesce(st.RunUnderCommitLock))
 			if err := straddleRun(NewEngineWithStore(st), `CREATE (:L {s: 'v'})`); err != nil {
 				t.Fatal(err)
@@ -72,6 +78,11 @@ func TestWALEngine_OpenWriteCloseIsFDFlat(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+				if err := wr.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+					t.Errorf("wal.Close: %v", err)
+				}
+			})
 			st := txn.NewStoreWithOptions[string, float64](rec.Graph, wr, opts)
 			db := store.New(wr, store.WithQuiesce(st.RunUnderCommitLock))
 			if err := straddleRun(NewEngineWithStoreAndRecovery(st, rec), `CREATE (:L {s: 'w'})`); err != nil {

@@ -279,7 +279,7 @@ func generate(ctx context.Context, cfg config) (*adjlist.AdjList[uint32, struct{
 	//nolint:gosec // G404: a seeded math/rand is intentional here — the example
 	// must reproduce a fixed dataset for a given -seed; crypto/rand would defeat that.
 	rng := rand.New(rand.NewSource(cfg.seed))
-	a := adjlist.New[uint32, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[uint32, struct{}](adjlist.Config{})
 
 	m := cfg.outDegree
 	// copyTargets holds one entry per existing directed edge: the edge's

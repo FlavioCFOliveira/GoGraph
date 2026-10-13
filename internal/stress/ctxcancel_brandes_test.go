@@ -54,11 +54,11 @@ func TestCtxCancel_Brandes_MidRun(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	shape := shapegen.BarabasiAlbert(nodes, m0, 42)
-	g, err := shape.Build(adjlist.Config{Directed: false})
+	g, err := shape.Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("BarabasiAlbert.Build: %v", err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 
 	var ctx context.Context
 	var cancel context.CancelFunc

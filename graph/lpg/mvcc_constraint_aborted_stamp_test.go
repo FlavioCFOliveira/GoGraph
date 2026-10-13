@@ -28,7 +28,7 @@ func TestConstraintConflict_AbortedStampKeepsDisplacedCommit(t *testing.T) {
 			name = "control"
 		}
 		t.Run(name, func(t *testing.T) {
-			g := New[string, int64](adjlist.Config{Directed: true})
+			g := New[string, int64](adjlist.Config{})
 			if err := g.AddNode("n"); err != nil {
 				t.Fatalf("AddNode: %v", err)
 			}

@@ -28,7 +28,7 @@ func TestBFS_CycleGraph_DistanceHistogram(t *testing.T) {
 				t.Fatalf("Build: %v", err)
 			}
 			a := g.AdjList()
-			c := csr.BuildFromAdjList(a)
+			c := csr.BuildFromAdjList(a).BuildSymmetric()
 			// Run from key 0; by symmetry this is representative.
 			srcID, ok := a.Mapper().Lookup(0)
 			if !ok {

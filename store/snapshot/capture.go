@@ -41,8 +41,7 @@ type capturedIndex struct {
 // Capture is a point-in-time, fully-serialised image of EVERY snapshot
 // component that derives from the live graph: csr.bin, labels.bin,
 // properties.bin, mapper.bin, tombstones.bin, edgehandles.bin, the
-// indexes/<name>.bin payloads, and the graph's directed/multigraph/weightless
-// shape.
+// indexes/<name>.bin payloads, and the graph's weightless shape.
 //
 // # Why this type exists (ACID Atomicity, rmp #2269)
 //
@@ -148,7 +147,7 @@ type Capture[W any] struct {
 
 // SetWALPosition records the store id of the write-ahead log this image pairs
 // with and the log position it covers — every frame below redoPos is folded
-// into the image. A capture that publishes a mapper (manifest version 4) then
+// into the image. A capture that publishes a mapper (manifest version 4 or 5) then
 // writes them as the manifest's store_id, wal_redo_pos and wal_format = 2,
 // which recovery checks against the log (rmp #3014). A storeID of 0 records
 // nothing. Call it before the capture is published; a Capture is not safe for
@@ -402,14 +401,14 @@ func captureGraph[N comparable, W any](
 	var err error
 	// labels.bin — always emitted (possibly empty), matching the writer.
 	if out.labels, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
-		return WriteLabels(w, g, at)
+		return writeLabels(w, g, at, snapshotRegistry, captureBufSize)
 	}); err != nil {
 		return nil, fmt.Errorf("snapshot: capture %s: %w", LabelsFile, err)
 	}
 
 	// properties.bin — always emitted (possibly empty), matching the writer.
 	if out.properties, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
-		return WriteProperties(w, g, at)
+		return writeProperties(w, g, at, snapshotPropertyKeys, newPropValueArena, captureBufSize)
 	}); err != nil {
 		return nil, fmt.Errorf("snapshot: capture %s: %w", PropertiesFile, err)
 	}
@@ -503,11 +502,7 @@ func captureGraph[N comparable, W any](
 	}
 
 	cfg := g.Config()
-	out.config = GraphConfig{
-		Directed:   cfg.Directed,
-		Multigraph: cfg.Multigraph,
-		Weightless: cfg.Weightless,
-	}
+	out.config = GraphConfig{Weightless: cfg.Weightless}
 	return out, nil
 }
 
@@ -515,13 +510,77 @@ func captureGraph[N comparable, W any](
 // buffer and records the (bytes, size, CRC32C) triple it produced. The writer's
 // own size and CRC are kept verbatim, so the captured component is byte- and
 // manifest-identical to one streamed straight to a file.
+//
+// The in-memory sink is a [chunkSink], not a bytes.Buffer: a bytes.Buffer fed
+// in small flushes regrows by doubling, copying every prior byte at each step
+// and ending with up to twice the component's size in capacity (rmp #3083).
 func captureComponent(write func(io.Writer) (int64, uint32, error)) (component, error) {
-	var buf bytes.Buffer
-	size, crc, err := write(&buf)
+	var sink chunkSink
+	size, crc, err := write(&sink)
 	if err != nil {
 		return component{}, err
 	}
-	return component{bytes: buf.Bytes(), size: size, crc: crc, present: true}, nil
+	return component{bytes: sink.bytes(), size: size, crc: crc, present: true}, nil
+}
+
+// Chunk sizes of a [chunkSink]: the first chunk is chunkSinkFirst bytes and
+// each later one doubles, up to chunkSinkMax.
+const (
+	chunkSinkFirst = 4 << 10
+	chunkSinkMax   = 1 << 20
+)
+
+// chunkSink is the append-only in-memory io.Writer [captureComponent] serialises
+// a component into. It stores the bytes in a list of chunks that are never
+// copied while writing, and [chunkSink.bytes] joins them once into a slice of
+// exactly the written length. The total allocation is therefore the
+// component's size plus the chunks — at most about twice the component's size,
+// against two to four times for a bytes.Buffer grown by doubling.
+//
+// A chunkSink is used by one goroutine at a time; it is not safe for
+// concurrent use. The zero value is ready to use.
+type chunkSink struct {
+	chunks [][]byte // every chunk but the last is full
+	n      int      // total bytes written
+}
+
+// Write appends p. It never fails.
+func (s *chunkSink) Write(p []byte) (int, error) {
+	written := len(p)
+	for len(p) > 0 {
+		last := len(s.chunks) - 1
+		if last < 0 || len(s.chunks[last]) == cap(s.chunks[last]) {
+			next := chunkSinkFirst
+			if last >= 0 {
+				next = min(2*cap(s.chunks[last]), chunkSinkMax)
+			}
+			s.chunks = append(s.chunks, make([]byte, 0, next))
+			last++
+		}
+		c := s.chunks[last]
+		k := min(len(p), cap(c)-len(c))
+		s.chunks[last] = append(c, p[:k]...)
+		p = p[k:]
+	}
+	s.n += written
+	return written, nil
+}
+
+// bytes returns the written bytes as one slice of length and capacity equal to
+// the total written. A single chunk is returned as is, without a copy.
+func (s *chunkSink) bytes() []byte {
+	switch len(s.chunks) {
+	case 0:
+		return nil
+	case 1:
+		return s.chunks[0]
+	}
+	out := make([]byte, 0, s.n)
+	for _, c := range s.chunks {
+		out = append(out, c...)
+	}
+	s.chunks = nil
+	return out
 }
 
 // captureMapper serialises the NodeID->key interning table. With a codec it is
@@ -542,7 +601,7 @@ func captureMapper[N comparable, W any](g *lpg.Graph[N, W], codec keyEncoder[N],
 	if codec != nil {
 		comp, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
 			var n uint64
-			size, crc, n, werr := writeMapperN(w, mapper, codec, include)
+			size, crc, n, werr := writeMapperN(w, mapper, codec, include, captureBufSize)
 			emitted = n
 			return size, crc, werr
 		})
@@ -557,7 +616,7 @@ func captureMapper[N comparable, W any](g *lpg.Graph[N, W], codec keyEncoder[N],
 		return component{}, 0, nil
 	}
 	comp, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
-		size, crc, n, werr := writeMapperStringN(w, stringMapper, include)
+		size, crc, n, werr := writeMapperStringN(w, stringMapper, include, captureBufSize)
 		emitted = n
 		return size, crc, werr
 	})

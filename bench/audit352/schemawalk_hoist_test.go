@@ -33,14 +33,21 @@ package audit352_test
 // presence is not a sampling accident at rate 1 — so a PARTIAL conversion
 // cannot satisfy (1), and no conversion at all cannot satisfy (2).
 //
-// # Why the window cannot simply exclude the plan build
+// # Why each window contains a COLD plan build, and discriminates by stack
 //
 // `(*Engine).Run` rebuilds the physical plan on every execution
-// (`buildReadPhysical`), so the one legitimate, plan-time derivation of each
-// rowSchema lands inside any window that contains a query. The gate therefore
+// (`buildReadPhysical`), but since rmp #3097 the build takes the Filter and
+// Projection row layouts from the plan-cache entry's layout memo
+// (`cypher.layoutMemo`): on a memo hit the stored rowSchema is reused and
+// newSchemaWalk does not run at all. A window over a warm, cached plan therefore
+// observes no derivation at those sites, and the non-vacuity check fails as
+// "blind" (rmp #3116). Each window is therefore preceded, outside it, by
+// `ClearPlanCache`, so the measured execution builds from a fresh cache entry
+// with an empty memo and performs every plan-time derivation. The gate then
 // discriminates by STACK rather than by count: measured on the converted tree,
-// every surviving derivation is reached through `newRowSchema` from a plan
-// builder, and none from an operator.
+// every derivation is reached through `newRowSchema` from a plan builder, and
+// none from an operator. A per-row derivation runs beneath an operator's Next on
+// every execution, cold or warm, so a cold window loses no per-row evidence.
 //
 // # Measured at the conversion (2026-08-29, exact rate-1 windows, n=3000)
 //
@@ -149,7 +156,7 @@ func walkShapeEngine(tb testing.TB, n int) *cypher.Engine {
 	if e, ok := walkEngines[n]; ok {
 		return e
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(key); err != nil {
@@ -178,11 +185,17 @@ func walkShapeEngine(tb testing.TB, n int) *cypher.Engine {
 // stack passed through the plan builder.
 func walkDerivations(tb testing.TB, eng *cypher.Engine, query string, wantRows int) (planTime, perRow int64, detail string) {
 	tb.Helper()
-	// Warm the plan cache OUTSIDE the window so one-off compilation cannot be
-	// read as a path difference.
+	// Warm the process-wide state (pools, lazily built tables) OUTSIDE the window.
 	if got := drainCounting(tb, eng, query); got != wantRows {
 		tb.Fatalf("warm-up shipped %d rows, want %d", got, wantRows)
 	}
+	// Then drop the cached plan, also outside the window, so the measured
+	// execution builds from a fresh plan-cache entry whose layout memo (rmp #3097)
+	// is empty. A warm entry answers the Filter and Projection layouts from the
+	// memo without calling newSchemaWalk, which left this gate blind (rmp #3116).
+	// The window therefore also contains parse and compile; the verdict is read by
+	// stack, so neither can be mistaken for a per-row derivation.
+	eng.ClearPlanCache()
 	at := exerciseAttributed(tb, 1, func() {
 		if got := drainCounting(tb, eng, query); got != wantRows {
 			tb.Fatalf("shipped %d rows, want %d", got, wantRows)
@@ -254,9 +267,9 @@ func TestSchemaWalkIsNotPerRow(t *testing.T) {
 				s.name, small, planSmall, large, planLarge)
 
 			// THE GATE MUST SEE SOMETHING. Every shape derives at least one
-			// rowSchema while its physical plan is built, and that build happens
-			// inside the window because (*Engine).Run rebuilds the plan per
-			// execution. A zero here does not mean "nothing per row", it means the
+			// rowSchema while its physical plan is built from a fresh plan-cache
+			// entry, and walkDerivations clears the plan cache before each window
+			// so that cold, memo-miss build happens inside it. A zero here does not mean "nothing per row", it means the
 			// instrument observed no newSchemaWalk frame at all — a renamed frame,
 			// an inlined-away derivation, or a broken suffix match — and the
 			// per-row assertions above are then vacuous rather than satisfied.
@@ -294,7 +307,10 @@ func TestSchemaWalkIsNotPerRow(t *testing.T) {
 // two-item one — roughly one per thousand rows, against the 120 000 the
 // pre-change tree performed. The rate bound below is what separates those two
 // regimes, and it is an absolute ratio fixed by morsel granularity, not a
-// fraction of any measured baseline.
+// fraction of any measured baseline. With the layout memo (rmp #3097) a cold
+// window (see [walkDerivations]) measured 2 derivations for `parallel_salary`
+// and 1 for `parallel_whole_node` (2026-10-12, rmp #3116); both are plan-build
+// stacks, and the bound is unchanged.
 var parallelShapes = []struct {
 	name    string
 	query   string

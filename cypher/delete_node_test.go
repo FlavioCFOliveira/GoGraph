@@ -22,7 +22,7 @@ import (
 // confirms a subsequent MATCH returns zero rows.
 func TestDelete_NodeGoneAfterDelete(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Target)`)
@@ -49,7 +49,7 @@ func TestDelete_NodeGoneAfterDelete(t *testing.T) {
 // it, and verifies the properties are no longer accessible.
 func TestDelete_NodeWithPropertiesGone(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Rich {name: "data", score: 100})`)
@@ -70,7 +70,7 @@ func TestDelete_NodeWithPropertiesGone(t *testing.T) {
 // a shared label and deletes all three in a single MATCH … DELETE.
 func TestDelete_MultipleNodesOneTransaction(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	for range 3 {

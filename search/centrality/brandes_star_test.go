@@ -32,13 +32,13 @@ func TestBetweenness_StarCentreDominates(t *testing.T) {
 		tc := tc
 		t.Run("", func(t *testing.T) {
 			t.Parallel()
-			a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+			a := adjlist.New[int, struct{}](adjlist.Config{})
 			for i := 1; i <= tc.nLeaves; i++ {
 				if err := a.AddEdge(0, i, struct{}{}); err != nil {
 					t.Fatalf("AddEdge(0,%d): %v", i, err)
 				}
 			}
-			c := csr.BuildFromAdjList(a)
+			c := csr.BuildFromAdjList(a).BuildSymmetric()
 			bc := Betweenness(c)
 
 			hub, ok := a.Mapper().Lookup(0)

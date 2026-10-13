@@ -52,7 +52,7 @@ import (
 // wbrGraph builds the storage the Cypher engine requires: directed, and a
 // multigraph (openCypher's data model — every CREATE adds a relationship).
 func wbrGraph() *lpg.Graph[string, float64] {
-	return lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	return lpg.New[string, float64](adjlist.Config{})
 }
 
 // wbrEngine pairs a fresh graph with an in-memory engine over it.

@@ -31,7 +31,7 @@ import (
 
 func TestRun_RejectsWriteClause_ClearError(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -71,7 +71,7 @@ func TestRun_RejectsWriteClause_ClearError(t *testing.T) {
 // happens before ANY execution — the graph must be completely untouched.
 func TestRun_RejectsWriteClause_NoPartialExecution(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

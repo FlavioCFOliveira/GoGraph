@@ -111,7 +111,7 @@ func TestRunWithoutSchema(t *testing.T) {
 // declaration is rejected before it lands. This is the enforcement half of the
 // optional-schema demonstration.
 func TestSchemaRejectsBadType(t *testing.T) {
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := installSchema(g); err != nil {
 		t.Fatalf("installSchema: %v", err)
 	}

@@ -39,7 +39,7 @@ func BenchmarkWriteScaling_StoreAPI(b *testing.B) {
 				b.Fatalf("wal.Open: %v", err)
 			}
 			b.Cleanup(func() { _ = w.Close() })
-			g := lpg.New[string, int64](adjlist.Config{Directed: true})
+			g := lpg.New[string, int64](adjlist.Config{})
 			s := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 			before := w.Stats().Syncs
@@ -84,7 +84,7 @@ func BenchmarkWriteScaling_Cypher(b *testing.B) {
 				b.Fatalf("wal.Open: %v", err)
 			}
 			b.Cleanup(func() { _ = w.Close() })
-			g := lpg.New[string, float64](adjlist.Config{Directed: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			s := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 				Codec:       txn.NewStringCodec(),
 				WeightCodec: txn.NewFloat64WeightCodec(),

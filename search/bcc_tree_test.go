@@ -33,12 +33,12 @@ func TestHopcroftTarjanBCC_Tree_Path5(t *testing.T) {
 	t.Parallel()
 
 	const n = 5
-	g, err := shapegen.Path(n, false).Build(defaultCfg())
+	g, err := shapegen.Path(n).Build(defaultCfg())
 	if err != nil {
 		t.Fatalf("Path(%d).Build: %v", n, err)
 	}
 	a := g.AdjList()
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	res := HopcroftTarjanBCC(c)
 
 	// Each of the n-1 edges is its own BCC in a tree.
@@ -80,7 +80,7 @@ func TestHopcroftTarjanBCC_Tree_BinaryDepth2(t *testing.T) {
 
 	// Build undirected binary tree manually because shapegen.BalancedBinary
 	// forces cfg.Directed=true and does not expose an undirected variant.
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	// BFS-order parent edges: node i has parent (i-1)/2 for i in [1, 6].
 	const n = 7
 	for i := 1; i < n; i++ {
@@ -89,7 +89,7 @@ func TestHopcroftTarjanBCC_Tree_BinaryDepth2(t *testing.T) {
 			t.Fatalf("AddEdge(%d->%d): %v", parent, i, err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	res := HopcroftTarjanBCC(c)
 
 	// All n-1 edges are bridges in a tree.

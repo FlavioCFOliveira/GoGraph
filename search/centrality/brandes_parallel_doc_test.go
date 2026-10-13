@@ -17,7 +17,7 @@ import (
 //
 //	0-1-2-3-4-5 (path spine) plus cross-edges 0-3, 1-4, 2-5.
 func buildParallelTestGraph() *csr.CSR[struct{}] {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	spine := [][2]int{{0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}}
 	cross := [][2]int{{0, 3}, {1, 4}, {2, 5}}
 	for _, e := range append(spine, cross...) {
@@ -25,7 +25,7 @@ func buildParallelTestGraph() *csr.CSR[struct{}] {
 			panic(err)
 		}
 	}
-	return csr.BuildFromAdjList(a)
+	return csr.BuildFromAdjList(a).BuildSymmetric()
 }
 
 // TestBetweennessParallel_AgreesWithSerial_WithinTolerance verifies

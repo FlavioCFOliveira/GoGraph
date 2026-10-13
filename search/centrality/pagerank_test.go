@@ -11,7 +11,7 @@ import (
 
 func TestPageRank_Star(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 1; i <= 5; i++ {
 		if err := a.AddEdge(i, 0, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -38,7 +38,7 @@ func TestPageRank_Star(t *testing.T) {
 
 func TestPageRank_Empty(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	c := csr.BuildFromAdjList(a)
 	ranks, iters, _ := PageRank(c, DefaultPageRankOptions())
 	if len(ranks) != 0 || iters != 0 {
@@ -53,7 +53,7 @@ func TestPageRank_Empty(t *testing.T) {
 // all of its accumulated rank.
 func TestPageRank_MassConservation_Star(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 1; i <= 5; i++ {
 		if err := a.AddEdge(i, 0, struct{}{}); err != nil { // leaves -> sink
 			t.Fatalf("AddEdge: %v", err)
@@ -84,7 +84,7 @@ func TestPageRank_MassConservation_Star(t *testing.T) {
 func TestPageRank_MassConservation_Cycle(t *testing.T) {
 	t.Parallel()
 	const k = 7
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < k; i++ {
 		if err := a.AddEdge(i, (i+1)%k, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -121,7 +121,7 @@ func TestPageRank_MassConservation_Cycle(t *testing.T) {
 // upstream nodes carry strictly less mass than downstream ones.
 func TestPageRank_MassConservation_Chain(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestPageRank_MassConservation_Chain(t *testing.T) {
 // rank slice indexes by NodeID but only carries mass on live IDs.
 func TestPageRank_IsolatedGhostNodes(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestPageRank_IsolatedGhostNodes(t *testing.T) {
 }
 
 func BenchmarkPageRank_Cycle1K(b *testing.B) {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	const k = 1024
 	for i := 0; i < k; i++ {
 		if err := a.AddEdge(i, (i+1)%k, struct{}{}); err != nil {
@@ -198,7 +198,7 @@ func BenchmarkPageRank_Cycle1K(b *testing.B) {
 
 func TestPageRank_RejectsNaN(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

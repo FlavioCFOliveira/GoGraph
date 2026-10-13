@@ -44,7 +44,7 @@ func TestRWHub_ReaderWriterOverlap(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	// ── Build the initial star graph ───────────────────────────────────────
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false, Multigraph: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	const hub = 0
 	for leaf := 1; leaf <= leaves; leaf++ {
 		if err := a.AddEdge(hub, leaf, 1); err != nil {
@@ -56,7 +56,7 @@ func TestRWHub_ReaderWriterOverlap(t *testing.T) {
 	// writers. Readers load it atomically so they always see a fully-built,
 	// consistent CSR — never a partially-constructed one.
 	var snapshotPtr atomic.Pointer[csr.CSR[int64]]
-	snapshotPtr.Store(csr.BuildFromAdjList(a))
+	snapshotPtr.Store(csr.BuildFromAdjList(a).BuildSymmetric())
 
 	hubID, ok := a.Mapper().Lookup(hub)
 	if !ok {
@@ -83,7 +83,7 @@ func TestRWHub_ReaderWriterOverlap(t *testing.T) {
 				leaf := int(nextLeaf.Add(1))
 				mu.Lock()
 				if err := a.AddEdge(hub, leaf, 1); err == nil {
-					snapshotPtr.Store(csr.BuildFromAdjList(a))
+					snapshotPtr.Store(csr.BuildFromAdjList(a).BuildSymmetric())
 				}
 				mu.Unlock()
 			}

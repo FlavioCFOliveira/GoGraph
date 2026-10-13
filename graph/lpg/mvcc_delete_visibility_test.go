@@ -98,7 +98,7 @@ func deleteVisibilityFixture(t *testing.T, round, population int) (
 	*Graph[string, float64], LabelID, []string, []graph.NodeID,
 ) {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	keys := make([]string, population)
 	ids := make([]graph.NodeID, population)
 	for i := range keys {
@@ -418,7 +418,7 @@ func TestDeleteVisibility_RestoreTombstonesRetiresTheEntries(t *testing.T) {
 // reopened store served deleted nodes from a labelled scan, once the first
 // reclaim had drained the label deltas that were masking it.
 func TestDeleteVisibility_LabellingADeadNodeDoesNotIndexIt(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
@@ -574,7 +574,7 @@ func TestDeleteVisibility_TombstoneCounterNeverUnderCountsTheBitmap(t *testing.T
 	const rounds = 3000
 	var lies, checks atomic.Int64
 	for round := 0; round < rounds; round++ {
-		g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := New[string, float64](adjlist.Config{})
 		if err := g.AddNode("a"); err != nil {
 			t.Fatalf("AddNode: %v", err)
 		}

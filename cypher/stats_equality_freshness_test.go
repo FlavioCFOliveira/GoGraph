@@ -58,7 +58,7 @@ const mcvQuery = `MATCH (p:Person) WHERE p.grp = 'hot' RETURN p`
 // provider could not land on a plausible number by accident.
 func seedMCVEngine(t *testing.T, hot, cold int) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	add := func(key, grp string, rank int64) {
 		t.Helper()
 		if err := g.AddNode(key); err != nil {

@@ -35,7 +35,7 @@ import (
 // process.
 func findShardKeys(t *testing.T, want int) []int {
 	t.Helper()
-	a := New[int, struct{}](Config{Directed: true})
+	a := New[int, struct{}](Config{})
 	keys := make([]int, 0, want)
 	for i := 0; len(keys) < want && i < 1_000_000; i++ {
 		id := a.Mapper().Intern(i)
@@ -54,7 +54,7 @@ func TestAdjList_MaxShardCapacity_RejectsBeyondCap(t *testing.T) {
 	const capLimit = 4
 	keys := findShardKeys(t, capLimit+1)
 
-	a := New[int, struct{}](Config{Directed: true, MaxShardCapacity: capLimit})
+	a := New[int, struct{}](Config{MaxShardCapacity: capLimit})
 
 	// First `cap` distinct nodes with edges out of them must succeed:
 	// each one allocates a slot in shard 0.
@@ -83,7 +83,7 @@ func TestAdjList_MaxShardCapacity_RejectsBeyondCap(t *testing.T) {
 
 func TestAdjList_MaxShardCapacity_ZeroIsUnbounded(t *testing.T) {
 	t.Parallel()
-	a := New[int, struct{}](Config{Directed: true, MaxShardCapacity: 0})
+	a := New[int, struct{}](Config{MaxShardCapacity: 0})
 
 	// Push well past any plausible "default" cap to confirm the
 	// zero-value config really is uncapped.
@@ -97,7 +97,7 @@ func TestAdjList_MaxShardCapacity_ZeroIsUnbounded(t *testing.T) {
 
 func TestAdjList_MaxShardCapacity_DefaultsAreUnbounded(t *testing.T) {
 	t.Parallel()
-	a := New[int, struct{}](Config{Directed: true})
+	a := New[int, struct{}](Config{})
 	keys := findShardKeys(t, initialShardCap*4)
 	for i, k := range keys {
 		if err := a.AddEdge(k, k, struct{}{}); err != nil {
@@ -111,7 +111,7 @@ func TestAdjList_MaxShardCapacity_OtherShardsUnaffected(t *testing.T) {
 	const capLimit = 4
 	saturating := findShardKeys(t, capLimit+1)
 
-	a := New[int, struct{}](Config{Directed: true, MaxShardCapacity: capLimit})
+	a := New[int, struct{}](Config{MaxShardCapacity: capLimit})
 
 	// Saturate shard 0.
 	for i := 0; i < capLimit; i++ {
@@ -151,7 +151,7 @@ func TestAdjList_MaxShardCapacity_ConcurrentWriters(t *testing.T) {
 		goroutines  = 16
 		insertsEach = 64
 	)
-	a := New[int, struct{}](Config{Directed: true, MaxShardCapacity: cap, Multigraph: true})
+	a := New[int, struct{}](Config{MaxShardCapacity: cap})
 
 	// Pre-discover saturating keys for shard 0; concurrent writers all
 	// try to add their edges using those keys, so most calls will be

@@ -44,7 +44,7 @@ func TestDijkstra_NegativeEdge(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+			a := adjlist.New[int, float64](adjlist.Config{})
 			for _, e := range tc.edges {
 				if err := a.AddEdge(e.from, e.to, e.w); err != nil {
 					t.Fatalf("AddEdge: %v", err)

@@ -7,8 +7,9 @@ package search
 // other and every other pair of vertices is closer. This file verifies
 // Diameter(c) returns a lower bound lo == n-1 for n in {2, 16, 1024}.
 //
-// shapegen.Path(n, false) produces an undirected P_n. Diameter expects
-// a symmetric (undirected) CSR, so directed=false is required.
+// shapegen.Path(n) produces an undirected P_n. Diameter expects
+// a symmetric (undirected) CSR, so the test projects it with
+// csr.CSR.BuildSymmetric.
 //
 // Acceptance criteria:
 //   - lo == n-1 for every tested n.
@@ -30,12 +31,12 @@ func TestDiameter_Pn_Shapegen(t *testing.T) {
 		t.Run("n="+itoa(n), func(t *testing.T) {
 			t.Parallel()
 
-			g, err := shapegen.Path(n, false).Build(defaultCfg())
+			g, err := shapegen.Path(n).Build(defaultCfg())
 			if err != nil {
 				t.Fatalf("Path(%d).Build: %v", n, err)
 			}
 
-			c := csr.BuildFromAdjList(g.AdjList())
+			c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 			lo, hi, exact := Diameter(c)
 
 			want := n - 1

@@ -21,7 +21,7 @@ import (
 // indexes.
 func TestCreate_MultipleLabels(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -48,7 +48,7 @@ func TestCreate_MultipleLabels(t *testing.T) {
 // with string, int64, float64, and bool property values.
 func TestCreate_AllPropertyTypes(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -110,7 +110,7 @@ func TestCreate_AllPropertyTypes(t *testing.T) {
 // through a subsequent MATCH query and that the name property round-trips.
 func TestCreate_ThenMatchVerifies(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

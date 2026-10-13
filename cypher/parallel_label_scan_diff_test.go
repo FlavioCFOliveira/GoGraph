@@ -45,7 +45,7 @@ import (
 // for a `:Few` query instead of n/3 — a difference this fixture makes loud.
 func buildSubsetLabelGraph(t *testing.T, n int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := "s" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {
@@ -112,7 +112,7 @@ func TestParallelLabelScan_BelowLabelThresholdStaysSerial(t *testing.T) {
 	// 600 nodes, all Many; only 10 carry Rare. With a threshold of 50 the graph is
 	// over it and Many is over it, but Rare (10) is under it.
 	const n = 600
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := "r" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

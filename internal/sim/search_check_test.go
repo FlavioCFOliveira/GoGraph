@@ -30,7 +30,7 @@ func buildSearchOracle(names []string, edges [][2]string) *GraphOracle {
 // CheckSearch against it exercises the genuine Cypher extraction path.
 func buildSearchEngine(t *testing.T, names []string, edges [][2]string) *EngineAdapter {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	for _, n := range names {

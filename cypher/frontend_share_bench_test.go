@@ -105,7 +105,7 @@ func shareUserID(i int) string { return fmt.Sprintf("%024x", i) }
 // newShareRig builds the USER/KNOWS population and the USER(id) index.
 func newShareRig(tb testing.TB) *Engine {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	for i := 0; i < shareUsers; i++ {
 		key := fmt.Sprintf("u%d", i)

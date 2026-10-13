@@ -190,15 +190,17 @@
 //
 // # Example session
 //
-//	# small deterministic default
-//	go run ./examples/25_software_house_api -d /tmp/shop -addr :8080 &
+//	# small deterministic default, in a fresh temporary data directory
+//	DATA_DIR=$(mktemp -d)
+//	go run ./examples/25_software_house_api -d "$DATA_DIR" -addr :8080 &
 //	curl -s -XPOST localhost:8080/seed
 //	curl -s localhost:8080/stats
 //	curl -s -XPOST localhost:8080/query \
 //	    -d '{"query":"MATCH (c:Component)<-[:DEPENDS_ON]-(d) RETURN c.key AS component, count(d) AS inDegree ORDER BY inDegree DESC LIMIT 5"}'
 //
 //	# observable-scale run: ~5.7k nodes, ~19k edges, seeded and reproducible
-//	go run ./examples/25_software_house_api -d /tmp/big -addr :8081 \
+//	BIG_DIR=$(mktemp -d)
+//	go run ./examples/25_software_house_api -d "$BIG_DIR" -addr :8081 \
 //	    -scale-components 2000 -scale-tasks 1500 -scale-developers 80 -scale-seed 7
 //	curl -s localhost:8081/stats   # read the "telemetry" object for heap and latency
 //

@@ -25,7 +25,7 @@ import (
 // suitable for exercising all canonical query shapes.
 func newPlanStabilityEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for i := range 5 {
 		q := fmt.Sprintf(`CREATE (:Person {name: 'p%d', age: %d})`, i, 20+i*5)

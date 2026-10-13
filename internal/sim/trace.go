@@ -187,7 +187,7 @@ type scriptedExecutor struct {
 // matching the deterministic Simulator's non-crash engine shape (directed
 // simple graph) so its end-state is directly comparable to a recorded run.
 func newScriptedExecutor() *scriptedExecutor {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return &scriptedExecutor{
 		engine: NewEngineAdapter(cypher.NewEngine(g)),
 		oracle: NewGraphOracle(),

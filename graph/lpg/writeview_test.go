@@ -38,7 +38,7 @@ import (
 // reproduction. It fails on a build where the write does not carry its
 // transaction, and the failure is the shipped defect: half a transaction visible.
 func TestWriteView_SecondWriteDoesNotAdoptAnOverlappingTransactionsRecord(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 
 	// A pre-existing value on each key, so a version that never becomes visible
 	// reads back as the old one rather than as absent — which makes the assertion
@@ -120,7 +120,7 @@ func TestWriteView_SecondWriteDoesNotAdoptAnOverlappingTransactionsRecord(t *tes
 // It pins the two halves against each other, so neither the threading nor the
 // instrument can rot without a failure.
 func TestWriteView_CarriesTheTransactionRatherThanResolvingIt(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.SetNodeProperty("n", "v", Int64Value(0)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestWriteView_CarriesTheTransactionRatherThanResolvingIt(t *testing.T) {
 // them, it needs a WriteView method and an entry here — and the ambient-resolution
 // gates would report it rather than leaving it to be noticed.
 func TestWriteView_CoversEveryTransactionalMutator(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	wv := g.Writer(WriteTx{})
 
 	// Every entry drives its WriteView method once. A method that stops existing
@@ -296,7 +296,7 @@ func TestWriteView_CoversEveryTransactionalMutator(t *testing.T) {
 //
 // See [writeCtx.undoing] for the reasoning and the Memgraph abort path it follows.
 func TestWriteCtx_UndoOfADoomedTransactionIsNotRefused(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.SetNodeProperty("n", "v", Int64Value(0)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestWriteView_ConcurrentWritersEachPublishTheirOwnTransaction(t *testing.T)
 		rounds  = 60
 		props   = 4
 	)
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	keys := make([]string, writers)
 	for w := range keys {
 		keys[w] = string(rune('a' + w))

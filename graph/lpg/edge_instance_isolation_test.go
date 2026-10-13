@@ -33,7 +33,7 @@ import (
 func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 	t.Parallel()
 
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode a: %v", err)
 	}

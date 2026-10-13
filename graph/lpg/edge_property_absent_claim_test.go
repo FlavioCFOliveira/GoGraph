@@ -22,7 +22,7 @@ import (
 // a removal of it reaches the adjacency.
 func absentClaimGraph(t *testing.T) *Graph[string, int64] {
 	t.Helper()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, err := range []error{
 		g.AddEdge("a", "b", 1),
 		g.AddEdge("a", "c", 1),

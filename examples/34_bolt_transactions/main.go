@@ -269,7 +269,7 @@ func count(ctx context.Context, sess neo4j.SessionWithContext) (int64, error) {
 // newEngine builds an in-memory multigraph engine seeded with cfg.persons
 // deterministically-named :Person nodes.
 func newEngine(cfg config) *cypher.Engine {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < cfg.persons; i++ {
 		id := fmt.Sprintf("p%06d", i)
 		_ = g.AddNode(id)

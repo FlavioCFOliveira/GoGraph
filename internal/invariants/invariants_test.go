@@ -20,7 +20,7 @@ func TestMain(m *testing.M) {
 // directedLPG builds a directed *lpg.Graph[int, struct{}] from an
 // edge list expressed as pairs of ints.
 func directedLPG(nodes []int, edges [][2]int) *lpg.Graph[int, struct{}] {
-	g := lpg.New[int, struct{}](adjlist.Config{Directed: true})
+	g := lpg.New[int, struct{}](adjlist.Config{})
 	for _, n := range nodes {
 		_ = g.AddNode(n)
 	}
@@ -32,7 +32,7 @@ func directedLPG(nodes []int, edges [][2]int) *lpg.Graph[int, struct{}] {
 
 // undirectedLPG builds an undirected *lpg.Graph[int, struct{}].
 func undirectedLPG(nodes []int, edges [][2]int) *lpg.Graph[int, struct{}] {
-	g := lpg.New[int, struct{}](adjlist.Config{Directed: false})
+	g := lpg.New[int, struct{}](adjlist.Config{})
 	for _, n := range nodes {
 		_ = g.AddNode(n)
 	}
@@ -176,7 +176,7 @@ func TestAssertBipartite_Negative_K33(t *testing.T) {
 // buildWeightedGraph constructs an lpg with int64 weights for
 // Dijkstra testing.
 func buildWeightedGraph(nodes []int64, edges [][3]int64) *lpg.Graph[int64, int64] {
-	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, int64](adjlist.Config{})
 	for _, n := range nodes {
 		_ = g.AddNode(n)
 	}

@@ -17,7 +17,7 @@ func TestHierholzerUndirected_FigureEight(t *testing.T) {
 	// Triangle 1: 0-1, 1-2, 0-2
 	// Triangle 2: 0-3, 3-4, 0-4
 	// Degrees: 0→4, 1→2, 2→2, 3→2, 4→2 — all even.
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	type edge struct{ u, v int }
 	edges := []edge{
 		{0, 1}, {1, 2}, {0, 2},
@@ -28,7 +28,7 @@ func TestHierholzerUndirected_FigureEight(t *testing.T) {
 			t.Fatalf("AddEdge(%d,%d): %v", e.u, e.v, err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	circuit, err := HierholzerUndirected(c)
 	if err != nil {
 		t.Fatalf("HierholzerUndirected: %v", err)

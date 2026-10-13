@@ -40,26 +40,24 @@ import (
 //
 // Each generator constructs the underlying [adjlist.Config] from the
 // caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, and
-// forces cfg.Directed=false: both pairing-model constructions are
-// undirected by definition.
+// stores each pairing as ONE directed arc: both pairing-model
+// constructions are undirected by definition, and a consumer that needs
+// both directions projects the graph with csr.CSR.BuildSymmetric.
 //
-// cfg.Multigraph is overridden as follows:
+// Multiplicity is decided by the generators themselves:
 //
 //   - [RandomRegular] is a simple graph (no parallel edges, no
-//     self-loops); cfg.Multigraph is forced to false. The rejection-
-//     resampling loop guarantees the simple-graph contract before any
-//     edge is emitted into the lpg backend.
+//     self-loops). The rejection-resampling loop guarantees the
+//     simple-graph contract before any edge is emitted into the lpg
+//     backend.
 //   - [ConfigurationModel] with allowMulti=true keeps every pairing
-//     verbatim, including parallel edges and self-loops; cfg.Multigraph
-//     is forced to true so the lpg backend stores the parallel
-//     entries. The resulting graph is a multigraph in the strict
+//     verbatim, including parallel edges and self-loops, all of which
+//     the lpg backend stores. The resulting graph is a multigraph in the strict
 //     sense; the degree sequence is preserved exactly.
 //   - [ConfigurationModel] with allowMulti=false realises the Erased
 //     Configuration Model: parallel-edge and self-loop pairings are
-//     dropped at generation time (mirroring the literature's
-//     definition rather than relying on the lpg backend's silent
-//     coalescing in simple-graph mode). cfg.Multigraph is forced to
-//     false. The resulting graph is a simple graph; the realised
+//     dropped at generation time, mirroring the literature's
+//     definition. The resulting graph is a simple graph; the realised
 //     degree sequence is at most the input sequence componentwise.
 //
 // # Edge ordering and determinism
@@ -152,8 +150,7 @@ func (s configModelBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], erro
 // (Bollobás, "A probabilistic proof of an asymptotic formula for the
 // number of labelled regular graphs", European J. Combin. 1(4),
 // 1980). The graph is undirected and simple (no parallel edges, no
-// self-loops); cfg.Directed and cfg.Multigraph are overridden to
-// false.
+// self-loops); each edge is stored as one directed arc.
 //
 // The PRNG is a deterministically-seeded [math/rand/v2.PCG], so every
 // (n, d, seed) tuple yields the same byte-for-byte adjacency.
@@ -226,8 +223,6 @@ func RandomRegular(n, d int, seed uint64) Shape[int, int64] {
 			{Name: "d", Min: 0, Max: 50, Default: 3},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildRandomRegular(g, n, d, seed)
 		},
@@ -386,14 +381,13 @@ func randomRegularAttempt(r *rand.Rand, n, d int) (map[[2]int]struct{}, bool) {
 // When allowMulti is true the resulting graph is a multigraph: every
 // pairing — including self-loops (pairings of two half-edges from the
 // same node) and parallel edges (multiple pairings of the same
-// unordered pair) — becomes an edge in g. cfg.Multigraph is forced
-// to true; cfg.Directed is forced to false. The realised degree
-// sequence equals degSeq exactly.
+// unordered pair) — becomes an edge in g. The realised undirected degree sequence (in-degree plus
+// out-degree) equals degSeq exactly.
 //
 // When allowMulti is false the generator realises the Erased
 // Configuration Model: self-loop and parallel pairings are dropped at
-// generation time. cfg.Multigraph is forced to false; cfg.Directed is
-// forced to false. The realised degree sequence is at most degSeq
+// generation time. The realised
+// undirected degree sequence is at most degSeq
 // componentwise — every dropped pairing reduces the realised degree
 // of its endpoints by one each.
 //
@@ -440,8 +434,6 @@ func ConfigurationModel(degSeq []int, allowMulti bool, seed uint64) Shape[int, i
 	return configModelBase{
 		name: "random.configuration",
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = allowMulti
 			g := lpg.New[int, int64](cfg)
 			return g, buildConfigurationModel(g, owned, allowMulti, seed)
 		},

@@ -50,7 +50,7 @@ func ageRange(lo, hi int64) query.Predicate[int, int64] {
 func setupRangeGraph(tb testing.TB) (*lpg.Graph[int, int64], *csr.CSR[int64]) {
 	tb.Helper()
 
-	g := lpg.New[int, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int, int64](adjlist.Config{})
 
 	for i := range 2000 {
 		age := int64(i % 101)

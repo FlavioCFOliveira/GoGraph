@@ -627,8 +627,6 @@ func runBulkVsOnline(ctx context.Context, seed uint64) (*SimReport, error) {
 func bulkLoad(ctx context.Context, seed *Seed, outPath string) (int, error) {
 	loader := bulk.New(bulk.Options{
 		OutputPath: outPath,
-		Directed:   true,
-		Multigraph: true,
 		MaxRows:    bulkLoadEdges,
 	})
 	for i := 0; i < bulkLoadEdges; i++ {

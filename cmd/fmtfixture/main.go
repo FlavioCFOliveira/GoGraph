@@ -99,7 +99,7 @@ func mustWriteSnapshotFixture() {
 		log.Fatal(err)
 	}
 	// Build a deterministic 3-node graph.
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for _, edge := range [...]struct {
 		s, d int
 		w    int64

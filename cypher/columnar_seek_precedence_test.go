@@ -37,7 +37,7 @@ import (
 // creates an index on age. The returned engine is ready to query.
 func seedIndexedPeople(t *testing.T, n int) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("p%06d", i)
 		if err := g.AddNode(k); err != nil {
@@ -114,7 +114,7 @@ func TestColumnarYieldsToIndexSeek_ScalarProjection(t *testing.T) {
 
 	// The same predicate WITHOUT an index must still take the columnar path, so the
 	// assertion above is about the index and not about the shape being rejected outright.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < seekGatePopulation; i++ {
 		k := fmt.Sprintf("q%06d", i)
 		if err := g.AddNode(k); err != nil {
@@ -158,7 +158,7 @@ func TestColumnarYieldsToIndexSeek_ResultsIdentical(t *testing.T) {
 	const n = seekGatePopulation
 	indexed := seedIndexedPeople(t, n)
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("p%06d", i)
 		if err := g.AddNode(k); err != nil {

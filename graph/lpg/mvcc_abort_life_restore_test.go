@@ -117,7 +117,7 @@ func TestAbortLifeRestore(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := New[string, float64](adjlist.Config{})
 			committedDurable(t, g, c.setup)
 			abortedDurable(t, g, c.aborted)
 			id, ok := g.adj.Mapper().Lookup("x")
@@ -139,7 +139,7 @@ func TestAbortLifeRestore(t *testing.T) {
 // aborted, revived by a second transaction that also aborts, still never
 // existed.
 func TestAbortLifeRestore_RevivalOfUnbornStaysUnborn(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	abortedDurable(t, g, func(w WriteView[string, float64]) error { return w.AddNode("x") })
 	abortedDurable(t, g, func(w WriteView[string, float64]) error { return w.AddNode("x") })
 	id, _ := g.adj.Mapper().Lookup("x")

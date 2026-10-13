@@ -70,7 +70,7 @@ func TestAStar_NegativeWeight(t *testing.T) {
 func TestAStar_VsDijkstraOnGrid(t *testing.T) {
 	t.Parallel()
 	const size = 32 // grid 32x32
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for r := 0; r < size; r++ {
 		for col := 0; col < size; col++ {
 			cur := r*size + col
@@ -86,7 +86,7 @@ func TestAStar_VsDijkstraOnGrid(t *testing.T) {
 			}
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 
 	srcID, _ := a.Mapper().Lookup(0)
 	dstID, _ := a.Mapper().Lookup(size*size - 1)

@@ -21,7 +21,7 @@ import (
 // 50000, 60000, 70000, 80000, 90000 and names are emp0…emp4.
 func newEmployeeGraph(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	salaries := []int64{50000, 60000, 70000, 80000, 90000}
@@ -124,7 +124,7 @@ func TestAggregationAdvanced_AllAggregates(t *testing.T) {
 // Query groups by "tier" (a string property) and checks per-group sums.
 func TestAggregationAdvanced_GroupBySalaryBucket(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// tier='junior': 50000 + 60000 + 65000 = 175000
@@ -189,7 +189,7 @@ func TestAggregationAdvanced_GroupBySalaryBucket(t *testing.T) {
 // but for a labelled scan, exercising the label scan → aggregate path).
 func TestAggregationAdvanced_EmptyLabelScan(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(),

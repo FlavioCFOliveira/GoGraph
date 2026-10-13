@@ -19,7 +19,7 @@ import (
 // multiple property assignments persists all of them correctly.
 func TestSet_MultiplePropertiesAtOnce(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Profile {name: "Alice"})`)
@@ -76,7 +76,7 @@ func TestSet_MultiplePropertiesAtOnce(t *testing.T) {
 // pipeline.
 func TestSet_MultiplePropertiesViaReturn(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

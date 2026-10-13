@@ -38,8 +38,8 @@ func TestStreamingIngest_BulkLoaderConcurrentReads(t *testing.T) {
 	var snap atomic.Pointer[csr.CSR[struct{}]]
 
 	// Seed with an empty snapshot so readers never observe a nil pointer.
-	initial := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
-	snap.Store(csr.BuildFromAdjList(initial))
+	initial := adjlist.New[int, struct{}](adjlist.Config{})
+	snap.Store(csr.BuildFromAdjList(initial).BuildSymmetric())
 
 	done := make(chan struct{})
 	var totalIter atomic.Int64
@@ -49,7 +49,7 @@ func TestStreamingIngest_BulkLoaderConcurrentReads(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		for edge := 0; edge < totalEdges; {
 			for k := 0; k < batchSize && edge < totalEdges; k++ {
 				u := edge % 50
@@ -59,7 +59,7 @@ func TestStreamingIngest_BulkLoaderConcurrentReads(t *testing.T) {
 				}
 				edge++
 			}
-			snap.Store(csr.BuildFromAdjList(a))
+			snap.Store(csr.BuildFromAdjList(a).BuildSymmetric())
 			time.Sleep(time.Millisecond)
 		}
 	}()

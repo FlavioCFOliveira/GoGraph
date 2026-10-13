@@ -29,7 +29,7 @@ import (
 // buildLongPath builds a directed path v0→v1→…→v{n-1} (n nodes, n-1 edges).
 func buildLongPath(tb testing.TB, n int) *cypher.Engine {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range n {
 		key := fmt.Sprintf("v%d", i)
 		if err := g.AddNode(key); err != nil {
@@ -126,7 +126,7 @@ func TestVarlenPlan_PnBoundedHops(t *testing.T) {
 func TestVarlenPlan_PnExplainNoExecution(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	const n = 1000
 	for i := range n {
 		key := fmt.Sprintf("lp%d", i)

@@ -161,6 +161,9 @@ func run() int {
 		case workloadCheckpointConcurrent:
 			runConcurrentCheckpointCrash(dir, scenario)
 			return 0
+		case workloadLegacyMigration:
+			runLegacyMigration(dir)
+			return 0
 		default:
 			fmt.Fprintf(os.Stderr, "crashinject-helper: unknown workload %q\n", w)
 			return 1
@@ -239,7 +242,7 @@ func runCheckpointCrash(dir, scenario string) {
 		log.Fatalf("wal.Open: %v", err)
 	}
 
-	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, int64](adjlist.Config{})
 	opts := txn.Options[int64, int64]{
 		Codec:       txn.NewInt64Codec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -328,7 +331,7 @@ func runRecoveryPromoteCrash(dir string) {
 		log.Fatalf("wal.Open: %v", err)
 	}
 
-	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, int64](adjlist.Config{})
 	opts := txn.Options[int64, int64]{
 		Codec:       txn.NewInt64Codec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -580,7 +583,7 @@ func runEdgeHandlePropCrash(dir, scenario string) {
 		log.Fatalf("wal.Open: %v", err)
 	}
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -660,7 +663,7 @@ func runEdgeHandleDeleteCrash(dir string) {
 		log.Fatalf("wal.Open: %v", err)
 	}
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -769,7 +772,7 @@ func runConcurrentWriters(dir, scenario string) {
 	perWriter := envInt(envConcPerWriter, 200)
 
 	w := openConcurrentWAL(dir)
-	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[int64, int64](g, w, txn.Options[int64, int64]{
 		Codec:       txn.NewInt64Codec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -842,7 +845,11 @@ const (
 	// envWorkload selects the workload independently of the breakpoint name; see
 	// the override in run().
 	envWorkload = "GOGRAPH_CRASH_WORKLOAD"
-	// workloadCheckpointConcurrent is the only value envWorkload currently takes.
+	// workloadLegacyMigration recovers the legacy store the parent placed in
+	// the crash directory, so the breakpoint fires inside the legacy migration
+	// checkpoint (rmp #3072).
+	workloadLegacyMigration = "legacy-migration"
+	// workloadCheckpointConcurrent drives a checkpoint under concurrent commits.
 	workloadCheckpointConcurrent = "checkpoint-concurrent"
 )
 
@@ -890,7 +897,7 @@ func runConcurrentCheckpointCrash(dir, scenario string) {
 	if err != nil {
 		log.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[int64, int64](g, w, txn.Options[int64, int64]{
 		Codec:       txn.NewInt64Codec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -1025,7 +1032,7 @@ func runMVCCCommitCrash(dir, scenario string) {
 		log.Fatalf("wal.Open: %v", err)
 	}
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -1049,4 +1056,16 @@ func runMVCCCommitCrash(dir, scenario string) {
 
 	// Reached only on the non-crash self-test path.
 	fmt.Printf("runMVCCCommitCrash: completed without crash (GOGRAPH_CRASH_AT != %s)\n", scenario)
+}
+
+// runLegacyMigration recovers the legacy store the parent copied into dir. The
+// recovery migrates it and checkpoints it in the current format; the armed
+// breakpoint kills the process somewhere inside that checkpoint.
+func runLegacyMigration(dir string) {
+	if _, err := recovery.Open[string, int64](dir, recovery.Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	}); err != nil {
+		log.Fatalf("recovery.Open: %v", err)
+	}
 }

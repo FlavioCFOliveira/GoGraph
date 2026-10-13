@@ -22,7 +22,7 @@ import (
 // With a:A, b:B, c:C and a-->c (no a-->b-->c), the OPTIONAL MATCH fails and
 // the row must survive with b=NULL.
 func TestMatch7_BoundNodesWithoutMatches(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("s"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

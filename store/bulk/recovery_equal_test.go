@@ -1,6 +1,7 @@
 package bulk
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -30,7 +31,7 @@ func TestLoader_RecoveryEqual(t *testing.T) {
 	outPath := filepath.Join(dir, "graph.csr")
 
 	// Phase 1: bulk load.
-	l := New(Options{OutputPath: outPath, Directed: true})
+	l := New(Options{OutputPath: outPath})
 	edges := []Edge{
 		{Src: "alpha", Dst: "beta", Weight: 1},
 		{Src: "beta", Dst: "gamma", Weight: 2},
@@ -49,7 +50,7 @@ func TestLoader_RecoveryEqual(t *testing.T) {
 	// Phase 2: build LPG from CSR and write snapshot.
 	// The CSR contains NodeIDs; we need a string-keyed LPG for recovery.
 	// We reconstruct it via the adjlist path that the bulk loader used.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, e := range edges {
 		if err := g.AddEdge(e.Src, e.Dst, e.Weight); err != nil {
 			t.Fatalf("AddEdge(%s->%s): %v", e.Src, e.Dst, err)
@@ -67,6 +68,11 @@ func TestLoader_RecoveryEqual(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal.Close: %v", err)
 	}

@@ -15,10 +15,10 @@ import (
 // Config branches.
 func TestAdjList_Weightless_Accessor(t *testing.T) {
 	t.Parallel()
-	if New[string, int64](Config{Directed: true, Weightless: true}).Weightless() != true {
+	if New[string, int64](Config{Weightless: true}).Weightless() != true {
 		t.Fatal("Weightless() = false for Weightless:true config")
 	}
-	if New[string, int64](Config{Directed: true}).Weightless() != false {
+	if New[string, int64](Config{}).Weightless() != false {
 		t.Fatal("Weightless() = true for default config")
 	}
 }
@@ -32,8 +32,8 @@ func TestAdjList_Weightless_Accessor(t *testing.T) {
 // `weights != nil` gate keys off to persist hasWeights=0.
 func TestAdjList_Weightless_NoWeightColumn(t *testing.T) {
 	t.Parallel()
-	a := New[string, int64](Config{Directed: true})
-	a2 := New[string, int64](Config{Directed: true, Weightless: true})
+	a := New[string, int64](Config{})
+	a2 := New[string, int64](Config{Weightless: true})
 
 	// Append enough edges from one source to force the grow/slow path several
 	// times (geometric capacity 4 -> 8 -> 16 ...), so the fresh, fast, and slow
@@ -96,7 +96,7 @@ func TestAdjList_Weightless_NoWeightColumn(t *testing.T) {
 // fully intact.
 func TestAdjList_Weightless_NeighboursYieldsZero(t *testing.T) {
 	t.Parallel()
-	a := New[string, int64](Config{Directed: true, Weightless: true})
+	a := New[string, int64](Config{Weightless: true})
 	mustAddEdge(t, a, "a", "b", 99)
 	mustAddEdge(t, a, "a", "c", 7)
 
@@ -131,7 +131,7 @@ func TestAdjList_Weightless_NeighboursYieldsZero(t *testing.T) {
 // a removal nor a Compact may resurrect a zero-filled weights slice.
 func TestAdjList_Weightless_RemoveCompactKeepNil(t *testing.T) {
 	t.Parallel()
-	a := New[string, int64](Config{Directed: true, Weightless: true})
+	a := New[string, int64](Config{Weightless: true})
 	for i := 0; i < 10; i++ {
 		mustAddEdge(t, a, "hub", "n"+itoa(i), int64(i+1))
 	}
@@ -163,27 +163,6 @@ func TestAdjList_Weightless_RemoveCompactKeepNil(t *testing.T) {
 	}
 }
 
-// TestAdjList_Weightless_UndirectedMirror confirms the undirected mirror append
-// (cross-shard two-lock path included) keeps both directions weightless.
-func TestAdjList_Weightless_UndirectedMirror(t *testing.T) {
-	t.Parallel()
-	a := New[int, int64](Config{Weightless: true}) // undirected
-	// Use ids that land in different shards (low 8 bits differ) to drive the
-	// cross-shard mirror path in addEdge.
-	mustAddEdge(t, a, 0, 1, 42)
-	id0, _ := a.Mapper().Lookup(0)
-	id1, _ := a.Mapper().Lookup(1)
-	if _, ws := a.LoadEntry(id0); ws != nil {
-		t.Fatalf("weightless undirected fwd: weights = %v, want nil", ws)
-	}
-	if _, ws := a.LoadEntry(id1); ws != nil {
-		t.Fatalf("weightless undirected mirror: weights = %v, want nil", ws)
-	}
-	if !a.HasEdge(0, 1) || !a.HasEdge(1, 0) {
-		t.Fatal("weightless undirected: mirror edge missing")
-	}
-}
-
 // TestAdjList_Weightless_ConcurrentReadsConsistentPrefix mirrors the lock-free
 // read contract test (torn_read_test.go) for a weightless graph: a reader
 // observing a concurrently-grown adjacency must always see a consistent prefix.
@@ -197,7 +176,7 @@ func TestAdjList_Weightless_ConcurrentReadsConsistentPrefix(t *testing.T) {
 	const N = 10_000
 	numReaders := max(2, runtime.GOMAXPROCS(0)-1)
 
-	a := New[int, int64](Config{Directed: true, Weightless: true})
+	a := New[int, int64](Config{Weightless: true})
 
 	startCh := make(chan struct{})
 	writerDone := make(chan struct{})

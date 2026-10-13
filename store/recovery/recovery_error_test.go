@@ -92,7 +92,7 @@ func TestOpen_SnapshotPresentNoWAL(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	// Lay down a valid empty snapshot under dir/snapshot.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	a := g.AdjList()
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
@@ -153,6 +153,11 @@ func TestOpen_UnknownRecordVersionStopsHard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	// 0x01 == OpAddEdge as a leading byte: not OpRecordV2 (0xFE) or
 	// OpRecordV3 (0xFD), so Decode rejects it with ErrUnsupportedRecordVersion.
 	if err := w.Append([]byte{byte(txn.OpAddEdge)}); err != nil {
@@ -233,8 +238,13 @@ func TestOpen_ContextCancelledMidReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	// Append enough valid frames that the >=4096 checkpoint can fire.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	for i := 0; i < 4500; i++ {
 		tx := store.Begin()

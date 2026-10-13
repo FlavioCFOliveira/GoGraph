@@ -10,12 +10,13 @@ package cypher_test
 // recovery.Open used to rebuild the graph in simple-graph mode, so every
 // consumer that recovers from disk (e.g. a CLI where each command reopens the
 // store) silently lost all but the last parallel edge. recovery.Open now
-// builds the graph with Multigraph: true, matching the TCK harness.
+// builds the graph with matching the TCK harness.
 //
 // Layer: short. goleak-clean (engines/graphs are local).
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -48,6 +49,11 @@ func mgWriteCycle(t *testing.T, dir string, snap bool, queries ...string) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	store := txn.NewStoreWithOptions[string, float64](res.Graph, w, mgStoreOpts())
 	eng := cypher.NewEngineWithStore(store)
 	for _, q := range queries {
@@ -127,16 +133,16 @@ func runParallelEdgeReopen(t *testing.T, snap bool) {
 	}
 }
 
-// TestMultigraph_ParallelTypedEdges_WAL verifies two distinctly-typed parallel
+// TestRecovery_ParallelTypedEdges_WAL verifies two distinctly-typed parallel
 // edges survive pure WAL-replay recovery as two relationships.
-func TestMultigraph_ParallelTypedEdges_WAL(t *testing.T) {
+func TestRecovery_ParallelTypedEdges_WAL(t *testing.T) {
 	t.Parallel()
 	runParallelEdgeReopen(t, false)
 }
 
-// TestMultigraph_ParallelTypedEdges_Snapshot verifies the same across the
+// TestRecovery_ParallelTypedEdges_Snapshot verifies the same across the
 // self-sufficient snapshot recovery path (snapshot + WAL truncate).
-func TestMultigraph_ParallelTypedEdges_Snapshot(t *testing.T) {
+func TestRecovery_ParallelTypedEdges_Snapshot(t *testing.T) {
 	t.Parallel()
 	runParallelEdgeReopen(t, true)
 }

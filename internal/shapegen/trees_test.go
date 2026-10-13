@@ -177,7 +177,6 @@ func TestTrees_BalancedBinary_Invariants(t *testing.T) {
 			}
 			wantN := uint64((1 << (d + 1)) - 1)
 			assertTreeInvariants(t, g, wantN)
-			assertDirected(t, g, true)
 		})
 	}
 }
@@ -246,7 +245,6 @@ func TestTrees_CompleteKAry_Invariants(t *testing.T) {
 				t.Fatalf("Build: %v", err)
 			}
 			assertTreeInvariants(t, g, uint64(completeKAryOrder(p.k, p.depth)))
-			assertDirected(t, g, true)
 		})
 	}
 }
@@ -319,7 +317,6 @@ func TestTrees_PruferTree_Invariants(t *testing.T) {
 				t.Fatalf("Build: %v", err)
 			}
 			assertTreeInvariants(t, g, uint64(c.n))
-			assertDirected(t, g, true)
 		})
 	}
 }
@@ -384,7 +381,7 @@ func TestTrees_PruferTree_Golden(t *testing.T) {
 func TestTrees_PruferTree_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
 	const n = 260 // > 256 so at least one NodeID lands at intraIdx >= 1.
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	_, err := PruferTree(n, 0).Build(cfg)
 	if err == nil {
 		t.Fatal("Build returned nil error, want adjlist.ErrShardFull")
@@ -483,7 +480,7 @@ func TestTrees_PathDegenerate_Invariants(t *testing.T) {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			t.Parallel()
 			s := PathDegenerate(n)
-			// PathDegenerate is a delegation to Path(n, false), so its
+			// PathDegenerate is a delegation to Path(n), so its
 			// Name() reports the delegated catalogue identifier rather
 			// than a trees-family name. This is the contract called
 			// out in PathDegenerate's godoc.
@@ -496,8 +493,7 @@ func TestTrees_PathDegenerate_Invariants(t *testing.T) {
 			}
 			assertTreeInvariants(t, g, uint64(n))
 			// PathDegenerate is undirected by definition: it inherits
-			// the orientation from Path(n, false).
-			assertDirected(t, g, false)
+			// the orientation from Path(n).
 		})
 	}
 }
@@ -505,7 +501,7 @@ func TestTrees_PathDegenerate_Invariants(t *testing.T) {
 // TestTrees_PathDegenerate_DelegatesToClassic asserts the
 // constructor contract pinned in the brief: the graph produced by
 // PathDegenerate(n) is semantically equal to the one produced by
-// Path(n, false) — same Order, same Size, same adjacency listing.
+// Path(n) — same Order, same Size, same adjacency listing.
 func TestTrees_PathDegenerate_DelegatesToClassic(t *testing.T) {
 	t.Parallel()
 	for _, n := range goldenSizes() {
@@ -516,7 +512,7 @@ func TestTrees_PathDegenerate_DelegatesToClassic(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PathDegenerate: %v", err)
 			}
-			gClassic, err := Path(n, false).Build(defaultCfg)
+			gClassic, err := Path(n).Build(defaultCfg)
 			if err != nil {
 				t.Fatalf("Path: %v", err)
 			}
@@ -587,7 +583,6 @@ func TestTrees_Caterpillar_Invariants(t *testing.T) {
 				total += l
 			}
 			assertTreeInvariants(t, g, uint64(total))
-			assertDirected(t, g, true)
 		})
 	}
 }
@@ -683,7 +678,6 @@ func TestTrees_Spider_Invariants(t *testing.T) {
 			}
 			wantN := uint64(1 + c.legs*c.legLen)
 			assertTreeInvariants(t, g, wantN)
-			assertDirected(t, g, true)
 			// Centre node has out-degree == legs (one edge per leg).
 			if got := degreeOut(g, 0); got != c.legs {
 				t.Fatalf("centre out-deg = %d, want %d", got, c.legs)
@@ -763,7 +757,6 @@ func TestTrees_Lobster_Invariants(t *testing.T) {
 				total += d
 			}
 			assertTreeInvariants(t, g, uint64(total))
-			assertDirected(t, g, true)
 		})
 	}
 }
@@ -848,7 +841,7 @@ func TestTrees_Lobster_Golden(t *testing.T) {
 // covered by the classic-family suite.
 func TestTrees_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	for _, tc := range []struct {
 		name string
 		s    Shape[int, int64]

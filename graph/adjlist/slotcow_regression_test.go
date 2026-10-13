@@ -20,7 +20,7 @@ import (
 // RemoveEdge allocates on a graph of n nodes that each carry one edge.
 func unbracketedBytesPerOp(t *testing.T, n int) float64 {
 	t.Helper()
-	a := New[int, float64](Config{Directed: true})
+	a := New[int, float64](Config{})
 	a.BeginCommit()
 	for i := 0; i < n; i++ {
 		if err := a.AddEdge(i, (i+1)%n, 1); err != nil {
@@ -86,7 +86,7 @@ func TestSlotCOW_UnbracketedWriteCostIsIndependentOfGraphSize(t *testing.T) {
 // entry DID change across a pin — otherwise the test would pass without ever
 // exercising the race.
 func TestSlotCOW_PinnedVersionNeverChangesUnderConcurrentUnbracketedWrites(t *testing.T) {
-	a := New[int, float64](Config{Directed: true, Multigraph: true})
+	a := New[int, float64](Config{})
 	const hub, writers, pins = 0, 4, 2000
 	for i := 0; i < 64; i++ {
 		if err := a.AddEdge(hub, i+1, 1); err != nil {

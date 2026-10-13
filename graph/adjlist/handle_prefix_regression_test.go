@@ -38,7 +38,7 @@ import "testing"
 // arrive verbatim.
 func TestAdjList_HandleAfterHandlelessPrefix_NoPanic(t *testing.T) {
 	t.Parallel()
-	a := New[string, int](Config{Directed: true, Multigraph: true})
+	a := New[string, int](Config{})
 
 	// Five auto-minted edges: neighbours grows to len 5 / cap 8, and the handle
 	// column grows with it.
@@ -89,7 +89,7 @@ func TestAdjList_HandleAfterHandlelessPrefix_Degrees(t *testing.T) {
 		prefix := prefix
 		t.Run("", func(t *testing.T) {
 			t.Parallel()
-			a := New[int, int](Config{Directed: true, Multigraph: true})
+			a := New[int, int](Config{})
 			for i := 0; i < prefix; i++ {
 				if err := a.AddEdge(0, i+1, 1); err != nil {
 					t.Fatalf("AddEdge #%d: %v", i, err)

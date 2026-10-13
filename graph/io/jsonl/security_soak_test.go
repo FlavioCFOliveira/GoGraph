@@ -41,7 +41,7 @@ func TestSec_IO_JSONLSustainedHostileStreamBounded(t *testing.T) {
 	runtime.ReadMemStats(&before)
 
 	g, rows, err := jsonl.ReadIntoCappedCtx(context.Background(), r,
-		adjlist.Config{Directed: true}, capBytes)
+		adjlist.Config{}, capBytes)
 	if !errors.Is(err, jsonl.ErrInputTooLarge) {
 		t.Fatalf("err = %v, want ErrInputTooLarge after the cap is crossed", err)
 	}

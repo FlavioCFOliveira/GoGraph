@@ -17,7 +17,7 @@ import (
 //
 //	(a)-[:FIRST]->(b)   (a)-[:SECOND]->(b)
 func TestRepro_NegatedPatternPredicate_NonFirstRelType(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (a:N {name:'a'})-[:FIRST]->(b:N {name:'b'})`)
 	runSetup(t, eng, `MATCH (a:N {name:'a'}), (b:N {name:'b'}) CREATE (a)-[:SECOND]->(b)`)
@@ -62,7 +62,7 @@ func TestRepro_NegatedPatternPredicate_NonFirstRelType(t *testing.T) {
 // multigraph pair should report the matched edge's OWN type, not the first
 // label of the pair. `type(r)` for `[r:SECOND]` must yield "SECOND".
 func TestRepro_PatternComprehension_RelVarType(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (a:N {name:'a'})-[:FIRST]->(b:N {name:'b'})`)
 	runSetup(t, eng, `MATCH (a:N {name:'a'}), (b:N {name:'b'}) CREATE (a)-[:SECOND]->(b)`)
@@ -107,7 +107,7 @@ func TestRepro_PatternComprehension_RelVarType(t *testing.T) {
 // pattern selected. Both parallel edges exist, so filtering the comprehension
 // by either type must retain 'a'.
 func TestRepro_ComprehensionFallback_RelVarType(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (a:N {name:'a'})-[:FIRST]->(b:N {name:'b'})`)
 	runSetup(t, eng, `MATCH (a:N {name:'a'}), (b:N {name:'b'}) CREATE (a)-[:SECOND]->(b)`)

@@ -51,7 +51,7 @@ const entityPropSeed = `CREATE (a:X {key:'a'})-[:R]->(c:X {key:'c'}), (b:X {key:
 // [entityPropSeed].
 func newEntityPropEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	if _, err := runEntityProp(eng, entityPropSeed); err != nil {
 		t.Fatalf("seed: %v", err)

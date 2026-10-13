@@ -29,7 +29,7 @@ func TestHopcroftTarjanBCC_Dense_K8(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete(%d).Build: %v", n, err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 	res := HopcroftTarjanBCC(c)
 
 	if len(res.Components) != 1 {
@@ -55,7 +55,7 @@ func TestHopcroftTarjanBCC_Dense_Petersen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Petersen().Build: %v", err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 	res := HopcroftTarjanBCC(c)
 
 	if len(res.Components) != 1 {

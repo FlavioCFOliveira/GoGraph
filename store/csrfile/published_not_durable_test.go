@@ -29,7 +29,7 @@ func (failCreateFS) Create(string) (File, error) { return nil, errInjected }
 // publishTestCSR builds a small CSR to publish.
 func publishTestCSR(t *testing.T) *csr.CSR[struct{}] {
 	t.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 8; i++ {
 		if err := a.AddEdge(i, (i+1)%8, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)

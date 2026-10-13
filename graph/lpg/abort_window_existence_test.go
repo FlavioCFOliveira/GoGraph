@@ -30,7 +30,7 @@ import (
 )
 
 func TestExistenceNoOpAdmits_RefusesAnUnbornID(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	abortedDurable(t, g, func(w WriteView[string, float64]) error { return w.AddNode("x") })
 	id, _ := g.adj.Mapper().Lookup("x")
 	if !g.IsTombstonedStored(id) || !g.inUnborn(id) {
@@ -60,7 +60,7 @@ func TestExistenceNoOpAdmits_RefusesAnUnbornID(t *testing.T) {
 // in the window — a live node marked unborn — and requires the death to be
 // refused, so nothing is recorded that an abort could turn into a revival.
 func TestRemoveNode_RefusesAnUnbornID(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	committedDurable(t, g, func(w WriteView[string, float64]) error { return w.AddNode("x") })
 	id, _ := g.adj.Mapper().Lookup("x")
 	g.markUnborn(id) // the instant between markUnborn and the tombstone flip

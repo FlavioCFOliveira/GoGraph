@@ -162,9 +162,10 @@ const (
 // fwdPos is the FORWARD-CSR position of the physical edge this hop traverses —
 // the handle-disambiguated per-instance position, NOT a synthetic reverse
 // position. Both a forward hop and a reverse hop over the same physical edge
-// record the SAME fwdPos, so the hop is decodable by the relationship hydrator
-// ([cypher].edgeHandleAtFwdPos), which keys off a forward position to recover
-// the stable per-edge handle (rmp #1685). reversed marks whether this hop was
+// record the SAME fwdPos. When the path is emitted, [VarLengthExpand.emittedEdgeID]
+// maps fwdPos to the edge's stable per-edge handle (rmp #2317), and the
+// relationship hydrator ([cypher].resolveHopRel) keys on that handle (rmp #1685).
+// reversed marks whether this hop was
 // taken against storage direction (an undirected/reverse traversal of a
 // stored src->dst edge): the path renderer needs it to emit `<-[…]-`, and the
 // hydrator needs it to swap the storage endpoints when resolving the edge's
@@ -216,7 +217,7 @@ type VarLengthExpand struct {
 	fwdHandles []uint64 // forward per-slot stable handles (nil unless a multigraph snapshot)
 	revVerts   []uint64
 	revEdges   []graph.NodeID
-	revHandles []uint64 // reverse per-slot stable handles (nil for DirOut / non-multigraph)
+	revHandles []uint64 // reverse per-slot stable handles (nil for DirOut / a handle-less snapshot)
 
 	// revToFwd maps a reverse-CSR edge position to its corresponding
 	// forward-CSR edge position. Used by the relationship-uniqueness
@@ -239,7 +240,7 @@ type VarLengthExpand struct {
 	// reverse dst->src slot pairs with the n-th forward src->dst... actually
 	// dst->src slot). The handle path mirrors [Expand.lookupFwdEdgePosByHandle]
 	// (the single-hop #1634 fix); the ordinal fallback mirrors its pre-#1634
-	// behaviour for non-multigraph snapshots.
+	// behaviour for handle-less snapshots.
 	revToFwd []uint64
 
 	// BFS state for the current input row. Two slices are kept and ping-ponged
@@ -768,7 +769,7 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 		// disjunction -[:A|B*]- accepts an edge of EITHER type. Comparing the
 		// looked-up label against the single op.edgeType (= RelTypes[0]) here
 		// silently dropped every edge of a non-first declared type, even on a
-		// simple graph (rmp #1688/D3); the set test mirrors
+		// pair without parallel edges (rmp #1688/D3); the set test mirrors
 		// [Expand.passesFilter]. op.edgeType stays as the "a filter was
 		// requested" gate, set in lockstep with op.admit.
 		if isFwd && op.edgeType != "" {

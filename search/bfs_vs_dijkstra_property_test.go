@@ -27,7 +27,7 @@ func TestProperty_BFSHops_LEQ_DijkstraDistance(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		n := rapid.IntRange(5, 30).Draw(rt, "n")
 
-		a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+		a := adjlist.New[int, int64](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			if err := a.AddNode(i); err != nil {
 				rt.Fatalf("AddNode(%d): %v", i, err)

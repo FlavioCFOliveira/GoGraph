@@ -10,7 +10,7 @@ import (
 
 func TestWrite_Directed(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("alice", "bob", 5); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -36,33 +36,9 @@ func TestWrite_Directed(t *testing.T) {
 	}
 }
 
-func TestWrite_Undirected(t *testing.T) {
-	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: false})
-	if err := a.AddEdge("alice", "bob", 1); err != nil {
-		t.Fatalf("AddEdge: %v", err)
-	}
-	var buf bytes.Buffer
-	if err := Write(&buf, a); err != nil {
-		t.Fatal(err)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "graph G {") {
-		t.Fatalf("missing graph header: %q", out)
-	}
-	if !strings.Contains(out, "--") {
-		t.Fatalf("undirected should use -- operator: %q", out)
-	}
-	// Exactly one edge line (mirror edge skipped).
-	count := strings.Count(out, "--")
-	if count != 1 {
-		t.Fatalf("expected one -- edge line, got %d", count)
-	}
-}
-
 func TestWrite_QuotesSpecialIDs(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("ali ce", "bob", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

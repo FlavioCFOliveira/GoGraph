@@ -32,7 +32,7 @@ type seededFixture struct {
 // [seededFixture]. Used by every multi-index test in this file.
 func seedThreeIndexes(t *testing.T) seededFixture {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
 
@@ -115,7 +115,7 @@ func TestSnapshot_IndexesPersisted(t *testing.T) {
 // callers that never opt in.
 func TestSnapshot_NoManagerNoIndexes(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestSnapshot_NoManagerNoIndexes(t *testing.T) {
 // registered indexes does NOT emit the indexes/ directory.
 func TestSnapshot_EmptyManagerNoIndexes(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
@@ -274,7 +274,7 @@ func TestSnapshot_V1FixtureStillLoads(t *testing.T) {
 // reference it, and no file is written.
 func TestSnapshot_NonSerializableSubscriberSkipped(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
 	if err := mgr.CreateIndex("nope", &dummySub{}); err != nil {

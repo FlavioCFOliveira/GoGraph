@@ -25,7 +25,7 @@ func TestBetweenness_PropertyMatchesParallel(t *testing.T) {
 		n := rapid.IntRange(5, 30).Draw(rt, "n")
 		m := rapid.IntRange(n-1, 4*n).Draw(rt, "m")
 
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		// Ensure all n nodes are registered so the mapper is dense
 		// even if some receive no edges.
 		for i := 0; i < n; i++ {
@@ -41,7 +41,7 @@ func TestBetweenness_PropertyMatchesParallel(t *testing.T) {
 			}
 		}
 
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		serial := Betweenness(c)
 		parallel := BetweennessParallel(c, 4)
 
@@ -67,7 +67,7 @@ func TestBetweenness_PropertyNonNegative(t *testing.T) {
 		n := rapid.IntRange(2, 40).Draw(rt, "n")
 		m := rapid.IntRange(0, 4*n).Draw(rt, "m")
 
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			if err := a.AddNode(i); err != nil {
 				rt.Fatalf("AddNode(%d): %v", i, err)
@@ -81,7 +81,7 @@ func TestBetweenness_PropertyNonNegative(t *testing.T) {
 			}
 		}
 
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		bc := Betweenness(c)
 		for i, v := range bc {
 			if v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {

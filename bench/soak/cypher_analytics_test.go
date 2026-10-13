@@ -75,7 +75,7 @@ func runCypherAnalytics(t *testing.T, dur time.Duration) {
 		msStart.HeapAlloc, goroutinesStart, dur)
 
 	// ── Build graph + engine ──────────────────────────────────────────────────
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	for i := range 100 {
@@ -94,7 +94,7 @@ func runCypherAnalytics(t *testing.T, dur time.Duration) {
 	// ── Shared adjlist snapshot for CSR rebuild ───────────────────────────────
 	// The analytics goroutine works on an atomic CSR snapshot to avoid
 	// holding the engine lock during PageRank iteration.
-	al := adjlist.New[string, float64](adjlist.Config{Directed: true})
+	al := adjlist.New[string, float64](adjlist.Config{})
 	for i := range 100 {
 		if err := al.AddNode(fmt.Sprintf("seed_%d", i)); err != nil {
 			t.Fatalf("adjlist seed %d: %v", i, err)

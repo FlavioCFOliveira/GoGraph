@@ -44,7 +44,7 @@ func (c *cancelAfterFirstCheck) Err() error {
 // The path ensures that Dijkstra has meaningful work to do before
 // cancellation; its linear topology keeps construction O(n).
 func buildDirectedPath(n int) *csr.CSR[float64] {
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		_ = a.AddNode(i) // AddNode is total; error is always nil
 	}

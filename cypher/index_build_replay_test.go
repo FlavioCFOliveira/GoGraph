@@ -86,7 +86,7 @@ const replaySeedSize = 20
 // node whose committed label state and whose uncommitted label state differ.
 func replaySeed(tb testing.TB) *lpg.Graph[string, float64] {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < replaySeedSize; i++ {
 		key := fmt.Sprintf("k%d", i)
 		if err := g.SetNodeLabel(key, "Person"); err != nil {

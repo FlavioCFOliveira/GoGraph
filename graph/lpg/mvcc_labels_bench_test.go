@@ -59,7 +59,7 @@ func benchLabelGraph(b *testing.B, n int, deltas bool) (*Graph[string, float64],
 // state DETERMINISTICALLY: measured 0, not 3 or 13 or 4965.
 func benchLabelGraphAt(b *testing.B, n int, deltas, armAfterSeed bool) (*Graph[string, float64], []string) {
 	b.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	// Seed with the substrate DISARMED in every arm, so the seeding writes never
 	// record a delta and the post-seed state is a function of the arm rather than
 	// of how fast the reclaimer ran.
@@ -190,7 +190,7 @@ func BenchmarkPropWrite(b *testing.B) {
 	for _, size := range []int{10000, 1000000} {
 		for _, deltas := range []bool{false, true} {
 			b.Run(fmt.Sprintf("nodes=%d/deltas=%v", size, deltas), func(b *testing.B) {
-				g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+				g := New[string, float64](adjlist.Config{})
 				keys := make([]string, size)
 				for i := 0; i < size; i++ {
 					keys[i] = fmt.Sprintf("n%d", i)
@@ -243,7 +243,7 @@ func BenchmarkPropWrite(b *testing.B) {
 func BenchmarkPropRead(b *testing.B) {
 	const size = 100000
 	build := func(arm bool) (*Graph[string, float64], graph.NodeID) {
-		g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := New[string, float64](adjlist.Config{})
 		// Seed DISARMED, then arm — the same correction as the label fixture and
 		// for the same reason: EnablePropDeltas is a no-op on a graph from New,
 		// because armMVCC already set propDeltas and runs by default. Seeding

@@ -68,7 +68,7 @@ func FuzzSec_IO_JSONLReadWithProps(f *testing.F) {
 
 		g, n, err := jsonl.ReadWithPropsCappedCtx(
 			context.Background(), strings.NewReader(string(data)),
-			adjlist.Config{Directed: true}, maxFuzzBytes)
+			adjlist.Config{}, maxFuzzBytes)
 		if err != nil {
 			// Contract: on any error the graph is nil and the row count is
 			// not negative.

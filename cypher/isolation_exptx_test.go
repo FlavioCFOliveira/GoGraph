@@ -125,7 +125,7 @@ func TestExplicitTx_Isolation_ReadCommitted(t *testing.T) {
 	t.Run("reader_does_not_block_and_sees_no_uncommitted_work", func(t *testing.T) {
 		t.Parallel()
 
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 
 		// Pre-condition: empty graph.
@@ -198,7 +198,7 @@ func TestExplicitTx_Isolation_ReadCommitted(t *testing.T) {
 	t.Run("reader_sees_zero_after_rollback", func(t *testing.T) {
 		t.Parallel()
 
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 
 		tx, err := eng.BeginTx(context.Background())
@@ -254,7 +254,7 @@ func TestExplicitTx_Isolation_ReadCommitted(t *testing.T) {
 		// count (e.g. exactly 1 node when 2 are committed atomically). Valid
 		// observations are 0 (before Commit) or 2 (after Commit).
 
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 
 		var (
@@ -385,7 +385,7 @@ func TestExplicitTx_InTxCreateThenDeleteInvisibleToConcurrentReader(t *testing.T
 		}, true, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			eng := cypher.NewEngine(g)
 
 			tx, err := eng.BeginTx(context.Background())
@@ -432,7 +432,7 @@ func TestExplicitTx_InTxCreateThenDeleteInvisibleToConcurrentReader(t *testing.T
 // node (the aborted birth+death life-record pair was tombstoned and then
 // revived by the abort reclaim, and the revive won).
 func TestExplicitTx_ConflictedRollbackLeavesNoPhantom(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -512,7 +512,7 @@ func TestExplicitTx_ConflictedRollbackLeavesNoPhantom(t *testing.T) {
 func TestExplicitTx_DeleteVsPendingWriteConflicts(t *testing.T) {
 	newEng := func(t *testing.T) *cypher.Engine {
 		t.Helper()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 		if _, err := eng.RunInTxAny(context.Background(), `CREATE (:P {name:'victim', v:1})`, nil); err != nil {
 			t.Fatalf("seed: %v", err)
@@ -625,7 +625,7 @@ func TestExplicitTx_DeleteVsPendingWriteConflicts(t *testing.T) {
 func TestExplicitTx_EdgeVsPendingNodeDelete(t *testing.T) {
 	seed := func(t *testing.T) *cypher.Engine {
 		t.Helper()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 		if _, err := eng.RunInTxAny(context.Background(),
 			`CREATE (:P {name:'a'}), (:P {name:'b'})`, nil); err != nil {
@@ -708,7 +708,7 @@ func TestExplicitTx_EdgeVsPendingNodeDelete(t *testing.T) {
 // broken build the CREATE's mapper intern survived with no life record, so the
 // slot read as a permanently visible unnamed node.
 func TestExplicitTx_DoomedCreateLeavesNoOrphanSlot(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	if _, err := eng.RunInTxAny(ctx, `CREATE (:P {name:'target', v:1})`, nil); err != nil {
@@ -779,7 +779,7 @@ func TestExplicitTx_DoomedCreateLeavesNoOrphanSlot(t *testing.T) {
 func TestExplicitTx_StackedRelationshipWriteCannotCommitARolledBackRelationship(t *testing.T) {
 	for _, doomed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("doomed=%v", doomed), func(t *testing.T) {
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			t.Cleanup(func() { _ = g.Close() })
 			eng := cypher.NewEngine(g)
 			ctx := context.Background()

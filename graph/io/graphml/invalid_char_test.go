@@ -17,7 +17,7 @@ import (
 func TestWrite_InvalidNodeID_FailStop(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddNode("ctrl\x01\x1f"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestWrite_InvalidNodeID_FailStop(t *testing.T) {
 func TestWrite_CleanNodeID_OK(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("alice", "bob", 7); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

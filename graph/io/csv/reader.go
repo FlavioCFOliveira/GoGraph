@@ -86,10 +86,6 @@ type Options struct {
 	Comment rune
 	// HasHeader skips the first line when true.
 	HasHeader bool
-	// Directed selects the underlying adjacency-list config.
-	Directed bool
-	// Multigraph allows parallel edges.
-	Multigraph bool
 
 	// SanitizeFormulae, when true, neutralises spreadsheet formula
 	// injection (OWASP CSV injection, CWE-1236) on the write path. A cell
@@ -112,10 +108,10 @@ type Options struct {
 }
 
 // DefaultOptions returns the minimal config: comma delimiter, '#'
-// comments, directed simple graph, no header, and the [DefaultMaxBytes]
+// comments, no header, and the [DefaultMaxBytes]
 // input-size ceiling.
 func DefaultOptions() Options {
-	return Options{Delimiter: ',', Comment: '#', Directed: true, MaxBytes: DefaultMaxBytes}
+	return Options{Delimiter: ',', Comment: '#', MaxBytes: DefaultMaxBytes}
 }
 
 // ReadInto streams a CSV from r into an adjacency list, returning
@@ -177,10 +173,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjLi
 	c.FieldsPerRecord = -1
 	c.ReuseRecord = true
 
-	a := adjlist.New[string, int64](adjlist.Config{
-		Directed:   opts.Directed,
-		Multigraph: opts.Multigraph,
-	})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	rows := 0
 	first := opts.HasHeader
 	for {

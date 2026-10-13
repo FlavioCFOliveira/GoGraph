@@ -61,7 +61,7 @@ func TestCheckpoint_HandleRecordUnderCapStillFolds_2784(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, w, csStoreOpts())
 
 	tx := st.Begin()

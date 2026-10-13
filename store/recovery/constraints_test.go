@@ -6,6 +6,7 @@ package recovery
 // reconciled with a snapshot's constraints.bin component.
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -29,6 +30,11 @@ func crStore(t *testing.T, dir string) (*txn.Store[string, float64], *wal.Writer
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	store := txn.NewStoreWithOptions[string, float64](res.Graph, w,
 		txn.Options[string, float64]{Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec()})
 	return store, w

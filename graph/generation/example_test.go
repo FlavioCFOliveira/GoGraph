@@ -11,7 +11,7 @@ import (
 // snapshot is a helper that freezes a directed graph with the given
 // edges into a CSR view, the immutable unit a Publisher hands out.
 func snapshot(edges [][2]string) *csr.CSR[int] {
-	g := adjlist.New[string, int](adjlist.Config{Directed: true})
+	g := adjlist.New[string, int](adjlist.Config{})
 	for _, e := range edges {
 		_ = g.AddEdge(e[0], e[1], 1)
 	}

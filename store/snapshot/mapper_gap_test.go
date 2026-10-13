@@ -128,7 +128,7 @@ func assertHole(t *testing.T, pairs map[graph.NodeID]string, dead []graph.NodeID
 func TestCapture_OpenTransactionAtInstantLeavesAHole(t *testing.T) {
 	keyA, keyB := sameShardKeys(t)
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	txA := g.BeginVersionedTx()
@@ -162,7 +162,7 @@ func TestCapture_AbortedCreationAfterInstantLeavesAHole(t *testing.T) {
 	for _, captureRead := range []bool{true, false} {
 		t.Run(fmt.Sprintf("capture_read=%v", captureRead), func(t *testing.T) {
 			keyA, keyB := sameShardKeys(t)
-			g := lpg.New[string, float64](adjlist.Config{Directed: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			defer func() { _ = g.Close() }()
 			if err := g.ApplyVersioned(func(tx lpg.WriteTx) error {
 				return g.Writer(tx).AddNode("seed")
@@ -227,7 +227,7 @@ func mustLookup(t *testing.T, g *lpg.Graph[string, float64], k string) graph.Nod
 func TestCapture_QuiescedInstantEmitsEveryVisibleNode(t *testing.T) {
 	keyA, keyB := sameShardKeys(t)
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	// Both transactions COMMIT before the instant, in interning order.
@@ -291,7 +291,7 @@ func TestCapture_QuiescedInstantEmitsEveryVisibleNode(t *testing.T) {
 func TestCapture_TombstoneIDsAreAscending(t *testing.T) {
 	const n = 2000
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	for i := 0; i < n; i++ {

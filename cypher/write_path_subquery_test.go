@@ -69,7 +69,7 @@ const wpsNodes = 4
 // under test or by an explicit setup — never by the fixture.
 func newWPSFixture(t *testing.T, n int) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	e := cypher.NewEngine(g)
 	for i := range n {
 		if _, err := e.RunAny(context.Background(), fmt.Sprintf(`CREATE (:P {sid:%d})`, wpsBaseSID+i), nil); err != nil {
@@ -479,7 +479,7 @@ func TestWritePathSubquery_AdjacencyRewriteAgrees(t *testing.T) {
 	}
 	arm := func(t *testing.T, disable bool, setup, q string) []string {
 		t.Helper()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		e := cypher.NewEngineWithOptions(g, cypher.EngineOptions{DisableAdjacencyCountRewrites: disable})
 		for i := range wpsNodes {
 			if _, err := e.RunAny(context.Background(), fmt.Sprintf(`CREATE (:P {sid:%d})`, wpsBaseSID+i), nil); err != nil {

@@ -20,7 +20,7 @@ import (
 // buildPath builds a directed path v0→v1→…→v{n-1}.
 func buildPath(tb testing.TB, n int) (*lpg.Graph[string, float64], *cypher.Engine) {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range n {
 		name := fmt.Sprintf("v%d", i)
 		if err := g.AddNode(name); err != nil {

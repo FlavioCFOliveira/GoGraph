@@ -18,7 +18,7 @@ import (
 // from a literal.
 func boundSeekFixture(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	run := func(q string) {
 		t.Helper()

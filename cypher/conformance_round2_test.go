@@ -21,7 +21,7 @@ import (
 
 func r2Engine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return cypher.NewEngine(g)
 }
 

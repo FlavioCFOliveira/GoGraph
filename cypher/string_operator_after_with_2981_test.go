@@ -25,7 +25,7 @@ import (
 )
 
 func TestStringOperatorAfterWith_2981(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	e := cypher.NewEngine(g)
 	if _, errText := wpsDrain(t, e,
 		"CREATE (:P {name: 'alpha'}), (:P {name: 'abc'}), (:P {name: 'beta'}), "+

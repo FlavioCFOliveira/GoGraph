@@ -37,7 +37,7 @@ import (
 // the graph takes the walking path, including "clean"'s.
 func boundedDegreeFixture(t *testing.T, dead, live int) *Graph[string, float64] {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 
 	add := func(key string) {
 		if err := g.AddNode(key); err != nil {

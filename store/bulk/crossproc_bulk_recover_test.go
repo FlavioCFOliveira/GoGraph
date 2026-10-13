@@ -41,7 +41,7 @@ func init() {
 		}
 
 		// Phase 1: bulk load.
-		l := New(Options{OutputPath: outPath, Directed: true})
+		l := New(Options{OutputPath: outPath})
 		if err := l.AddBatch(edges); err != nil {
 			fmt.Printf("bulk-load-proc: AddBatch: %v\n", err)
 			return 1
@@ -54,7 +54,7 @@ func init() {
 
 		// Phase 2: build an LPG from the same edges and write a full
 		// snapshot so recovery.Open can load the graph without a WAL.
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		for _, e := range edges {
 			if addErr := g.AddEdge(e.Src, e.Dst, e.Weight); addErr != nil {
 				fmt.Printf("bulk-load-proc: AddEdge: %v\n", addErr)

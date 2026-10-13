@@ -21,7 +21,7 @@ import (
 func TestDOTWrite_Golden(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i, w := range []int64{10, 20, 30, 40} {
 		src := strconv.Itoa(i)
 		dst := strconv.Itoa((i + 1) % 4)

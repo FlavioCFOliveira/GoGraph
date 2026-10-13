@@ -1253,25 +1253,5 @@ func (c *Checkpointer[N, W]) snapshotIsSelfSufficient(dir string, needConstraint
 	if err != nil {
 		return false, fmt.Errorf("checkpoint: read snapshot manifest: %w", err)
 	}
-	var hasMapper, hasConstraints, hasIndexDefs bool
-	for _, f := range m.Files {
-		switch f.Name {
-		case snapshot.MapperFile:
-			hasMapper = true
-		case snapshot.ConstraintsFile:
-			hasConstraints = true
-		case snapshot.IndexDefsFile:
-			hasIndexDefs = true
-		}
-	}
-	if !hasMapper {
-		return false, nil
-	}
-	if needConstraints && !hasConstraints {
-		return false, nil
-	}
-	if needIndexes && !hasIndexDefs {
-		return false, nil
-	}
-	return true, nil
+	return snapshot.SelfSufficient(m.Files, needConstraints, needIndexes), nil
 }

@@ -70,7 +70,7 @@ const sortComplexityQuery = `MATCH (p:Person) RETURN p.firstName ORDER BY coales
 // flattered by a boxing-free integer.
 func sortComplexityGraph(t *testing.T, n int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(key); err != nil {
@@ -276,7 +276,7 @@ func TestOrderByResultsIdenticalAcrossSeam(t *testing.T) {
 	const n = 800
 	const salaryTieModulus = 11
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(key); err != nil {
@@ -470,7 +470,7 @@ func TestOrderByColIdxResultsIdenticalAcrossSeam(t *testing.T) {
 	const n = 800
 	const salaryTieModulus = 11
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(key); err != nil {

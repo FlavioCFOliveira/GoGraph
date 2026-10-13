@@ -62,7 +62,7 @@ func TestSec_Core_ShardFloodAnalyzeEnvelope(t *testing.T) {
 	if len(keys) < realOrder {
 		t.Fatalf("GenerateShardZeroKeys(%d) returned %d keys", realOrder, len(keys))
 	}
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	// A directed chain over the shard-0 keys: live, weakly connected,
 	// every node reachable from its predecessor.
 	for i := 0; i+1 < realOrder; i++ {

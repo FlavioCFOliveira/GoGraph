@@ -28,13 +28,9 @@ import (
 // # Configuration override policy
 //
 // Each generator constructs the underlying [adjlist.Config] from the
-// caller-supplied cfg, preserving cfg.MaxShardCapacity, but overrides
-// cfg.Directed and cfg.Multigraph whenever the catalogue definition
-// fixes them. For example, ParallelDigon must force Multigraph=true
-// regardless of cfg.Multigraph; otherwise the catalogue invariant
-// Size=k would silently degrade to Size=1 under simple-graph
-// deduplication. Where a flag is overridden, the godoc records both
-// the override and the rationale.
+// caller-supplied cfg, preserving cfg.MaxShardCapacity. Every graph is a
+// multigraph, so ParallelDigon's k parallel edges are all stored and the
+// other shapes are simple because their generators never repeat a pair.
 //
 // # Error propagation
 //
@@ -99,16 +95,11 @@ func (s trivialBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
 //   - Order() == 0
 //   - Size()  == 0
 //
-// The graph respects cfg.MaxShardCapacity but always sets
-// Directed=true: an empty directed graph is the canonical E0 across
-// the catalogue, and any reverse-edge mirroring would be vacuous
-// regardless.
+// The graph respects cfg.MaxShardCapacity.
 func EmptyGraph() Shape[int, int64] {
 	return trivialBase{
 		name: "trivial.empty",
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			return lpg.New[int, int64](cfg), nil
 		},
 	}
@@ -134,8 +125,6 @@ func SingleNode() Shape[int, int64] {
 	return trivialBase{
 		name: "trivial.k1",
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			err := g.AddNode(canonicalNode(0))
 			return g, err
@@ -144,38 +133,34 @@ func SingleNode() Shape[int, int64] {
 }
 
 // SingleEdge returns a Shape that builds K2 or — when selfLoop is
-// true — the single self-loop graph. The three boolean flags select
+// true — the single self-loop graph. The two boolean flags select
 // the variant:
 //
-//   - directed:  true → cfg.Directed=true; false → cfg.Directed=false.
 //   - weighted:  true → edge weight is [weightedSentinel] (1);
 //     false → edge weight is [unweightedSentinel] (0).
-//   - selfLoop:  true → one node with one (0→0) edge; the directed
-//     flag is ignored in this case because a single self-loop has the
-//     same topology in directed and undirected graphs.
+//   - selfLoop:  true → one node with one (0→0) edge; false → the
+//     single arc 0 -> 1.
 //
 // Name is "trivial.k2" in the non-selfLoop case and
 // "trivial.k1.selfloop" when selfLoop=true.
 //
 // Catalogue invariants on the returned graph:
 //
-//   - selfLoop=false: Order=2, Size=1, HasEdge(0,1)=true.
-//     When directed=false, HasEdge(1,0)=true as well; when
-//     directed=true, HasEdge(1,0)=false.
+//   - selfLoop=false: Order=2, Size=1, HasEdge(0,1)=true,
+//     HasEdge(1,0)=false.
 //   - selfLoop=true:  Order=1, Size=1, HasEdge(0,0)=true.
 //
-// SingleEdge declares no Knobs: every combination of (directed,
-// weighted, selfLoop) is a discrete shape rather than a numeric
-// sweep, so the property-based test enumerates the eight-cell
-// constructor matrix directly. Multigraph is always set to false
-// because K2 and the self-loop graph are simple by definition.
+// SingleEdge declares no Knobs: every combination of (weighted,
+// selfLoop) is a discrete shape rather than a numeric sweep, so the
+// property-based test enumerates the four-cell constructor matrix
+// directly. K2 and the self-loop graph are simple by definition.
 //
 // The single g.AddEdge call inside Build can in principle return
 // [adjlist.ErrShardFull] when the caller has set a tight
 // cfg.MaxShardCapacity; that error is returned verbatim with no
 // extra wrapping. With the canonical node ids 0 and 1 the error
 // path is not reachable for any maxCap >= 1.
-func SingleEdge(directed, weighted, selfLoop bool) Shape[int, int64] {
+func SingleEdge(weighted, selfLoop bool) Shape[int, int64] {
 	w := unweightedSentinel
 	if weighted {
 		w = weightedSentinel
@@ -184,13 +169,6 @@ func SingleEdge(directed, weighted, selfLoop bool) Shape[int, int64] {
 		return trivialBase{
 			name: "trivial.k1.selfloop",
 			build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-				// A self-loop is its own reverse, so directedness has
-				// no observable effect on this topology. We pick
-				// Directed=true to give a deterministic configuration
-				// for the underlying adjlist; the catalogue invariant
-				// (HasEdge(0,0)=true, Order=1, Size=1) holds either way.
-				cfg.Directed = true
-				cfg.Multigraph = false
 				g := lpg.New[int, int64](cfg)
 				err := g.AddEdge(canonicalNode(0), canonicalNode(0), w)
 				return g, err
@@ -200,8 +178,6 @@ func SingleEdge(directed, weighted, selfLoop bool) Shape[int, int64] {
 	return trivialBase{
 		name: "trivial.k2",
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = directed
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			err := g.AddEdge(canonicalNode(0), canonicalNode(1), w)
 			return g, err
@@ -229,9 +205,8 @@ func SingleEdge(directed, weighted, selfLoop bool) Shape[int, int64] {
 //   - Size()  == uint64(k)
 //   - HasEdge(0,1) == true; HasEdge(1,0) == false.
 //
-// The build forces Directed=true and Multigraph=true regardless of
-// cfg, because the catalogue definition fixes both. cfg.MaxShardCapacity
-// is preserved so the caller can still bound shard growth.
+// cfg.MaxShardCapacity is preserved so the caller can still bound shard
+// growth.
 //
 // Errors from g.AddEdge are returned verbatim from the first failing
 // iteration; the build aborts at that point and the partial graph
@@ -246,8 +221,6 @@ func ParallelDigon(k int) Shape[int, int64] {
 			{Name: "k", Min: 1, Max: 1000, Default: 2},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = true
 			g := lpg.New[int, int64](cfg)
 			return g, addParallelEdges(g, canonicalNode(0), canonicalNode(1), unweightedSentinel, k)
 		},
@@ -286,9 +259,7 @@ func addParallelEdges(g *lpg.Graph[int, int64], src, dst int, w int64, cnt int) 
 //   - Size()  == 0
 //   - HasEdge(i, j) == false for every pair (i, j).
 //
-// The build forces Directed=true (the catalogue's canonical
-// orientation for this family) and Multigraph=false. cfg.MaxShardCapacity
-// is preserved.
+// cfg.MaxShardCapacity is preserved.
 //
 // AddNode cannot fail in the current adjlist contract (it only
 // interns the user value with the Mapper, never touches shard
@@ -304,8 +275,6 @@ func IsolatedOnly(n int) Shape[int, int64] {
 			{Name: "n", Min: 0, Max: 1000, Default: 5},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, addNodesRange(g, n)
 		},
@@ -342,10 +311,7 @@ func addNodesRange(g *lpg.Graph[int, int64], n int) error {
 //   - HasEdge(v, v) == true for every v in 0..n-1.
 //   - HasEdge(u, v) == false for every u != v.
 //
-// The build forces Directed=true and Multigraph=false; a self-loop
-// is its own reverse so the directed flag has no observable effect,
-// but fixing it removes a useless degree of freedom from the
-// configuration matrix. cfg.MaxShardCapacity is preserved.
+// cfg.MaxShardCapacity is preserved.
 func UniversalSelfLoops(n int, weighted bool) Shape[int, int64] {
 	if n < 0 {
 		panic(fmt.Sprintf("shapegen: UniversalSelfLoops requires n >= 0, got %d", n))
@@ -360,8 +326,6 @@ func UniversalSelfLoops(n int, weighted bool) Shape[int, int64] {
 			{Name: "n", Min: 0, Max: 1000, Default: 4},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, addSelfLoops(g, n, w)
 		},

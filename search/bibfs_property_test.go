@@ -24,9 +24,9 @@ func TestProperty_BiBFS_PathLength_EQ_BFSDistance(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		n := rapid.IntRange(5, 30).Draw(rt, "n")
 
-		// Build an undirected graph. adjlist encodes undirected edges
-		// as two symmetric directed arcs when Directed=false.
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		// Build an undirected graph: each edge is stored as one arc and
+		// the CSR below is its symmetric projection.
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			if err := a.AddNode(i); err != nil {
 				rt.Fatalf("AddNode(%d): %v", i, err)
@@ -51,7 +51,7 @@ func TestProperty_BiBFS_PathLength_EQ_BFSDistance(t *testing.T) {
 			_ = a.AddEdge(u, v, struct{}{}) // ignore duplicate-edge errors
 		}
 
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		mapper := a.Mapper()
 
 		srcKey := rapid.IntRange(0, n-1).Draw(rt, "src")

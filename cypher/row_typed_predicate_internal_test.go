@@ -43,7 +43,7 @@ func intLit(v int64) *ast.IntLiteral { return &ast.IntLiteral{Value: v} }
 // comparison core distinguishes, and returns their ids ordered by the seeded k.
 func typedPredGraph(t *testing.T) (*lpg.Graph[string, float64], []graph.NodeID) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngineWithOptions(g, EngineOptions{})
 	for _, q := range []string{
 		`CREATE (:A:B {k: 0, v: 1000, f: 1.5, s: 'x', b: true, d: date('2025-01-01')})`,

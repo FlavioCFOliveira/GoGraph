@@ -22,7 +22,7 @@ import (
 // range predicates (rmp #2231).
 func newBtreeStringEngine(t testing.TB, n int, extra ...map[string]any) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
@@ -59,7 +59,7 @@ func newBtreeStringEngine(t testing.TB, n int, extra ...map[string]any) *cypher.
 // for it rather than by a limitation that happened to be there.
 func newBtreeStringScanEngine(t *testing.T, n int, extra ...map[string]any) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{DisableRangeIndexSeek: true})
 	ctx := context.Background()
@@ -264,7 +264,7 @@ func TestBTreeStringEq_SeekAndScanAgree(t *testing.T) {
 func TestBTreeStringEq_TemporalIsNotSeekMatchable(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()

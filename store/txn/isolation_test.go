@@ -1,6 +1,7 @@
 package txn
 
 import (
+	"errors"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -136,11 +137,16 @@ func TestIsolation_ViewWithUnversionedReadIsNotAtomic(t *testing.T) {
 // drive, seeded with the two nodes whose properties carry the invariant.
 func newIsolationStore(t *testing.T) (*lpg.Graph[string, int64], *Store[string, int64], func()) {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	w, err := wal.Open(filepath.Join(t.TempDir(), "wal"))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	store := NewStoreWithOptions[string, int64](g, w, Options[string, int64]{
 		Codec:       NewStringCodec(),
 		WeightCodec: NewInt64WeightCodec(),

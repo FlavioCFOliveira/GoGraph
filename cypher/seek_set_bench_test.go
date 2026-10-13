@@ -20,7 +20,7 @@ func BenchmarkSeekSet_Lookup(b *testing.B) {
 		{"absent", "['x1','x2','x3']"},
 	}
 	for _, n := range []int{64, 2000, 20000} {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 		ctx := context.Background()
 		for _, q := range []string{

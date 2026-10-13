@@ -29,7 +29,7 @@ func TestTarjanSCC_ChainOfSCCs(t *testing.T) {
 		{2, 3}, {5, 6}, {8, 9},
 	}
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for _, e := range edges {
 		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
 			t.Fatalf("AddEdge(%d->%d): %v", e[0], e[1], err)

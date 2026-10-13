@@ -19,7 +19,7 @@ func TestDijkstra_ZeroWeightEdges(t *testing.T) {
 		t.Parallel()
 		// 0→1 (w=0), 1→2 (w=0), 0→2 (w=5)
 		// Shortest path from 0: dist[1]=0, dist[2]=0 (via 0→1→2).
-		a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+		a := adjlist.New[int, float64](adjlist.Config{})
 		for _, e := range []float64Edge{{0, 1, 0}, {1, 2, 0}, {0, 2, 5}} {
 			if err := a.AddEdge(e.from, e.to, e.w); err != nil {
 				t.Fatalf("AddEdge: %v", err)
@@ -73,7 +73,7 @@ func TestDijkstra_ZeroWeightEdges(t *testing.T) {
 		t.Parallel()
 		// 0→1 (w=10), 1→2 (w=0), 2→3 (w=0), 3→4 (w=5)
 		// From 0: dist[4] = 10+0+0+5 = 15.
-		a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+		a := adjlist.New[int, float64](adjlist.Config{})
 		for _, e := range []float64Edge{{0, 1, 10}, {1, 2, 0}, {2, 3, 0}, {3, 4, 5}} {
 			if err := a.AddEdge(e.from, e.to, e.w); err != nil {
 				t.Fatalf("AddEdge: %v", err)

@@ -77,7 +77,7 @@ func drainPercentile(t *testing.T, res *cypher.Result) []map[string]any {
 // newValueGraph creates an engine with 10 :Value nodes, v ∈ {1, …, 10}.
 func newValueGraph(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for i := int64(1); i <= 10; i++ {
 		runSetup(t, eng, "CREATE (:Value {v: "+itoa64(i)+"})")
@@ -191,7 +191,7 @@ func TestPercentileCont_P0_P100(t *testing.T) {
 // The test accepts both outcomes and documents which it observes.
 func TestPercentileCont_EmptyInput(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(),

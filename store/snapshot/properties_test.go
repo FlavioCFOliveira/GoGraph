@@ -35,7 +35,7 @@ import (
 func TestProperties_RoundtripAllKinds(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("alice", "bob", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestProperties_RoundtripAllKinds(t *testing.T) {
 
 	// Materialise into a fresh graph with the same adjacency replayed,
 	// then apply the properties readback.
-	restored := lpg.New[string, int64](adjlist.Config{Directed: true})
+	restored := lpg.New[string, int64](adjlist.Config{})
 	if err := restored.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestProperties_RoundtripAllKinds(t *testing.T) {
 // mapper.bin) in current builds.
 func TestProperties_ManifestCurrent_WithBothLabelsAndProperties_Loads(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestProperties_ManifestCurrent_WithBothLabelsAndProperties_Loads(t *testing
 // load cleanly and return an empty PropertiesReadback.
 func TestProperties_ManifestV2_OnlyLabels_Loads(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestProperties_ManifestV2_OnlyLabels_Loads(t *testing.T) {
 // staging path: rewrite manifest + delete two files + dual readback assertions
 func TestProperties_ManifestV2_NoLabelsNoProperties_Loads(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestProperties_ManifestV1_StillLoads(t *testing.T) {
 // an empty readback.
 func TestProperties_WriteEmptyGraph_RoundTrips(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
 	if err := WriteSnapshotFull(dir, c, g); err != nil {
@@ -355,7 +355,7 @@ func TestProperties_WriteEmptyGraph_RoundTrips(t *testing.T) {
 // it with the wrapped ErrCorrupted.
 func TestProperties_CorruptedFile_SurfacesErrCorrupted(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestProperties_PropertyRoundtrip(t *testing.T) {
 		for i := range nodes {
 			nodes[i] = fmt.Sprintf("n%d", i)
 		}
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 
 		// Expected state. Property values stored as their canonical
 		// post-round-trip representation so the comparator does not
@@ -470,7 +470,7 @@ func TestProperties_PropertyRoundtrip(t *testing.T) {
 		}
 
 		// Replay against a fresh graph with the same adjacency.
-		restored := lpg.New[string, int64](adjlist.Config{Directed: true})
+		restored := lpg.New[string, int64](adjlist.Config{})
 		for _, name := range nodes {
 			if err := restored.AddNode(name); err != nil {
 				t.Fatalf("AddNode: %v", err)
@@ -629,7 +629,7 @@ func debugProp(v lpg.PropertyValue) string {
 // invariant.
 func TestProperties_KeyOrderIsStableAcrossSnapshots(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("n"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -669,7 +669,7 @@ func TestProperties_KeyOrderIsStableAcrossSnapshots(t *testing.T) {
 // nodes and edges contribute properties to the same key.
 func TestProperties_MultipleNodesEdges(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	const N = 50
 	for i := 0; i < N; i++ {
 		name := fmt.Sprintf("n%d", i)
@@ -706,7 +706,7 @@ func TestProperties_MultipleNodesEdges(t *testing.T) {
 		t.Fatalf("EdgeProperties = %d, want %d", len(loaded.Properties.EdgeProperties), N-1)
 	}
 
-	restored := lpg.New[string, int64](adjlist.Config{Directed: true})
+	restored := lpg.New[string, int64](adjlist.Config{})
 	for i := 0; i < N; i++ {
 		if err := restored.AddNode(fmt.Sprintf("n%d", i)); err != nil {
 			t.Fatalf("AddNode: %v", err)

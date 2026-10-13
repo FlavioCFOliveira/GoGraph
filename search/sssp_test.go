@@ -63,7 +63,7 @@ func TestSSSP_NegativeWeightRejectedOnce(t *testing.T) {
 // construction.
 func TestSSSP_NaNRejectedOnce(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, math.Inf(1)); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestSSSP_ConcurrentFrom(t *testing.T) {
 // validate-once amortisation is the dominant difference.
 func buildSSSPBallast(tb testing.TB, pathLen, ballastEdges int) *csr.CSR[int64] {
 	tb.Helper()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < pathLen; i++ {
 		if err := a.AddEdge(i, i+1, int64(i+1)); err != nil {
 			tb.Fatalf("AddEdge path: %v", err)

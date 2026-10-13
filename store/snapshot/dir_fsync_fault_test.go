@@ -68,7 +68,7 @@ func (f *dirSyncFaultFS) DirSync(path string) error {
 // snapshot's bytes and the unchanged-live-snapshot verdict can fail.
 func buildWiderCSR(tb testing.TB) *csr.CSR[struct{}] {
 	tb.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			tb.Fatalf("AddEdge: %v", err)
@@ -150,7 +150,7 @@ func TestWriteSnapshotCSR_StagingDirFsyncFault_AbortsBeforePublish(t *testing.T)
 func TestWriteIndexes_IndexesDirFsyncFault(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
 	bt := btree.New[string]()

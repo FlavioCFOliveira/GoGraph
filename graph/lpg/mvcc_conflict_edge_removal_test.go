@@ -34,7 +34,7 @@ import (
 // must be refused, must report the refusal, must leave the adjacency exactly as
 // it found it, and must be unable to commit.
 func TestConflict_EdgeRemovalReportsItsRefusal(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "c"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%s): %v", n, err)
@@ -84,7 +84,7 @@ func TestConflict_EdgeRemovalReportsItsRefusal(t *testing.T) {
 // the refusal test and silently stop every legitimate inverse from being
 // journalled — a rolled-back DELETE would then become permanent.
 func TestConflict_EdgeRemovalAppliesWithoutAConcurrentWriter(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%s): %v", n, err)
@@ -138,7 +138,7 @@ func TestConflict_EdgeRemovalAppliesWithoutAConcurrentWriter(t *testing.T) {
 // A handle of 0 is not a corner case: the Cypher DELETE path falls back to it
 // whenever the bound relationship carries no stable handle.
 func TestConflict_HandleZeroRemovalReportsItsRefusal(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "c"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%s): %v", n, err)

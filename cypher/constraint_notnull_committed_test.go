@@ -84,7 +84,7 @@ const notNullViolationMsg = "pre-existing node has a null value"
 // with no email for the add-label shape. The engine has no constraint yet.
 func notNullEngine(tb testing.TB, emails map[string]string) *Engine {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for key, email := range emails {
 		if err := g.SetNodeLabel(key, "Person"); err != nil {
 			tb.Fatalf("seed label %s: %v", key, err)

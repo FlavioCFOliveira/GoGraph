@@ -114,7 +114,7 @@ func run() int {
 }
 
 func buildSeedGraph(n int) *adjlist.AdjList[int, int64] {
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	r := rand.New(rand.NewPCG(53, 59)) //nolint:gosec // deterministic seed
 	for i := 0; i < n; i++ {
 		if err := a.AddNode(i); err != nil {

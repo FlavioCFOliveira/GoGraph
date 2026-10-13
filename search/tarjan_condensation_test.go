@@ -32,7 +32,7 @@ func TestTarjanSCC_Condensation(t *testing.T) {
 		{3, 4}, {3, 6}, {5, 6},
 	}
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for _, e := range edges {
 		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
 			t.Fatalf("AddEdge(%d->%d): %v", e[0], e[1], err)
@@ -67,7 +67,7 @@ func TestTarjanSCC_Condensation(t *testing.T) {
 	}
 
 	// Build condensation adjlist (deduplicated via a seen map).
-	ca := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	ca := adjlist.New[int, struct{}](adjlist.Config{})
 	seen := make(map[[2]int]bool)
 	origVerts := c.VerticesSlice()
 	origEdges := c.EdgesSlice()

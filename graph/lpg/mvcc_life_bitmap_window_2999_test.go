@@ -30,7 +30,7 @@ func TestNodeExistsAsOf_BitmapReadUnderTheLifeLock_2999(t *testing.T) {
 	const nodes, writers, readers = 8, 4, 4
 	const budget = 300 * time.Millisecond
 	ctx := context.Background()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	keys := make([]string, nodes)
 	for i := range keys {

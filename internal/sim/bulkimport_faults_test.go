@@ -111,7 +111,7 @@ func TestBulkImportFaults_VerdictIsFalsifiable(t *testing.T) {
 	}
 
 	model, nodes, edges := buildBulkImportFixture(NewSeed(bulkImportParityScenario().DefaultSeed))
-	b := bulkimport.New[int64](bulkimport.Options{Directed: true, Multigraph: true, ExpectNodes: bulkImportNodes})
+	b := bulkimport.New[int64](bulkimport.Options{ExpectNodes: bulkImportNodes})
 	if err := b.AddNodes(nodes); err != nil {
 		t.Fatalf("AddNodes: %v", err)
 	}

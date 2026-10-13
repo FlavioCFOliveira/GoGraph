@@ -12,7 +12,7 @@ import (
 // from an edge list where each entry [u, v] represents one directed
 // edge (parallel entries produce parallel edges).
 func multigraphLPG(nodes []int, edges [][2]int) *lpg.Graph[int, struct{}] {
-	g := lpg.New[int, struct{}](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[int, struct{}](adjlist.Config{})
 	for _, n := range nodes {
 		_ = g.AddNode(n)
 	}

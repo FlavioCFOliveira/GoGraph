@@ -70,7 +70,7 @@ func wantConflictAt[N comparable, W any](t *testing.T, tx *labelTx[N, W], store 
 // without detection B's birth lands on top of it and both commit — the node
 // ends up alive although the transaction that killed it also succeeded.
 func TestConflict_NodeExistence(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -107,7 +107,7 @@ func nodeIDOf[N comparable, W any](t *testing.T, g *Graph[N, W], n N) graph.Node
 // TestConflict_EdgeOverflowRelTypes covers the overflow store: a pair's SECOND
 // and later relationship types.
 func TestConflict_EdgeOverflowRelTypes(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestConflict_EdgeOverflowRelTypes(t *testing.T) {
 // TestConflict_EdgeRelTypeByHandle covers the per-handle relationship-type
 // store: one parallel edge instance, addressed by its stable handle.
 func TestConflict_EdgeRelTypeByHandle(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	h, err := g.AddEdgeH("a", "b", 0)
 	if err != nil {
 		t.Fatalf("AddEdgeH: %v", err)
@@ -164,7 +164,7 @@ func TestConflict_EdgeRelTypeByHandle(t *testing.T) {
 
 // TestConflict_EdgePropertyByHandle covers the per-handle property store.
 func TestConflict_EdgePropertyByHandle(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	h, err := g.AddEdgeH("a", "b", 0)
 	if err != nil {
 		t.Fatalf("AddEdgeH: %v", err)
@@ -190,7 +190,7 @@ func TestConflict_EdgePropertyByHandle(t *testing.T) {
 // store: the same instance addressed by its position in the pair rather than by
 // its handle. It is a separate chain, so it needs its own gate.
 func TestConflict_EdgeRelTypeByOrdinal(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestConflict_EdgeRelTypeByOrdinal(t *testing.T) {
 
 // TestConflict_EdgePropertyByOrdinal covers the per-ordinal property store.
 func TestConflict_EdgePropertyByOrdinal(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestConflict_EdgePropertyByOrdinal(t *testing.T) {
 //
 // It exercises all five side stores at once, on two disjoint pairs.
 func TestConflict_DisjointEdgeWritersDoNotConflict(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	hAB, err := g.AddEdgeH("a", "b", 0)
 	if err != nil {
 		t.Fatalf("AddEdgeH a->b: %v", err)
@@ -304,7 +304,7 @@ func TestConflict_DisjointEdgeWritersDoNotConflict(t *testing.T) {
 // PrepareForWrite tests first, applied to the side stores: a transaction must
 // be free to write the same object twice.
 func TestConflict_OwnSecondWriteToEdgeStores(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	h, err := g.AddEdgeH("a", "b", 0)
 	if err != nil {
 		t.Fatalf("AddEdgeH: %v", err)
@@ -360,7 +360,7 @@ func TestConflict_OwnSecondWriteToEdgeStores(t *testing.T) {
 // update against a build with detection off: B's removal landed on top of A's
 // still-in-flight write and both committed.
 func TestConflict_EdgeOverflowRelTypeRemoval(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

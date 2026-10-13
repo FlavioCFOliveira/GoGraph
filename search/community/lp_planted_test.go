@@ -31,12 +31,12 @@ func TestLabelPropagation_Planted(t *testing.T) {
 	)
 
 	g, err := shapegen.PlantedPartition(k, blockSize, pIn, pOut, seed).
-		Build(adjlist.Config{Directed: false})
+		Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("PlantedPartition Build: %v", err)
 	}
 	a := g.AdjList()
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 
 	p := LabelPropagation(c, DefaultLabelPropagationOptions())
 

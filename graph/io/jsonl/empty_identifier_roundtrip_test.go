@@ -22,7 +22,7 @@ func TestJSONL_EmptyIdentifierRoundtrip(t *testing.T) {
 	// A node whose id is the empty string round-trips, alongside a normal node.
 	t.Run("node_empty_id", func(t *testing.T) {
 		t.Parallel()
-		a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+		a := adjlist.New[string, int64](adjlist.Config{})
 		if err := a.AddNode(""); err != nil {
 			t.Fatalf("AddNode(%q): %v", "", err)
 		}
@@ -39,7 +39,7 @@ func TestJSONL_EmptyIdentifierRoundtrip(t *testing.T) {
 			t.Fatalf("empty-id node not serialised with a present empty id:\n%s", out)
 		}
 
-		b, _, err := jsonl.ReadInto(strings.NewReader(out), adjlist.Config{Directed: true})
+		b, _, err := jsonl.ReadInto(strings.NewReader(out), adjlist.Config{})
 		if err != nil {
 			t.Fatalf("ReadInto: %v", err)
 		}
@@ -57,7 +57,7 @@ func TestJSONL_EmptyIdentifierRoundtrip(t *testing.T) {
 	// An edge with an empty-string endpoint round-trips.
 	t.Run("edge_empty_endpoint", func(t *testing.T) {
 		t.Parallel()
-		a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+		a := adjlist.New[string, int64](adjlist.Config{})
 		if err := a.AddEdge("", "b", 5); err != nil {
 			t.Fatalf("AddEdge(%q -> b): %v", "", err)
 		}
@@ -71,7 +71,7 @@ func TestJSONL_EmptyIdentifierRoundtrip(t *testing.T) {
 			t.Fatalf("empty edge endpoint not serialised as present empty value:\n%s", out)
 		}
 
-		b, _, err := jsonl.ReadInto(strings.NewReader(out), adjlist.Config{Directed: true})
+		b, _, err := jsonl.ReadInto(strings.NewReader(out), adjlist.Config{})
 		if err != nil {
 			t.Fatalf("ReadInto: %v", err)
 		}
@@ -83,7 +83,7 @@ func TestJSONL_EmptyIdentifierRoundtrip(t *testing.T) {
 	// A property whose key is the empty string round-trips with its value.
 	t.Run("empty_property_key", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		if err := g.AddNode("n"); err != nil {
 			t.Fatalf("AddNode(n): %v", err)
 		}
@@ -100,7 +100,7 @@ func TestJSONL_EmptyIdentifierRoundtrip(t *testing.T) {
 			t.Fatalf("empty property key not serialised as present empty value:\n%s", out)
 		}
 
-		h, _, err := jsonl.ReadWithProps(strings.NewReader(out), adjlist.Config{Directed: true})
+		h, _, err := jsonl.ReadWithProps(strings.NewReader(out), adjlist.Config{})
 		if err != nil {
 			t.Fatalf("ReadWithProps: %v", err)
 		}
@@ -117,10 +117,10 @@ func TestJSONL_EmptyIdentifierRoundtrip(t *testing.T) {
 	// malformed record into a silently-accepted one.
 	t.Run("absent_id_still_errors", func(t *testing.T) {
 		t.Parallel()
-		if _, _, err := jsonl.ReadInto(strings.NewReader(`{"type":"node"}`+"\n"), adjlist.Config{Directed: true}); err == nil {
+		if _, _, err := jsonl.ReadInto(strings.NewReader(`{"type":"node"}`+"\n"), adjlist.Config{}); err == nil {
 			t.Fatal("absent node id must still error")
 		}
-		if _, _, err := jsonl.ReadInto(strings.NewReader(`{"type":"edge","dst":"b"}`+"\n"), adjlist.Config{Directed: true}); err == nil {
+		if _, _, err := jsonl.ReadInto(strings.NewReader(`{"type":"edge","dst":"b"}`+"\n"), adjlist.Config{}); err == nil {
 			t.Fatal("absent edge src must still error")
 		}
 	})

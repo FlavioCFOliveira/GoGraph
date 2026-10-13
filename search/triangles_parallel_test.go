@@ -21,7 +21,7 @@ import (
 // needs no RNG and is fully reproducible.
 func buildUndirectedTriangleFixture(tb testing.TB, n, degEachSide int) *csr.CSR[struct{}] {
 	tb.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for v := 0; v < n; v++ {
 		for d := 1; d <= degEachSide; d++ {
 			u := (v + d) % n
@@ -33,7 +33,7 @@ func buildUndirectedTriangleFixture(tb testing.TB, n, degEachSide int) *csr.CSR[
 			}
 		}
 	}
-	return csr.BuildFromAdjList(a)
+	return csr.BuildFromAdjList(a).BuildSymmetric()
 }
 
 // assertTriangleCountsEqual fails unless the parallel total and perNode
@@ -59,7 +59,7 @@ func assertTriangleCountsEqual(t *testing.T, wantTotal int64, wantPerNode []int6
 // counts.
 func TestCountTrianglesParallel_K5(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 5; i++ {
 		for j := i + 1; j < 5; j++ {
 			if err := a.AddEdge(i, j, struct{}{}); err != nil {
@@ -67,7 +67,7 @@ func TestCountTrianglesParallel_K5(t *testing.T) {
 			}
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	m := a.Mapper()
 	for _, nw := range []int{1, 2, 4, 8} {
 		total, perNode := CountTrianglesParallel(c, nw)
@@ -108,7 +108,7 @@ func TestCountTrianglesParallel_BitEqualSerial_Random(t *testing.T) {
 	rapid.Check(t, func(r *rapid.T) {
 		n := rapid.IntRange(2, 30).Draw(r, "n")
 		m := rapid.IntRange(0, 4*n).Draw(r, "m")
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			if err := a.AddNode(i); err != nil {
 				t.Fatalf("AddNode: %v", err)
@@ -124,7 +124,7 @@ func TestCountTrianglesParallel_BitEqualSerial_Random(t *testing.T) {
 				t.Fatalf("AddEdge: %v", err)
 			}
 		}
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		wantTotal, wantPerNode := CountTriangles(c)
 		for _, nw := range []int{1, 4, 8} {
 			gotTotal, gotPerNode := CountTrianglesParallel(c, nw)
@@ -144,8 +144,8 @@ func TestCountTrianglesParallel_BitEqualSerial_Random(t *testing.T) {
 // (0, nil) without spawning workers.
 func TestCountTrianglesParallel_Empty(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
-	c := csr.BuildFromAdjList(a)
+	a := adjlist.New[int, struct{}](adjlist.Config{})
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	total, perNode := CountTrianglesParallel(c, 4)
 	if total != 0 || perNode != nil {
 		t.Fatalf("empty graph: total=%d perNode=%v, want 0, nil", total, perNode)

@@ -30,7 +30,7 @@ func TestBidirectionalDijkstra_DeterministicGraph(t *testing.T) {
 	)
 
 	// Build graph with non-negative float64 weights.
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	for i := 0; i < numNodes; i++ {
 		if err := a.AddNode(i); err != nil {
 			t.Fatalf("AddNode(%d): %v", i, err)

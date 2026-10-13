@@ -51,7 +51,7 @@ const (
 var benchGraph *lpg.Graph[string, float64]
 
 func TestMain(m *testing.M) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < nodeCount; i++ {
 		key := fmt.Sprintf("n%d", i)
 		must(g.AddNode(key))

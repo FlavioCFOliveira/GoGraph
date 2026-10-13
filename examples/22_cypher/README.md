@@ -43,9 +43,10 @@ reference date, so the whole dataset is reproducible for a fixed `-seed`.
 `shortestPath` and `allShortestPaths` are exercised over the *undirected* KNOWS
 relation between the anchor user (`userIDs[0]`) and the farthest user reachable
 from it. To catch any engine error, the result is cross-checked against an
-**independent oracle** built from the same edges: the KNOWS edges are mirrored
-into an undirected `graph/csr.CSR`, a hand-written BFS picks the destination and
-its distance, and `search.BiBFS` confirms it on that pair. If the engine's
+**independent oracle** built from the same edges: the KNOWS relationships are
+copied into a `graph/csr.CSR` and projected to its undirected view with
+`csr.CSR.BuildSymmetric`, a hand-written BFS over that projection picks the
+destination and its distance, and `search.BiBFS` confirms it on that pair. If the engine's
 `shortestPath` length disagrees with the oracle, the run fails and reports a
 module bug; agreement is asserted as the fact `sp.len_matches_bibfs=1`.
 
@@ -155,8 +156,9 @@ surfaces as a failed run rather than a silent wrong answer. Scale `-users` up
 and the latency lines show how each query class — label scan, `WHERE` filter,
 relationship pattern, bidirectional path search, and the write transactions —
 responds as the graph grows, while the heap figure tracks the in-memory
-footprint. (The traversal cross-check builds a transient undirected mirror of
-the KNOWS edges; it is released after the check.)
+footprint. (The traversal cross-check builds a transient copy of the KNOWS
+relationships and its symmetric projection; both are released after the
+check.)
 
 ## Key APIs
 
@@ -172,9 +174,10 @@ the KNOWS edges; it is released after the check.)
 - `cypher/expr.StringValue` / `expr.IntegerValue` / `expr.ListValue` /
   `expr.MapValue` — the runtime value types passed as parameters (the `UNWIND`
   list-of-maps and the `MERGE` scalars) and returned in result records.
-- `graph/adjlist.New` (undirected) / `graph/csr.BuildFromAdjList` /
-  `search.BiBFS` — build the independent undirected oracle and search it to
-  cross-check the engine's `shortestPath` length.
+- `graph/adjlist.New` / `graph/csr.BuildFromAdjList` / `CSR.BuildSymmetric` /
+  `search.BiBFS` — copy the KNOWS relationships, project them to the
+  undirected oracle, and search it to cross-check the engine's `shortestPath`
+  length.
 
 ## Further reading
 

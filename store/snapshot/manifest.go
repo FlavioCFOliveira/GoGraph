@@ -24,24 +24,29 @@ import (
 )
 
 // ManifestVersion is the highest on-disk schema version this build
-// understands. The current build writes version 4 manifests via
-// [WriteSnapshotFull] whenever it emits mapper.bin (CSR + labels +
-// properties + mapper + nodeids.bin, fully self-sufficient on load; the
-// mapper may carry holes, which a build before WAL v2 step 1 cannot load,
-// so such a build refuses the version with [ErrManifestUnsupported]),
-// version 2 manifests via the same writer when it emits no mapper
-// (requires WAL replay to reconstruct the natural-key mapper), and
-// version 1 manifests via the legacy [WriteSnapshotCSR] code path
-// (CSR-only snapshots). The loader accepts versions 1 to 4; version 3 is
-// what builds before WAL v2 step 1 wrote with a mapper.
-const ManifestVersion = 4
+// understands, and the version stamped on every manifest it writes:
+// by [WriteSnapshotFull] with mapper.bin (CSR + labels + properties +
+// mapper + nodeids.bin, fully self-sufficient on load) or without it
+// (WAL replay reconstructs the natural-key mapper), and by the legacy
+// [WriteSnapshotCSR] code path (CSR-only snapshots). Which components a
+// snapshot carries is read from its file list, never from its version.
+// The loader accepts versions 1 to 5; versions 1 to 4 are only read,
+// with the meaning the builds that wrote them gave them.
+//
+// Version 5 (rmp #3072) is version 4 for a store in which every graph is a
+// directed multigraph: its graph_config carries neither "directed" nor
+// "multigraph". A build that predates it would read the absent keys as an
+// undirected simple graph, so it must refuse the file, which it does with
+// [ErrManifestUnsupported]. Version 4 added a mapper that may carry holes
+// (WAL v2 step 1) and version 3 is what builds before that wrote with a
+// mapper; both still load, and a version-4 or older manifest that declares
+// an undirected or simple graph is migrated by recovery.
+const ManifestVersion = 5
 
-// manifestVersionV2 is the schema version emitted by [WriteSnapshotFull]
-// when the underlying [graph.Mapper] is keyed by a comparable type
-// other than string (or any future type for which the writer cannot
-// persist the interning table). v2 snapshots remain self-consistent
-// for CSR + labels + properties but require the surrounding WAL to
-// re-intern keys at recovery time.
+// manifestVersionV2 is the schema version that builds before rmp #3072
+// stamped on a [WriteSnapshotFull] manifest without mapper.bin. This
+// build writes no such manifest; the constant remains so tests can
+// construct one and pin that it still loads.
 const manifestVersionV2 = 2
 
 // CurrentIndexBuilderEpoch identifies the secondary-index BUILDER this build
@@ -74,10 +79,10 @@ const manifestVersionV2 = 2
 // above could have fabricated.
 const CurrentIndexBuilderEpoch uint64 = 1
 
-// manifestVersionLegacy is the schema version emitted by
-// [WriteSnapshotCSR] and [WriteSnapshotCSRCtx]. Those writers retain
-// the v1 shape on disk so existing readers and the v1 fixture
-// continue to load bit-for-bit unchanged.
+// manifestVersionLegacy is the schema version that builds before
+// rmp #3072 stamped on a [WriteSnapshotCSR] manifest. This build writes
+// no such manifest; the constant remains so tests can construct one and
+// pin that it still loads.
 const manifestVersionLegacy = 1
 
 // ErrManifestUnsupported is returned by [LoadManifest] when the
@@ -245,11 +250,17 @@ type FileEntry struct {
 }
 
 // GraphConfig is the JSON-persisted shape of the originating graph's
-// adjacency-list configuration. It mirrors the directed/multigraph
-// flags of [adjlist.Config] without importing that package, so the
-// snapshot manifest stays decoupled from the graph backend. The
-// snapshot writer fills it from the live graph; recovery reads it to
-// reconstruct the same variant.
+// adjacency-list configuration. It mirrors the weightless flag of
+// [adjlist.Config] without importing that package, so the snapshot manifest
+// stays decoupled from the graph backend. The snapshot writer fills it from
+// the live graph; recovery reads it to reconstruct the same variant.
+//
+// Every graph is a directed multigraph, so neither direction nor
+// multiplicity is persisted. A manifest written before that carries
+// "directed" and "multigraph" keys; both are read only by the decoder and
+// reported in [LoadedSnapshot.Legacy]. Recovery migrates such a store and
+// checkpoints it before it accepts a write (see legacy_undirected.go and
+// store/recovery).
 //
 // Only the shape-defining flags are persisted. [adjlist.Config.MaxShardCapacity]
 // is deliberately omitted: it is a runtime growth bound, not a property
@@ -258,12 +269,6 @@ type FileEntry struct {
 // that legitimately exceeds the cap. A recovered graph is therefore
 // always reconstructed unbounded.
 type GraphConfig struct {
-	// Directed records whether AddEdge was a directed insertion in the
-	// originating graph.
-	Directed bool `json:"directed"`
-	// Multigraph records whether the originating graph allowed parallel
-	// edges between the same ordered endpoint pair.
-	Multigraph bool `json:"multigraph"`
 	// Weightless records whether the originating graph stored no per-edge
 	// weight column (adjlist.Config.Weightless, #1650). It is omitempty and
 	// backward-compatible: a snapshot written before this field, or by a
@@ -272,6 +277,55 @@ type GraphConfig struct {
 	// per-edge memory saving across a restart rather than re-allocating a
 	// zero-filled weight column.
 	Weightless bool `json:"weightless,omitempty"`
+
+	// legacy is set by the decoder from the "directed" and "multigraph" keys
+	// a manifest written before every graph became a directed multigraph
+	// carries. It is never written.
+	legacy LegacyShape
+}
+
+// LegacyShape reports the graph shape a manifest written before every graph
+// became a directed multigraph declares, when it is not that shape. It selects
+// nothing: it is how a loaded legacy snapshot tells recovery which old
+// semantics its write-ahead log was written under.
+type LegacyShape struct {
+	// Undirected reports "directed": false: every non-loop edge was stored
+	// twice, once per direction, and an edge operation could name either.
+	Undirected bool
+	// Simple reports "multigraph": false: a repeated AddEdge between an
+	// existing ordered pair was a no-op, although its write-ahead-log record
+	// was written.
+	Simple bool
+}
+
+// Any reports whether the shape is a legacy one at all.
+func (l LegacyShape) Any() bool { return l.Undirected || l.Simple }
+
+// UnmarshalJSON decodes a [GraphConfig], reading the legacy "directed" and
+// "multigraph" keys that no writer emits any more.
+func (gc *GraphConfig) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Directed   *bool `json:"directed"`
+		Multigraph *bool `json:"multigraph"`
+		Weightless bool  `json:"weightless"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	gc.Weightless = raw.Weightless
+	gc.legacy = LegacyShape{
+		Undirected: raw.Directed != nil && !*raw.Directed,
+		Simple:     raw.Multigraph != nil && !*raw.Multigraph,
+	}
+	return nil
+}
+
+// legacyShape returns the legacy shape gc was decoded with; a nil gc has none.
+func (gc *GraphConfig) legacyShape() LegacyShape {
+	if gc == nil {
+		return LegacyShape{}
+	}
+	return gc.legacy
 }
 
 // WALFormatSegmented is the [Manifest.WALFormat] value of a snapshot paired
@@ -373,14 +427,12 @@ const WALFormatSegmented = 2
 // produced before this extension are byte-identical to the ones
 // produced by current builds when no indexes are registered.
 //
-// GraphConfig records the originating graph's directed/multigraph
-// shape. It is a pointer with omitempty so it is dropped from the JSON
+// GraphConfig records the originating graph's weightless shape. It is a pointer with omitempty so it is dropped from the JSON
 // form entirely when nil — every snapshot written before this field
 // existed (and the CSR-only legacy writer, which has no live graph to
 // read) is therefore byte-identical to what it would have been. A
 // reader that finds the field absent must default the configuration to
-// the historical recovery behaviour ([adjlist.Config]{Directed: true,
-// Multigraph: true}); see [store/recovery.Open]. Only NEW snapshots
+// the default [adjlist.Config]; see [store/recovery.Open]. Only NEW snapshots
 // produced by the full writer carry the real config.
 type Manifest struct {
 	CreatedAt   time.Time        `json:"created_at"`

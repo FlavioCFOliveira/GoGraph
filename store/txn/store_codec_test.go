@@ -21,7 +21,7 @@ func TestNewStoreWithCodec_EmitsV3(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = w.Close() }()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	codec := NewStringCodec()
 	s := NewStoreWithCodec[string, int64](g, w, codec)
 	if got := s.Codec(); got == nil {

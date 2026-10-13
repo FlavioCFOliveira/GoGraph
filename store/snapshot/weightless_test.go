@@ -17,7 +17,7 @@ import (
 // (vertices offsets + edges) round-trips byte-for-byte.
 func TestWriteReadCSR_Weightless_RoundTrip(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true, Weightless: true})
+	a := adjlist.New[string, int64](adjlist.Config{Weightless: true})
 	// Non-zero weights, all ignored by the weightless graph.
 	if err := a.AddEdge("a", "b", 11); err != nil {
 		t.Fatalf("AddEdge: %v", err)
@@ -81,7 +81,7 @@ func TestWriteReadCSR_Weightless_RoundTrip(t *testing.T) {
 // perturb the weighted persistence path.
 func TestWriteCSR_Weighted_PersistsWeights(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 11); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

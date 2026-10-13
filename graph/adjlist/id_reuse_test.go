@@ -14,7 +14,7 @@ import (
 func TestAdjList_NodeID_NoReuse(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 
 	if err := a.AddEdge("A", "B", 1); err != nil {
 		t.Fatalf("AddEdge A->B: %v", err)
@@ -62,7 +62,7 @@ func TestAdjList_NodeID_MonotonicAcrossShards(t *testing.T) {
 
 	const n = 1000
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := range n {
 		if err := a.AddNode(i); err != nil {
 			t.Fatalf("AddNode(%d): %v", i, err)
@@ -102,7 +102,7 @@ func TestAdjList_NodeID_MonotonicAcrossShards(t *testing.T) {
 func TestAdjList_NodeID_StableAfterRemove(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 
 	for _, edge := range [][2]string{{"X", "Y"}, {"Y", "Z"}} {
 		if err := a.AddEdge(edge[0], edge[1], 1); err != nil {

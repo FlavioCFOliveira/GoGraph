@@ -17,7 +17,7 @@ func TestGraphML_TypedPropsRoundtrip(t *testing.T) {
 	t.Parallel()
 
 	// Build an lpg.Graph with one node carrying one property of each kind.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 
 	const nodeName = "n0"
 	props := map[string]lpg.PropertyValue{
@@ -137,7 +137,7 @@ func TestGraphML_TypedPropsRoundtrip_NaNInf(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			g := lpg.New[string, int64](adjlist.Config{Directed: true})
+			g := lpg.New[string, int64](adjlist.Config{})
 			if err := g.SetNodeProperty("n", "f", lpg.Float64Value(tc.val)); err != nil {
 				t.Fatalf("SetNodeProperty: %v", err)
 			}

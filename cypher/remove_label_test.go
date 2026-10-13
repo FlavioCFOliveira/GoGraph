@@ -23,7 +23,7 @@ import (
 // synthetic key in the mapper.
 func TestRemoveLabel_LastLabel(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Temp)`)
@@ -42,7 +42,7 @@ func TestRemoveLabel_LastLabel(t *testing.T) {
 // the node. The operation must succeed without error.
 func TestRemoveLabel_NonExistentLabel(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Person)`)
@@ -64,7 +64,7 @@ func TestRemoveLabel_NonExistentLabel(t *testing.T) {
 // and verifies that Person survives in the label index.
 func TestRemoveLabel_OneOfMultiple(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Person)`)
@@ -92,7 +92,7 @@ func TestRemoveLabel_OneOfMultiple(t *testing.T) {
 // clause (REMOVE n:Person:Employee) and verifies both are gone.
 func TestRemoveLabel_MultipleLabelsAtOnce(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	drainRunInTx(t, eng, `CREATE (n:Person)`)

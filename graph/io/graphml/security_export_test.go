@@ -20,7 +20,7 @@ import (
 func TestSec_IO_GraphMLExportRejectsControlChar(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	// U+0007 (BEL) is a C0 control character outside the XML 1.0 Char set.
 	if err := g.AddNode("bad\x07id"); err != nil {
 		t.Fatalf("AddNode: %v", err)

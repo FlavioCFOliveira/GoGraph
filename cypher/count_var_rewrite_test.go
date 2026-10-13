@@ -52,7 +52,7 @@ import (
 // property, so a projection of one binds null in every row.
 func countVarGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range 10 {
 		k := fmt.Sprintf("a%d", i)
 		if err := g.AddNode(k); err != nil {

@@ -574,6 +574,9 @@ type ConstraintRegistry struct {
 type constraintScope struct {
 	labels map[string]struct{}
 	props  map[string]struct{}
+	// keys is the exact set of (label, property) pairs with at least one live
+	// UNIQUE or NOT NULL constraint; see [ConstraintRegistry.constrainsAnyKey].
+	keys map[ckey]struct{}
 }
 
 // rebuildScopeLocked republishes [ConstraintRegistry.scope] from the live
@@ -585,16 +588,50 @@ func (r *ConstraintRegistry) rebuildScopeLocked() {
 	sc := &constraintScope{
 		labels: make(map[string]struct{}, n),
 		props:  make(map[string]struct{}, n),
+		keys:   make(map[ckey]struct{}, n),
 	}
 	for key := range r.unique {
 		sc.labels[key.label] = struct{}{}
 		sc.props[key.prop] = struct{}{}
+		sc.keys[key] = struct{}{}
 	}
 	for key := range r.notNull {
 		sc.labels[key.label] = struct{}{}
 		sc.props[key.prop] = struct{}{}
+		sc.keys[key] = struct{}{}
 	}
 	r.scope.Store(sc)
+}
+
+// constrainsAnyKey reports whether (label, prop) carries a live UNIQUE or NOT
+// NULL constraint for at least one label of labels. It takes no lock and
+// allocates nothing.
+//
+// It is the gate that keeps a write of an UNCONSTRAINED key off the registry's
+// exclusive lock once some other key is constrained (rmp #3082). The answer is
+// read from [ConstraintRegistry.scope], which every registration and
+// unregistration republishes inside the same critical section of r.mu that
+// mutates the constraint maps. So a load that does not see a key orders this
+// call before that critical section, and for a key absent from the maps the
+// locked path reads only absent entries (no NOT NULL flag, no UNIQUE entry, a
+// nil value-set, generation 0): it checks nothing and reserves nothing. The
+// lock-free answer is therefore the answer the locked path would give at that
+// point of the order; see reserveSetPropertyGen for the one side effect it
+// still owes.
+func (r *ConstraintRegistry) constrainsAnyKey(labels []string, prop string) bool {
+	sc := r.scope.Load()
+	if sc == nil {
+		return false
+	}
+	if _, ok := sc.props[prop]; !ok {
+		return false
+	}
+	for _, label := range labels {
+		if _, ok := sc.keys[ckey{label: label, prop: prop}]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // ConstrainsLabel reports whether label is the label of at least one registered
@@ -1203,6 +1240,32 @@ func (r *ConstraintRegistry) reserveSetPropertyGen(ct *ConstraintTxn, labels []s
 	if r.uniqueActive.Load() == 0 && r.notNullActive.Load() == 0 {
 		return 0, nil, nil
 	}
+	// Some key is constrained, but none of this write's (label, prop) pairs is:
+	// the locked path below would check nothing and insert nothing, so do not
+	// take the registry's exclusive lock either (rmp #3082). Measured on example
+	// 37 before this gate: 1.79 s mutex + 1.85 s block delay at this lock, from
+	// writes of keys no constraint names. Why the lock-free answer is sound is on
+	// [ConstraintRegistry.constrainsAnyKey].
+	//
+	// The one effect the locked path has for an unconstrained key is on the
+	// transaction's PRIVATE marks: re-taking a value spends the transaction's own
+	// pending release of it (phase 2 below). That is kept here, without the lock,
+	// because ct belongs to this goroutine. It matters when the key becomes
+	// constrained before the transaction commits: an unspent mark would make
+	// CommitTxn delete from the new value-set a value this transaction still
+	// holds. The reservation marks of phase 2 are no-ops here — the generation
+	// of an unconstrained key is 0 — and gen0 = 0 with rest = nil reports that no
+	// label's value-set was touched.
+	if !r.constrainsAnyKey(labels, prop) {
+		if !ct.empty() {
+			if strVal, isValue := propertyValueToString(value); isValue {
+				for _, label := range labels {
+					ct.unmarkReleased(constraintKey(label, prop), strVal)
+				}
+			}
+		}
+		return 0, nil, nil
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1426,6 +1489,12 @@ func (r *ConstraintRegistry) ReleasePropertyValue(ct *ConstraintTxn, labels []st
 		}
 		return
 	}
+	// Immediate release of a key no UNIQUE constraint names: the value-set it
+	// would delete from is nil, so skip the exclusive lock (rmp #3082; the
+	// soundness argument is on [ConstraintRegistry.constrainsAnyKey]).
+	if !r.constrainsAnyKey(labels, prop) {
+		return
+	}
 	r.mu.Lock()
 	for _, label := range labels {
 		key := constraintKey(label, prop)
@@ -1452,6 +1521,14 @@ func (r *ConstraintRegistry) CommitTxn(ct *ConstraintTxn) {
 	if r == nil || ct.empty() {
 		return
 	}
+	// Releases recorded only under keys no constraint names delete from nil
+	// value-sets: apply nothing and skip the exclusive lock (rmp #3082). A key
+	// constrained after the release was recorded is in the scope by now, so its
+	// release still takes the locked path. Soundness: [ConstraintRegistry.constrainsAnyKey].
+	if !r.anyReleaseConstrained(ct) {
+		ct.Reset()
+		return
+	}
 	r.mu.Lock()
 	ct.forEachReleased(func(kv ckeyval) {
 		if vs := r.valueSets[kv.key]; vs != nil {
@@ -1460,6 +1537,26 @@ func (r *ConstraintRegistry) CommitTxn(ct *ConstraintTxn) {
 	})
 	r.mu.Unlock()
 	ct.Reset()
+}
+
+// anyReleaseConstrained reports whether any release ct records is under a key
+// that currently carries a constraint. It takes no lock and allocates nothing.
+func (r *ConstraintRegistry) anyReleaseConstrained(ct *ConstraintTxn) bool {
+	sc := r.scope.Load()
+	if sc == nil {
+		return false
+	}
+	for i := 0; i < ct.n; i++ {
+		if _, ok := sc.keys[ct.inline[i].key]; ok {
+			return true
+		}
+	}
+	for kv := range ct.spill {
+		if _, ok := sc.keys[kv.key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // ReseedFromGraph clears every UNIQUE value-set and rebuilds it from the

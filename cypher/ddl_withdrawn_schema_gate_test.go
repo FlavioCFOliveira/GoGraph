@@ -67,7 +67,7 @@ func TestDDL_WithdrawnSchemaGateRequestAdmitsNewWrites(t *testing.T) {
 }
 
 func runWithdrawnGateCase(t *testing.T, wiring string, writer ddlGateEntry) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	var eng *cypher.Engine
 	if wiring == "memory" {
 		eng = cypher.NewEngine(g)

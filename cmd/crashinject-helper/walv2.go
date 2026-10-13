@@ -100,7 +100,7 @@ func runSegmentedCheckpointCrash(dir, scenario string) {
 	if err != nil {
 		log.Fatalf("wal.OpenWithOptions: %v", err)
 	}
-	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[int64, int64](g, w, int64Opts())
 	commitSeed(store)
 	for i := int64(0); i < segFillerNodes; i++ {
@@ -133,7 +133,7 @@ func buildLegacyStore(dir string) {
 	if err != nil {
 		log.Fatalf("wal.OpenWith: %v", err)
 	}
-	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int64, int64](adjlist.Config{})
 	commitSeed(txn.NewStoreWithOptions[int64, int64](g, w, int64Opts()))
 	if err := w.Close(); err != nil {
 		log.Fatalf("close legacy log: %v", err)

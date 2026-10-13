@@ -91,7 +91,7 @@ func TestCSRFile_CrossProc_MmapNeighbours(t *testing.T) {
 
 	// Build the csrfile.
 	shape := shapegen.BarabasiAlbert(200, 3, 42)
-	g, err := shape.Build(adjlist.Config{Directed: true})
+	g, err := shape.Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("shapegen.Build: %v", err)
 	}

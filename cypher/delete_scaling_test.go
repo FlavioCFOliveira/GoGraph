@@ -264,7 +264,7 @@ func allocRatio(v []uint64) float64 {
 // deliberately-degrading control used to prove that the gate can still fire.
 func deleteCycles(t *testing.T, perCycle, batch, cycles int, detach, degrade bool) []cycleSample {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -425,7 +425,7 @@ const singleStatementDeleteBudget = 10 * time.Second
 func TestSingleStatementDeleteOfNinetyThousandNodes(t *testing.T) {
 	testlayers.RequireSoak(t)
 	const nodes = 90_000
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -460,7 +460,7 @@ func BenchmarkDeleteAccumulated(b *testing.B) {
 			ctx := context.Background()
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
-				g := lpg.New[string, float64](adjlist.Config{Directed: true})
+				g := lpg.New[string, float64](adjlist.Config{})
 				eng := cypher.NewEngine(g)
 				if accumulated > 0 {
 					seedTmp(ctx, b, eng, accumulated, 10_000)
@@ -483,7 +483,7 @@ func BenchmarkDeleteAccumulated(b *testing.B) {
 func BenchmarkCreateRelationships(b *testing.B) {
 	const perStatement = 500
 	ctx := context.Background()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -493,4 +493,30 @@ func BenchmarkCreateRelationships(b *testing.B) {
 	}
 	b.StopTimer()
 	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*perStatement), "ns/rel")
+}
+
+// BenchmarkDetachDeleteHubs prices DETACH DELETE of nodes with many incoming
+// relationships: each hub's removal excises every one of its in-edges from the
+// adjacency reverse index, so the benchmark exercises that index's removal path
+// on lists far longer than one entry (rmp #3112).
+func BenchmarkDetachDeleteHubs(b *testing.B) { benchDetachDeleteHubs(b, 50, 200) }
+
+// BenchmarkDetachDeleteHub30k is BenchmarkDetachDeleteHubs for one hub with
+// 30 000 incoming relationships: each removal searches the hub's in-neighbour
+// list, so the layout of a long list decides its cost (rmp #3112).
+func BenchmarkDetachDeleteHub30k(b *testing.B) { benchDetachDeleteHubs(b, 1, 30_000) }
+
+func benchDetachDeleteHubs(b *testing.B, hubs, fanIn int) {
+	ctx := context.Background()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		g := lpg.New[string, float64](adjlist.Config{})
+		eng := cypher.NewEngine(g)
+		runStmt(ctx, b, eng, fmt.Sprintf(
+			`UNWIND range(1, %d) AS h CREATE (hub:Hub) WITH hub UNWIND range(1, %d) AS i CREATE (:Leaf)-[:R]->(hub)`,
+			hubs, fanIn))
+		b.StartTimer()
+		runStmt(ctx, b, eng, `MATCH (h:Hub) DETACH DELETE h`)
+	}
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*hubs*fanIn), "ns/rel")
 }

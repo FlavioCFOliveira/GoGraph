@@ -89,7 +89,7 @@ const mlpPlainQuery = "MATCH (n:Common:Rare) RETURN n.k AS k"
 // carry :Rare, each with a unique integer property.
 func seedMLPGraph(t *testing.T, common, rare int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < common; i++ {
 		k := "n" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

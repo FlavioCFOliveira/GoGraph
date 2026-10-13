@@ -28,6 +28,7 @@ package cypher
 // closed). Layer: short.
 
 import (
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -94,6 +95,11 @@ func countRunCycle(t *testing.T, dir string, g *lpg.Graph[string, float64], chec
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	store := txn.NewStoreWithOptions[string, float64](g, w, countDurStoreOpts())
 	eng := NewEngineWithStore(store)
 	for _, q := range queries {
@@ -131,6 +137,11 @@ func countReopen(t *testing.T, dir string) (*Engine, *lpg.Graph[string, float64]
 	if err != nil {
 		t.Fatalf("reopen wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	store := txn.NewStoreWithOptions[string, float64](res.Graph, w, countDurStoreOpts())
 	eng := NewEngineWithStoreAndSchema(store, res.Constraints, res.Indexes)
 	return eng, res.Graph, func() {
@@ -232,7 +243,7 @@ func TestCountStore_ReopenParity_WALReplay(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	snap1 := countRunCycle(t, dir, g, false, countDurWorkload...)
 	assertSession1WasDirty(t, &snap1, g)
 
@@ -250,7 +261,7 @@ func TestCountStore_ReopenParity_AfterCheckpoint(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	snap1 := countRunCycle(t, dir, g, true, countDurWorkload...)
 	assertSession1WasDirty(t, &snap1, g)
 
@@ -275,7 +286,7 @@ func TestCountStore_ReopenParity_CheckpointThenWALTail(t *testing.T) {
 	prefix := countDurWorkload[:6]
 	tail := countDurWorkload[6:]
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	// Cycle 1: create the graph and checkpoint it (WAL prefix truncated).
 	countRunCycle(t, dir, g, true, prefix...)
 
@@ -324,7 +335,7 @@ func TestCountStore_ReopenParity_InterleavedBoundariesStayExact(t *testing.T) {
 		return res.Graph
 	}
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	// Cycle 1 — WAL only: seed a small typed graph.
 	countRunCycle(t, dir, g, false,

@@ -12,7 +12,7 @@ import (
 // them). The remaining n-m nodes are inserted via AddNode only and have no
 // incident edges, making them invisible to LiveMask.
 func buildFragmentedGraph(n, m int) (*adjlist.AdjList[int, int64], *csr.CSR[int64]) {
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		if err := a.AddNode(i); err != nil {
 			panic(err)

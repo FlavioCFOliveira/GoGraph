@@ -253,9 +253,9 @@ func collectPackageNames(g *lpg.Graph[string, int64]) ([]string, error) {
 // disableSeek turns the prefix rewrite off, yielding the NodeByLabelScan+Filter
 // plan the rewrite replaces — the example's own A/B control.
 func buildRegistryEngine(ctx context.Context, names []string, disableSeek bool) (*cypher.Engine, error) {
-	// Directed + Multigraph is the openCypher storage model, which is what the
-	// Cypher engine expects; anything else makes it warn at construction.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	// The zero Config is a directed multigraph, the openCypher storage model
+	// the Cypher engine expects.
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i, n := range names {
 		if i%checkEvery == 0 {
 			if err := ctx.Err(); err != nil {

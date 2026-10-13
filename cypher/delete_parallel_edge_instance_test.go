@@ -14,7 +14,7 @@ package cypher_test
 // case FAIL (the wrong instance survives). Post-fix: all pass.
 //
 // Layer: short. In-memory multigraph engine (lpgMutatorAdapter path) — the
-// helpers inMemMultigraphEngine / mustRunWrite / keyNode live in
+// helpers inMemParallelEdgeEngine / mustRunWrite / keyNode live in
 // byhandle_edge_prop_mutation_test.go.
 
 import (
@@ -89,7 +89,7 @@ func seedTwoDistinctlyTypedParallelEdges(t *testing.T, eng *cypher.Engine) {
 // first-match removal dropped T1 and left T2 — this test FAILS pre-fix.
 func TestDeleteParallelEdgeInstance_DeleteT2_LeavesT1(t *testing.T) {
 	t.Parallel()
-	eng, _ := inMemMultigraphEngine(t)
+	eng, _ := inMemParallelEdgeEngine(t)
 	seedTwoDistinctlyTypedParallelEdges(t, eng)
 
 	mustRunWrite(t, eng, `MATCH (:N {key:'x'})-[r:T2]->(:N {key:'y'}) DELETE r`)
@@ -105,7 +105,7 @@ func TestDeleteParallelEdgeInstance_DeleteT2_LeavesT1(t *testing.T) {
 // passed pre-fix only by luck (T1 is the first slot); it must stay green.
 func TestDeleteParallelEdgeInstance_DeleteT1_LeavesT2(t *testing.T) {
 	t.Parallel()
-	eng, _ := inMemMultigraphEngine(t)
+	eng, _ := inMemParallelEdgeEngine(t)
 	seedTwoDistinctlyTypedParallelEdges(t, eng)
 
 	mustRunWrite(t, eng, `MATCH (:N {key:'x'})-[r:T1]->(:N {key:'y'}) DELETE r`)
@@ -123,7 +123,7 @@ func TestDeleteParallelEdgeInstance_DeleteT1_LeavesT2(t *testing.T) {
 // leaving {2,3} — this test FAILS pre-fix.
 func TestDeleteParallelEdgeInstance_SameType_DeleteMiddle_LeavesTwo(t *testing.T) {
 	t.Parallel()
-	eng, _ := inMemMultigraphEngine(t)
+	eng, _ := inMemParallelEdgeEngine(t)
 	mustRunWrite(t, eng, `CREATE (a:N {key:'x'})`)
 	mustRunWrite(t, eng, `CREATE (b:N {key:'y'})`)
 	mustRunWrite(t, eng, `MATCH (a:N {key:'x'}),(b:N {key:'y'}) CREATE (a)-[:T {seq:1}]->(b)`)
@@ -145,7 +145,7 @@ func TestDeleteParallelEdgeInstance_SameType_DeleteMiddle_LeavesTwo(t *testing.T
 // made instance-precise.
 func TestDeleteParallelEdgeInstance_DeletedRowView_IsBoundInstance(t *testing.T) {
 	t.Parallel()
-	eng, _ := inMemMultigraphEngine(t)
+	eng, _ := inMemParallelEdgeEngine(t)
 	seedTwoDistinctlyTypedParallelEdges(t, eng)
 
 	res, err := eng.RunInTx(context.Background(),
@@ -177,7 +177,7 @@ func TestDeleteParallelEdgeInstance_DeletedRowView_IsBoundInstance(t *testing.T)
 // rejects the trailing SET, so the whole statement rolls back inside the
 // visibility barrier via the write-query undo log.
 func TestDeleteParallelEdgeInstance_RollbackRestoresExactInstance(t *testing.T) {
-	eng, g, w, _ := walMultigraphEngineWithGraph(t)
+	eng, g, w, _ := walEngineWithGraph(t)
 	defer w.Close()
 
 	seedTwoDistinctlyTypedParallelEdges(t, eng)

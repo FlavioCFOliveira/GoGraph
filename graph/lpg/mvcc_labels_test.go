@@ -46,7 +46,7 @@ func TestLabelDelta_VisibilityRule(t *testing.T) {
 }
 
 func TestLabelDelta_ReconstructsOlderVersion(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	// Seed with the substrate DISARMED so "Base" is the committed state with no
 	// delta behind it, then arm. MVCC is on by default from P4a (rmp #2288), so
 	// this now has to be asked for explicitly.
@@ -92,7 +92,7 @@ func TestLabelDelta_ReconstructsOlderVersion(t *testing.T) {
 }
 
 func TestLabelDelta_NoDeltaForARedundantWrite(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestLabelDelta_NoDeltaForARedundantWrite(t *testing.T) {
 // direction is reversed deliberately, not by accident, so the test is left
 // here — named for what it now guarantees — rather than deleted.
 func TestLabelDelta_ArmedByDefaultAndDisarmable(t *testing.T) {
-	armed := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	armed := New[string, float64](adjlist.Config{})
 	if err := armed.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestLabelDelta_ArmedByDefaultAndDisarmable(t *testing.T) {
 			"MVCC is armed by default, so a read must be able to reconstruct both older versions", n)
 	}
 
-	inert := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	inert := New[string, float64](adjlist.Config{})
 	inert.disarmMVCCForTest()
 	if err := inert.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)

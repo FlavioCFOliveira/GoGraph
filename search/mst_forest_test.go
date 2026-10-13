@@ -16,7 +16,7 @@ import (
 // Component C: complete K7 on vertices 13–19 (7 vertices; edge weights src+dst)
 func TestMST_Forest(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, float64](adjlist.Config{})
 
 	// Component A: path 0-1-2-3-4-5-6-7
 	for i := 0; i < 7; i++ {
@@ -41,7 +41,7 @@ func TestMST_Forest(t *testing.T) {
 		}
 	}
 
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	mst, _, err := KruskalMST[float64](c)
 	if err != nil {
 		t.Fatalf("KruskalMST: %v", err)

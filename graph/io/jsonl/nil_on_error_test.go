@@ -22,7 +22,7 @@ const goodPrefix = `{"type":"node","id":"alice"}
 // records and then malformed must yield a nil graph plus the typed error.
 func TestReadInto_NilGraphOnParseError(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true}
+	cfg := adjlist.Config{}
 
 	cases := []struct {
 		name  string
@@ -52,7 +52,7 @@ func TestReadInto_NilGraphOnParseError(t *testing.T) {
 // TestReadWithProps_NilGraphOnParseError is the property-graph analogue.
 func TestReadWithProps_NilGraphOnParseError(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true}
+	cfg := adjlist.Config{}
 
 	cases := []struct {
 		name  string
@@ -87,7 +87,7 @@ func TestReadInto_NilGraphOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	a, _, err := jsonl.ReadIntoCtx(ctx, strings.NewReader(goodPrefix), adjlist.Config{Directed: true})
+	a, _, err := jsonl.ReadIntoCtx(ctx, strings.NewReader(goodPrefix), adjlist.Config{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context.Canceled, got %v", err)
 	}
@@ -103,7 +103,7 @@ func TestReadWithProps_NilGraphOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	g, _, err := jsonl.ReadWithPropsCtx(ctx, strings.NewReader(goodPrefix), adjlist.Config{Directed: true})
+	g, _, err := jsonl.ReadWithPropsCtx(ctx, strings.NewReader(goodPrefix), adjlist.Config{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context.Canceled, got %v", err)
 	}

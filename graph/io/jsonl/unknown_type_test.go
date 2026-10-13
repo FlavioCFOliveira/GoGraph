@@ -20,7 +20,7 @@ import (
 func TestJSONL_UnknownRecordType(t *testing.T) {
 	t.Parallel()
 
-	cfg := adjlist.Config{Directed: true}
+	cfg := adjlist.Config{}
 
 	cases := []struct {
 		name    string

@@ -25,9 +25,9 @@ positive integer weight in `[1, max-weight]`, stored as the GraphML
 attribute.
 
 The generated graph is a **simple directed graph** (no self-loops, no
-parallel edges), so the GraphML reader — which is directed when
-`edgedefault` is not `undirected` and collapses parallel edges —
-re-materialises it edge-for-edge. That makes the round-trip exact:
+parallel edges), and the GraphML reader turns each `<edge>` into one directed
+relationship from source to target and never merges edges, so it
+re-materialises the graph edge-for-edge. That makes the round-trip exact:
 re-reading the written GraphML yields the same node count, the same edge
 count, and the same weight sum.
 

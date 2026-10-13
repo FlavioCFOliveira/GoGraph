@@ -125,3 +125,20 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
+
+// TestRingCSRStoresEachEdgeOnce guards the directed-multigraph storage
+// model: ringCSR stores each ring edge once and reads it through the
+// symmetric projection, so an n-node ring holds exactly 2n arcs. For n == 2
+// the two nodes share one edge; storing 0->1 and 1->0 would make it two
+// parallel relationships (4 arcs).
+func TestRingCSRStoresEachEdgeOnce(t *testing.T) {
+	for _, tc := range []struct{ n, arcs int }{{2, 2}, {3, 6}, {5, 10}} {
+		c := ringCSR(tc.n)
+		if got := c.Size(); got != uint64(tc.arcs) {
+			t.Errorf("ringCSR(%d).Size() = %d, want %d", tc.n, got, tc.arcs)
+		}
+		if got := c.Order(); got != uint64(tc.n) {
+			t.Errorf("ringCSR(%d).Order() = %d, want %d", tc.n, got, tc.n)
+		}
+	}
+}

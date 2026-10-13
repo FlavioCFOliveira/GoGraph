@@ -48,7 +48,7 @@ const countStoreNodes = 37
 // deliberately makes them decline.
 func newCountStoreEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < countStoreNodes; i++ {
 		id := fmt.Sprintf("cs%d", i)
 		if err := g.AddNode(id); err != nil {

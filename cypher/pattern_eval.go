@@ -496,7 +496,7 @@ func (pe *patternEvaluator) lateHopQualifies(ctx context.Context, s step, c cand
 // candidateHop describes one (rel, dst) traversal candidate found by
 // enumerateSteps. handle is the stable per-edge handle stamped on the specific
 // adjacency slot this candidate came from (0 when the graph carries no handles,
-// e.g. a simple-graph or pre-handle storage). It lets [relValueFromHop] report
+// e.g. pre-handle storage). It lets [relValueFromHop] report
 // the type of THIS parallel instance rather than the whole pair's deterministic
 // pick, so an untyped `[r]` over a multi-type parallel pair enumerates each
 // instance's own type(r) (rmp #2017).
@@ -580,7 +580,7 @@ func (pe *patternEvaluator) collectOutgoingCandidates(srcID graph.NodeID, srcKey
 //
 // The narrowing applies only where it is decidable: with no type filter every
 // slot qualifies, and a slot whose handle carries no per-instance label record
-// (handle 0 on simple-graph / pre-handle storage, or a Go-API edge that stamped
+// (handle 0 on pre-handle storage, or a Go-API edge that stamped
 // a handle without recording a type) cannot be distinguished from its siblings,
 // so the per-pair verdict already reached stands. Both fallbacks preserve the
 // pre-#2505 behaviour exactly for graphs that have no per-instance types to
@@ -857,7 +857,7 @@ func relValueFromHop(g *lpg.ReadView[string, float64], hop candidateHop, rel *as
 	// so no swap is involved.
 	//
 	// The per-pair union is the fallback for a handle-less slot (handle 0 —
-	// simple-graph / pre-handle storage) or a handle that carries no per-instance
+	// pre-handle storage) or a handle that carries no per-instance
 	// label: [Graph.EdgeLabels] returns the UNION of the types over all parallel
 	// edges between the pair, and pickEdgeType prefers a label the pattern's type
 	// filter accepts, else the deterministic alphabetically-smallest label. A

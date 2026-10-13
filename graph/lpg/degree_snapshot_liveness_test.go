@@ -17,7 +17,7 @@ var errFsyncForTest = errors.New("injected fsync failure")
 
 func degreeLivenessFixture(t *testing.T) (*Graph[string, float64], LabelID) {
 	t.Helper()
-	g := newDirectTxGraph(t, true)
+	g := newDirectTxGraph(t)
 	requireNoErr(t, g.AddNode("a"), g.AddNode("b"))
 	if _, err := g.AddEdgeH("a", "b", 1); err != nil {
 		t.Fatal(err)

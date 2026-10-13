@@ -59,7 +59,7 @@ func isWALV2Corruption(err error) bool {
 }
 
 // snapshotRedo returns the redo position R a snapshot manifest records and
-// whether it records one (manifest version 4 with wal_format 2).
+// whether it records one (manifest version 4 or 5 with wal_format 2).
 func snapshotRedo(m *snapshot.Manifest) (int64, bool) {
 	if m.WALFormat != 2 {
 		return 0, false
@@ -196,12 +196,12 @@ func replayLogWithoutSnapshot[N comparable, W any](
 		if lr == nil {
 			return ReplayResult{}, nil
 		}
-		return replayWALInto(ctx, lr, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false, nil)
+		return replayWALInto(ctx, lr, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false, nil, nil)
 	}
 	if cerr := checkSnapshotReachesWAL(ctl, false, &snapshot.Manifest{}, false); cerr != nil {
 		return ReplayResult{TailErr: cerr}, nil
 	}
-	return replayWALInto(ctx, &chainSource{log: log, legacy: lr, storeID: ctl.StoreID}, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false, nil)
+	return replayWALInto(ctx, &chainSource{log: log, legacy: lr, storeID: ctl.StoreID}, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched, -1, false, nil, nil)
 }
 
 // openWALChecked opens the write-ahead log at walPath and applies the checks

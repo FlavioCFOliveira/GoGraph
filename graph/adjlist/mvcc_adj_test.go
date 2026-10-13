@@ -22,7 +22,7 @@ import (
 
 func versionedList(t *testing.T) (*AdjList[string, float64], *mvcc.Clock) {
 	t.Helper()
-	a := New[string, float64](Config{Directed: true, Multigraph: true})
+	a := New[string, float64](Config{})
 	a.EnableVersioning()
 	clk := &mvcc.Clock{}
 	ws := &mvcc.WriteStamp{}
@@ -190,7 +190,7 @@ func TestAdjVersion_UncommittedIsInvisible(t *testing.T) {
 
 // TestAdjVersion_InertByDefault pins that nothing is recorded unless armed.
 func TestAdjVersion_InertByDefault(t *testing.T) {
-	a := New[string, float64](Config{Directed: true, Multigraph: true})
+	a := New[string, float64](Config{})
 	for _, n := range []string{"a", "b"} {
 		if err := a.AddNode(n); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -217,7 +217,7 @@ func BenchmarkAdjVersionWrite(b *testing.B) {
 		for _, versioned := range []bool{false, true} {
 			name := "nodes=" + itoaBench(size) + "/versioned=" + boolStr(versioned)
 			b.Run(name, func(b *testing.B) {
-				a := New[string, float64](Config{Directed: true, Multigraph: true})
+				a := New[string, float64](Config{})
 				clk := &mvcc.Clock{}
 				if versioned {
 					a.EnableVersioning()
@@ -446,67 +446,61 @@ func TestAdjVersion_ReclaimIsBoundedByTheHorizon(t *testing.T) {
 // once its record is marked aborted the stored value carries none of its work,
 // and the next write builds on the pre-image rather than on the aborted entry.
 func TestWithdrawTx_RestoresThePreImage(t *testing.T) {
-	for _, directed := range []bool{true, false} {
-		for _, op := range []string{"add", "remove"} {
-			t.Run(fmt.Sprintf("directed=%v/%s", directed, op), func(t *testing.T) {
-				a := New[string, float64](Config{Directed: directed, Multigraph: true})
-				a.EnableVersioning()
-				clk := &mvcc.Clock{}
-				ws := &mvcc.WriteStamp{}
-				ws.SetClock(clk)
-				a.SetWriteStamp(ws)
-				if err := a.AddEdge("a", "b", 1); err != nil {
-					t.Fatal(err)
-				}
-				a.Mapper().Intern("c")
-				aID, _ := a.Mapper().Lookup("a")
-				bID, _ := a.Mapper().Lookup("b")
-				cID, _ := a.Mapper().Lookup("c")
-				state := func() string {
-					return fmt.Sprintf("size=%d a->b=%v b->a=%v a->c=%v in(a)=%v in(b)=%v in(c)=%v",
-						a.Size(), a.HasEdge("a", "b"), a.HasEdge("b", "a"), a.HasEdge("a", "c"),
-						a.InNeighbourIDs(aID), a.InNeighbourIDs(bID), a.InNeighbourIDs(cID))
-				}
-				before := state()
+	for _, op := range []string{"add", "remove"} {
+		t.Run(op, func(t *testing.T) {
+			a := New[string, float64](Config{})
+			a.EnableVersioning()
+			clk := &mvcc.Clock{}
+			ws := &mvcc.WriteStamp{}
+			ws.SetClock(clk)
+			a.SetWriteStamp(ws)
+			if err := a.AddEdge("a", "b", 1); err != nil {
+				t.Fatal(err)
+			}
+			a.Mapper().Intern("c")
+			aID, _ := a.Mapper().Lookup("a")
+			bID, _ := a.Mapper().Lookup("b")
+			cID, _ := a.Mapper().Lookup("c")
+			state := func() string {
+				return fmt.Sprintf("size=%d a->b=%v b->a=%v a->c=%v in(a)=%v in(b)=%v in(c)=%v",
+					a.Size(), a.HasEdge("a", "b"), a.HasEdge("b", "a"), a.HasEdge("a", "c"),
+					a.InNeighbourIDs(aID), a.InNeighbourIDs(bID), a.InNeighbourIDs(cID))
+			}
+			before := state()
 
-				st := &mvcc.TxState{}
-				st.Arm(clk.NextTxID())
-				wr := a.Writer(mvcc.NewTx(st))
-				switch op {
-				case "add":
-					if err := wr.AddEdge("a", "c", 2); err != nil {
-						t.Fatalf("AddEdge: %v", err)
-					}
-				case "remove":
-					if err := wr.RemoveEdge("a", "b"); err != nil {
-						t.Fatalf("RemoveEdge: %v", err)
-					}
+			st := &mvcc.TxState{}
+			st.Arm(clk.NextTxID())
+			wr := a.Writer(mvcc.NewTx(st))
+			switch op {
+			case "add":
+				if err := wr.AddEdge("a", "c", 2); err != nil {
+					t.Fatalf("AddEdge: %v", err)
 				}
-				if state() == before {
-					t.Fatal("setup: the transaction's write changed nothing")
+			case "remove":
+				if err := wr.RemoveEdge("a", "b"); err != nil {
+					t.Fatalf("RemoveEdge: %v", err)
 				}
-				info, _ := st.Retract()
-				if info == nil {
-					t.Fatal("setup: the write recorded no version")
-				}
-				want := 1
-				if !directed {
-					want = 2
-				}
-				if got := a.WithdrawTx(info, st.AdjacencyWrites()); got != want {
-					t.Errorf("WithdrawTx released %d version records, want %d", got, want)
-				}
-				info.Abort()
-				if got := state(); got != before {
-					t.Errorf("after the abort the adjacency is %s, want %s", got, before)
-				}
-				if err := a.AddEdge("a", "d", 3); err != nil {
-					t.Fatalf("a write after the abort: %v", err)
-				}
-				if !a.HasEdge("a", "b") || a.HasEdge("a", "c") || !a.HasEdge("a", "d") {
-					t.Error("the write after the abort did not build on the pre-image")
-				}
-			})
-		}
+			}
+			if state() == before {
+				t.Fatal("setup: the transaction's write changed nothing")
+			}
+			info, _ := st.Retract()
+			if info == nil {
+				t.Fatal("setup: the write recorded no version")
+			}
+			if got := a.WithdrawTx(info, st.AdjacencyWrites()); got != 1 {
+				t.Errorf("WithdrawTx released %d version records, want 1", got)
+			}
+			info.Abort()
+			if got := state(); got != before {
+				t.Errorf("after the abort the adjacency is %s, want %s", got, before)
+			}
+			if err := a.AddEdge("a", "d", 3); err != nil {
+				t.Fatalf("a write after the abort: %v", err)
+			}
+			if !a.HasEdge("a", "b") || a.HasEdge("a", "c") || !a.HasEdge("a", "d") {
+				t.Error("the write after the abort did not build on the pre-image")
+			}
+		})
 	}
 }

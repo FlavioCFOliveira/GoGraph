@@ -57,7 +57,7 @@ func TestCypherWriteConflict_MERGE(t *testing.T) {
 func runMergeConflictTest(t *testing.T, n int) {
 	t.Helper()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	engine := cypher.NewEngine(g)
 
 	// mu serialises RunInTx calls to honour the single-writer contract on

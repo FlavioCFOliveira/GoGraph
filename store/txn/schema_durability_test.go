@@ -23,7 +23,7 @@ func typedStore(t *testing.T) (*Store[string, int64], string) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	sc := schema.New(nil, nil)
 	if _, err := sc.RegisterProperty("age", lpg.PropInt64); err != nil {
 		t.Fatalf("RegisterProperty: %v", err)

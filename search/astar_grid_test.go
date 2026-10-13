@@ -82,7 +82,7 @@ func TestAStar_Grid_ManhattanHeuristic(t *testing.T) {
 // unnamedResult: four-element return is clearer than named vars that shadow loop counters
 func buildUnitGrid(tb testing.TB, m, n int) (*csr.CSR[float64], *adjlist.AdjList[int, float64], graph.NodeID, graph.NodeID) {
 	tb.Helper()
-	adj := adjlist.New[int, float64](adjlist.Config{Directed: false})
+	adj := adjlist.New[int, float64](adjlist.Config{})
 	for r := 0; r < m; r++ {
 		for col := 0; col < n; col++ {
 			cur := r*n + col
@@ -98,7 +98,7 @@ func buildUnitGrid(tb testing.TB, m, n int) (*csr.CSR[float64], *adjlist.AdjList
 			}
 		}
 	}
-	c := csr.BuildFromAdjList(adj)
+	c := csr.BuildFromAdjList(adj).BuildSymmetric()
 	srcID, _ := adj.Mapper().Lookup(0)
 	dstID, _ := adj.Mapper().Lookup((m-1)*n + (n - 1))
 	return c, adj, srcID, dstID

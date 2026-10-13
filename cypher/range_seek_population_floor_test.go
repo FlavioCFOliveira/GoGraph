@@ -82,7 +82,7 @@ const (
 // population and would therefore pass this test without exercising it.
 func seedRSF(t *testing.T, population int) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	ctx := context.Background()
 	if _, err := eng.RunInTx(ctx, "CREATE INDEX acct_id FOR (n:Account) ON (n.id)", nil); err != nil {

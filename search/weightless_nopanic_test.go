@@ -17,7 +17,7 @@ import (
 func TestShortestPath_WeightlessCSR_NoPanic(t *testing.T) {
 	t.Parallel()
 	// Weightless graph 0->1->2 (nil weights column); a live edge-bearing source.
-	a := adjlist.New[int, int](adjlist.Config{Directed: true, Weightless: true})
+	a := adjlist.New[int, int](adjlist.Config{Weightless: true})
 	if err := a.AddEdge(0, 1, 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 )
 
 // TestBulkImportParity_Scenario_Passes runs the registered scenario in its own
@@ -508,4 +509,38 @@ func violationMessages(r *SimReport) string {
 		msgs = append(msgs, string(v.Kind)+": "+v.Message)
 	}
 	return strings.Join(msgs, "\n")
+}
+
+// TestBulkImportParity_ManifestComponentsCheckFires proves the durable-shape
+// check on the manifest's component list can fail: a manifest that omits
+// labels.bin, properties.bin, or both is reported once per missing file, while
+// one that lists both is not. The
+// happy-path scenario only ever produces the last case.
+func TestBulkImportParity_ManifestComponentsCheckFires(t *testing.T) {
+	t.Parallel()
+	entry := func(name string) snapshot.FileEntry { return snapshot.FileEntry{Name: name} }
+	cases := []struct {
+		name  string
+		files []snapshot.FileEntry
+		want  []string // the missing files the violations must name
+	}{
+		{"both listed", []snapshot.FileEntry{entry(snapshot.CSRFile), entry(snapshot.LabelsFile), entry(snapshot.PropertiesFile)}, nil},
+		{"labels missing", []snapshot.FileEntry{entry(snapshot.CSRFile), entry(snapshot.PropertiesFile)}, []string{snapshot.LabelsFile}},
+		{"properties missing", []snapshot.FileEntry{entry(snapshot.CSRFile), entry(snapshot.LabelsFile)}, []string{snapshot.PropertiesFile}},
+		{"csr only", []snapshot.FileEntry{entry(snapshot.CSRFile)}, []string{snapshot.LabelsFile, snapshot.PropertiesFile}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := bulkImportCheckManifestComponents(tc.files, "probe")
+			if len(v) != len(tc.want) {
+				t.Fatalf("violations = %d (%v), want %d naming %v", len(v), v, len(tc.want), tc.want)
+			}
+			for i, name := range tc.want {
+				if v[i].Kind != ViolationACIDDurability || !strings.Contains(v[i].Message, name) {
+					t.Errorf("violation %d = %+v, want an ACID-durability violation naming %s", i, v[i], name)
+				}
+			}
+		})
+	}
 }

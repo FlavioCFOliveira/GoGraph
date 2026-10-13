@@ -34,7 +34,7 @@ import (
 // nProps properties, plus the external key of that node.
 func buildMetadataGraph(tb testing.TB, nLabels, nProps int) (*Graph[string, float64], string) {
 	tb.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	const key = "n0"
 	for i := 0; i < nLabels; i++ {
 		if err := g.SetNodeLabel(key, "Label"+strconv.Itoa(i)); err != nil {

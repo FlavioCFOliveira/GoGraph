@@ -27,7 +27,7 @@ func TestDiskFS_CheckpointOptionAccepts(t *testing.T) {
 // the read-into-[]byte fallback is sound and byte-faithful.
 func TestDiskFS_CSRFileRoundTripOnSimDisk(t *testing.T) {
 	disk := NewSimDisk(NewSeed(2), 0)
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < 5; i++ {
 		_ = g.AddNode(nodeKey(i))
 	}

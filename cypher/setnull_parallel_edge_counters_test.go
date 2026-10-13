@@ -101,7 +101,7 @@ func TestSetNullParallelEdge_InMemory_CountersPerInstance(t *testing.T) {
 // gate for `SET r.x = null` on the durable write path (walMutatorAdapter).
 func TestSetNullParallelEdge_WalStore_CountersPerInstance(t *testing.T) {
 	t.Parallel()
-	setNullPerInstanceCounters(t, walMultigraphEngine(t))
+	setNullPerInstanceCounters(t, walParallelEdgeEngine(t))
 }
 
 // replaceMapPerInstanceCounters drives the #2501 shape for the whole-entity
@@ -145,7 +145,7 @@ func TestSetReplaceMapParallelEdge_InMemory_CountersPerInstance(t *testing.T) {
 // regression gate for `SET r = {…}` teardown on the durable write path.
 func TestSetReplaceMapParallelEdge_WalStore_CountersPerInstance(t *testing.T) {
 	t.Parallel()
-	replaceMapPerInstanceCounters(t, walMultigraphEngine(t))
+	replaceMapPerInstanceCounters(t, walParallelEdgeEngine(t))
 }
 
 // replaceParamPerInstanceCounters is replaceMapPerInstanceCounters with the
@@ -183,7 +183,7 @@ func TestSetReplaceParamParallelEdge_InMemory_CountersPerInstance(t *testing.T) 
 // regression gate for `SET r = $map` teardown on the durable write path.
 func TestSetReplaceParamParallelEdge_WalStore_CountersPerInstance(t *testing.T) {
 	t.Parallel()
-	replaceParamPerInstanceCounters(t, walMultigraphEngine(t))
+	replaceParamPerInstanceCounters(t, walParallelEdgeEngine(t))
 }
 
 // mergeSetNullPerInstanceCounters probes the MERGE ON MATCH SET null-RHS
@@ -231,7 +231,7 @@ func TestMergeSetNullParallelEdge_InMemory_CountersPerInstance(t *testing.T) {
 // for the MergeRelationship ON MATCH null-RHS removal on the durable path.
 func TestMergeSetNullParallelEdge_WalStore_CountersPerInstance(t *testing.T) {
 	t.Parallel()
-	mergeSetNullPerInstanceCounters(t, walMultigraphEngine(t))
+	mergeSetNullPerInstanceCounters(t, walParallelEdgeEngine(t))
 }
 
 // mergePatternSetNullPerInstanceCounters is the compound-pattern MERGE variant
@@ -262,5 +262,5 @@ func TestMergePatternSetNullParallelEdge_InMemory_CountersPerInstance(t *testing
 // #2501 probe for the compound-pattern MERGE null-RHS removal (durable).
 func TestMergePatternSetNullParallelEdge_WalStore_CountersPerInstance(t *testing.T) {
 	t.Parallel()
-	mergePatternSetNullPerInstanceCounters(t, walMultigraphEngine(t))
+	mergePatternSetNullPerInstanceCounters(t, walParallelEdgeEngine(t))
 }

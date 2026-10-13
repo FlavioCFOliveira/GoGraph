@@ -43,7 +43,7 @@ func TestDetachDelete_RefusedOverArcCommittedAfterSnapshot(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := context.Background()
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			eng := cypher.NewEngine(g)
 			defer func() { _ = eng.Close() }()
 			runAll(t, eng, "CREATE (:Hub {id:1}), (:X {id:1}), (:X {id:2})")

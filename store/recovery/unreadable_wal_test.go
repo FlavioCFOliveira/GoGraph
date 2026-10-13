@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -35,7 +36,7 @@ func TestRecovery_UnreadableWAL(t *testing.T) {
 	dir := t.TempDir()
 
 	// 1. Build a minimal snapshot so recovery has something to restore.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	adj := g.AdjList()
 	if err := adj.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
@@ -50,6 +51,11 @@ func TestRecovery_UnreadableWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

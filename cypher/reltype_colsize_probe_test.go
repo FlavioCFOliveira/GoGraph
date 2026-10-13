@@ -18,7 +18,7 @@ import (
 // arcs each carry one type.
 func TestRelTypeColumnSize(t *testing.T) {
 	for _, n := range []int{25_000, 100_000} {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			k := fmt.Sprintf("n%d", i)
 			if err := g.AddNode(k); err != nil {

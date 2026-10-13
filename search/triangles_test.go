@@ -9,7 +9,7 @@ import (
 
 func TestCountTriangles_K5(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 5; i++ {
 		for j := i + 1; j < 5; j++ {
 			if err := a.AddEdge(i, j, struct{}{}); err != nil {
@@ -17,7 +17,7 @@ func TestCountTriangles_K5(t *testing.T) {
 			}
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	total, perNode := CountTriangles(c)
 	// K5 has C(5,3) = 10 triangles. Each vertex is in 6 of them.
 	if total != 10 {
@@ -34,7 +34,7 @@ func TestCountTriangles_K5(t *testing.T) {
 
 func TestCountTriangles_NoTriangle(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	// Path 0-1-2-3: no triangle.
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
@@ -45,7 +45,7 @@ func TestCountTriangles_NoTriangle(t *testing.T) {
 	if err := a.AddEdge(2, 3, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	total, _ := CountTriangles(c)
 	if total != 0 {
 		t.Fatalf("path triangles = %d, want 0", total)
@@ -54,7 +54,7 @@ func TestCountTriangles_NoTriangle(t *testing.T) {
 
 func TestCountTriangles_OneTriangle(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestCountTriangles_OneTriangle(t *testing.T) {
 	if err := a.AddEdge(0, 2, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	total, perNode := CountTriangles(c)
 	if total != 1 {
 		t.Fatalf("triangle count = %d, want 1", total)

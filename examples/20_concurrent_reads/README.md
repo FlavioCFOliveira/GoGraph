@@ -21,6 +21,17 @@ a different order). The measured serial-vs-parallel speedup is reported as
 telemetry. Cross-query safety (many readers, one snapshot) and intra-query
 parallel correctness are the two halves of the concurrency story.
 
+Every PageRank call of a run shares one `centrality.PageRankBudget` of
+`GOMAXPROCS` worker slots, passed through `PageRankOptions.Budget`. PageRank
+parallelises internally once a graph reaches its parallel threshold, so without
+a budget each concurrent reader would start its own `GOMAXPROCS`-sized worker
+pool: `N` readers would run `N × GOMAXPROCS` PageRank workers that park on the
+per-iteration barrier. With the shared budget the readers together never run
+more than `GOMAXPROCS` PageRank workers; a reader that finds fewer than two free
+slots runs PageRank single-threaded on its own goroutine instead of waiting.
+The example demonstrates the caller-side wiring of that budget and shows it
+leaves every answer unchanged.
+
 By default the read sweep is capped at `GOMAXPROCS`; pass `-cap-to-cpus=false`
 to drive the reliability mandate's high-concurrency levels (64/256/1024
 readers over one immutable snapshot), which the lock-free contract must
@@ -97,12 +108,14 @@ edges.directed=31950
 # mem.heap_alloc=755.83 KiB
 # mem.heap_growth=552.22 KiB
 # mem.num_gc=2
+# pagerank.budget.capacity=10
 ref.dijkstra_dist=17
 ref.bfs_reached=4000
 ref.pagerank_topk=[230,7,73,65,15,213,32,205,139,165]
 # scale.workers_1.reads=16
 # scale.workers_1.elapsed=27.229ms
 # scale.workers_1.throughput=588 reads/s
+# scale.workers_1.pagerank_budget_in_use=0
 # scale.workers_2.throughput=1124 reads/s
 # scale.workers_4.throughput=1638 reads/s
 # scale.workers_8.throughput=2312 reads/s
@@ -136,6 +149,11 @@ This is a **concurrency** example, so it reports (per the taxonomy in
   well before the worker count reaches `GOMAXPROCS` rather than scaling
   linearly. Scale `-nodes`/`-attach` up to do more work per read and the
   climb extends further before it saturates.
+- **PageRank worker budget** — `# pagerank.budget.capacity` is the number of
+  worker slots shared by every PageRank call (`GOMAXPROCS`), and
+  `# scale.workers_N.pagerank_budget_in_use` is the number of slots still held
+  after level `N` has joined. It is `0` at every level: each PageRank run
+  returns its slots on every exit path.
 - **Live heap** — one immutable snapshot is shared, not copied per worker,
   so the heap does not grow with the worker count.
 
@@ -145,12 +163,13 @@ concurrent readers compute exactly what one reader computes.
 
 ## Key APIs
 
-- `graph/adjlist.New` / `AdjList.AddEdge` — build the mutable weighted undirected graph.
+- `graph/adjlist.New` / `AdjList.AddEdge` — build the mutable weighted graph, one directed relationship per edge.
 - `graph/adjlist.AdjList.Mapper` — resolve node values to stable `NodeID`s for the fixed source/target.
-- `graph/csr.BuildFromAdjList` — freeze the builder into an immutable CSR snapshot, the shared read surface for all goroutines.
+- `graph/csr.BuildFromAdjList` / `CSR.BuildSymmetric` — freeze the builder into an immutable CSR snapshot and project it to the symmetric (undirected) snapshot, the shared read surface for all goroutines.
 - `search.Dijkstra` — single-source shortest paths; safe to call concurrently on a snapshot CSR.
 - `search.BFS` — breadth-first traversal with a visit callback; allocation-free on the hot path after the first call.
 - `search/centrality.PageRank` / `DefaultPageRankOptions` — power-iteration PageRank, safe to invoke from any number of goroutines on a snapshot CSR.
+- `search/centrality.NewPageRankBudget` / `PageRankOptions.Budget` / `PageRankBudget.InUse` — one caller-owned pool of PageRank worker slots that bounds the parallel workers of all concurrent PageRank calls together.
 - `search.WCCParallel` / `search.CountTrianglesParallel` / `search/centrality.BetweennessParallelCtx` — intra-query parallel variants, each cross-checked here against its serial counterpart over the same snapshot.
 
 ## Further reading

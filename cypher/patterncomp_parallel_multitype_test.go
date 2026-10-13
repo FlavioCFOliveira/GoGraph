@@ -39,7 +39,7 @@ import (
 func buildParallelMultiTypeEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
 	ctx := context.Background()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
 		`CREATE (a:A), (b:B)`,

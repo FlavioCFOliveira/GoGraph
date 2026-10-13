@@ -13,7 +13,7 @@ import (
 // by >2x at V=2048 — the working set crosses L1 in the unblocked
 // variant, becoming DRAM-bandwidth-bound.
 func BenchmarkFloydWarshall_V2048(b *testing.B) {
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	const n = 2048
 	r := rand.New(rand.NewPCG(73, 79)) //nolint:gosec // deterministic benchmark RNG
 	for i := 0; i < 4*n; i++ {
@@ -77,7 +77,7 @@ func TestFloydWarshall_Unreachable(t *testing.T) {
 // on int32 and corrupted unreachable-pair detection.
 func TestFloydWarshall_Int32WeightsNoOverflow(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int32](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int32](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 5); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestFloydWarshall_Int32WeightsNoOverflow(t *testing.T) {
 // (zero, false) not (sentinel, true).
 func TestFloydWarshall_UnreachableReportedExplicitly(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

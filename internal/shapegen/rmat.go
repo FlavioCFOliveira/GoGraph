@@ -37,10 +37,9 @@ import (
 //
 // The generator constructs the underlying [adjlist.Config] from the
 // caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, and
-// forces cfg.Directed=true and cfg.Multigraph=false: the Graph500
-// R-MAT spec defines the graph as directed; duplicate (src, dst)
-// emissions across the m draws are silently coalesced by the simple-
-// graph mode of [adjlist.AdjList]. Self-loops (src == dst) are
+// keeps the graph simple itself: the Graph500 R-MAT spec defines the
+// graph as directed; a duplicate (src, dst) emission across the m draws
+// is dropped by the generator, keeping the first. Self-loops (src == dst) are
 // admitted because the canonical R-MAT distribution places non-zero
 // probability mass on the diagonal at every recursion level; this is
 // the Graph500 contract, not an oversight.
@@ -49,7 +48,7 @@ import (
 //
 // Edges are inserted in deterministic emission order: the i-th
 // recursion-descent draw is emitted as the i-th AddEdge call. Because
-// duplicates are dropped at the AddEdge layer, the **emission**
+// duplicates are dropped before the AddEdge call, the **emission**
 // sequence — not the unique-edge sequence — is what the determinism
 // invariant pins. The seeded generator threads a caller-supplied
 // [uint64] seed through [math/rand/v2.NewPCG]: every
@@ -212,8 +211,6 @@ func RMAT(scale, edgeFactor int, a, b, c, d, seed uint64) Shape[int, int64] {
 			{Name: "edgeFactor", Min: 1, Max: 64, Default: 16},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildRMAT(g, scale, edgeFactor, int(a), int(b), int(c), seed)
 		},
@@ -222,8 +219,8 @@ func RMAT(scale, edgeFactor int, a, b, c, d, seed uint64) Shape[int, int64] {
 
 // buildRMAT interns nodes 0..n-1 in g (n = 1 << scale) and emits
 // edgeFactor * n edge-placement attempts via [RMATPick], inserting
-// each into g. Duplicates within an emission run are silently
-// coalesced by simple-graph mode; the resulting Size() is therefore
+// each into g. A duplicate (src, dst) within an emission run is skipped,
+// keeping the first; the resulting Size() is therefore
 // the count of *distinct* (src, dst) pairs emitted, while every
 // emission still consumes a fixed prefix of the PRNG output. The
 // first AddEdge error short-circuits the loop, matching the
@@ -243,8 +240,15 @@ func buildRMAT(g *lpg.Graph[int, int64], scale, edgeFactor, a, b, c int, seed ui
 	m := uint64(edgeFactor) * n
 	ab := a + b
 	abc := ab + c
+	// Every graph is a multigraph, so a repeated (src, dst) draw is dropped
+	// here, keeping its first emission: the catalogue's R-MAT is simple.
+	seen := make(map[[2]uint64]struct{}, m)
 	for i := uint64(0); i < m && err == nil; i++ {
 		src, dst := RMATPick(r, n, a, ab, abc)
+		if _, dup := seen[[2]uint64{src, dst}]; dup {
+			continue
+		}
+		seen[[2]uint64{src, dst}] = struct{}{}
 		err = g.AddEdge(canonicalNode(int(src)), canonicalNode(int(dst)), unweightedSentinel)
 	}
 	return err

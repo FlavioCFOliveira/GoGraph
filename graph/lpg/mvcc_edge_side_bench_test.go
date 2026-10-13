@@ -26,7 +26,7 @@ import (
 // then sweeps the version chains so the benchmark measures the fast path.
 func edgeSideFixture(b *testing.B, pairs int) (*Graph[string, float64], []graph.NodeID, []graph.NodeID) {
 	b.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	srcs := make([]graph.NodeID, pairs)
 	dsts := make([]graph.NodeID, pairs)
 	for i := 0; i < pairs; i++ {

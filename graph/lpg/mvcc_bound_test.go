@@ -221,7 +221,7 @@ func TestMVCCMetrics_AreExported(t *testing.T) {
 	metrics.SetBackend(rec)
 	defer metrics.SetBackend(nil)
 
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	// Closed so the vacuum has published and terminated before the gauges are
 	// read: the publisher is a background goroutine since rmp #2308, so a test
 	// that reads without joining it is asserting on a race rather than on the

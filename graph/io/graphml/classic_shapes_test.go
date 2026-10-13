@@ -16,10 +16,7 @@ import (
 // writer, which is specialised on string node keys. Node ids are
 // rendered with fmt.Sprintf("%d", key).
 func toStringAdj(a *adjlist.AdjList[int, int64]) *adjlist.AdjList[string, int64] {
-	s := adjlist.New[string, int64](adjlist.Config{
-		Directed:   a.Directed(),
-		Multigraph: a.Multigraph(),
-	})
+	s := adjlist.New[string, int64](adjlist.Config{})
 	maxID := uint64(a.MaxNodeID())
 	// Pre-resolve all names in one Walk so the edge loop pays no
 	// per-node Mapper.Resolve cost.
@@ -69,7 +66,7 @@ func TestGraphMLRoundtrip_ClassicShapes(t *testing.T) {
 
 	cases := []shapeCase{
 		// P₅ — directed path on 5 nodes.
-		{shape: shapegen.Path(5, true), directed: true},
+		{shape: shapegen.Path(5), directed: true},
 		// C₅ — directed cycle on 5 nodes.
 		{shape: shapegen.Cycle(5, true), directed: true},
 		// S₅ — directed star: centre node 0 + 4 leaves (n=5 total).
@@ -85,7 +82,7 @@ func TestGraphMLRoundtrip_ClassicShapes(t *testing.T) {
 		t.Run(tc.shape.Name(), func(t *testing.T) {
 			t.Parallel()
 
-			cfg := adjlist.Config{Directed: tc.directed}
+			cfg := adjlist.Config{}
 			g, err := tc.shape.Build(cfg)
 			if err != nil {
 				t.Fatalf("Build: %v", err)

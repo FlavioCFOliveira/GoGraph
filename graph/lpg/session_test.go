@@ -54,7 +54,7 @@ const (
 // caller being told its write committed and then not finding it — the symptom that
 // makes this a correctness question rather than a performance one.
 func TestSession_ReadsItsOwnCommittedWrite(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	var wg sync.WaitGroup
@@ -116,7 +116,7 @@ func TestSession_ReadsItsOwnCommittedWrite(t *testing.T) {
 // that misleads an operator: an uncontended workload reporting contention, and a
 // conflict rate that rises with writer count rather than with real contention.
 func TestSession_DoesNotConflictWithItselfOnItsOwnKey(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	var wg sync.WaitGroup
@@ -168,7 +168,7 @@ func TestSession_DoesNotConflictWithItselfOnItsOwnKey(t *testing.T) {
 // prove nothing. This one asserts the positive — that a session's floor really does
 // get ahead of the frontier, so the wait has something to wait for.
 func TestSession_FloorAdvancesAndWaitIsActuallyExercised(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	var wg sync.WaitGroup
@@ -218,7 +218,7 @@ func TestSession_FloorAdvancesAndWaitIsActuallyExercised(t *testing.T) {
 // is what lets two goroutines share one session without pulling each other's
 // guarantee back.
 func TestSession_FloorIsMonotonic(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	s := g.NewSession()
 
@@ -263,7 +263,7 @@ func TestSession_FloorIsMonotonic(t *testing.T) {
 // carries the guarantee too — the floor advances when the transaction is closed
 // through the session, not when it is opened.
 func TestSession_ExplicitTransactionRecordsItsInstant(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	s := g.NewSession()
 

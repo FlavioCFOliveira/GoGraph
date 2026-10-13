@@ -63,7 +63,6 @@ func TestRandom_RMAT_Invariants(t *testing.T) {
 			n := uint64(1) << c.scale
 			m := uint64(c.edgeFactor) * n
 			assertOrder(t, g, n)
-			assertDirected(t, g, true)
 			gotSize := g.AdjList().Size()
 			if gotSize > m {
 				t.Fatalf("Size = %d, exceeds upper bound m = %d", gotSize, m)
@@ -204,7 +203,7 @@ func TestRandom_RMAT_GoldenScale6(t *testing.T) {
 // directly, mirroring the dags-family shard-full tests.
 func TestRandom_RMAT_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	if err := buildRMAT(g, 9, 1, 57, 19, 19, 1); err == nil {
 		t.Fatal("buildRMAT(g, 9, 1, 57, 19, 19, 1) with MaxShardCapacity=1 returned nil error, want adjlist.ErrShardFull")
@@ -262,7 +261,7 @@ func TestRandom_RMAT_AllQuadrantSwitches(t *testing.T) {
 // contracts.
 func TestRandom_RMAT_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: false, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	g, err := RMAT(4, 2, 57, 19, 19, 5, 42).Build(cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -296,9 +295,6 @@ func TestRandom_RMAT_Properties_RapidSweep(t *testing.T) {
 		}
 		if got := g.AdjList().Size(); got > m {
 			t.Fatalf("Size = %d, exceeds m = %d", got, m)
-		}
-		if !g.AdjList().Directed() {
-			t.Fatal("Directed = false, want true")
 		}
 	})
 }
@@ -336,8 +332,5 @@ func TestRandom_RMAT_Soak(t *testing.T) {
 	}
 	if gotSize > m {
 		t.Fatalf("Size = %d, exceeds m = %d", gotSize, m)
-	}
-	if !g.AdjList().Directed() {
-		t.Fatal("Directed = false, want true")
 	}
 }

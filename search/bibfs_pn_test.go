@@ -28,9 +28,9 @@ func TestBiBFS_LongPath(t *testing.T) {
 	t.Parallel()
 
 	const n = 10_000
-	// shapegen.Path with directed=false produces an undirected path,
-	// which is required by BiBFS for symmetric traversal.
-	g, err := shapegen.Path(n, false).Build(defaultCfg())
+	// shapegen.Path stores the path as arcs i -> i+1; BiBFS searches
+	// it from 0 towards n-1.
+	g, err := shapegen.Path(n).Build(defaultCfg())
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}

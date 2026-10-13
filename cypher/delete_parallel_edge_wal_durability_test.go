@@ -15,6 +15,7 @@ package cypher_test
 // slot, so replay would retire T1 and leave T2 — the opposite of the intent.
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -38,7 +39,12 @@ func TestCypher_DeleteParallelEdgeInstance_WALDurability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
-	g1 := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w1.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g1 := lpg.New[string, float64](adjlist.Config{})
 	deleteWALEngineRun(t, g1, w1,
 		`CREATE (a:N {key:'x'})`,
 		`CREATE (b:N {key:'y'})`,
@@ -55,6 +61,11 @@ func TestCypher_DeleteParallelEdgeInstance_WALDurability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open2 wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	deleteWALEngineRun(t, res2.Graph, w2,
 		`MATCH (:N {key:'x'})-[r:T2]->(:N {key:'y'}) DELETE r`)
 

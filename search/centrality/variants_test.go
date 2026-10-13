@@ -19,7 +19,7 @@ const ctol = 1e-4
 // with a key→NodeID resolver (NodeIDs are hashed by the adjlist mapper).
 func buildC(t *testing.T, directed bool, nodes []string, edges [][2]string) (*csr.CSR[struct{}], func(string) int) {
 	t.Helper()
-	a := adjlist.New[string, struct{}](adjlist.Config{Directed: directed})
+	a := adjlist.New[string, struct{}](adjlist.Config{})
 	for _, nkey := range nodes {
 		if err := a.AddNode(nkey); err != nil {
 			t.Fatalf("AddNode %s: %v", nkey, err)
@@ -31,6 +31,9 @@ func buildC(t *testing.T, directed bool, nodes []string, edges [][2]string) (*cs
 		}
 	}
 	c := csr.BuildFromAdjList(a)
+	if !directed {
+		c = c.BuildSymmetric()
+	}
 	return c, func(k string) int {
 		id, ok := a.Mapper().Lookup(k)
 		if !ok {

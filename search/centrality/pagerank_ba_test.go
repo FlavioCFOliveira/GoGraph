@@ -17,11 +17,11 @@ import (
 func TestPageRank_BarabasiAlbert(t *testing.T) {
 	t.Parallel()
 
-	g, err := shapegen.BarabasiAlbert(2000, 3, 42).Build(adjlist.Config{Directed: false})
+	g, err := shapegen.BarabasiAlbert(2000, 3, 42).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("BarabasiAlbert.Build: %v", err)
 	}
-	c := csr.BuildFromAdjList(g.AdjList())
+	c := csr.BuildFromAdjList(g.AdjList()).BuildSymmetric()
 
 	opts := PageRankOptions{
 		Damping:       0.85,

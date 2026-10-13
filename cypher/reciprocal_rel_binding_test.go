@@ -106,7 +106,7 @@ func assertRows(t *testing.T, label string, got, want []string) {
 // newReciprocalEngine builds the in-memory multigraph fixture.
 func newReciprocalEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSeed(t, eng, reciprocalSeed)
 	return eng
@@ -158,30 +158,6 @@ func TestReciprocalRelBinding_Undirected(t *testing.T) {
 	})
 }
 
-// TestReciprocalRelBinding_Simple pins the same three directions on a SIMPLE
-// (non-multigraph) adjacency. A reciprocal pair is legal there too — the two
-// edges occupy different pairs — so the defect reproduced identically, and the
-// fix must hold without multigraph semantics.
-func TestReciprocalRelBinding_Simple(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
-	eng := cypher.NewEngine(g)
-	runSeed(t, eng, reciprocalSeed)
-	for _, tc := range []struct {
-		name, pattern string
-		want          []string
-	}{
-		{"forward", `MATCH (a:Person)-[r:KNOWS]->(b:Person) `, []string{"A B 1 AB A B", "B A 2 BA B A", "B C 3 BC B C"}},
-		{"reverse", `MATCH (b:Person)<-[r:KNOWS]-(a:Person) `, []string{"A B 1 AB A B", "B A 2 BA B A", "B C 3 BC B C"}},
-		{"undirected", `MATCH (a:Person {name:'A'})-[r:KNOWS]-(b:Person) `, []string{"A B 1 AB A B", "A B 2 BA B A"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := collectRowStrings(t, eng, tc.pattern+reciprocalProjection,
-				"an", "bn", "rid", "tag", "sn", "en")
-			assertRows(t, tc.name, got, tc.want)
-		})
-	}
-}
-
 // TestReciprocalRelBinding_DurableStore repeats the three directions over the
 // WAL-backed engine. #2500-#2503 showed the durable adapter can diverge from
 // the in-memory one on exactly this class of by-handle routing, so the durable
@@ -193,7 +169,7 @@ func TestReciprocalRelBinding_DurableStore(t *testing.T) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -297,7 +273,7 @@ func TestReciprocalRelBinding_RelatedPaths(t *testing.T) {
 // handle column is then the only thing that can tell the two edges of a
 // reciprocal pair apart, and it does.
 func TestReciprocalRelBinding_GoAPIEdges(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"A", "B"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode(%q): %v", k, err)

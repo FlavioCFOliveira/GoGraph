@@ -5,45 +5,42 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.16.0`.** This is the project's **twenty-first
+**Current release: `v0.17.0`.** This is the project's **twenty-second
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.16.0` is a pre-1.0 **MINOR** release of **167 commits** from **three
-sprints**: 363 (*Performance and Efficiency Laboratory*), 364
-(*Correctness and Security Laboratory*) and 365 (*Observe, Correct and
-Optimize MVCC, Store and LPG Exercise*).
+`v0.17.0` is a pre-1.0 **MINOR** release of **53 commits** from **two
+sprints**: 366 (*Drop undirected relations and simple graphs*) and 367
+(*Performance and Efficiency Laboratory*).
 
-**It breaks the exported API and changes the on-disk format.** Parsing
-every non-test Go file outside `internal/`, `examples/`, `cmd/` and any
-`gen/`, `tck/` or `testdata/` directory at both tags and diffing the
-rendered declarations gives **4 822 exported declarations before and 5 160
-after: 342 added, 74 re-signed (71 incompatibly) and 4 removed.** Most
-mutators of `graph/lpg`, `graph/adjlist` and `cypher/exec.GraphMutator`
-now return their refusal as an `error`, because every write path — direct,
-raw and store commit — is now atomic and isolated, and every token is
-bounded at 65 535 bytes.
+**It breaks the exported API and changes the on-disk format.** Every graph
+is now a directed multigraph; undirected and simple graphs are no longer
+supported. Parsing every non-test Go file outside `internal/`, `examples/`,
+`cmd/` and any `gen/`, `tck/` or `testdata/` directory at both ends of the
+window and diffing the rendered declarations gives **5 152 exported
+declarations before and 5 162 after: 24 added, 1 re-signed and 14
+removed** — among them `adjlist.Config.Directed` and `Config.Multigraph`.
+Undirected analytics read the symmetric projection `csr.BuildSymmetric`.
 
-**WAL v2 is a one-way migration.** The write-ahead log is now segmented,
-each frame carries its position, a link to its predecessor and the store
-id, every commit records the node ids it created, and node ids are
-reserved ahead of use, so `id()` and `elementId()` survive a reopen
-exactly. The first writable, clean open of an older store migrates it,
-after which **`v0.15.0` and earlier builds refuse the directory**. Back up
-a store before its first open with `v0.16.0` if you need a downgrade path.
-`store.Open` composes recovery and the store in one fail-safe call, and
-`txn.Store.Close` records the exact node-id marks at a clean close.
+**The snapshot manifest is now version 5**, which `v0.16.0` and earlier
+builds refuse. A store written by an undirected or simple graph is
+migrated by its first clean open; a directed multigraph store opens as is
+and writes a version-5 manifest at its next checkpoint. Back up a store
+before its first open with `v0.17.0` if you need a downgrade path. Sprint
+367 cut module-attributed CPU by 39.3 %, allocation by 29.2 % and
+contention delay by 50.9 % across the examples
+([docs/campaign-lab-2026-10-09.md](docs/campaign-lab-2026-10-09.md)).
 
 The two compliance invariants remain in force: the module is **100 %
 openCypher TCK-compliant at the execution level** (**3 897/3 897
 scenarios**; `tckExecutionBaseline` is unchanged) and **100 %
-ACID-compliant**. `go.mod` and `go.sum` are unchanged from `v0.15.0`.
+ACID-compliant**. `go.mod` and `go.sum` are unchanged from `v0.16.0`.
 
 The module uses the conventional Go path
 `github.com/FlavioCFOliveira/GoGraph` and is fetchable with
-`go get github.com/FlavioCFOliveira/GoGraph@v0.16.0`. See
+`go get github.com/FlavioCFOliveira/GoGraph@v0.17.0`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.16.0.md](release-notes/v0.16.0.md) for the full release
+[release-notes/v0.17.0.md](release-notes/v0.17.0.md) for the full release
 narrative, the behaviour changes a caller must know about, and what the
 release does **not** establish.
 
@@ -52,16 +49,19 @@ release does **not** establish.
 - `github.com/FlavioCFOliveira/GoGraph/graph` — generic node identifiers and the `Graph[N, W]`
   contract.
 - `github.com/FlavioCFOliveira/GoGraph/graph/adjlist` — mutable, sharded adjacency-list backend
-  with copy-on-write snapshots and lock-free reads. Every edge slot carries a
-  stable identity, and adjacency is versioned inside the immutable entry so a
-  snapshot resolves it at one instant.
+  with copy-on-write snapshots and lock-free reads. It stores a directed
+  multigraph: every edge is one directed relationship, and parallel edges and
+  self-loops are kept. Every edge slot carries a stable identity, and adjacency
+  is versioned inside the immutable entry so a snapshot resolves it at one
+  instant.
 - `github.com/FlavioCFOliveira/GoGraph/graph/mvcc` — the concurrency-control substrate: a
   transaction clock and shared commit records, a contiguous commit frontier,
   the reclamation horizon and watermark, `Gate` (a weak/strong admission gate),
   and `ErrSerializationConflict`. New in `v0.11.0`; MVCC is the module's only
   concurrency-control mechanism and is armed by `lpg.New`.
 - `github.com/FlavioCFOliveira/GoGraph/graph/csr` — immutable Compressed Sparse Row view for
-  read-mostly analytics.
+  read-mostly analytics; `BuildSymmetric` projects it to the undirected view that
+  undirected algorithms read.
 - `github.com/FlavioCFOliveira/GoGraph/graph/generation` — atomic pointer swap for snapshot
   rotation across readers/writers.
 - `github.com/FlavioCFOliveira/GoGraph/graph/lpg` — Labelled Property Graph model (vertex and
@@ -268,7 +268,7 @@ import (
 )
 
 func main() {
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	a.AddEdge("Lisbon", "Madrid", 624)
 	a.AddEdge("Lisbon", "Paris", 1737)
 	a.AddEdge("Madrid", "Paris", 1274)
@@ -576,7 +576,7 @@ examples/                 — 37 runnable example programs, each pprof-able (see
 ## Labelled Property Graph + Query Example
 
 ```go
-g := lpg.New[string, int64](adjlist.Config{Directed: true})
+g := lpg.New[string, int64](adjlist.Config{})
 g.SetNodeLabel("alice", "Person")
 g.SetNodeLabel("alice", "Admin")
 g.SetNodeProperty("alice", "age", lpg.Int64Value(30))

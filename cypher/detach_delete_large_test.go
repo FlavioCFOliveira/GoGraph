@@ -30,7 +30,7 @@ func TestDetachDelete_Hub1000Leaves(t *testing.T) {
 
 	const leaves = 1_000
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	// Create hub via Cypher so the label index knows about it.
@@ -88,7 +88,7 @@ func TestDetachDelete_HubCount(t *testing.T) {
 
 	const leaves = 10
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

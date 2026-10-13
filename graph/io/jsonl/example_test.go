@@ -13,7 +13,7 @@ import (
 // weighted graph to NDJSON (one node/edge record per line) with Write,
 // then unmarshal it back with ReadInto and confirm the structure.
 func ExampleWrite() {
-	cfg := adjlist.Config{Directed: true}
+	cfg := adjlist.Config{}
 
 	src := adjlist.New[string, int64](cfg)
 	_ = src.AddEdge("a", "b", 7)
@@ -44,7 +44,7 @@ func ExampleWrite() {
 // WriteWithProps emits a property record per typed property and
 // ReadWithProps restores it, so a string property recovers its value.
 func ExampleWriteWithProps() {
-	cfg := adjlist.Config{Directed: true}
+	cfg := adjlist.Config{}
 
 	src := lpg.New[string, int64](cfg)
 	_ = src.AddEdge("alice", "bob", 1)

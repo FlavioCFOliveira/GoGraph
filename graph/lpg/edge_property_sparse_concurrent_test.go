@@ -29,7 +29,7 @@ import (
 func TestLPG_EdgeProperty_ConcurrentReshape(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	const src = "hub"
 	const degree = 200 // high degree so the column spans many slots
 	if err := g.AddNode(src); err != nil {

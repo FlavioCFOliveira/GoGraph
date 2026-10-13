@@ -20,7 +20,7 @@ func TestBFS_PathGraph_DistanceEqualsIndex(t *testing.T) {
 		n := n
 		t.Run("n="+itoa(n), func(t *testing.T) {
 			t.Parallel()
-			g, err := shapegen.Path(n, true).Build(defaultCfg())
+			g, err := shapegen.Path(n).Build(defaultCfg())
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}

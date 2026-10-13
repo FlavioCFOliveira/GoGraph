@@ -27,7 +27,7 @@ import (
 // (unique) and an integer "g" (v mod 8, a low-cardinality grouping key).
 func benchPassthroughGraph(tb testing.TB, n int) *lpg.Graph[string, float64] {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%07d", i)
 		if err := g.AddNode(key); err != nil {
@@ -64,7 +64,7 @@ func benchDrainQuery(b *testing.B, eng *Engine, query string) {
 // BenchmarkColumnarWithPassthrough covers the #2045 target shapes plus the
 // deferred aggregation baseline and the P2/P3 projection regression guard.
 func BenchmarkColumnarWithPassthrough(b *testing.B) {
-	// Silence the one-time non-multigraph WARN so it does not pollute benchstat runs.
+	// Silence engine WARN output so it does not pollute benchstat runs.
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer slog.SetDefault(prev)

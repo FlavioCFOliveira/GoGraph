@@ -16,7 +16,7 @@ import (
 )
 
 func scNewEng(directed bool) *cypher.Engine {
-	g := lpg.New[string, float64](adjlist.Config{Directed: directed})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return cypher.NewEngine(g)
 }
 

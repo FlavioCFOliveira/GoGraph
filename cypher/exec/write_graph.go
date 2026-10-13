@@ -212,7 +212,7 @@ type GraphMutator interface {
 	// ON MATCH / ON CREATE action path uses it to mirror its per-pair property
 	// writes onto the matched edge's by-handle store. Returns 0 / false when
 	// either endpoint is unknown, no src→dst edge exists, or the matched slot
-	// carries the 0 "no handle" sentinel (simple-graph / pre-handle storage) —
+	// carries the 0 "no handle" sentinel (pre-handle storage) —
 	// in which case the caller mutates the per-pair store only and never a
 	// by-handle instance.
 	FirstEdgeHandle(src, dst string) (uint64, bool)

@@ -23,7 +23,7 @@ func init() {
 	//   edges:<hex>
 	subproc.Register("csr-build-sha256", func(_ []string) int {
 		shape := shapegen.BarabasiAlbert(1000, 3, 42)
-		g, err := shape.Build(adjlist.Config{Directed: true})
+		g, err := shape.Build(adjlist.Config{})
 		if err != nil {
 			fmt.Printf("csr-build-sha256: Build: %v\n", err)
 			return 1

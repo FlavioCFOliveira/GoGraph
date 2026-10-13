@@ -367,7 +367,7 @@ func writeTrackingErr(ctx context.Context, eng *EngineAdapter, op Op) (committed
 // newMetricsEngine builds the fresh in-memory engine the metrics oracle drives:
 // a directed simple graph, matching the simulator's non-crash engine shape.
 func newMetricsEngine() *cypher.Engine {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return cypher.NewEngine(g)
 }
 

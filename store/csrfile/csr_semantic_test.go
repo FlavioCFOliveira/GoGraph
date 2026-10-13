@@ -21,7 +21,7 @@ import (
 // EdgesSlice has length 2: [1, 2].
 func buildSmallCSRFile(t *testing.T) (path string, data []byte, h Header) {
 	t.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for _, src := range []int{0, 1, 2} {
 		if err := a.AddNode(src); err != nil {
 			t.Fatalf("AddNode(%d): %v", src, err)

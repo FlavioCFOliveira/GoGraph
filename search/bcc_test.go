@@ -14,14 +14,14 @@ import (
 func TestHopcroftTarjanBCC_BridgeFixture(t *testing.T) {
 	t.Parallel()
 	// Two triangles 0-1-2 and 3-4-5 connected by a bridge 2-3.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	edges := [][2]int{{0, 1}, {1, 2}, {2, 0}, {2, 3}, {3, 4}, {4, 5}, {5, 3}}
 	for _, e := range edges {
 		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	res := HopcroftTarjanBCC(c)
 
 	// Bridge 2-3 must be detected.
@@ -52,13 +52,13 @@ func TestHopcroftTarjanBCC_BridgeFixture(t *testing.T) {
 func TestHopcroftTarjanBCC_SingleCycle(t *testing.T) {
 	t.Parallel()
 	// A single cycle: no bridges, no articulation points.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 5; i++ {
 		if err := a.AddEdge(i, (i+1)%5, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	res := HopcroftTarjanBCC(c)
 	if len(res.Bridges) != 0 {
 		t.Fatalf("single cycle should have no bridges, got %v", res.Bridges)
@@ -77,14 +77,14 @@ func TestHopcroftTarjanBCC_SingleCycle(t *testing.T) {
 // edge used to descend into the child).
 func TestHopcroftTarjanBCC_MultigraphParallel(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false, Multigraph: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil { // parallel
 		t.Fatalf("AddEdge: %v", err)
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	res := HopcroftTarjanBCC(c)
 	if len(res.Bridges) != 0 {
 		t.Fatalf("two parallel edges form a 2-cycle BCC, not a bridge; got bridges=%v", res.Bridges)
@@ -102,13 +102,13 @@ func TestHopcroftTarjanBCC_MultigraphParallel(t *testing.T) {
 // still a bridge under the multigraph-aware fix.
 func TestHopcroftTarjanBCC_MultigraphSingleEdgeStillBridge(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false, Multigraph: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for _, e := range [][2]int{{0, 1}, {1, 2}, {2, 0}, {2, 3}, {3, 4}, {4, 5}, {5, 3}} {
 		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	res := HopcroftTarjanBCC(c)
 	if len(res.Bridges) == 0 {
 		t.Fatalf("single bridge edge 2-3 should be detected in multigraph mode; got %v", res.Bridges)
@@ -121,7 +121,7 @@ func TestHopcroftTarjanBCC_MultigraphSingleEdgeStillBridge(t *testing.T) {
 // because the timer is global and disc[root2]>0.
 func TestHopcroftTarjanBCC_TwoDisjointTriangles(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	tri1 := [][2]int{{0, 1}, {1, 2}, {2, 0}}
 	tri2 := [][2]int{{3, 4}, {4, 5}, {5, 3}}
 	for _, e := range tri1 {
@@ -134,7 +134,7 @@ func TestHopcroftTarjanBCC_TwoDisjointTriangles(t *testing.T) {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	res := HopcroftTarjanBCC(c)
 	if len(res.Articulation) != 0 {
 		t.Fatalf("two disjoint triangles should have no articulation points; got %v", res.Articulation)
@@ -149,7 +149,7 @@ func TestHopcroftTarjanBCC_TwoDisjointTriangles(t *testing.T) {
 // (degree-2) vertices that are articulation points. Total = 6.
 func TestHopcroftTarjanBCC_TwoDisjointPaths(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil { // path 0-1-2-3-4
 			t.Fatalf("AddEdge: %v", err)
@@ -160,7 +160,7 @@ func TestHopcroftTarjanBCC_TwoDisjointPaths(t *testing.T) {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	res := HopcroftTarjanBCC(c)
 
 	gotIDs := make(map[int]struct{}, len(res.Articulation))
@@ -237,7 +237,7 @@ func TestHopcroftTarjanBCC_ForestPropertyVsBrute(t *testing.T) {
 	t.Parallel()
 	rapid.Check(t, func(rt *rapid.T) {
 		nComps := rapid.IntRange(1, 4).Draw(rt, "nComponents")
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		nextID := 0
 		for c := 0; c < nComps; c++ {
 			size := rapid.IntRange(2, 8).Draw(rt, "componentSize")
@@ -266,7 +266,7 @@ func TestHopcroftTarjanBCC_ForestPropertyVsBrute(t *testing.T) {
 			}
 			nextID = base + size
 		}
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		res := HopcroftTarjanBCC(c)
 		got := map[graph.NodeID]struct{}{}
 		for _, id := range res.Articulation {

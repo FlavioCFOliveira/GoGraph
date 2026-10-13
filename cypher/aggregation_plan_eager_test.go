@@ -35,7 +35,7 @@ import (
 // are 20, 25, 25, 30, 30 — giving two distinct age groups.
 func newAggregationPlanEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for i, age := range []int{20, 25, 25, 30, 30} {
 		q := fmt.Sprintf(`CREATE (:Person {name: 'p%d', age: %d})`, i, age)

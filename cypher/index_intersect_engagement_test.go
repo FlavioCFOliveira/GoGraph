@@ -54,7 +54,7 @@ const iiSmallPop = 32
 // the floor and not merely by a missing index.
 func iiSmallLabelFixture(tb testing.TB) (*lpg.Graph[string, float64], *Engine) {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < iiSmallPop; i++ {
 		key := fmt.Sprintf("m%06d", i)
 		if err := g.AddNode(key); err != nil {
@@ -85,16 +85,16 @@ func iiSmallLabelFixture(tb testing.TB) (*lpg.Graph[string, float64], *Engine) {
 // iiBuildsPerExplain is how many times ONE plan build composes the intersection
 // for a shape that accepts it.
 //
-// It is TWO, not one, and that is worth pinning rather than papering over: the
-// planner runs the whole range-seek peephole a second time as a throwaway probe
-// inside indexSeekWouldFire, which builds a real operator purely to answer "would
-// a seek fire here?" and then closes it. So every cost inside the recogniser —
-// including the range counts #2266 budgets — is paid TWICE per query build, once
-// by the probe and once by the build that keeps its result.
+// It is ONE. It was TWO until rmp #3096: the planner ran the whole range-seek
+// peephole a second time as a throwaway probe inside indexSeekWouldFire, built a
+// real operator purely to answer "would a seek fire here?", and closed it, so every
+// cost inside the recogniser — including the range counts #2266 budgets — was paid
+// twice per query build. The probe now hands the operator it built to the
+// Selection build (see seekProbeVerdict), so the intersection is composed once.
 //
 // A change to this number is a change to how many times the planner walks that
 // path. It should fail here and be read, not silently absorbed.
-const iiBuildsPerExplain = 2
+const iiBuildsPerExplain = 1
 
 // iiEngagementCase is one shape and the verdict the planner must reach for it.
 type iiEngagementCase struct {

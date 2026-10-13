@@ -22,7 +22,7 @@ import (
 // setup reclaimed so nothing but the step under test can explain what follows.
 func retireFixture(t *testing.T) (*Graph[string, float64], LabelID, graph.NodeID) {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 	if err := g.AddNode("a"); err != nil {
 		t.Fatal(err)

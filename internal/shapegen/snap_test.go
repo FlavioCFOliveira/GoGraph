@@ -101,9 +101,6 @@ func TestSNAP_ParseHandCraftedArchive(t *testing.T) {
 	if got, want := g.AdjList().Size(), uint64(5); got != want {
 		t.Errorf("Size = %d, want %d", got, want)
 	}
-	if !g.AdjList().Directed() {
-		t.Error("parsed graph is not Directed()")
-	}
 }
 
 // TestSNAP_ChecksumMismatchDetected pins the SHA-256 guard: a

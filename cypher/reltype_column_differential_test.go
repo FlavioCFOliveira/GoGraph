@@ -63,7 +63,7 @@ type relTypeFixture struct {
 func cypherGraph(stmts ...string) func(t *testing.T) *lpg.Graph[string, float64] {
 	return func(t *testing.T) *lpg.Graph[string, float64] {
 		t.Helper()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := NewEngine(g)
 		for _, s := range stmts {
 			degreeRun(t, eng, s)
@@ -137,7 +137,7 @@ func relTypeFixtures() []relTypeFixture {
 // adjacency label column rather than against a per-edge handle record.
 func goAPIGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	keys := []string{"n0", "n1", "n2", "n3", "n4"}
 	for _, k := range keys {
 		if err := g.AddNode(k); err != nil {
@@ -170,7 +170,7 @@ func goAPIGraph(t *testing.T) *lpg.Graph[string, float64] {
 // positional inference used to answer wrongly.
 func mixedOriginGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	degreeRun(t, eng, `CREATE (:P {sid:'a'}), (:P {sid:'b'})`)
 	degreeRun(t, eng, `MATCH (a:P {sid:'a'}), (b:P {sid:'b'}) CREATE (a)-[:K]->(b)`)
@@ -193,7 +193,7 @@ func mixedOriginGraph(t *testing.T) *lpg.Graph[string, float64] {
 // second-and-later types.
 func multiTypeArcGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, k := range []string{"u", "v", "w"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode(%q): %v", k, err)

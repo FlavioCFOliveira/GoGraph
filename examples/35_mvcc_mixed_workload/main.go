@@ -308,7 +308,7 @@ func openDurable(dir string, nodes int) (*cypher.Engine, *lpg.Graph[string, floa
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("wal.Open: %w", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for i := 0; i < nodes; i++ {
 		k := fmt.Sprintf("a%d", i)

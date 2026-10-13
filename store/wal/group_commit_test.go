@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -33,6 +34,11 @@ func TestWAL_GroupCommit_ConcurrentWriters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 
 	var errCount atomic.Int64
 	var wg sync.WaitGroup

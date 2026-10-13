@@ -34,7 +34,7 @@ func TestTopologicalSort_Layered(t *testing.T) {
 		seed    = 42
 	)
 
-	g, err := shapegen.Layered(L, w, density, seed).Build(adjlist.Config{Directed: true})
+	g, err := shapegen.Layered(L, w, density, seed).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Layered.Build: %v", err)
 	}

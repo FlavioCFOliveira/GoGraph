@@ -15,7 +15,7 @@ func TestLeiden_BridgeDoubleCluster(t *testing.T) {
 	t.Parallel()
 	const k = 30
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	// Clique A: nodes 0 .. k-1.
 	for i := 0; i < k; i++ {
 		for j := i + 1; j < k; j++ {
@@ -37,7 +37,7 @@ func TestLeiden_BridgeDoubleCluster(t *testing.T) {
 		t.Fatalf("AddEdge bridge: %v", err)
 	}
 
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	p := Leiden(c, DefaultLeidenOptions())
 
 	if p.NumCommunities != 2 {

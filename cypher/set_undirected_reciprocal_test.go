@@ -57,7 +57,7 @@ const undirectedSetSeed = `CREATE (a:Y {key:'a'})-[:R {stamp:'orig-reverse'}]->(
 
 func newUndirectedSetEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	if _, err := runEntityProp(eng, undirectedSetSeed); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -131,7 +131,7 @@ func TestUndirectedSet_ReciprocalPair_WritesBoth(t *testing.T) {
 // cannot have bought its result by writing (or counting) a phantom second edge.
 func TestUndirectedSet_SingleRelationship_CountsOnce(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	if _, err := runEntityProp(eng, `CREATE (a:Y {key:'a'})-[:R {stamp:'orig'}]->(b:Y {key:'b'})`); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -167,7 +167,7 @@ func TestUndirectedSet_SingleRelationship_CountsOnce(t *testing.T) {
 // before the fix it was keyed (b, a), where no edge exists, and vanished.
 func TestUndirectedSet_ReverseHopOnly_WritesTheBoundEdge(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	if _, err := runEntityProp(eng, `CREATE (a:Y {key:'a'})-[:R {stamp:'orig'}]->(b:Y {key:'b'})`); err != nil {
 		t.Fatalf("seed: %v", err)

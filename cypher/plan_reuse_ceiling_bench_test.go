@@ -59,7 +59,7 @@ const (
 // the adjacency all end up in the same shape.
 func newCeilRig(tb testing.TB) *Engine {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < ceilNodes; i++ {
 		id := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(id); err != nil {

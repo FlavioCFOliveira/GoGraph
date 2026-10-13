@@ -14,7 +14,7 @@ import (
 // undirected mirror handles the reverse direction automatically.
 func buildUnitGridCSR(tb testing.TB, m, ncols int) (*csr.CSR[int64], *adjlist.AdjList[int, int64]) {
 	tb.Helper()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < m; i++ {
 		for j := 0; j < ncols; j++ {
 			node := i*ncols + j
@@ -30,7 +30,7 @@ func buildUnitGridCSR(tb testing.TB, m, ncols int) (*csr.CSR[int64], *adjlist.Ad
 			}
 		}
 	}
-	return csr.BuildFromAdjList(a), a
+	return csr.BuildFromAdjList(a).BuildSymmetric(), a
 }
 
 // bfsGridDistances runs BFS from src and returns the distance map

@@ -42,7 +42,12 @@ func TestRecovery_IndexesSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
 	lab := label.NewIndex()
@@ -167,7 +172,12 @@ func TestRecovery_IndexesSurviveRestart_WiredEarly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
 	lab := label.NewIndex()
@@ -206,7 +216,7 @@ func TestRecovery_IndexesSurviveRestart_WiredEarly(t *testing.T) {
 	// under test here is that each index kind's payload deserialises back out of
 	// a real snapshot, not who calls the deserialiser (see
 	// hydrateReadbacksForTest).
-	g2 := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g2 := lpg.New[string, int64](adjlist.Config{})
 	mgr2 := index.NewManager()
 	g2.SetIndexManager(mgr2)
 	_ = mgr2.CreateIndex("labels.nodes", label.NewIndex())
@@ -246,7 +256,12 @@ func TestRecovery_CorruptedIndexPayload_IsPartiallyRoundTrippable(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
 	lab := label.NewIndex()
@@ -303,7 +318,7 @@ func TestRecovery_CorruptedIndexPayload_IsPartiallyRoundTrippable(t *testing.T) 
 		t.Fatalf("LoadSnapshotFull after corruption = %v, want nil", err)
 	}
 
-	g2 := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g2 := lpg.New[string, int64](adjlist.Config{})
 	mgr2 := index.NewManager()
 	g2.SetIndexManager(mgr2)
 	_ = mgr2.CreateIndex("labels.nodes", label.NewIndex())
@@ -363,7 +378,12 @@ func TestRecovery_PresentTimeSnapshotIsNeverHydratable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
 	lab := label.NewIndex()

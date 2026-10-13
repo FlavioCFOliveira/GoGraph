@@ -18,6 +18,40 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
+// Staging-buffer sizes for the component writers (rmp #3083). A writer's
+// bufio buffer changes only how its bytes are chunked into the destination's
+// Write calls, never the bytes, their order, or the CRC, so these sizes are a
+// pure resource choice.
+const (
+	// componentBufMax is the largest staging buffer a component writer uses,
+	// and the size the exported writers keep for a destination of unknown
+	// kind. It was the fixed size of every component writer before #3083.
+	componentBufMax = 1 << 20
+	// componentBufMin is the smallest staging buffer: bufio's own default.
+	componentBufMin = 4 << 10
+	// captureBufSize is the staging buffer for a component serialised into
+	// memory at capture time (captureComponent's bytes.Buffer). The destination
+	// is already a buffer, so a larger staging buffer saves no syscall: it
+	// only allocates. It was 1 MiB per component per checkpoint before #3083.
+	captureBufSize = componentBufMin
+)
+
+// componentBufSize returns the staging-buffer size for a file component whose
+// exact byte length is n: n itself, clamped to [componentBufMin,
+// componentBufMax]. A file no larger than the cap is therefore written in one
+// Write call, as it was with the fixed 1 MiB buffer, and a larger one in the
+// same number of 1 MiB calls — the syscall count never rises, while the
+// allocation shrinks to the file's size.
+func componentBufSize(n int64) int {
+	switch {
+	case n < componentBufMin:
+		return componentBufMin
+	case n > componentBufMax:
+		return componentBufMax
+	}
+	return int(n)
+}
+
 // CSRFile is the conventional file name carrying the CSR triplet
 // (vertices + edges + optional weights) inside a snapshot directory.
 const CSRFile = "csr.bin"
@@ -137,10 +171,17 @@ func WriteCSRWithWeightCodec[W any](w io.Writer, c *csr.CSR[W], wenc weightEncod
 //
 // CSR serialisation: header + vertices + edges + two weight layouts + optional handles
 func writeCSRWith[W any](w io.Writer, c *csr.CSR[W], wenc weightEncoder[W]) (size int64, crc uint32, err error) {
+	return writeCSRBuffered(w, c, wenc, 0)
+}
+
+// writeCSRBuffered is [writeCSRWith] with an explicit staging-buffer size.
+// bufSize 0 sizes the buffer to the file's exact byte length, clamped by
+// [componentBufSize]; a positive bufSize is used as given, which is how the
+// byte-identity test reproduces the prior fixed 1 MiB writer (rmp #3083). The
+// buffer size changes only how the bytes are chunked into w.Write calls, never
+// the bytes, their order, or the CRC.
+func writeCSRBuffered[W any](w io.Writer, c *csr.CSR[W], wenc weightEncoder[W], bufSize int) (size int64, crc uint32, err error) {
 	defer metrics.Time("store.snapshot.WriteCSR").Stop()
-	bw := bufio.NewWriterSize(w, 1<<20)
-	hasher := crc32.New(castagnoli)
-	tee := io.MultiWriter(bw, hasher)
 
 	verts := c.VerticesSlice()
 	edges := c.EdgesSlice()
@@ -186,6 +227,26 @@ func writeCSRWith[W any](w io.Writer, c *csr.CSR[W], wenc weightEncoder[W]) (siz
 	if wsize > 0 {
 		hasW = 1
 	}
+	weightBytes := int64(0)
+	switch {
+	case wsize == weightSizeCodec:
+		weightBytes = encoded.byteLen()
+	case hasW == 1:
+		weightBytes = int64(int(wsize)) * int64(len(edges))
+	}
+	handleBytes := int64(0)
+	if handles != nil {
+		handleBytes = 1 + 8*int64(len(handles))
+	}
+	total := int64(8+8+2+8*len(verts)+8*len(edges)) + weightBytes + handleBytes
+
+	if bufSize <= 0 {
+		bufSize = componentBufSize(total)
+	}
+	bw := bufio.NewWriterSize(w, bufSize)
+	hasher := crc32.New(castagnoli)
+	tee := io.MultiWriter(bw, hasher)
+
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(verts))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 		return 0, 0, err
@@ -219,7 +280,6 @@ func writeCSRWith[W any](w io.Writer, c *csr.CSR[W], wenc weightEncoder[W]) (siz
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 		return 0, 0, err
 	}
-	weightBytes := int64(0)
 	switch {
 	case wsize == weightSizeCodec:
 		// Variable-width codec section: offsets array then payload.
@@ -227,18 +287,15 @@ func writeCSRWith[W any](w io.Writer, c *csr.CSR[W], wenc weightEncoder[W]) (siz
 			metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 			return 0, 0, err
 		}
-		weightBytes = encoded.byteLen()
 	case hasW == 1:
 		if err := streamLE(tee, weightsAsBytes(weights, int(wsize))); err != nil {
 			metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 			return 0, 0, err
 		}
-		weightBytes = int64(int(wsize)) * int64(len(edges))
 	}
 	// Optional trailing handle block. Emitted only when the CSR carries a
 	// handle column; absent otherwise so a handle-less graph's bytes match
 	// the pre-Stage-2 layout exactly.
-	handleBytes := int64(0)
 	if handles != nil {
 		if _, err := tee.Write([]byte{1}); err != nil {
 			metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
@@ -248,13 +305,11 @@ func writeCSRWith[W any](w io.Writer, c *csr.CSR[W], wenc weightEncoder[W]) (siz
 			metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 			return 0, 0, err
 		}
-		handleBytes = 1 + 8*int64(len(handles))
 	}
 	if err := bw.Flush(); err != nil {
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 		return 0, 0, err
 	}
-	total := int64(8+8+2+8*len(verts)+8*len(edges)) + weightBytes + handleBytes
 	return total, hasher.Sum32(), nil
 }
 
@@ -557,10 +612,12 @@ func weightsByteLen(wsize uint8, nE uint64, maxBytes int64, byteBudget uint64) (
 }
 
 // WriteSnapshotCSR is the legacy high-level helper that lays a
-// snapshot directory containing a v1 manifest plus the CSR. It is
+// snapshot directory containing a CSR-only manifest plus the CSR. It is
 // retained for backward compatibility: callers that also need LPG
-// label durability must use [WriteSnapshotFull] which writes a v2
-// manifest with both csr.bin and labels.bin. Atomic publication is
+// label durability must use [WriteSnapshotFull], which also writes
+// labels.bin and properties.bin. The manifest is stamped at
+// [ManifestVersion], like every manifest this build writes, so a build
+// that predates it refuses the directory. Atomic publication is
 // achieved by assembling the snapshot under dir + ".tmp" and
 // renaming it to dir on success.
 func WriteSnapshotCSR[W any](dir string, c *csr.CSR[W]) error {
@@ -630,7 +687,7 @@ func writeSnapshotCSRCtxWith[W any](ctx context.Context, fsys fileSystem, dir st
 	}
 
 	m := Manifest{
-		Version:   manifestVersionLegacy,
+		Version:   ManifestVersion,
 		CreatedAt: time.Now().UTC(),
 		Order:     c.Order(),
 		Size:      c.Size(),

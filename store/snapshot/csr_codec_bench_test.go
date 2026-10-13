@@ -31,7 +31,7 @@ func buildBenchCSR(tb testing.TB) *csr.CSR[int64] {
 	tb.Helper()
 	const k = 4
 	n := csrBenchMinEdges/k + 1
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		for j := 1; j <= k; j++ {
 			dst := (i + j) % n

@@ -24,7 +24,7 @@ import (
 func TestTopologicalSort_DiamondShape(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for _, e := range [][2]int{{0, 1}, {0, 2}, {1, 3}, {2, 3}} {
 		if err := a.AddEdge(e[0], e[1], 1); err != nil {
 			t.Fatalf("AddEdge %d->%d: %v", e[0], e[1], err)

@@ -67,7 +67,7 @@ const slotPinTS = 0
 // keeps the residue small, which is what the later tests actually care about.
 func seedGateGraphWithLiveHistory(t *testing.T, n int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	// Pin BEFORE writing, so nothing the seed produces can be reclaimed.
 	slot := g.Horizon().Enter(slotPinTS)
@@ -185,7 +185,7 @@ func TestLabelCountBound_IsAnUpperBound(t *testing.T) {
 // enough to turn `make ci` red twice; a graph with no history needs no vacuum to
 // have run, so the assertion is deterministic under any load.
 func TestLabelCountBound_IsExactWithNoHistory(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngineWithOptions(g, EngineOptions{})
 
 	if g.LabelDeltaCount() != 0 {

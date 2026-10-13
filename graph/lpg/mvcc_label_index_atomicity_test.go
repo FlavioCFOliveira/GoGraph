@@ -34,7 +34,7 @@ import (
 // goroutine while a writer churns the same label, both under -race.
 func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	const nodes = 1

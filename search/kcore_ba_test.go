@@ -38,12 +38,12 @@ func TestKCore_BarabasiAlbert(t *testing.T) {
 		seed = 42
 	)
 
-	g, err := shapegen.BarabasiAlbert(n, m, seed).Build(adjlist.Config{Directed: false})
+	g, err := shapegen.BarabasiAlbert(n, m, seed).Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
 	a := g.AdjList()
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 
 	coreness := KCore(c)
 

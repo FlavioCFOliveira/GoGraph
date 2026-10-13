@@ -19,6 +19,7 @@ package recovery_test
 
 import (
 	"encoding/binary"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -92,6 +93,11 @@ func writeFrames(t *testing.T, dir string, payloads [][]byte) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	for i, p := range payloads {
 		if aerr := w.Append(p); aerr != nil {
 			t.Fatalf("Append(%d): %v", i, aerr)

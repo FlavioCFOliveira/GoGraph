@@ -20,7 +20,7 @@ import (
 // `VersionCount()=50`, for the life of the process, because [mvcc.AbortedTS] is
 // the maximum uint64 and every reclaimer truncates on `stamp <= watermark`.
 func TestAbort_VersionsAreReleasedBySweep(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 
 	const nodes = 50
@@ -75,7 +75,7 @@ func TestAbort_VersionsAreReleasedBySweep(t *testing.T) {
 // stored value. So the sweep must leave the stored value CLEAN, and this asserts
 // it from both sides of the sweep and for a reader that starts afterwards.
 func TestAbort_WithdrawnWritesStayInvisible(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
@@ -152,12 +152,12 @@ func TestAbort_StoredValueEqualsTheSerialSchedule(t *testing.T) {
 			t.Fatalf("SetNodeProperty: %v", err)
 		}
 	}
-	control := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	control := New[string, float64](adjlist.Config{})
 	defer func() { _ = control.Close() }()
 	seed(control)
 	control.ReclaimNow()
 
-	subject := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	subject := New[string, float64](adjlist.Config{})
 	defer func() { _ = subject.Close() }()
 	seed(subject)
 	subject.ReclaimNow()
@@ -226,7 +226,7 @@ func sameStrings(a, b []string) bool {
 // has run, because refusing forever is the bug rmp #2300 introduced the exemption
 // to avoid.
 func TestAbort_DirtyBaseIsNotWritable(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	defer func() { _ = g.Close() }()
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)

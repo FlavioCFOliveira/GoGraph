@@ -304,7 +304,7 @@ func TestOpen_UnknownWeightWidthRejectedAtHeader(t *testing.T) {
 // bound in place — the legitimate header always fits its own file size.
 func TestOpen_ManifestSizeBoundValidRoundTrip(t *testing.T) {
 	// Not t.Parallel — see TestOpen_ManifestSizeBoundRejectsHostileWeightsSize.
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for _, e := range [][2]string{{"a", "b"}, {"a", "c"}, {"b", "c"}, {"c", "a"}} {
 		if err := a.AddEdge(e[0], e[1], 1); err != nil {
 			t.Fatalf("AddEdge(%s->%s): %v", e[0], e[1], err)
@@ -432,7 +432,7 @@ func TestReadCSR_BackstopHostileWeightsNeverPanics(t *testing.T) {
 // overflow guards were added.
 func TestReadCSR_RoundTripValidSnapshot(t *testing.T) {
 	t.Parallel() // no global-alloc measurement here; safe to parallelise.
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	const n = 64
 	for i := 0; i < n; i++ {
 		if err := a.AddEdge(i, (i+1)%n, int64(i*7+1)); err != nil {

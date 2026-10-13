@@ -13,7 +13,7 @@ import (
 // The Config is forwarded to the underlying adjacency list, so Directed
 // selects a directed graph here.
 func ExampleGraph() {
-	g := lpg.New[string, int](adjlist.Config{Directed: true})
+	g := lpg.New[string, int](adjlist.Config{})
 
 	// Create two nodes and tag each with a label.
 	_ = g.AddNode("alice")
@@ -49,7 +49,7 @@ func ExampleGraph() {
 // once. NodeLabels returns them in an unspecified order, so callers
 // that need a stable order sort the result.
 func ExampleGraph_NodeLabels() {
-	g := lpg.New[string, int](adjlist.Config{Directed: true})
+	g := lpg.New[string, int](adjlist.Config{})
 	_ = g.AddNode("alice")
 	_ = g.SetNodeLabel("alice", "Person")
 	_ = g.SetNodeLabel("alice", "Employee")
@@ -69,7 +69,7 @@ func ExampleGraph_NodeLabels() {
 // delete-then-recreate cycle yield exactly one live node, and (once the
 // tombstone set is persisted) survive a store reopen.
 func ExampleGraph_RemoveNode() {
-	g := lpg.New[string, int](adjlist.Config{Directed: true})
+	g := lpg.New[string, int](adjlist.Config{})
 	_ = g.SetNodeLabel("auth", "Spec")
 	id, _ := g.AdjList().Mapper().Lookup("auth")
 
@@ -93,7 +93,7 @@ func ExampleGraph_RemoveNode() {
 // re-creating an edge between the same endpoints does not resurrect the
 // removed relationship's type.
 func ExampleGraph_RemoveEdge() {
-	g := lpg.New[string, int](adjlist.Config{Directed: true})
+	g := lpg.New[string, int](adjlist.Config{})
 	_ = g.AddEdge("alice", "bob", 0)
 	_ = g.SetEdgeLabel("alice", "bob", "KNOWS")
 	fmt.Println("before delete:", g.HasEdgeLabel("alice", "bob", "KNOWS"))
@@ -122,7 +122,7 @@ func ExampleGraph_RemoveEdge() {
 // labels exist" always holds. A snapshot read takes NO LOCK, so it neither blocks
 // writers nor is blocked by them.
 func ExampleGraph_BeginRead() {
-	g := lpg.New[string, int](adjlist.Config{Directed: true})
+	g := lpg.New[string, int](adjlist.Config{})
 
 	// One transaction establishes a cross-substructure invariant: the edge
 	// alice->bob and both endpoint :Hot labels become visible together.

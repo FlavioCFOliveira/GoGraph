@@ -270,7 +270,7 @@ func parseSNAPArchive(path string) (*lpg.Graph[int64, struct{}], error) {
 		return nil, fmt.Errorf("shapegen: SNAP gzip header: %w", err)
 	}
 	defer func() { _ = gz.Close() }()
-	g := lpg.New[int64, struct{}](adjlist.Config{Directed: true})
+	g := lpg.New[int64, struct{}](adjlist.Config{})
 	sc := bufio.NewScanner(gz)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	lineNo := 0

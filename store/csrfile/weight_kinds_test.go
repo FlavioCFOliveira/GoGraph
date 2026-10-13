@@ -20,7 +20,7 @@ import (
 func roundTripWeight[W comparable](t *testing.T, want W) (WeightKind, []byte) {
 	t.Helper()
 	const edges = 4
-	a := adjlist.New[int, W](adjlist.Config{Directed: true})
+	a := adjlist.New[int, W](adjlist.Config{})
 	for i := 0; i < edges; i++ {
 		if err := a.AddEdge(i, (i+1)%edges, want); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -174,7 +174,7 @@ func TestWeightKinds_EveryDocumentedKindRoundTrips(t *testing.T) {
 // encoding/binary — which is what a caller used to get for int, uint and uintptr.
 func TestWeightKinds_UnsupportedIsRefusedByName(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, string](adjlist.Config{Directed: true})
+	a := adjlist.New[int, string](adjlist.Config{})
 	if err := a.AddEdge(0, 1, "not a weight"); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

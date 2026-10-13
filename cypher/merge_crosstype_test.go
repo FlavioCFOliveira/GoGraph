@@ -55,7 +55,7 @@ func nodePropKind(t *testing.T, g *lpg.Graph[string, float64], key string) (lpg.
 // mutated (MERGE writes nothing on a pure match).
 func TestMerge_CrossType_IntStoredFloatPattern(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -83,7 +83,7 @@ func TestMerge_CrossType_IntStoredFloatPattern(t *testing.T) {
 // literal of equal numeric value.
 func TestMerge_CrossType_FloatStoredIntPattern(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -107,7 +107,7 @@ func TestMerge_CrossType_FloatStoredIntPattern(t *testing.T) {
 // duplicate edge is created.
 func TestMerge_CrossType_Relationship(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -131,7 +131,7 @@ func TestMerge_CrossType_Relationship(t *testing.T) {
 // MERGE whose pattern uses t:[1.0,2.0] (floats).
 func TestMerge_CrossType_ListElements(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -152,7 +152,7 @@ func TestMerge_CrossType_NegativeControls(t *testing.T) {
 
 	t.Run("distinct integers", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 		ctx := context.Background()
 
@@ -164,7 +164,7 @@ func TestMerge_CrossType_NegativeControls(t *testing.T) {
 
 	t.Run("distinct numeric-looking strings", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 		ctx := context.Background()
 
@@ -176,7 +176,7 @@ func TestMerge_CrossType_NegativeControls(t *testing.T) {
 
 	t.Run("distinct booleans", func(t *testing.T) {
 		t.Parallel()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng := cypher.NewEngine(g)
 		ctx := context.Background()
 
@@ -193,7 +193,7 @@ func TestMerge_CrossType_NegativeControls(t *testing.T) {
 // comparison path; the cross-type fallback never converts them.
 func TestMerge_Temporal_NonRegression(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

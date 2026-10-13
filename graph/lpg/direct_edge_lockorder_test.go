@@ -1,10 +1,10 @@
 package lpg
 
-// direct_edge_lockorder_test.go — rmp #2947: an undirected direct edge write
-// holds BOTH endpoints' adjacency shard locks, and a bulk removal holds every
-// neighbour's. They are taken in ascending shard order; this drives writers in
+// direct_edge_lockorder_test.go — rmp #2947: a direct edge write claims BOTH
+// endpoints, and a bulk removal claims every neighbour. This drives writers in
 // OPPOSITE directions on the same pairs, on pairs that share a shard and pairs
-// that do not, so an inverted order would deadlock here.
+// that do not, so a claim or lock order that inverts between the two directions
+// would deadlock here.
 
 import (
 	"fmt"
@@ -21,7 +21,7 @@ func TestDirectEdge_OppositeDirectionsDoNotDeadlock(t *testing.T) {
 		rounds   = 400
 		deadline = 2 * time.Minute // sized to catch a hang, not to pace the run
 	)
-	g := New[string, float64](adjlist.Config{Directed: false, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() { _ = g.Close() })
 
 	// 300 nodes: ids 0..299, so ids k and k+256 share a shard and the pairs
@@ -90,10 +90,9 @@ func TestDirectEdge_OppositeDirectionsDoNotDeadlock(t *testing.T) {
 		// refused: every error here is a defect.
 		t.Errorf("direct edge write failed with no transaction open: %v", err)
 	}
-	// Symmetry survives the race: every arc has its mirror.
-	for _, p := range pairs {
-		if g.AdjList().HasEdge(p[0], p[1]) != g.AdjList().HasEdge(p[1], p[0]) {
-			t.Errorf("undirected pair %s—%s lost its mirror under concurrent direct writes", p[0], p[1])
-		}
+	// The derived structures survive the race: the reverse index is the exact
+	// transpose of the forward entries and the edge count matches them.
+	if err := g.AdjList().CheckInvariants(); err != nil {
+		t.Errorf("adjacency invariants after concurrent direct writes: %v", err)
 	}
 }

@@ -19,7 +19,7 @@ func TestProperty_Dijkstra_TriangleInequality(t *testing.T) {
 	rapid.Check(t, func(r *rapid.T) {
 		n := rapid.IntRange(2, 12).Draw(r, "n")
 		m := rapid.IntRange(0, 4*n).Draw(r, "m")
-		a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+		a := adjlist.New[int, int64](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			if err := a.AddNode(i); err != nil {
 				t.Fatalf("AddNode: %v", err)
@@ -79,7 +79,7 @@ func TestProperty_TopologicalSort_Precedence(t *testing.T) {
 	rapid.Check(t, func(r *rapid.T) {
 		n := rapid.IntRange(2, 12).Draw(r, "n")
 		m := rapid.IntRange(0, 3*n).Draw(r, "m")
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			if err := a.AddNode(i); err != nil {
 				t.Fatalf("AddNode: %v", err)
@@ -125,7 +125,7 @@ func TestProperty_TarjanSCC_Reflexive(t *testing.T) {
 	rapid.Check(t, func(r *rapid.T) {
 		n := rapid.IntRange(1, 12).Draw(r, "n")
 		m := rapid.IntRange(0, 3*n).Draw(r, "m")
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: true, Multigraph: true})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			if err := a.AddNode(i); err != nil {
 				t.Fatalf("AddNode: %v", err)
@@ -161,7 +161,7 @@ func TestProperty_HopcroftKarp_Cardinality(t *testing.T) {
 	rapid.Check(t, func(r *rapid.T) {
 		n := rapid.IntRange(2, 8).Draw(r, "n")
 		m := rapid.IntRange(0, 4*n).Draw(r, "m")
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: true, Multigraph: true})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		// Pre-intern lefts as 0..n-1, rights as n..2n-1.
 		for i := 0; i < 2*n; i++ {
 			if err := a.AddNode(i); err != nil {

@@ -49,7 +49,7 @@ func TestReadIntoCtx_ContextCancelled(t *testing.T) {
 // causing the check to fire on the very first edge iteration.
 func TestWriteCtx_ContextCancelled(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	const nodeCount = 4096
 	for i := range nodeCount {
 		if err := a.AddNode(fmt.Sprintf("n%d", i)); err != nil {

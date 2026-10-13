@@ -25,7 +25,7 @@ func TestLeiden_ModularityNonDecrease(t *testing.T) {
 		// flat-prob coin per pair.
 		p := rapid.Float64Range(0.2, 0.7).Draw(rt, "p")
 		seed := rapid.Int64().Draw(rt, "seed")
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		// Reproducible PRNG via Park-Miller-style LCG keyed on seed.
 		state := uint64(seed)
 		nextRand := func() float64 {
@@ -46,7 +46,7 @@ func TestLeiden_ModularityNonDecrease(t *testing.T) {
 		if edgesAdded == 0 {
 			return // empty graph — Leiden returns 0 communities, trivially OK
 		}
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		part := Leiden(c, DefaultLeidenOptions())
 
 		// Compute Q on the original CSR for the Leiden partition and

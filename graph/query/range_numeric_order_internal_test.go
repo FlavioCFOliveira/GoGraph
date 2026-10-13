@@ -252,7 +252,7 @@ func buildSpyRangeGraph(
 	tb testing.TB, inV, outV lpg.PropertyValue,
 ) (*lpg.Graph[string, int64], *csr.CSR[int64], uint64, uint64) {
 	tb.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for key, v := range map[string]lpg.PropertyValue{"in": inV, "out": outV} {
 		if err := g.SetNodeLabel(key, "N"); err != nil {
 			tb.Fatalf("SetNodeLabel %s: %v", key, err)
@@ -307,7 +307,7 @@ func TestSeek_NumericRangeIsResidualFiltered(t *testing.T) {
 func TestSeek_NumericRangeResidualFilterIsExactAtTheBoundary(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	values := map[string]int64{"exact": twoTo62, "above": tckBigIntA, "below": tckBigIntB}
 	ids := make([]uint64, 0, len(values))
 	for key, v := range values {

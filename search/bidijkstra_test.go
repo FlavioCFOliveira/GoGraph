@@ -87,7 +87,7 @@ func TestBidirectionalDijkstra_RandomVsDijkstra(t *testing.T) {
 				w:    int64(r.IntN(40) + 1),
 			})
 		}
-		c, a := buildWeightedCSRCfg(t, edges, adjlist.Config{Directed: true, Multigraph: true})
+		c, a := buildWeightedCSRCfg(t, edges, adjlist.Config{})
 		src := r.IntN(n)
 		dst := r.IntN(n)
 		srcID, ok1 := a.Mapper().Lookup(src)
@@ -158,7 +158,7 @@ func BenchmarkBidirectionalDijkstra_RoadNetwork(b *testing.B) {
 
 func buildRoadNetwork(tb testing.TB) (c *csr.CSR[int64], src, dst graph.NodeID) {
 	tb.Helper()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	const side = 200 // 200x200 = 40k nodes
 	for r := 0; r < side; r++ {
 		for c := 0; c < side; c++ {
@@ -175,7 +175,7 @@ func buildRoadNetwork(tb testing.TB) (c *csr.CSR[int64], src, dst graph.NodeID) 
 			}
 		}
 	}
-	c = csr.BuildFromAdjList(a)
+	c = csr.BuildFromAdjList(a).BuildSymmetric()
 	src, _ = a.Mapper().Lookup(0)
 	dst, _ = a.Mapper().Lookup(side*side - 1)
 	return c, src, dst

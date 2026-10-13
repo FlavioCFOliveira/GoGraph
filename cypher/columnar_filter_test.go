@@ -99,7 +99,7 @@ func mixedFilterGraph(t *testing.T) *lpg.Graph[string, float64] {
 		{true, lpg.DateValue(time.Date(2026, 7, 17, 0, 0, 0, 0, time.UTC))},
 		{false, lpg.PropertyValue{}},
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i, cell := range vals {
 		key := padKey(i)
 		if err := g.AddNode(key); err != nil {

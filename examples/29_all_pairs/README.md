@@ -24,7 +24,9 @@ segment connect them:
   short links that give the network realistic detours and a smooth
   eccentricity gradient.
 
-Every segment is undirected and carries a strictly positive `int64` weight —
+Every segment is a two-way road: it is stored once, as one directed
+relationship, and the APSP passes read the symmetric (undirected) projection
+built by `csr.CSR.BuildSymmetric`. Each carries a strictly positive `int64` weight —
 the Euclidean length rounded to the nearest unit, floored at 1. The elongated
 region stretches the network along one axis, so eccentricity varies smoothly
 from a distinct central cluster of towns (low eccentricity — the radius) out
@@ -123,8 +125,8 @@ machine. The fact lines are stable.)
 
 ## Key APIs
 
-- `graph/adjlist.New` / `AdjList.AddEdge` — build the undirected, weighted road network.
-- `graph/csr.BuildFromAdjList` — freeze the builder into an immutable CSR snapshot; `CSR.Order` / `CSR.LiveNodes` report the live node set.
+- `graph/adjlist.New` / `AdjList.AddEdge` — build the weighted road network, one directed relationship per segment.
+- `graph/csr.BuildFromAdjList` / `CSR.BuildSymmetric` — freeze the builder into an immutable CSR snapshot and project it to the symmetric (undirected) snapshot; `CSR.Order` / `CSR.LiveNodes` report the live node set.
 - `search.DijkstraAPSP` — APSP by one Dijkstra per source (non-negative weights); O(V·(V+E)·log V).
 - `search.FloydWarshall` — the textbook O(V³) dynamic program over a dense matrix.
 - `search.JohnsonAPSP` — Bellman-Ford reweighting then one Dijkstra per source; O(V·(V+E)·log V).

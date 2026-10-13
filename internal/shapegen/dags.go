@@ -35,7 +35,7 @@ import (
 //
 // Each generator constructs the underlying [adjlist.Config] from the
 // caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, and
-// forces cfg.Directed=true and cfg.Multigraph=false. Every shape in
+// keeps the graph simple. Every shape in
 // this family is a directed simple graph by definition; orientation
 // is the load-bearing property that makes the topological-sort and
 // dominator invariants meaningful.
@@ -123,8 +123,6 @@ func TransitiveTournament(n int) Shape[int, int64] {
 		name:  "dags.transitive-tournament",
 		knobs: []Knob{{Name: "n", Min: 0, Max: 200, Default: 5}},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildTransitiveTournament(g, n)
 		},
@@ -195,8 +193,6 @@ func Diamond(k int) Shape[int, int64] {
 		name:  "dags.diamond",
 		knobs: []Knob{{Name: "k", Min: 0, Max: 1000, Default: 3}},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildDiamond(g, k)
 		},
@@ -322,8 +318,6 @@ func Layered(L, w, density int, seed uint64) Shape[int, int64] {
 			{Name: "density", Min: 0, Max: 100, Default: 50},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildLayered(g, L, w, density, seed)
 		},
@@ -441,8 +435,6 @@ func LengauerTarjanExample() Shape[int, int64] {
 	return dagsBase{
 		name: "dags.lengauer-tarjan",
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildLengauerTarjan(g)
 		},
@@ -526,8 +518,6 @@ func BuildDepDAG(depth, fanIn, fanOut int, seed uint64) Shape[int, int64] {
 			{Name: "fanOut", Min: 1, Max: 10, Default: 2},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildDepDAG(g, depth, fanIn, fanOut, seed)
 		},
@@ -654,8 +644,6 @@ func NegativeWeightAcyclic(n, signMix int, seed uint64) Shape[int, int64] {
 			{Name: "signMix", Min: 0, Max: 100, Default: 50},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = true
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildNegativeWeightAcyclic(g, n, signMix, seed)
 		},

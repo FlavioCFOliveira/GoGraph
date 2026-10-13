@@ -59,7 +59,7 @@ func runWithWatchdog(t *testing.T, body func()) (recovered any) {
 
 func newReentrancyGraph(t *testing.T) *Graph[string, int64] {
 	t.Helper()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("u"); err != nil {
 		t.Fatalf("AddNode u: %v", err)
 	}

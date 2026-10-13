@@ -51,7 +51,7 @@ const joinReorderBenchQuery = "MATCH (a:Big), (b:Small) RETURN count(*) AS c"
 // :Small nodes, each with a unique integer key. Node counts are the exact base
 // cardinalities the peephole reads from the label index.
 func buildJoinReorderBenchGraph() *lpg.Graph[string, float64] {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	k := 0
 	for i := 0; i < jrBenchBigPop; i++ {
 		key := fmt.Sprintf("n%d", k)

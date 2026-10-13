@@ -20,7 +20,7 @@ import (
 
 func TestTopoGeneration_RemoveNodeAdvances(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestTopoGeneration_RemoveNodeAdvances(t *testing.T) {
 
 func TestTopoGeneration_ReviveAdvances(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestTopoGeneration_ReviveAdvances(t *testing.T) {
 // must differ across that pair.
 func TestTopoGeneration_TombstoneCountIsNotASoundKey(t *testing.T) {
 	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"b", "c"} {
 		if err := g.AddEdge("a", n, 1); err != nil {
 			t.Fatal(err)

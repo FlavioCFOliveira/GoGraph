@@ -29,7 +29,7 @@ import (
 // Returns the engine so tests can run queries against it.
 func newSemiApplyGraph(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	runSetup(t, eng, `CREATE (:Person {name: 'alice'})-[:KNOWS]->(:Person {name: 'bob'})`)
 	runSetup(t, eng, `CREATE (:Person {name: 'charlie'})`)
@@ -100,7 +100,7 @@ func TestAntiSemiApply_WithoutOutgoingEdge(t *testing.T) {
 // TestSemiApply_EmptyGraph verifies that EXISTS on an empty graph returns no rows.
 func TestSemiApply_EmptyGraph(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	res, err := eng.Run(context.Background(),
@@ -122,7 +122,7 @@ func TestSemiApply_EmptyGraph(t *testing.T) {
 // CREATE statement to avoid the known limitation with MATCH+CREATE multi-pattern.
 func TestSemiApply_AllNodesHaveEdges(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	// Single CREATE with all nodes and edges: a→b→c→a.
 	runSetup(t, eng, `CREATE (a:X {name: 'a'}), (b:X {name: 'b'}), (c:X {name: 'c'}), (a)-[:R]->(b), (b)-[:R]->(c), (c)-[:R]->(a)`)

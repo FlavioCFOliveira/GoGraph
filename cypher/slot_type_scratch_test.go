@@ -60,7 +60,7 @@ func freshScratchPerSource(g *lpg.ReadView[string, float64], fwd *csr.CSR[float6
 // on several sources, which is what exercises the reset between them.
 func staleParallelGraph(t *testing.T) (*lpg.ReadView[string, float64], *csr.CSR[float64]) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	sources := []string{"a", "x", "y"}
 	for _, k := range append([]string{"b", "c"}, sources...) {
 		if err := g.AddNode(k); err != nil {

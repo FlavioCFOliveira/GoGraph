@@ -91,7 +91,7 @@ const backfillSnapshotSeedSize = 20_000
 // cannot be used.
 func backfillSnapshotSeed(tb testing.TB) *lpg.Graph[string, float64] {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < backfillSnapshotSeedSize; i++ {
 		key := fmt.Sprintf("k%d", i)
 		if err := g.SetNodeLabel(key, "Person"); err != nil {

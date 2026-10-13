@@ -203,7 +203,7 @@ func TestLabelIndex_DeferredRemovalIsCancelledByReAdd(t *testing.T) {
 // The watchdog is what makes this a TEST rather than a hang: without it a
 // regression reports as a timeout twenty minutes later with no attribution.
 func TestCandidateFilter_DoesNotDeadlockUnderConcurrentReaders(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	const n = 512
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("n%d", i)

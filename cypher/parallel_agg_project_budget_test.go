@@ -58,7 +58,7 @@ const (
 // distinct first element so a grouping key over `big` opens one group per node.
 func parAggBudgetGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range parAggBudgetNodes {
 		k := fmt.Sprintf("p%d", i)
 		if err := g.AddNode(k); err != nil {

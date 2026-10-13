@@ -12,9 +12,11 @@ the Newman modularity `Q` of its output.
 
 A seeded **planted-partition graph** (symmetric stochastic block model):
 `-communities` (`K`) equal-sized blocks of `-community-size` (`s`) nodes
-each. Every unordered node pair is offered an undirected edge
-independently — with probability `-p-in` when the two nodes share a block
-and `-p-out` when they do not. With `p-in ≫ p-out` the blocks are dense
+each. Every unordered node pair is offered an edge independently — with
+probability `-p-in` when the two nodes share a block and `-p-out` when they
+do not. Each drawn edge is stored once, as one directed relationship from the
+lower to the higher node index, and Leiden reads the undirected view produced
+by `csr.CSR.BuildSymmetric`. With `p-in ≫ p-out` the blocks are dense
 inside and sparse between, so a modularity-optimising method recovers them.
 
 The default parameters place the partition about three times above the
@@ -102,8 +104,8 @@ runs the large configuration mechanically.
 
 ## Key APIs
 
-- `graph/adjlist.New` / `AdjList.AddNode` / `AddEdge` — build the mutable, undirected planted-partition graph.
-- `graph/csr.BuildFromAdjList` — freeze the builder into an immutable CSR snapshot for analytics.
+- `graph/adjlist.New` / `AdjList.AddNode` / `AddEdge` — build the mutable planted-partition graph, one directed relationship per edge.
+- `graph/csr.BuildFromAdjList` / `CSR.BuildSymmetric` — freeze the builder into an immutable CSR snapshot and project it to the symmetric (undirected) snapshot Leiden and the modularity computation read.
 - `graph/csr.CSR.VerticesSlice` / `EdgesSlice` / `MaxNodeID` — the offsets/edges arrays the modularity computation walks in `O(V+E)`.
 - `search/community.LeidenCtx` / `DefaultLeidenOptions` — run context-aware Leiden community detection.
 - `search/community.Partition` — the result: `NumCommunities` and a NodeID-indexed `Community` slice whose ghost slots carry the sentinel `-1`.

@@ -132,6 +132,7 @@ package mvccwrite
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -181,12 +182,17 @@ type rig struct {
 // concurrency-control path and not in the graph.
 func newRig(tb testing.TB, w wiring) *rig {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	switch w {
 	case wiringMem:
 		return &rig{eng: cypher.NewEngine(g), close: func() error { return nil }}
 	case wiringWAL:
 		wr, err := wal.Open(filepath.Join(tb.TempDir(), "wal"))
+		tb.Cleanup(func() { // close before the directory is removed (rmp #3095)
+			if err := wr.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+				tb.Errorf("wal.Close: %v", err)
+			}
+		})
 		if err != nil {
 			tb.Fatalf("wal.Open: %v", err)
 		}

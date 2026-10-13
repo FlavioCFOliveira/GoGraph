@@ -33,7 +33,7 @@ import (
 // mergeUniqueRaceMemEngine is the in-memory wiring of the #2987 reproduction.
 func mergeUniqueRaceMemEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 	t.Cleanup(func() { _ = eng.Close() })
 	return eng
 }

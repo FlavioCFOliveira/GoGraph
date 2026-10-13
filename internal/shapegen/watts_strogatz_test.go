@@ -58,7 +58,6 @@ func TestRandom_WattsStrogatz_Invariants(t *testing.T) {
 			// edge-count preserving).
 			wantSize := uint64(c.n * c.k / 2)
 			assertSize(t, g, wantSize)
-			assertDirected(t, g, false)
 			// Simple-graph invariants: no self-loops, no parallel
 			// edges. uniqueUndirectedPairs is defined in
 			// erdos_renyi_test.go and shared across the random
@@ -186,7 +185,7 @@ func TestRandom_WattsStrogatz_Golden_N8_K4_Beta50(t *testing.T) {
 // other-family contracts.
 func TestRandom_WattsStrogatz_PreservesMaxShardCapacity(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: true, MaxShardCapacity: 16}
+	cfg := adjlist.Config{MaxShardCapacity: 16}
 	g, err := WattsStrogatz(10, 4, 50, 42).Build(cfg)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -205,7 +204,7 @@ func TestRandom_WattsStrogatz_PreservesMaxShardCapacity(t *testing.T) {
 // Barabási-Albert / Erdős-Rényi shard-full tests.
 func TestRandom_WattsStrogatz_ShardFullPropagates(t *testing.T) {
 	t.Parallel()
-	cfg := adjlist.Config{Directed: false, MaxShardCapacity: 1}
+	cfg := adjlist.Config{MaxShardCapacity: 1}
 	g := lpg.New[int, int64](cfg)
 	if err := buildWattsStrogatz(g, 300, 4, 0, 1); err == nil {
 		t.Fatal("buildWattsStrogatz(g, 300, 4, 0, 1) with MaxShardCapacity=1 returned nil error, want adjlist.ErrShardFull")

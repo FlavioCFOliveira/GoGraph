@@ -142,7 +142,7 @@ func heteroTwoPropGraph(t *testing.T) *lpg.Graph[string, float64] {
 		{false, true, lpg.PropertyValue{}, lpg.Float64Value(math.NaN())},
 		{true, true, lpg.DateValue(time.Date(2020, 1, 2, 0, 0, 0, 0, time.UTC)), lpg.Int64Value(-7)},
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i, r := range rows {
 		key := padKey(i)
 		if err := g.AddNode(key); err != nil {

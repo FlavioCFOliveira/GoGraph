@@ -40,7 +40,7 @@ import (
 const mintWindow = 64
 
 func newMintGraph() *lpg.Graph[string, float64] {
-	return lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	return lpg.New[string, float64](adjlist.Config{})
 }
 
 // mintInts runs q and returns column 0 of every row as an integer.

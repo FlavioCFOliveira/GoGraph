@@ -16,7 +16,7 @@ import (
 // CSR-direct counting sort must reproduce.
 func buildAdjCSR(t *testing.T, edges []Edge, multigraph bool) *csr.CSR[int64] {
 	t.Helper()
-	adj := adjlist.New[string, int64](adjlist.Config{Directed: true, Multigraph: multigraph})
+	adj := adjlist.New[string, int64](adjlist.Config{})
 	for _, e := range edges {
 		if err := adj.AddEdge(e.Src, e.Dst, e.Weight); err != nil {
 			t.Fatalf("AddEdge(%s->%s): %v", e.Src, e.Dst, err)
@@ -31,7 +31,7 @@ func buildAdjCSR(t *testing.T, edges []Edge, multigraph bool) *csr.CSR[int64] {
 func loadCSRDirect(t *testing.T, edges []Edge, multigraph bool) (*csr.CSR[int64], []byte) {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "direct.csr")
-	l := New(Options{OutputPath: out, Directed: true, Multigraph: multigraph, Parallel: true})
+	l := New(Options{OutputPath: out, Parallel: true})
 	if err := l.AddBatch(edges); err != nil {
 		t.Fatalf("AddBatch: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestCSRDirect_CsrfileByteIdentical(t *testing.T) {
 
 			// Sequential adjacency path: force it by disabling Parallel.
 			seqOut := filepath.Join(t.TempDir(), "seq.csr")
-			ls := New(Options{OutputPath: seqOut, Directed: true, Multigraph: multigraph})
+			ls := New(Options{OutputPath: seqOut})
 			if err := ls.AddBatch(edges); err != nil {
 				t.Fatalf("seq AddBatch: %v", err)
 			}
@@ -138,7 +138,7 @@ func TestCSRDirect_EmptyInput(t *testing.T) {
 	want := buildAdjCSR(t, nil, false)
 
 	out := filepath.Join(t.TempDir(), "empty.csr")
-	l := New(Options{OutputPath: out, Directed: true, Parallel: true})
+	l := New(Options{OutputPath: out, Parallel: true})
 	_, got, err := l.Finalise()
 	if err != nil {
 		t.Fatalf("Finalise: %v", err)
@@ -173,9 +173,8 @@ func TestCSRDirect_CappedFallsBack(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "graph.csr")
 	l := &Loader{
-		opts: Options{OutputPath: out, Directed: true, Parallel: true},
+		opts: Options{OutputPath: out, Parallel: true},
 		adj: adjlist.New[string, int64](adjlist.Config{
-			Directed:         true,
 			MaxShardCapacity: 1,
 		}),
 	}

@@ -26,7 +26,7 @@ func TestNilShape_BuildRoundTrip(t *testing.T) {
 		t.Fatalf("NilShape.Knobs() = %#v, want empty", got)
 	}
 
-	cfg := adjlist.Config{Directed: true}
+	cfg := adjlist.Config{}
 	g, err := s.Build(cfg)
 	if err != nil {
 		t.Fatalf("NilShape.Build returned error: %v", err)
@@ -39,9 +39,6 @@ func TestNilShape_BuildRoundTrip(t *testing.T) {
 	}
 	if got := g.AdjList().Size(); got != 0 {
 		t.Fatalf("fresh NilShape graph Size() = %d, want 0", got)
-	}
-	if !g.AdjList().Directed() {
-		t.Fatal("NilShape.Build did not honour cfg.Directed")
 	}
 }
 

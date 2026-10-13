@@ -23,7 +23,7 @@ const parityFixtureNodes = 1500
 // with the given engine options.
 func newParityEngine(t *testing.T, opts *cypher.EngineOptions) *EngineAdapter {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	eng := cypher.NewEngineWithOptions(g, *opts)
 	ctx := context.Background()

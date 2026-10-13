@@ -23,15 +23,13 @@ import (
 // graph to read one node's neighbours. Measured at 127c012b on example 36 that
 // build was 36.9 s and 30.2 GiB, and on example 31 it was 16.9 s of 23.2 s.
 //
-// # Scope: forward only, directed graphs only
+// # Scope: forward only
 //
 // A forward run is one node's versioned adjacency entry, which answers exactly at
 // the transaction's instant. The only incoming-edge structure is a present-state
 // index with no versions, and writers are concurrent, so an incoming run cannot be
 // answered at an instant from it. Every traversal that reads incoming edges keeps
-// the whole-graph build; see [traversalAdjacencySource] for the list. An
-// undirected graph stores each edge in both endpoints' entries, which would make
-// every write a two-entry change; it keeps the whole-graph build too.
+// the whole-graph build; see [traversalAdjacencySource] for the list.
 //
 // # The instant, and why a journal is needed to keep it
 //
@@ -567,15 +565,13 @@ func (c *liveFwdCSR) HandlesSlice() []uint64 { return c.handles }
 //
 // Every other traversal keeps the whole-graph build: an incoming or undirected
 // Expand, OptionalExpand or VarLengthExpand; shortestPath and allShortestPaths,
-// whose bidirectional search reads the reverse frontier; the fused cyclic expand
-// (ExpandIntersect), whose second leg reads incoming edges; and the
-// relationship-reconstruction helper [ensureFwdCSR], which indexes positions of
-// a whole-graph adjacency.
+// whose bidirectional search reads the reverse frontier; and the fused cyclic
+// expand (ExpandIntersect), whose second leg reads incoming edges.
 func traversalAdjacencySource(
 	bopts *buildOpts, g *lpg.ReadView[string, float64], relTypes []string, dir exec.Direction,
 ) exec.AdjacencySource {
 	if dir == exec.DirOut && bopts != nil && bopts.liveTopo != nil && g != nil &&
-		viewCarriesOwnWrites(g) && g.AdjList().Directed() && bopts.liveTopo.bind(g) {
+		viewCarriesOwnWrites(g) && bopts.liveTopo.bind(g) {
 		src := &liveOutSource{log: bopts.liveTopo, bopts: bopts, g: g, relTypes: relTypes}
 		return func() (exec.CSRAdjacency, exec.CSRAdjacency, exec.RelTypeAdmit) {
 			return src, nil, exec.RelTypeAdmit{}

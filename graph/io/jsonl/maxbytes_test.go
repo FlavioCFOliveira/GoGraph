@@ -23,7 +23,7 @@ func TestReadIntoCappedCtx_Exceeded(t *testing.T) {
 
 	const capBytes = 1024
 	a, n, err := jsonl.ReadIntoCappedCtx(context.Background(),
-		strings.NewReader(hugeLine(capBytes*8)), adjlist.Config{Directed: true}, capBytes)
+		strings.NewReader(hugeLine(capBytes*8)), adjlist.Config{}, capBytes)
 	if !errors.Is(err, jsonl.ErrInputTooLarge) {
 		t.Fatalf("err = %v, want ErrInputTooLarge", err)
 	}
@@ -39,7 +39,7 @@ func TestReadWithPropsCappedCtx_Exceeded(t *testing.T) {
 
 	const capBytes = 1024
 	g, _, err := jsonl.ReadWithPropsCappedCtx(context.Background(),
-		strings.NewReader(hugeLine(capBytes*8)), adjlist.Config{Directed: true}, capBytes)
+		strings.NewReader(hugeLine(capBytes*8)), adjlist.Config{}, capBytes)
 	if !errors.Is(err, jsonl.ErrInputTooLarge) {
 		t.Fatalf("err = %v, want ErrInputTooLarge", err)
 	}
@@ -57,7 +57,7 @@ func TestReadInto_DefaultCapAllowsSmallInput(t *testing.T) {
 {"type":"node","id":"b"}
 {"type":"edge","src":"a","dst":"b","weight":3}
 `
-	a, n, err := jsonl.ReadInto(strings.NewReader(doc), adjlist.Config{Directed: true})
+	a, n, err := jsonl.ReadInto(strings.NewReader(doc), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestReadWithProps_DefaultCapAllowsSmallInput(t *testing.T) {
 	const doc = `{"type":"node","id":"a"}
 {"type":"property","id":"a","key":"age","value":"30","kind":"int64"}
 `
-	g, n, err := jsonl.ReadWithProps(strings.NewReader(doc), adjlist.Config{Directed: true})
+	g, n, err := jsonl.ReadWithProps(strings.NewReader(doc), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestReadIntoCappedCtx_Disabled(t *testing.T) {
 	// tiny cap passes once the cap is disabled.
 	doc := hugeLine(4096)
 	a, _, err := jsonl.ReadIntoCappedCtx(context.Background(),
-		strings.NewReader(doc), adjlist.Config{Directed: true}, 0)
+		strings.NewReader(doc), adjlist.Config{}, 0)
 	if err != nil {
 		t.Fatalf("cap disabled but got error: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestReadIntoCappedCtx_AtCap(t *testing.T) {
 
 	capBytes := int64(len(exactDoc)) // cap == payload length exactly
 	a, n, err := jsonl.ReadIntoCappedCtx(context.Background(),
-		strings.NewReader(exactDoc), adjlist.Config{Directed: true}, capBytes)
+		strings.NewReader(exactDoc), adjlist.Config{}, capBytes)
 	if err != nil {
 		t.Fatalf("at-cap input rejected: err=%v, want nil", err)
 	}
@@ -133,7 +133,7 @@ func TestReadWithPropsCappedCtx_AtCap(t *testing.T) {
 
 	capBytes := int64(len(exactDoc))
 	g, n, err := jsonl.ReadWithPropsCappedCtx(context.Background(),
-		strings.NewReader(exactDoc), adjlist.Config{Directed: true}, capBytes)
+		strings.NewReader(exactDoc), adjlist.Config{}, capBytes)
 	if err != nil {
 		t.Fatalf("at-cap input rejected: err=%v, want nil", err)
 	}
@@ -152,7 +152,7 @@ func TestReadIntoCappedCtx_BelowCap(t *testing.T) {
 
 	capBytes := int64(len(exactDoc)) + 1
 	a, n, err := jsonl.ReadIntoCappedCtx(context.Background(),
-		strings.NewReader(exactDoc), adjlist.Config{Directed: true}, capBytes)
+		strings.NewReader(exactDoc), adjlist.Config{}, capBytes)
 	if err != nil {
 		t.Fatalf("below-cap input rejected: err=%v, want nil", err)
 	}
@@ -171,7 +171,7 @@ func TestReadIntoCappedCtx_AboveCap(t *testing.T) {
 
 	capBytes := int64(len(exactDoc)) - 1
 	_, _, err := jsonl.ReadIntoCappedCtx(context.Background(),
-		strings.NewReader(exactDoc), adjlist.Config{Directed: true}, capBytes)
+		strings.NewReader(exactDoc), adjlist.Config{}, capBytes)
 	if !errors.Is(err, jsonl.ErrInputTooLarge) {
 		t.Fatalf("above-cap input accepted: err=%v, want ErrInputTooLarge", err)
 	}

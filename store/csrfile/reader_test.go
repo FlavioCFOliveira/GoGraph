@@ -12,7 +12,7 @@ import (
 
 func writeFixture(t *testing.T) (string, *csr.CSR[int64]) {
 	t.Helper()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge("a", "b", 10); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

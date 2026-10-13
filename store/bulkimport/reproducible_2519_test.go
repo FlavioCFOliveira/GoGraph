@@ -45,7 +45,7 @@ func TestImportInto_ByteReproducible(t *testing.T) {
 	publish := func() map[string][]byte {
 		dir := filepath.Join(t.TempDir(), "store")
 		if _, err := ImportInto[int64](context.Background(), dir,
-			Options{Directed: true, Multigraph: true}, nodes, edges); err != nil {
+			Options{}, nodes, edges); err != nil {
 			t.Fatalf("ImportInto: %v", err)
 		}
 		snap := filepath.Join(dir, snapshotName)

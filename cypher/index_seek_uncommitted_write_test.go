@@ -68,7 +68,7 @@ import (
 // seek for the wrong reason and every test here would pass vacuously.
 func idxUncommittedEngine(t *testing.T, ddl ...string) (*Engine, *lpg.Graph[string, float64]) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < 512; i++ {
 		id := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(id); err != nil {
@@ -662,7 +662,7 @@ func TestPendingIndexDelta_DisableIndexSeekOption(t *testing.T) {
 	ctx := context.Background()
 	run := func(disable bool) int64 {
 		t.Helper()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		for i := 0; i < 512; i++ {
 			id := fmt.Sprintf("n%d", i)
 			if err := g.AddNode(id); err != nil {

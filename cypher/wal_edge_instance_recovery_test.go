@@ -2,6 +2,7 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -71,14 +72,13 @@ func propString(m map[string]lpg.PropertyValue) string {
 // is WAL-described. Checked: no ordinal entry exists in memory, in particular
 // none after DELETE r, and after recovery every relationship's labels and
 // properties — by handle, per pair, and as a query sees them — equal the
-// acknowledged state, on a multigraph and on a simple graph.
+// acknowledged state, on parallel and on single-relationship pairs.
 func TestDurableEdgeInstanceWrites_SurviveRecoveryAndLeaveNoOrdinalEntry(t *testing.T) {
 	shapes := []struct {
-		name  string
-		multi bool
-		qs    []string
+		name string
+		qs   []string
 	}{
-		{"multigraph", true, []string{
+		{"parallel pairs", []string{
 			"CREATE (:A {id:1}), (:B {id:2})",
 			"MATCH (a:A),(b:B) CREATE (a)-[:T {p:1}]->(b)",
 			"MATCH (a:A),(b:B) CREATE (a)-[:U {p:2}]->(b)",
@@ -87,7 +87,7 @@ func TestDurableEdgeInstanceWrites_SurviveRecoveryAndLeaveNoOrdinalEntry(t *test
 			"MATCH ()-[r:T]->() DELETE r",
 			"MATCH (a:A),(b:B) MERGE (a)-[:V {p:4}]->(b)",
 		}},
-		{"simple graph", false, []string{
+		{"single pairs", []string{
 			"CREATE (:A {id:1}), (:B {id:2}), (:C {id:3})",
 			"MATCH (a:A),(b:B) CREATE (a)-[:T {p:1}]->(b)",
 			"MATCH (b:B),(c:C) CREATE (b)-[:U {p:2}]->(c)",
@@ -103,7 +103,12 @@ func TestDurableEdgeInstanceWrites_SurviveRecoveryAndLeaveNoOrdinalEntry(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: sh.multi})
+			t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+				if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+					t.Errorf("wal.Close: %v", err)
+				}
+			})
+			g := lpg.New[string, float64](adjlist.Config{})
 			opts := txn.Options[string, float64]{Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec()}
 			eng := cypher.NewEngineWithStore(txn.NewStoreWithOptions[string, float64](g, w, opts))
 			for _, q := range sh.qs {

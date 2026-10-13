@@ -26,7 +26,12 @@ func openTypedStringStore(t *testing.T) (store *Store[string, int64], walPath st
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store = NewStoreWithCodec[string, int64](g, w, NewStringCodec())
 	cleanup = func() {
 		_ = w.Close()
@@ -46,7 +51,12 @@ func openTypedWeightedStore(t *testing.T) (store *Store[string, int64], walPath 
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store = NewStoreWithOptions[string, int64](g, w, Options[string, int64]{
 		Codec:       NewStringCodec(),
 		WeightCodec: NewInt64WeightCodec(),
@@ -454,7 +464,12 @@ func TestTx_CommitWALOnly_AfterClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := NewStoreWithCodec[string, int64](g, w, NewStringCodec())
 
 	tx := s.Begin()
@@ -492,7 +507,12 @@ func TestTx_Commit_AppendFailure_LeavesGraphUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := NewStoreWithCodec[string, int64](g, w, NewStringCodec())
 
 	tx := s.Begin()
@@ -758,7 +778,12 @@ func TestTx_Commit_SyncFailure_ZeroOps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := NewStoreWithCodec[string, int64](g, w, NewStringCodec())
 
 	tx := s.Begin()
@@ -791,7 +816,12 @@ func TestTx_CommitWALOnly_SyncFailure_ZeroOps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, int64](adjlist.Config{})
 	s := NewStoreWithCodec[string, int64](g, w, NewStringCodec())
 
 	tx := s.Begin()

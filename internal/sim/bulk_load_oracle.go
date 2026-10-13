@@ -11,7 +11,7 @@ package sim
 // beside transactional writes and then compares ONE number, the row count,
 // against the constant it just used to generate them; the returned CSR is
 // discarded, the csrfile goes to a real OS tempdir that no fault can reach, and
-// the loader is only ever configured Directed+Multigraph. That scenario is a
+// the loader takes no shape option at all. That scenario is a
 // concurrency/resource-stability watch and remains one; it is deliberately left
 // intact.
 //
@@ -23,8 +23,8 @@ package sim
 // # What package `bulk` already tests for itself, and what this adds
 //
 // `store/bulk` is not untested, and this scenario is not a copy of its tests.
-// In-package there is already `TestCSRDirect_CsrfileByteIdentical` (directed,
-// both multigraph settings), `TestParallel_IdenticalToSequential`,
+// In-package there is already `TestCSRDirect_CsrfileByteIdentical`,
+// `TestParallel_IdenticalToSequential`,
 // `TestParallel_StableAcrossRuns` and `TestLoader_CtxCancelMidDrain`. What the
 // DST adds is of a different kind:
 //
@@ -35,11 +35,6 @@ package sim
 //     sides share, and validating the engine with the engine is what the DST's
 //     conventions forbid. [bulkOracleModel] is computed outside both, so a fault
 //     common to every builder is visible to it.
-//
-//   - THE OTHER THREE CONFIGURATIONS. In-package identity coverage is directed
-//     only, which is correct for its purpose. Here all four
-//     Directed x Multigraph configurations are adjudicated, including the
-//     undirected ones whose transparent fallback is itself a contract.
 //
 //   - FAULTS AND A CRASH. The in-package tests publish to real temporary
 //     directories, so none of them can fail an fsync, a rename or a
@@ -53,8 +48,8 @@ package sim
 // # What the model is, and what it does NOT certify
 //
 // [bulkOracleModel] reimplements the loader's documented ingest contract in
-// plain Go: per-edge interning order, simple-graph first-occurrence dedup,
-// undirected mirroring with the self-loop exception, and the stable
+// plain Go: per-edge interning order, every record kept as its own entry
+// (parallel edges included), and the stable
 // order-by-destination each row ends in. It calls into NEITHER
 // `graph/adjlist` nor `csr.OrderRuns` — its sort is `slices.SortStableFunc` —
 // so an adjacency or ordering defect cannot cancel itself out.
@@ -65,7 +60,7 @@ package sim
 // hash. The model therefore interns through its OWN [graph.Mapper] instance,
 // Src then Dst per edge in input order, which is the assignment rule
 // `buildCSRDirect`'s doc comment states. What the model certifies is the edge
-// multiset, the dedup, the mirroring, the within-row ordering, the row cap, the
+// multiset, the dedup, the within-row ordering, the row cap, the
 // streaming contracts and the publication's atomicity — all of it INDEXED BY
 // whatever ids the Mapper chose. A Mapper that assigned ids differently but
 // consistently would pass; a loader that lost, duplicated, reordered or
@@ -74,20 +69,17 @@ package sim
 // # Which build path each arm actually reaches
 //
 // [bulk.Loader.Finalise] dispatches on `Parallel && csrDirectEligible()` FIRST,
-// and `csrDirectEligible()` is `Directed && adj.Config().MaxShardCapacity == 0`.
-// The public [bulk.Options] exposes NO shard-capacity knob, so for any directed
-// load configured from outside package `bulk` the predicate is unconditionally
-// true. The eight (Directed x Multigraph x Parallel) combinations this scenario
-// runs therefore reach exactly three builders:
+// and `csrDirectEligible()` is `adj.Config().MaxShardCapacity == 0`.
+// The public [bulk.Options] exposes NO shard-capacity knob, so for any load
+// configured from outside package `bulk` the predicate is unconditionally
+// true. The two Parallel settings this scenario runs therefore reach exactly
+// two builders:
 //
-//	Directed,   Parallel=false -> csr.BuildFromAdjList over the Add-time adjacency
-//	Directed,   Parallel=true  -> Loader.buildCSRDirect (the counting sort)
-//	Undirected, Parallel=false -> csr.BuildFromAdjList over the Add-time adjacency
-//	Undirected, Parallel=true  -> Loader.buildBuffered -> buildSequential -> BuildFromAdjList
+//	Parallel=false -> csr.BuildFromAdjList over the Add-time adjacency
+//	Parallel=true  -> Loader.buildCSRDirect (the counting sort)
 //
-// The undirected+Parallel pair is worth naming: `Parallel && !Directed` is the
-// ONLY externally reachable route into the buffered-replay branch, which exists
-// for a capacity-capped adjacency no public Options can construct.
+// The buffered-replay branch exists for a capacity-capped adjacency no public
+// Options can construct, so it is not reachable from here.
 //
 // # The fault and concurrency regimes this scenario CANNOT reach, and why
 //
@@ -96,8 +88,8 @@ package sim
 //
 //   - THE GOROUTINE FAN-OUT IS UNREACHABLE. `Loader.buildParallel` — the
 //     phase-1-intern / phase-2-partition-by-Mapper-shard fan-out across bounded
-//     goroutines — is gated by `parallelEligible()`, which requires Directed AND
-//     `len(buffered) >= parallelMinEdges` (50 000). But a directed load never
+//     goroutines — is gated by `parallelEligible()`, which requires
+//     `len(buffered) >= parallelMinEdges` (50 000). But a load never
 //     gets that far: the CSR-direct case is matched first and wins. The fan-out
 //     is reachable only IN-package, with `MaxShardCapacity > 0` injected
 //     directly into the adjacency, which is what `store/bulk`'s own
@@ -284,24 +276,13 @@ type bulkOracleShape struct {
 // bulkOracleModel is the harness's independent reimplementation of the bulk
 // loader's documented ingest contract.
 //
-// It reproduces four rules, each read off the contract rather than off the
+// It reproduces two rules, each read off the contract rather than off the
 // implementation:
 //
-//  1. Size counts stored adjacency ENTRIES, not logical edges, so an undirected
-//     non-self-loop edge contributes two.
-//  2. Simple-graph mode keeps the FIRST occurrence of an endpoint pair and its
-//     weight, and drops every later one ([adjlist.Config].Multigraph: "repeated
-//     AddEdge calls on the same endpoint pair are idempotent").
-//  3. Undirected mode mirrors each edge onto (dst, src), EXCEPT a self-loop,
-//     which is stored once.
-//  4. Each row ends stably ordered by destination NodeID, with equal
+//  1. Size counts stored adjacency ENTRIES: one per edge record, a self-loop
+//     and every repeat of an endpoint pair (a parallel edge) included.
+//  2. Each row ends stably ordered by destination NodeID, with equal
 //     destinations left in ingest order (rmp #2141).
-//
-// Rule 2 is implemented as "row s already holds an entry for d", which is the
-// literal reading of the adjacency's idempotence clause. For an undirected graph
-// that coincides with unordered-pair dedup, because mirroring keeps the rows
-// symmetric — but the per-row form is the one the contract states, so it is the
-// one modelled.
 //
 // # Concurrency contract
 //
@@ -310,25 +291,16 @@ type bulkOracleShape struct {
 type bulkOracleModel struct {
 	mapper *graph.Mapper[string]
 	rows   map[graph.NodeID][]bulkOracleEntry
-	stored map[[2]graph.NodeID]struct{}
 
-	entries     int
-	dupsDropped int
-	mirrored    int
-	selfLoops   int
-
-	directed   bool
-	multigraph bool
+	entries   int
+	selfLoops int
 }
 
-// newBulkOracleModel returns an empty model for one adjacency configuration.
-func newBulkOracleModel(directed, multigraph bool) *bulkOracleModel {
+// newBulkOracleModel returns an empty model.
+func newBulkOracleModel() *bulkOracleModel {
 	return &bulkOracleModel{
-		mapper:     graph.NewMapper[string](),
-		rows:       make(map[graph.NodeID][]bulkOracleEntry, bulkOracleKeys),
-		stored:     make(map[[2]graph.NodeID]struct{}, bulkOracleDrawnEdges),
-		directed:   directed,
-		multigraph: multigraph,
+		mapper: graph.NewMapper[string](),
+		rows:   make(map[graph.NodeID][]bulkOracleEntry, bulkOracleKeys),
 	}
 }
 
@@ -340,28 +312,13 @@ func (m *bulkOracleModel) add(e bulk.Edge) {
 	if s == d {
 		m.selfLoops++
 	}
-	m.store(s, d, e.Weight, false)
-	if !m.directed && s != d {
-		m.store(d, s, e.Weight, true)
-	}
+	m.store(s, d, e.Weight)
 }
 
-// store appends one adjacency entry, applying simple-graph dedup. mirror marks
-// the entry as the reverse half of an undirected edge, for the coverage counter.
-func (m *bulkOracleModel) store(s, d graph.NodeID, w int64, mirror bool) {
-	if !m.multigraph {
-		key := [2]graph.NodeID{s, d}
-		if _, dup := m.stored[key]; dup {
-			m.dupsDropped++
-			return
-		}
-		m.stored[key] = struct{}{}
-	}
+// store appends one adjacency entry; a repeated pair is a parallel edge.
+func (m *bulkOracleModel) store(s, d graph.NodeID, w int64) {
 	m.rows[s] = append(m.rows[s], bulkOracleEntry{dst: d, w: w})
 	m.entries++
-	if mirror {
-		m.mirrored++
-	}
 }
 
 // expect renders the model as the CSR shape the loader must have produced.
@@ -416,8 +373,8 @@ func (m *bulkOracleModel) expect() *bulkOracleShape {
 }
 
 // buildBulkOracleModel folds an edge stream into a fresh model.
-func buildBulkOracleModel(edges []bulk.Edge, directed, multigraph bool) *bulkOracleModel {
-	m := newBulkOracleModel(directed, multigraph)
+func buildBulkOracleModel(edges []bulk.Edge) *bulkOracleModel {
+	m := newBulkOracleModel()
 	for k := range edges {
 		m.add(edges[k])
 	}
@@ -429,45 +386,10 @@ func buildBulkOracleModel(edges []bulk.Edge, directed, multigraph bool) *bulkOra
 //
 // It exists so the model's own count cannot be the only witness to itself: a
 // model whose two views of its edge set disagree fails the cross-check rather
-// than passing on whichever view happens to be wrong. The four cases are the
-// documented rules read as arithmetic — every record for a directed multigraph,
-// every record plus a mirror except self-loops for an undirected one, and the
-// distinct-pair cardinalities for the simple variants.
-func bulkOracleClosedFormSize(edges []bulk.Edge, directed, multigraph bool) uint64 {
-	if multigraph {
-		loops := 0
-		for k := range edges {
-			if edges[k].Src == edges[k].Dst {
-				loops++
-			}
-		}
-		if directed {
-			return uint64(len(edges))
-		}
-		return uint64(2*len(edges) - loops)
-	}
-
-	// Simple graph: count DISTINCT keys over the string endpoints. Interning is
-	// injective, so string identity and NodeID identity coincide.
-	type pair struct{ a, b string }
-	seen := make(map[pair]struct{}, len(edges))
-	var stored uint64
-	note := func(a, b string) {
-		p := pair{a: a, b: b}
-		if _, dup := seen[p]; dup {
-			return
-		}
-		seen[p] = struct{}{}
-		stored++
-	}
-	for k := range edges {
-		e := edges[k]
-		note(e.Src, e.Dst)
-		if !directed && e.Src != e.Dst {
-			note(e.Dst, e.Src)
-		}
-	}
-	return stored
+// than passing on whichever view happens to be wrong. Every graph is a
+// multigraph, so every record is stored.
+func bulkOracleClosedFormSize(edges []bulk.Edge) uint64 {
+	return uint64(len(edges))
 }
 
 // -----------------------------------------------------------------------------
@@ -527,7 +449,7 @@ func buildBulkOracleFixture(s *Seed, tame bool) bulkOracleFixture {
 			{Src: k0, Dst: k1, Weight: 1},
 			{Src: k1, Dst: k2, Weight: -2},
 			{Src: k0, Dst: k1, Weight: 3},  // duplicate of the first record
-			{Src: k2, Dst: k2, Weight: -4}, // self-loop: mirrored ONCE
+			{Src: k2, Dst: k2, Weight: -4}, // self-loop: stored ONCE
 			{Src: k1, Dst: k0, Weight: 5},  // reverse of the first record
 			// Extremal weights: the csrfile carries int64 weights in the
 			// 8-byte section the reader hands back as uint64, so a sign or
@@ -853,9 +775,9 @@ func bulkOraclePublish(disk *SimDisk, path string, c *csr.CSR[int64]) error {
 
 // bulkOracleLoad streams edges through a freshly configured loader and finalises
 // it WITHOUT an OutputPath, so the arm owns the publication and can fault it.
-func bulkOracleLoad(edges []bulk.Edge, directed, multigraph, parallel bool) (int, *csr.CSR[int64], error) {
+func bulkOracleLoad(edges []bulk.Edge, parallel bool) (int, *csr.CSR[int64], error) {
 	l := bulk.New(bulk.Options{
-		Directed: directed, Multigraph: multigraph, Parallel: parallel,
+		Parallel:    parallel,
 		ExpectNodes: bulkOracleKeys,
 	})
 	for k := range edges {
@@ -870,8 +792,7 @@ func bulkOracleLoad(edges []bulk.Edge, directed, multigraph, parallel bool) (int
 // Evidence and options
 // -----------------------------------------------------------------------------
 
-// bulkOracleConfigEvidence is what one (Directed x Multigraph) configuration
-// measured.
+// bulkOracleConfigEvidence is what one adjacency configuration measured.
 type bulkOracleConfigEvidence struct {
 	name string
 	// seqBytes / parBytes are the published csrfile image lengths for
@@ -884,8 +805,6 @@ type bulkOracleConfigEvidence struct {
 	// three columns plus order/size.
 	sliceIdentical bool
 	entries        int
-	dupsDropped    int
-	mirrored       int
 	selfLoops      int
 	closedFormSize uint64
 	modelSize      uint64
@@ -981,7 +900,7 @@ type bulkOracleOptions struct {
 	// a difference.
 	perturb func(*bulkOracleModel)
 	// tameFixture drops every guaranteed structural feature, so the coverage
-	// gates on dedup / mirroring / self-loops must fire.
+	// gates on dedup / reversed pairs / self-loops must fire.
 	tameFixture bool
 	// extraParallelEdge feeds the Parallel=true loader ONE more edge than the
 	// sequential one, so the byte-identity clause has a real difference to find.
@@ -1077,7 +996,7 @@ func bulkOracleReport(seed uint64, v []Violation) *SimReport {
 // before the next begins, so a defect is attributed to the arm that produced it
 // rather than to the end of the run:
 //
-//  1. CONFIGURATION MATRIX. All four Directed x Multigraph configurations, each
+//  1. CONFIGURATION MATRIX. The adjacency configuration,
 //     built twice (Parallel false/true), each adjudicated in memory and again
 //     after a round trip through a csrfile on a clean [SimDisk], plus the
 //     parallel/sequential byte-identity comparison.
@@ -1138,20 +1057,13 @@ func runBulkLoadOracleWith(
 
 // bulkOracleConfig names one adjacency configuration.
 type bulkOracleConfig struct {
-	name       string
-	directed   bool
-	multigraph bool
+	name string
 }
 
-// bulkOracleConfigs enumerates the four Directed x Multigraph configurations.
-// The `bulk-vs-online` scenario only ever built the first.
+// bulkOracleConfigs enumerates the adjacency configurations: every graph is a
+// directed multigraph, so there is one.
 func bulkOracleConfigs() []bulkOracleConfig {
-	return []bulkOracleConfig{
-		{name: "directed-multi", directed: true, multigraph: true},
-		{name: "directed-simple", directed: true, multigraph: false},
-		{name: "undirected-multi", directed: false, multigraph: true},
-		{name: "undirected-simple", directed: false, multigraph: false},
-	}
+	return []bulkOracleConfig{{name: "directed-multi"}}
 }
 
 // bulkOracleArmConfigMatrix builds every configuration twice — sequentially and
@@ -1165,15 +1077,13 @@ func bulkOracleArmConfigMatrix(
 	perturbed := false
 
 	for _, cfg := range bulkOracleConfigs() {
-		model := buildBulkOracleModel(ev.fixture.edges, cfg.directed, cfg.multigraph)
+		model := buildBulkOracleModel(ev.fixture.edges)
 		cev := bulkOracleConfigEvidence{
 			name:           cfg.name,
 			entries:        model.entries,
-			dupsDropped:    model.dupsDropped,
-			mirrored:       model.mirrored,
 			selfLoops:      model.selfLoops,
 			modelSize:      uint64(model.entries),
-			closedFormSize: bulkOracleClosedFormSize(ev.fixture.edges, cfg.directed, cfg.multigraph),
+			closedFormSize: bulkOracleClosedFormSize(ev.fixture.edges),
 		}
 		// Cross-check the model against a SECOND, closed-form derivation before
 		// anything is compared to it: a model whose two views of its own edge set
@@ -1204,7 +1114,7 @@ func bulkOracleArmConfigMatrix(
 					Src: bulkOracleKey(0), Dst: bulkOracleKey(1), Weight: 77,
 				})
 			}
-			rows, c, err := bulkOracleLoad(edges, cfg.directed, cfg.multigraph, parallel)
+			rows, c, err := bulkOracleLoad(edges, parallel)
 			if err != nil {
 				return v, fmt.Errorf("sim: bulk-load-oracle %s parallel=%t: %w", cfg.name, parallel, err)
 			}
@@ -1338,7 +1248,7 @@ func bulkOracleArmStreaming(
 	edges := ev.fixture.edges
 
 	// --- Drain to completion. ---
-	l := bulk.New(bulk.Options{Directed: true, Multigraph: true, ExpectNodes: bulkOracleKeys})
+	l := bulk.New(bulk.Options{ExpectNodes: bulkOracleKeys})
 	ch := make(chan bulk.Edge)
 	go func() {
 		defer close(ch)
@@ -1362,7 +1272,7 @@ func bulkOracleArmStreaming(
 	if err != nil {
 		return v, fmt.Errorf("sim: bulk-load-oracle clean drain finalise: %w", err)
 	}
-	want := buildBulkOracleModel(edges, true, true).expect()
+	want := buildBulkOracleModel(edges).expect()
 	v = append(v, bulkOracleCheckCSR("drain/clean", want, c)...)
 
 	// --- Drain cancelled mid-stream. ---
@@ -1370,7 +1280,7 @@ func bulkOracleArmStreaming(
 	if opts.skipDrainCancel {
 		cancelAt = len(edges) // never cancels: the stream simply closes.
 	}
-	cl := bulk.New(bulk.Options{Directed: true, Multigraph: true, ExpectNodes: bulkOracleKeys})
+	cl := bulk.New(bulk.Options{ExpectNodes: bulkOracleKeys})
 	cctx, cancel := context.WithCancel(ctx)
 	cch := make(chan bulk.Edge)
 	go func() {
@@ -1419,12 +1329,12 @@ func bulkOracleArmStreaming(
 		// The partial load must be exactly the model of the ACCEPTED PREFIX: a
 		// cancellation may not lose, duplicate or reorder what was already
 		// ingested.
-		pw := buildBulkOracleModel(edges[:cdrained], true, true).expect()
+		pw := buildBulkOracleModel(edges[:cdrained]).expect()
 		v = append(v, bulkOracleCheckCSR("drain/cancelled-prefix", pw, cc)...)
 	}
 
 	// --- AddBatch, uncapped. ---
-	bl := bulk.New(bulk.Options{Directed: true, Multigraph: true, ExpectNodes: bulkOracleKeys})
+	bl := bulk.New(bulk.Options{ExpectNodes: bulkOracleKeys})
 	for lo := 0; lo < len(edges); lo += bulkOracleBatchSize {
 		hi := min(lo+bulkOracleBatchSize, len(edges))
 		if err := bl.AddBatch(edges[lo:hi]); err != nil {
@@ -1467,7 +1377,7 @@ func bulkOracleArmCaps(
 		cap0 = len(edges) + 1 // never crossed.
 	}
 	optsFor := func() bulk.Options {
-		return bulk.Options{Directed: true, Multigraph: true, MaxRows: cap0, ExpectNodes: bulkOracleKeys}
+		return bulk.Options{MaxRows: cap0, ExpectNodes: bulkOracleKeys}
 	}
 
 	// --- AddBatch crosses the cap. ---
@@ -1513,7 +1423,7 @@ func bulkOracleArmCaps(
 		return v, fmt.Errorf("sim: bulk-load-oracle capped finalise: %w", err)
 	}
 	kept := min(l.Rows(), len(edges))
-	pw := buildBulkOracleModel(edges[:kept], true, true).expect()
+	pw := buildBulkOracleModel(edges[:kept]).expect()
 	v = append(v, bulkOracleCheckCSR("cap/accepted-prefix", pw, c)...)
 
 	// --- Drain crosses the cap. ---
@@ -1593,11 +1503,11 @@ func bulkOracleArmRealFS(
 	defer func() { _ = os.RemoveAll(root) }()
 
 	edges := ev.fixture.edges
-	want := buildBulkOracleModel(edges, true, true).expect()
+	want := buildBulkOracleModel(edges).expect()
 
 	out := filepath.Join(root, "oracle.csr")
 	l := bulk.New(bulk.Options{
-		OutputPath: out, Directed: true, Multigraph: true, ExpectNodes: bulkOracleKeys,
+		OutputPath: out, ExpectNodes: bulkOracleKeys,
 	})
 	for k := range edges {
 		if err := l.Add(edges[k]); err != nil {
@@ -1644,7 +1554,7 @@ func bulkOracleArmRealFS(
 		bad = filepath.Join(root, "second.csr")
 	}
 	bl := bulk.New(bulk.Options{
-		OutputPath: bad, Directed: true, Multigraph: true, ExpectNodes: bulkOracleKeys,
+		OutputPath: bad, ExpectNodes: bulkOracleKeys,
 	})
 	for k := range edges {
 		if err := bl.Add(edges[k]); err != nil {
@@ -1693,9 +1603,9 @@ func bulkOracleArmPublishFaults(
 ) ([]Violation, error) {
 	var v []Violation
 	edges := ev.fixture.edges
-	model := buildBulkOracleModel(edges, true, true)
+	model := buildBulkOracleModel(edges)
 	want := model.expect()
-	_, first, err := bulkOracleLoad(edges, true, true, false)
+	_, first, err := bulkOracleLoad(edges, false)
 	if err != nil {
 		return v, fmt.Errorf("sim: bulk-load-oracle fault fixture: %w", err)
 	}
@@ -1704,7 +1614,7 @@ func bulkOracleArmPublishFaults(
 	secondEdges := append(slices.Clone(edges), bulk.Edge{
 		Src: bulkOracleKey(3), Dst: bulkOracleKey(4), Weight: 424242,
 	})
-	_, second, err := bulkOracleLoad(secondEdges, true, true, false)
+	_, second, err := bulkOracleLoad(secondEdges, false)
 	if err != nil {
 		return v, fmt.Errorf("sim: bulk-load-oracle fault fixture 2: %w", err)
 	}
@@ -1929,8 +1839,8 @@ func bulkOracleArmCorruption(
 ) ([]Violation, error) {
 	var v []Violation
 	edges := ev.fixture.edges
-	want := buildBulkOracleModel(edges, true, true).expect()
-	_, c, err := bulkOracleLoad(edges, true, true, false)
+	want := buildBulkOracleModel(edges).expect()
+	_, c, err := bulkOracleLoad(edges, false)
 	if err != nil {
 		return v, fmt.Errorf("sim: bulk-load-oracle corruption fixture: %w", err)
 	}
@@ -2043,8 +1953,8 @@ func bulkOracleArmMediaFaults(
 ) ([]Violation, error) {
 	var v []Violation
 	edges := ev.fixture.edges
-	want := buildBulkOracleModel(edges, true, true).expect()
-	_, c, err := bulkOracleLoad(edges, true, true, false)
+	want := buildBulkOracleModel(edges).expect()
+	_, c, err := bulkOracleLoad(edges, false)
 	if err != nil {
 		return v, fmt.Errorf("sim: bulk-load-oracle media fixture: %w", err)
 	}
@@ -2165,17 +2075,17 @@ func bulkOracleArmCrashWindow(
 ) ([]Violation, error) {
 	var v []Violation
 	edges := ev.fixture.edges
-	gen1Model := buildBulkOracleModel(edges, true, true)
+	gen1Model := buildBulkOracleModel(edges)
 	want1 := gen1Model.expect()
-	_, gen1, err := bulkOracleLoad(edges, true, true, false)
+	_, gen1, err := bulkOracleLoad(edges, false)
 	if err != nil {
 		return v, fmt.Errorf("sim: bulk-load-oracle crash fixture 1: %w", err)
 	}
 	gen2Edges := append(slices.Clone(edges), bulk.Edge{
 		Src: bulkOracleKey(5), Dst: bulkOracleKey(6), Weight: -987654321,
 	})
-	want2 := buildBulkOracleModel(gen2Edges, true, true).expect()
-	_, gen2, err := bulkOracleLoad(gen2Edges, true, true, false)
+	want2 := buildBulkOracleModel(gen2Edges).expect()
+	_, gen2, err := bulkOracleLoad(gen2Edges, false)
 	if err != nil {
 		return v, fmt.Errorf("sim: bulk-load-oracle crash fixture 2: %w", err)
 	}
@@ -2380,13 +2290,13 @@ func bulkOracleCheckCoverage(ev *bulkOracleEvidence) []Violation {
 			ev.fixture.distinctKeys, bulkOracleMinDistinctKeys)
 	}
 	if ev.fixture.duplicatePairs == 0 {
-		note("the fixture repeats no endpoint pair, so simple-graph dedup was never exercised")
+		note("the fixture repeats no endpoint pair, so a parallel edge was never exercised")
 	}
 	if ev.fixture.selfLoops == 0 {
-		note("the fixture holds no self-loop, so the undirected mirror exception was never exercised")
+		note("the fixture holds no self-loop, so a self-loop entry was never exercised")
 	}
 	if ev.fixture.reversedPairs == 0 {
-		note("the fixture holds no reversed pair, so undirected simple-graph dedup was never exercised")
+		note("the fixture holds no reversed pair, so a reversed pair was never exercised")
 	}
 
 	if len(ev.configs) != len(bulkOracleConfigs()) {
@@ -2398,22 +2308,6 @@ func bulkOracleCheckCoverage(ev *bulkOracleEvidence) []Violation {
 			note("[%s] published %d/%d bytes, want at least %d on both builds — a comparison of two"+
 				" trivial images would pass without testing anything",
 				c.name, c.seqBytes, c.parBytes, bulkOracleMinPublishBytes)
-		}
-		simple := c.name == "directed-simple" || c.name == "undirected-simple"
-		undirected := c.name == "undirected-multi" || c.name == "undirected-simple"
-		if simple && c.dupsDropped == 0 {
-			note("[%s] dropped no duplicate entry", c.name)
-		}
-		if !simple && c.dupsDropped != 0 {
-			note("[%s] dropped %d entries although a multigraph keeps every parallel edge",
-				c.name, c.dupsDropped)
-		}
-		if undirected && c.mirrored == 0 {
-			note("[%s] stored no mirror entry", c.name)
-		}
-		if !undirected && c.mirrored != 0 {
-			note("[%s] stored %d mirror entries although a directed load mirrors nothing",
-				c.name, c.mirrored)
 		}
 	}
 

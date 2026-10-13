@@ -173,7 +173,7 @@ func TestSoleSeekLeaf_InitOnceChildOperators(t *testing.T) {
 	const rows = 3
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
-			g := lpg.New[string, float64](adjlist.Config{Directed: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			for _, id := range []string{"a", "b", "c"} {
 				if err := g.AddNode(id); err != nil {
 					t.Fatal(err)

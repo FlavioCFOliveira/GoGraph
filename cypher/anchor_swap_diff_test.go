@@ -49,7 +49,7 @@ func runWrite(t *testing.T, e *Engine, q string) {
 // share.
 func buildAnchorGraph(t *testing.T, stmts ...string) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	seed := NewEngine(g)
 	for _, s := range stmts {
 		runWrite(t, seed, s)

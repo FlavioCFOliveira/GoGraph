@@ -128,7 +128,7 @@ func TestVerifyMapperDecodable_AgreesWithRecoverysDecode(t *testing.T) {
 			}
 
 			var verifyErr, applyErr error
-			g := lpg.New[int, int64](adjlist.Config{Directed: true})
+			g := lpg.New[int, int64](adjlist.Config{})
 			if tc.nilCodec {
 				verifyErr = VerifyMapperDecodable[int](verifyRB, nil)
 				applyErr = ApplyMapperToGraphWithCodec[int, int64](g, applyRB, nil)

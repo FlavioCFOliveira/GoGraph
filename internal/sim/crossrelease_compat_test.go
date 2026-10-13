@@ -222,6 +222,17 @@ func TestCrossReleaseCompat_LegacySnapshotRecoversFullStack(t *testing.T) {
 	root := t.TempDir()
 	copyDirInto(t, legacySnapshotSubdir(), filepath.Join(root, "snapshot"))
 
+	// ── Non-vacuity precondition ─────────────────────────────────────────────
+	// There is no WAL in this directory BEFORE recovery, so nothing but the
+	// snapshot bytes can produce the graph asserted below. Recovery itself
+	// creates one: the fixture declares a legacy simple graph ("multigraph":
+	// false), and recovery migrates such a store and checkpoints it, through the
+	// WAL, before it returns (rmp #3072).
+	if _, err := os.Stat(filepath.Join(root, "wal")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("NON-VACUITY: a WAL exists beside the legacy snapshot before recovery (stat err %v); "+
+			"the recovered graph would not be attributable to the snapshot bytes", err)
+	}
+
 	res, err := recovery.OpenCtx[string, float64](ctx, root, recovery.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
@@ -258,13 +269,8 @@ func TestCrossReleaseCompat_LegacySnapshotRecoversFullStack(t *testing.T) {
 	}
 
 	// ── Non-vacuity gate (shape only) ─────────────────────────────────────────
-	// There is no WAL in this directory, so nothing but the snapshot bytes could
-	// have produced the graph above. Assert that rather than assume it: a stray
-	// WAL beside the fixture would make every assertion above WAL-satisfiable.
-	if _, err := os.Stat(filepath.Join(root, "wal")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("NON-VACUITY: a WAL exists beside the legacy snapshot (stat err %v); "+
-			"the recovered graph is no longer attributable to the snapshot bytes", err)
-	}
+	// The directory held no WAL when recovery started (asserted above), and
+	// recovery replayed nothing: the graph above came from the snapshot bytes.
 	if res.WALOps != 0 {
 		t.Fatalf("NON-VACUITY: recovery replayed %d WAL ops over a WAL-less directory", res.WALOps)
 	}

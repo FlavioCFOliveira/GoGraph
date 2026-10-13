@@ -109,7 +109,7 @@ func TestManifest_IndexBuilderEpochRoundTrip(t *testing.T) {
 func TestWriteSnapshotFull_StampsIndexBuilderEpoch(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "snapshot")
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.SetNodeLabel("a", "Person"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}

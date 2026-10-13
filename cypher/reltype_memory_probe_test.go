@@ -53,7 +53,7 @@ func heapAfterGC() uint64 {
 // ONE dominant type family, the shape on which the retired filter map was Θ(E).
 func buildTypedFixture(tb testing.TB, n int) *lpg.Graph[string, float64] {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(k); err != nil {

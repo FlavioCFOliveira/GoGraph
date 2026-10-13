@@ -33,14 +33,7 @@ const (
 // serves over Bolt, so that a probe here describes the deployment the
 // comparison measured.
 func newCypherEngine() (*lpg.Graph[string, float64], *cypher.Engine) {
-	return newCypherEngineMode(true)
-}
-
-// newCypherEngineMode is newCypherEngine with the parallel-edge decision
-// exposed, so the per-handle stores that only multigraph mode populates can be
-// switched off and their cost measured rather than estimated.
-func newCypherEngineMode(multigraph bool) (*lpg.Graph[string, float64], *cypher.Engine) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: multigraph})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	return g, cypher.NewEngine(g)
 }
@@ -60,8 +53,6 @@ func cypherRun(t *testing.T, eng *cypher.Engine, q string, params map[string]any
 
 // cypherSeedNodes creates the node population and the seek index every edge
 // probe joins through.
-func cypherSeedNodesOn(t *testing.T, eng *cypher.Engine) { cypherSeedNodes(t, eng) }
-
 func cypherSeedNodes(t *testing.T, eng *cypher.Engine) {
 	t.Helper()
 	cypherRun(t, eng, `CREATE INDEX idx_Person_sid FOR (n:Person) ON (n.sid)`, nil)
@@ -123,37 +114,6 @@ func TestProbe_CypherEdgesBaseline(t *testing.T) {
 	measure(t, "cypher/edge-baseline-nodes-only", probeCypherNodes, func() any {
 		g, eng := newCypherEngine()
 		cypherSeedNodes(t, eng)
-		return []any{g, eng}
-	})
-}
-
-// TestProbe_CypherEdgesSimpleGraph is TestProbe_CypherEdges with parallel
-// edges disallowed. graph/lpg/lpg.go documents the per-handle stores as
-// "Populated only in multigraph mode (one handle per CREATE)", so the
-// difference between the two probes is what openCypher's parallel-edge
-// semantics cost per relationship on the Cypher write path.
-//
-// It is a measurement, not a proposal: a simple graph cannot represent two
-// relationships between the same pair, which openCypher requires.
-func TestProbe_CypherEdgesSimpleGraph(t *testing.T) {
-	measure(t, "cypher/typed-edges-simple", probeCypherEdges, func() any {
-		g, eng := newCypherEngineMode(false)
-		cypherSeedNodesOn(t, eng)
-		const batch = 200
-		for lo := 0; lo < probeCypherNodes; lo += batch {
-			rows := make([]any, 0, batch*probeCypherDeg)
-			for i := lo; i < lo+batch && i < probeCypherNodes; i++ {
-				for k := 1; k <= probeCypherDeg; k++ {
-					dst := (i*31 + k*2654435761) % probeCypherNodes
-					rows = append(rows, map[string]any{
-						"ss": fmt.Sprintf("p%08d", i), "ts": fmt.Sprintf("p%08d", dst),
-					})
-				}
-			}
-			cypherRun(t, eng,
-				`UNWIND $rows AS r MATCH (a:Person {sid: r.ss}), (b:Person {sid: r.ts}) CREATE (a)-[:KNOWS]->(b)`,
-				map[string]any{"rows": rows})
-		}
 		return []any{g, eng}
 	})
 }

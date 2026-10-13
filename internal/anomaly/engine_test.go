@@ -65,7 +65,7 @@ type bank struct {
 
 func newBank(tb testing.TB, rec *anomaly.Recorder, atomicRead bool) *bank {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	b := &bank{eng: cypher.NewEngine(g), rec: rec, atomicRead: atomicRead}
 	b.verSeq.Store(100)
 	for i := range accounts {

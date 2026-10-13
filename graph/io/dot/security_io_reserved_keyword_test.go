@@ -48,7 +48,7 @@ func dotKeywordCasings(kw string) []string {
 
 func emitEdgeDOT(t *testing.T, src, dst string) string {
 	t.Helper()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	if err := a.AddEdge(src, dst, 0); err != nil {
 		t.Fatalf("AddEdge(%q,%q): %v", src, dst, err)
 	}

@@ -24,7 +24,7 @@ import (
 func TestLabels_Roundtrip(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("alice", "bob", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestLabels_Roundtrip(t *testing.T) {
 	// adjacency replayed: this is the canonical post-restart path,
 	// minus a WAL. The fresh graph must therefore have an identical
 	// label distribution after ApplyLabelsToGraph.
-	restored := lpg.New[string, int64](adjlist.Config{Directed: true})
+	restored := lpg.New[string, int64](adjlist.Config{})
 	for _, e := range []struct{ s, d string }{
 		{"alice", "bob"}, {"bob", "carol"}, {"carol", "alice"},
 	} {
@@ -124,7 +124,7 @@ func TestLabels_Roundtrip(t *testing.T) {
 func TestLabels_ManifestCurrent_LoadsClean(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("x", "y", 7); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestLabels_ManifestV1_StillLoads(t *testing.T) {
 func TestLabels_CorruptedFile_SurfacesErrCorrupted(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestLabels_BadMagic_SurfacesErrLabelsCorrupted(t *testing.T) {
 func TestLabels_WriteEmptyGraph_RoundTrips(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	c := csr.BuildFromAdjList(g.AdjList())
 	dir := filepath.Join(t.TempDir(), "snap")
 	if err := WriteSnapshotFull(dir, c, g); err != nil {
@@ -274,7 +274,7 @@ func TestLabels_PropertyRoundtrip(t *testing.T) {
 		}
 
 		// Build a random directed graph with random labels.
-		g := lpg.New[string, int64](adjlist.Config{Directed: true})
+		g := lpg.New[string, int64](adjlist.Config{})
 		nodeLabels := make(map[string]map[string]bool, n)
 		edgeLabels := make(map[[2]string]map[string]bool)
 		for _, name := range nodes {
@@ -337,7 +337,7 @@ func TestLabels_PropertyRoundtrip(t *testing.T) {
 		// In production the WAL replay performs the equivalent
 		// re-emission; here we shortcut via the same nodes/edges
 		// slice the test already holds.
-		restored := lpg.New[string, int64](adjlist.Config{Directed: true})
+		restored := lpg.New[string, int64](adjlist.Config{})
 		for _, name := range nodes {
 			if err := restored.AddNode(name); err != nil {
 				t.Fatalf("AddNode: %v", err)
@@ -393,7 +393,7 @@ func equalStrings(a, b []string) bool {
 func TestLabels_Roundtrip_MultiLabel(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge a->b: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestLabels_Roundtrip_MultiLabel(t *testing.T) {
 	}
 
 	// Replay adjacency, then apply labels — the canonical post-restart path.
-	restored := lpg.New[string, int64](adjlist.Config{Directed: true})
+	restored := lpg.New[string, int64](adjlist.Config{})
 	for _, e := range []struct{ s, d string }{{"a", "b"}, {"c", "d"}} {
 		if err := restored.AddEdge(e.s, e.d, 0); err != nil {
 			t.Fatalf("AddEdge: %v", err)

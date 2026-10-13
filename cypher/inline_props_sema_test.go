@@ -32,7 +32,7 @@ import (
 )
 
 func TestBuildPropertySelection_ParameterIsRejectedBySema(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for _, n := range []string{"alice", "bob", "carol"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode: %v", err)

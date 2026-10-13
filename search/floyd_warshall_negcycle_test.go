@@ -21,7 +21,7 @@ import (
 // cycle 0→1→2→0 with edge weight -1.0 throughout.
 func TestFloydWarshall_NegCycle_SimpleTriangle(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	for _, e := range [][3]float64{{0, 1, -1.0}, {1, 2, -1.0}, {2, 0, -1.0}} {
 		if err := a.AddEdge(int(e[0]), int(e[1]), e[2]); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -44,7 +44,7 @@ func TestFloydWarshall_NegCycle_SimpleTriangle(t *testing.T) {
 // 0→1→2→3→4→0 with edge weight -1.0 throughout.
 func TestFloydWarshall_NegCycle_FiveCycle(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	for i := 0; i < 5; i++ {
 		if err := a.AddEdge(i, (i+1)%5, -1.0); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -63,7 +63,7 @@ func TestFloydWarshall_NegCycle_FiveCycle(t *testing.T) {
 // though the source vertex (0) is not itself on the cycle.
 func TestFloydWarshall_NegCycle_ReachableViaPath(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	for _, e := range [][3]float64{
 		{0, 1, 1.0},
 		{1, 2, 1.0},
@@ -88,7 +88,7 @@ func TestFloydWarshall_NegCycle_ReachableViaPath(t *testing.T) {
 // must complete successfully and return a non-nil APSP.
 func TestFloydWarshall_NegEdges_NoCycle(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	// Layered DAG: 0→1, 0→2, 1→3, 2→3 with negative weights but no cycle.
 	for _, e := range [][3]float64{
 		{0, 1, -2.0},
@@ -125,7 +125,7 @@ func TestFloydWarshall_NegEdges_NoCycle(t *testing.T) {
 // negative-cycle branch).
 func TestFloydWarshall_NegCycle_IntegerWeight(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for _, e := range [][3]int64{{0, 1, -1}, {1, 2, -1}, {2, 0, -1}} {
 		if err := a.AddEdge(int(e[0]), int(e[1]), e[2]); err != nil {
 			t.Fatalf("AddEdge: %v", err)

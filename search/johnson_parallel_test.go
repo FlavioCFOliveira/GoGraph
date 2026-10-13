@@ -89,7 +89,7 @@ func TestJohnsonAPSPParallel_BitEqualSerial_Random(t *testing.T) {
 	rapid.Check(t, func(r *rapid.T) {
 		n := rapid.IntRange(2, 12).Draw(r, "n")
 		m := rapid.IntRange(0, 3*n).Draw(r, "m")
-		a := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
+		a := adjlist.New[int, int64](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			if err := a.AddNode(i); err != nil {
 				t.Fatalf("AddNode: %v", err)
@@ -153,7 +153,7 @@ func assertAPSPBitEqualRapid[W Weight](r *rapid.T, want, got *APSP[W]) {
 // Floyd-Warshall (a separate, documented caveat).
 func TestJohnsonAPSPParallel_FloatBitEqualSerial(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	fedges := [][3]float64{
 		{0, 1, 1.5}, {0, 2, 4.25},
 		{1, 2, 0.5}, {1, 3, 7.125},
@@ -182,7 +182,7 @@ func TestJohnsonAPSPParallel_FloatBitEqualSerial(t *testing.T) {
 // enforces the same NaN/+-Inf gate as the serial JohnsonAPSP.
 func TestJohnsonAPSPParallel_NaNRejected(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	if err := a.AddEdge(0, 1, 1.0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

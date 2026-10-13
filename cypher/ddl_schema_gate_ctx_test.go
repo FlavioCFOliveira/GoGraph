@@ -194,7 +194,7 @@ func runDDLGateCase(t *testing.T, wiring, ddl string, entry ddlGateEntry) {
 		w   *wal.Writer
 	)
 	if wiring == "memory" {
-		eng = cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+		eng = cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 	} else {
 		dir = t.TempDir()
 		var err error
@@ -203,7 +203,7 @@ func runDDLGateCase(t *testing.T, wiring, ddl string, entry ddlGateEntry) {
 			t.Fatalf("wal.Open: %v", err)
 		}
 		t.Cleanup(func() { _ = w.Close() })
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		eng = cypher.NewEngineWithStore(txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
 			Codec: txn.NewStringCodec(), WeightCodec: txn.NewFloat64WeightCodec(),
 		}))

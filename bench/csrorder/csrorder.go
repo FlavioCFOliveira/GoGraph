@@ -286,7 +286,7 @@ func BuildHubGraph(degree int) (*lpg.Graph[string, float64], error) {
 		hubs = 1
 	}
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < TargetSpace; i++ {
 		k := targetKey(i)
 		if err := g.AddNode(k); err != nil {
@@ -323,10 +323,10 @@ func BuildHubGraph(degree int) (*lpg.Graph[string, float64], error) {
 // The topology comes from internal/shapegen's generator rather than a local
 // preferential-attachment loop, so the fixture inherits a generator that is
 // already property-tested (including a power-law exponent test) instead of
-// asserting its own realism. shapegen builds it UNDIRECTED and non-multigraph
-// over int keys; the projection walks each node's neighbours and emits a
-// directed :LINK arc, so the projected out-degree equals the undirected degree
-// and the arc count is twice the generator's edge count.
+// asserting its own realism. shapegen builds it undirected and non-multigraph
+// over int keys, storing each edge as one directed arc; the projection emits
+// every arc in both directions, so the projected out-degree equals the
+// undirected degree and the arc count is twice the generator's edge count.
 //
 // n is bounded by the generator's own O(n²) construction cost, so this is a
 // fixture in the tens of thousands of nodes, not the hundreds of thousands. That
@@ -337,7 +337,7 @@ func BuildPowerLawGraph(n, m0 int, seed uint64) (*lpg.Graph[string, float64], er
 	if err != nil {
 		return nil, fmt.Errorf("csrorder: BarabasiAlbert(%d,%d): %w", n, m0, err)
 	}
-	return projectIntGraph(src, n, "Person", "KNOWS")
+	return projectIntGraph(src, n, "Person", "KNOWS", true)
 }
 
 // BuildRMATGraph projects an RMAT topology onto a string/float64 graph.
@@ -355,19 +355,21 @@ func BuildRMATGraph(scale, edgeFactor int, seed uint64) (*lpg.Graph[string, floa
 	if err != nil {
 		return nil, fmt.Errorf("csrorder: RMAT(%d,%d): %w", scale, edgeFactor, err)
 	}
-	return projectIntGraph(src, 1<<scale, "Person", "KNOWS")
+	return projectIntGraph(src, 1<<scale, "Person", "KNOWS", false)
 }
 
 // projectIntGraph copies the topology of an int-keyed generator graph into the
 // string/float64 graph the Cypher engine requires, labelling every node with
-// nodeLabel and every arc with relType.
+// nodeLabel and every arc with relType. When symmetric is set every non-loop
+// arc u -> v is also emitted as v -> u, projecting an undirected generator
+// graph onto the directed storage.
 //
 // Neighbours are read through the adjacency's key-based iterator, so the
 // projection never has to resolve a NodeID back to a key. Keys are the
 // generator's contiguous 0..n-1 range, which is why n is passed in rather than
 // discovered.
-func projectIntGraph(src *lpg.Graph[int, int64], n int, nodeLabel, relType string) (*lpg.Graph[string, float64], error) {
-	dstGraph := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+func projectIntGraph(src *lpg.Graph[int, int64], n int, nodeLabel, relType string, symmetric bool) (*lpg.Graph[string, float64], error) {
+	dstGraph := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := itoa(i)
 		if err := dstGraph.AddNode(k); err != nil {
@@ -383,6 +385,11 @@ func projectIntGraph(src *lpg.Graph[int, int64], n int, nodeLabel, relType strin
 		for dst := range adj.Neighbours(i) {
 			if err := dstGraph.AddEdgeLabeled(from, itoa(dst), 1, relType); err != nil {
 				return nil, fmt.Errorf("csrorder: project AddEdgeLabeled(%s,%d): %w", from, dst, err)
+			}
+			if symmetric && dst != i {
+				if err := dstGraph.AddEdgeLabeled(itoa(dst), from, 1, relType); err != nil {
+					return nil, fmt.Errorf("csrorder: project AddEdgeLabeled(%d,%s): %w", dst, from, err)
+				}
 			}
 		}
 	}

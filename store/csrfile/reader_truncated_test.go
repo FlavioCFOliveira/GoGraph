@@ -24,12 +24,12 @@ func TestReader_TruncatedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Grid.Build: %v", err)
 	}
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	// Re-build as unweighted so WriteToFile[struct{}] accepts it.
 	_ = g // use the adjlist from the shape directly
 	// Actually use BuildFixture for simplicity: same node count approach.
 	// Use a plain adjlist path graph instead so we control exact edge count.
-	a2 := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a2 := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 100; i++ {
 		if err := a2.AddEdge(i, (i+1)%100, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)

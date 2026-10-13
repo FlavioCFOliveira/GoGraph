@@ -59,7 +59,7 @@ func (s *spyHashIndex) Lookup(value string) *roaring64.Bitmap {
 func TestSeek_SpyIndexConsulted(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, p := range []string{"a", "b", "c", "d"} {
 		if err := g.SetNodeLabel(p, "Person"); err != nil {
 			t.Fatalf("SetNodeLabel: %v", err)
@@ -123,7 +123,7 @@ func TestSeek_SpyIndexConsulted(t *testing.T) {
 func TestSeek_SpyIndexIntersectsNotReplaces(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	// "a","b" are Persons; "ghost" is NOT a Person but the spy will claim it.
 	for _, p := range []string{"a", "b"} {
 		if err := g.SetNodeLabel(p, "Person"); err != nil {

@@ -29,7 +29,7 @@ func TestRun(t *testing.T) {
 		"recovered.edges":            "1139",
 		"recovered.label_records":    "1395",
 		"recovered.property_records": "4185", // 256*3 node props + 1139*3 edge props
-		"recovered.schema_version":   "v2",   // non-string graph: no mapper.bin
+		"recovered.schema_version":   "v5",   // snapshot.ManifestVersion, stamped on every manifest
 		"weights.verified":           "1139", // every recovered edge checked
 		"weights.bit_exact":          "true", // float64 weights survived bit-for-bit
 	}
@@ -81,8 +81,8 @@ func TestRunBitExactScaled(t *testing.T) {
 		t.Errorf("weights.verified (%s) != recovered.edges (%s)",
 			facts["weights.verified"], facts["recovered.edges"])
 	}
-	if facts["recovered.schema_version"] != "v2" {
-		t.Errorf("recovered.schema_version = %q, want v2", facts["recovered.schema_version"])
+	if facts["recovered.schema_version"] != "v5" {
+		t.Errorf("recovered.schema_version = %q, want v5", facts["recovered.schema_version"])
 	}
 }
 

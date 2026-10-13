@@ -31,7 +31,7 @@ type EngineVariant struct {
 // graph shape matches the deterministic scripted executor (directed simple
 // graph) so the two variants and a recorded trace are directly comparable.
 func (v *EngineVariant) buildEngine() *EngineAdapter {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return NewEngineAdapter(cypher.NewEngineWithOptions(g, v.Options))
 }
 

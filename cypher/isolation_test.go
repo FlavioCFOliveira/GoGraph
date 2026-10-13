@@ -31,7 +31,7 @@ func TestIsolation_Cypher_NoPartialWriteObservable(t *testing.T) {
 	testlayers.RequireSoak(t) // concurrency isolation stress → soak layer (short-layer per-package budget, #1460)
 	t.Parallel()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

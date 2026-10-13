@@ -17,7 +17,7 @@ import (
 )
 
 func TestGraphML_HeterogeneousKeyRoundTrips_1791(t *testing.T) {
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, k := range []string{"a", "b", "c"} {
 		if err := g.AddNode(k); err != nil {
 			t.Fatalf("AddNode %s: %v", k, err)
@@ -77,7 +77,7 @@ func TestGraphML_HeterogeneousKeyRoundTrips_1791(t *testing.T) {
 func TestGraphML_HomogeneousKeyUnchangedID_1791(t *testing.T) {
 	// A name with a single kind keeps the legacy "p_<name>" id (byte-stable
 	// output for the common case) — no per-kind suffix.
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	_ = g.AddNode("a")
 	_ = g.AddNode("b")
 	_ = g.SetNodeProperty("a", "name", lpg.StringValue("x"))

@@ -40,6 +40,7 @@ package recovery
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -73,8 +74,13 @@ func buildRecoveryFixture(tb testing.TB, checkpointed bool) string {
 	if err != nil {
 		tb.Fatalf("wal.Open: %v", err)
 	}
+	tb.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			tb.Errorf("wal.Close: %v", err)
+		}
+	})
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

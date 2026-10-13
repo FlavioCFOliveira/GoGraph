@@ -844,11 +844,10 @@ func (op *ShortestPath) hopForTraversal(from, to, h uint64) hop {
 
 // branchArcs enumerates every distinct undirected arc out of node for the
 // DirBoth shortest-cycle search. It scans both the forward and the reverse CSR
-// (so a directed graph queried with `-[*1..]-` sees both orientations) and
-// de-duplicates by stable handle, because an UNDIRECTED graph stores each edge
-// as two forward-CSR arcs that share one handle — and the reverse CSR mirrors
-// them — so the same physical edge would otherwise be visited up to four times
-// from one node. Each returned arc carries the handle-disambiguated forward
+// (so a graph queried with `-[*1..]-` sees both orientations) and
+// de-duplicates by stable handle, because a self-loop appears in both the
+// forward and the reverse run of its node and would otherwise be visited twice
+// from it. Each returned arc carries the handle-disambiguated forward
 // position and traversal direction so the emitted hop hydrates the correct
 // per-instance relationship type and properties.
 func (op *ShortestPath) branchArcs(node uint64, seen map[uint64]struct{}) []scanArc {

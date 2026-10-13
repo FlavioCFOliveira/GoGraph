@@ -16,7 +16,7 @@ import (
 func BenchmarkDirectWriteUncontended(b *testing.B) {
 	newGraph := func(b *testing.B) *Graph[string, float64] {
 		b.Helper()
-		g := New[string, float64](adjlist.Config{Directed: true})
+		g := New[string, float64](adjlist.Config{})
 		b.Cleanup(func() { _ = g.Close() })
 		if err := g.AddNode("n"); err != nil {
 			b.Fatal(err)
@@ -63,17 +63,13 @@ func BenchmarkDirectWriteUncontended(b *testing.B) {
 // BenchmarkDirectEdgeWriteUncontended measures direct Go-API edge writes with
 // no transaction in flight: the cost the direct-write conflict test of rmp #2947
 // adds to the adjacency path — one version-head load per entry written, the
-// endpoints' life gate, and on an undirected graph both shard locks held across
-// the pair. Each add is paired with its removal so the stored state stays
+// endpoints' life gate. Each add is paired with its removal so the stored state stays
 // bounded.
 func BenchmarkDirectEdgeWriteUncontended(b *testing.B) {
-	for _, directed := range []bool{true, false} {
-		shape := "undirected"
-		if directed {
-			shape = "directed"
-		}
+	{
+		const shape = "directed"
 		b.Run(shape+"/add-remove", func(b *testing.B) {
-			g := New[string, float64](adjlist.Config{Directed: directed, Multigraph: true})
+			g := New[string, float64](adjlist.Config{})
 			b.Cleanup(func() { _ = g.Close() })
 			for _, n := range []string{"a", "b"} {
 				if err := g.AddNode(n); err != nil {
@@ -91,7 +87,7 @@ func BenchmarkDirectEdgeWriteUncontended(b *testing.B) {
 			}
 		})
 		b.Run(shape+"/set-property", func(b *testing.B) {
-			g := New[string, float64](adjlist.Config{Directed: directed, Multigraph: true})
+			g := New[string, float64](adjlist.Config{})
 			b.Cleanup(func() { _ = g.Close() })
 			if err := g.AddEdge("a", "b", 1); err != nil {
 				b.Fatal(err)
@@ -113,7 +109,7 @@ func BenchmarkDirectEdgeWriteUncontended(b *testing.B) {
 // its commit record and publishes it at a fresh instant, which is what a direct
 // write that changes anything pays on top of its stores.
 func BenchmarkDirectTx(b *testing.B) {
-	g := New[string, float64](adjlist.Config{Directed: true})
+	g := New[string, float64](adjlist.Config{})
 	b.Cleanup(func() { _ = g.Close() })
 	b.Run("empty", func(b *testing.B) {
 		b.ReportAllocs()

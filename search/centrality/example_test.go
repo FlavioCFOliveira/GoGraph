@@ -15,7 +15,7 @@ import (
 // deterministic comparison.
 func ExamplePageRank() {
 	// Leaves 1..5 each point at sink 0.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for leaf := 1; leaf <= 5; leaf++ {
 		_ = a.AddEdge(leaf, 0, struct{}{})
 	}
@@ -43,10 +43,10 @@ func ExamplePageRank() {
 // betweenness while the endpoints carry none.
 func ExampleBetweenness() {
 	// Undirected path: 0 - 1 - 2.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	_ = a.AddEdge(0, 1, struct{}{})
 	_ = a.AddEdge(1, 2, struct{}{})
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	m := a.Mapper()
 
 	bc := centrality.Betweenness(c)

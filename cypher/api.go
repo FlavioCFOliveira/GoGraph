@@ -3,12 +3,11 @@
 //
 // # Usage
 //
-// Directed and Multigraph are required for openCypher semantics: relationships
-// are directed, and the data model is a multigraph, so a CREATE always adds a
-// relationship — including a parallel edge between an existing node pair, which
-// on a simple graph fails with [ErrParallelEdgeInSimpleGraph] instead. The zero
-// adjlist.Config is neither directed nor a multigraph, so it is the wrong
-// graph for this engine. Weightless is the right choice because Cypher has no
+// Storage is a directed multigraph, as openCypher's data model requires: every
+// relationship has a stored direction, and a CREATE always adds a relationship,
+// including a parallel edge between an existing node pair. An undirected
+// pattern is resolved by traversing both directions. Weightless is the right
+// choice because Cypher has no
 // edge-weight concept: the engine records the zero weight for every
 // relationship, and the one path that reads a weight back (transaction undo)
 // only ever reads that same zero, so the per-node weight column carries no
@@ -17,8 +16,6 @@
 // adjlist.Config.Weightless for that contract.
 //
 //	g := lpg.New[string, float64](adjlist.Config{
-//		Directed:   true,
-//		Multigraph: true,
 //		Weightless: true,
 //	})
 //	// ... populate graph ...
@@ -372,6 +369,10 @@ type buildOpts struct {
 	// boundary rewrites the maps they resolve from (see rowbind.go). Build-time
 	// state of one goroutine; forWorker clears it.
 	pendingBindPlans []*rowBindPlan
+	// seekProbe is the access path [indexSeekWouldFire] built for a Selection,
+	// pending adoption by that Selection's build (rmp #3096). Build-time state of
+	// one goroutine; forWorker clears it and forSubquery does not carry it.
+	seekProbe seekProbeVerdict
 	// projAliasScalarCols mirrors scalarCols for the BUILDROWCTX / Variable
 	// fast-path upgrade-bypass only. Distinct from scalarCols so the
 	// colliding-alias guard in buildIRProjection still routes a
@@ -440,34 +441,6 @@ type buildOpts struct {
 	// path (write path, public BuildPlanWithMutator, tests), which means the leaf
 	// gets the full unbounded GOMAXPROCS budget — the prior behaviour.
 	parallelGov *exec.ParallelGovernor
-	// fwdCSR caches the forward CSR snapshot used by the per-row relationship
-	// reconstruction helpers (edgeHandleAtFwdPos / edgeInstanceIdxFor) to read
-	// the stable per-edge handle and the per-CREATE instance index at a forward
-	// CSR position. It is built lazily, at most once per query, by [ensureFwdCSR]
-	// the first time a relationship is reconstructed:
-	// before #1574 each helper rebuilt the whole forward CSR (O(V+E)) PER result
-	// row, making `RETURN r` O(R·(V+E)) and dominating heap allocations.
-	//
-	// The whole query's reads resolve at ONE MVCC INSTANT, so the adjacency is stable
-	// for the snapshot's lifetime: a single snapshot reused across all rows is
-	// consistent with the Expand-time CSR that minted the positions
-	//
-	// (This used to read "run inside one lpg.Graph.View RLock". That stopped being
-	// true in sprint 334: a read no longer takes the visibility barrier at all — it
-	// carries a start timestamp and each structure resolves against it. The stability
-	// the paragraph depends on is unchanged, but it now comes from the instant rather
-	// than from excluding writers, and a reader who believed the old sentence would
-	// look for a lock that is not taken. rmp #2314.) (invariant I-POS: identical per-source out-degree counts and
-	// neighbour insertion order ⇒ identical edge positions, BuildFromAdjList
-	// being a deterministic pure function of the adjacency list). fwdCSRReady
-	// disambiguates "not yet built" from a nil snapshot. Forward-only by design:
-	// the helpers never read reverse state, so the reverse CSR is not cached.
-	//
-	// Concurrency: assigned without synchronisation, under the
-	// single-goroutine-per-query build/exec contract (the projection
-	// operator's Next drives reconstruction on one goroutine; ParallelScan
-	// workers never touch bopts).
-	fwdCSR *csr.CSR[float64]
 	// pendingPathPred maps a named path variable to a whole-path predicate that a
 	// WHERE Selection above a shortestPath()/allShortestPaths() binding wants
 	// fused INTO the operator (#1786). The Selection registers the predicate
@@ -647,7 +620,14 @@ type buildOpts struct {
 	// pushdown with itself. The polarity is negative so every build path that
 	// never sets it keeps the pushdown.
 	labelCountPushdownDisabled bool
-	fwdCSRReady                bool
+	// pinnedRead is true when the statement is read-only and reads a pinned
+	// snapshot, so every read of a node id within the statement observes the same
+	// state. It is set by [readBuildScaffold.init] and carried into subqueries by
+	// [buildOpts.forSubquery]; every write build leaves it false. It licenses
+	// reusing one materialised node value for consecutive rows carrying the same
+	// node id (see [newAggregationNodeKeyEval], rmp #2732): on a writing statement a
+	// later row may observe a write an earlier row's value predates.
+	pinnedRead bool
 	// scalarUseMemo is the plan-cache entry's cross-execution memo for
 	// [analyseNodeScalarUse] (rmp #2383). The read-path build points it at the
 	// entry serving this query; every other build path leaves it nil, and
@@ -664,6 +644,12 @@ type buildOpts struct {
 	// for what it holds and why it is bounded, and
 	// [rewriteCountVarToCountStarFor] for the routing.
 	countVarMemo *countVarRewriteMemo
+	// layoutMemo is the plan-cache entry's cross-execution memo of row-layout
+	// snapshots (rmp #3097). A pointer INTO the shared entry, like scalarUseMemo,
+	// and set only on a plain read execution where no reorder or anchor swap
+	// fired; nil means no memo. See [layoutMemo] for why it is exact and safe for
+	// concurrent use.
+	layoutMemo *layoutMemo
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -1831,30 +1817,6 @@ func resolveMaxResultBytes(opt int64) int64 {
 //nolint:gocritic // public API: EngineOptions is passed by value to preserve every existing call site; the constructor only reads from it.
 func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *Engine {
 	ensureIndexManager(g)
-	// openCypher's data model is a multigraph: every CREATE adds a relationship,
-	// including a second relationship between an existing ordered node pair. A
-	// non-multigraph adjacency cannot store such a parallel edge, so any write
-	// that would create one fails fast with [ErrParallelEdgeInSimpleGraph]. Warn
-	// once at construction so the misconfiguration surfaces before the first
-	// write rather than only when a parallel-edge CREATE is attempted.
-	if !g.AdjList().Multigraph() {
-		slog.Default().Warn("cypher: engine constructed over a non-multigraph graph; "+
-			"a CREATE or MERGE that adds a parallel relationship between an existing node pair "+
-			"will fail because openCypher requires multigraph semantics",
-			slog.String("hint", "construct the graph with adjlist.Config{Multigraph: true}"))
-	}
-	// openCypher relationships are directed: MATCH/CREATE/MERGE and functions
-	// like type()/startNode()/endNode() assume a stored direction. A
-	// non-directed (undirected) backend stores each edge symmetrically, so
-	// directed pattern matching and traversal silently produce incorrect edge
-	// results. Warn once at construction so the misconfiguration surfaces before
-	// the first query rather than as silently wrong output (#1892).
-	if !g.AdjList().Directed() {
-		slog.Default().Warn("cypher: engine constructed over a non-directed (undirected) graph; "+
-			"openCypher requires directed relationships, so directed pattern matching and "+
-			"traversal will produce incorrect edge results",
-			slog.String("hint", "construct the graph with adjlist.Config{Directed: true}"))
-	}
 	reg := opts.Registry
 	if reg == nil {
 		reg = funcs.DefaultRegistry
@@ -2997,6 +2959,13 @@ func (e *Engine) buildReadPhysical(
 	// the whole result set (#1830).
 	bopts.maxResultRows = e.maxResultRows
 	bopts.maxResultBytes = e.maxResultBytes
+	// Row-layout memo (rmp #3097): only on an ordinary execution — not a
+	// rendering or profiled build — and only when no swap gate fired, so the
+	// executions sharing the memo share their layouts. Content equality inside
+	// the memo keeps it exact regardless (see [layoutMemo]).
+	if entry != nil && prof == nil && estimates == nil && len(bopts.reorderSwap) == 0 && len(bopts.anchorSwap) == 0 {
+		bopts.layoutMemo = &entry.layouts
+	}
 	op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
 	if err == nil && estimates != nil {
 		// A rendering build reads exact statistics populations through the
@@ -5675,6 +5644,10 @@ type planCacheEntry struct {
 	// reach would duplicate knowledge that lives in the builder. See
 	// [countVarRewriteMemo].
 	countVarRewrite countVarRewriteMemo
+	// layouts memoises the build's row-layout snapshots across executions of this
+	// plan (rmp #3097). Filled lazily from the build's own call sites, like
+	// scalarUse; see [layoutMemo] for the concurrency contract.
+	layouts layoutMemo
 }
 
 // nodeScalarUseMemo memoises [analyseNodeScalarUse] per AST expression for the
@@ -7362,6 +7335,49 @@ type lpgNodeWalker struct {
 	// graph with g.Raw().
 	g      *lpg.ReadView[string, float64]
 	morsel []graph.NodeID // nil = walk the whole graph; non-nil = scan this slice only
+	// stream is set only by the READ build ([readBuildScaffold.init]) and only at
+	// a pinned snapshot (rmp #3081). It lets [exec.AllNodesScan] pull ids in
+	// bounded batches instead of materialising every id in Init. That is sound
+	// only there: node existence is resolved AS OF the snapshot, so whether an id
+	// is visited at Init or later in the drain cannot change the answer, and an id
+	// interned after the snapshot began is born after it and reads as absent. A
+	// write path's view also sees its own statement's creations and deletions as
+	// they happen, so it keeps the Init-time materialisation (stream false).
+	stream bool
+}
+
+// StreamsNodeIDs reports whether [lpgNodeWalker.NextNodeIDs] may be used instead
+// of WalkNodeIDs: a whole-graph walker on the read path at a pinned snapshot.
+func (w *lpgNodeWalker) StreamsNodeIDs() bool {
+	return w.stream && w.morsel == nil && w.g.Snapshot() != nil
+}
+
+// NextNodeIDs appends to dst (up to cap(dst)) the next batch of node ids visible
+// at the walker's snapshot, in WalkNodeIDs order, advancing cur. It returns an
+// empty slice only once the walk is exhausted. Valid only when
+// [lpgNodeWalker.StreamsNodeIDs] is true.
+func (w *lpgNodeWalker) NextNodeIDs(cur *graph.MapperCursor, dst []graph.NodeID) []graph.NodeID {
+	mapper := w.g.AdjList().Mapper()
+	dst = dst[:0]
+	for len(dst) == 0 && !cur.Done() {
+		dst, *cur = mapper.AppendIDs(dst, *cur, cap(dst))
+		k := 0
+		for _, id := range dst {
+			if !w.g.IsTombstoned(id) {
+				dst[k] = id
+				k++
+			}
+		}
+		dst = dst[:k]
+	}
+	return dst
+}
+
+// NodeIDUpperBound returns the number of ids currently interned, holes excluded:
+// an upper bound on what a streamed walk at the snapshot can yield, because every
+// id visible at the snapshot was interned before it began.
+func (w *lpgNodeWalker) NodeIDUpperBound() int {
+	return w.g.AdjList().Mapper().Len()
 }
 
 // LiveOrderHint returns an upper-bound estimate of how many NodeIDs
@@ -8234,26 +8250,16 @@ func buildPlanWithMutatorFull(
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
-	// Give the write adapter the SAME bopts the read-side builders use. It used to
-	// matter because a relationship SET/REMOVE resolved the bound instance's handle
-	// from a forward-CSR position against the bopts-cached snapshot, and had to use
-	// the exact read-path mechanism to agree with reads (#1686). Since rmp #2317 the
-	// row carries the handle itself and no resolution happens, but the adapters still
-	// read bopts for the count store and the undo log. Only the concrete write
-	// adapters carry the field.
-	//
-	// The two concrete adapters are also the only mutators whose writes are
+	// The two concrete write adapters are the only mutators whose writes are
 	// journaled for live forward traversal (rmp #2883), so only they arm it. The
 	// journal belongs to the ADAPTER, not to this bopts: every plan built against
 	// one statement's adapter must share the one journal its writes feed.
 	switch m := mutator.(type) {
 	case *walMutatorAdapter:
-		m.bopts = bopts
 		if m.eng == nil || !m.eng.disableLiveTraversalForTest {
 			bopts.liveTopo = &m.liveTopo
 		}
 	case *lpgMutatorAdapter:
-		m.bopts = bopts
 		if m.eng == nil || !m.eng.disableLiveTraversalForTest {
 			bopts.liveTopo = &m.liveTopo
 		}
@@ -11087,11 +11093,23 @@ func buildOperatorRec(
 		// Opportunistic index-seek rewrite: if the predicate is a simple equality
 		// n.prop = $name and a hash index is available, produce NodeByIndexSeek
 		// directly without first building the scan child.
+		//
+		// A columnar recogniser that declined this Selection because a seek would
+		// fire has already built that seek; adopt it rather than build it again, and
+		// skip the builders it proved decline (rmp #3096, [seekProbeVerdict]).
+		probe, probed := bopts.takeSeekProbe(p, schema)
+		if probed && (probe.kind == seekProbeHash || probe.kind == seekProbeSet) {
+			return probe.adopt(schema), nil
+		}
 		if idxMgr != nil {
-			if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr, labelSrc, bopts); err != nil {
-				return nil, err
-			} else if ok {
-				return op, nil
+			if !probed || !probe.skipsHash() {
+				if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr, labelSrc, bopts); err != nil {
+					probe.release()
+					return nil, err
+				} else if ok {
+					probe.release()
+					return op, nil
+				}
 			}
 			// Key-SET seek (#2183): the predicate is a disjunction of equalities on
 			// one property — what an UNWIND-bound key becomes once
@@ -11102,8 +11120,11 @@ func buildOperatorRec(
 			if lw, ok := walker.(*lpgNodeWalker); ok {
 				seekSetG = lw.g
 			}
-			if op, ok := tryBuildIndexSeekSetFromSelection(p, params, schema, idxMgr, seekSetG, bopts); ok {
-				return op, nil
+			if !probed || !probe.skipsSet() {
+				if op, ok := tryBuildIndexSeekSetFromSelection(p, params, schema, idxMgr, seekSetG, bopts); ok {
+					probe.release()
+					return op, nil
+				}
 			}
 		}
 		// An unclaimed seek hint is DROPPED rather than evaluated (#2183). The hint
@@ -11115,6 +11136,7 @@ func buildOperatorRec(
 		// establishes — measured at 2 952 ms for k=2001, N=20 000, against ~12 ms
 		// for the original hint-free plan.
 		if bopts != nil && bopts.seekHint[p] {
+			probe.release()
 			return buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		}
 		// Set-at-a-time multi-label conjunction (#2133): the SAME shape the
@@ -11128,8 +11150,10 @@ func buildOperatorRec(
 		// key-set seeks, which subsume the Selection outright and are more selective
 		// (see label_intersect_plan.go).
 		if op, ok, err := buildLabelIntersectionIfEnabled(p, labelSrc, schema, bopts); err != nil {
+			probe.release()
 			return nil, err
 		} else if ok {
+			probe.release()
 			return op, nil
 		}
 		// Min-cardinality multi-label anchor scan (#2077): when this Selection is
@@ -11142,8 +11166,10 @@ func buildOperatorRec(
 		// through to the default Labels[0] build when disabled or not eligible (see
 		// min_label_scan_plan.go).
 		if op, ok, err := buildMinLabelScanIfEnabled(p, walker, labelSrc, reg, params, schema, bopts); err != nil {
+			probe.release()
 			return nil, err
 		} else if ok {
+			probe.release()
 			return op, nil
 		}
 		// Opportunistic range-index seek (#1505): when the predicate is a range
@@ -11162,7 +11188,9 @@ func buildOperatorRec(
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			rangeG = lw.g
 		}
-		if rangeChild, ok := buildRangeSeekIfEnabled(bopts, p, schema, idxMgr, rangeG, params); ok {
+		if probed && probe.kind == seekProbeRange {
+			child = profileIntermediate(bopts, probe.adopt(schema))
+		} else if rangeChild, ok := buildRangeSeekIfEnabled(bopts, p, schema, idxMgr, rangeG, params); ok {
 			// profileIntermediate, because the seek is built HERE rather than by the
 			// recursion, so buildOperator's single wrap point never sees it and a
 			// profiled plan rendered the access path as "(not measured)" — the one
@@ -12676,9 +12704,7 @@ func exprHasNonScalar(e ast.Expression) bool { // per-AST-node dispatch; no hidd
 //     and carries the identical hazard, so it is reset for the identical reason:
 //     edgeVarMeta below is nil'd so a worker rebuilds its own, which means a
 //     future widening of the fused shape to a relationship pattern would reach
-//     lazyRelResolverFor on the worker goroutine. fwdCSR / fwdCSRReady are
-//     relationship-reconstruction caches the fused shape never touches; reset
-//     defensively.
+//     lazyRelResolverFor on the worker goroutine.
 //
 //   - BUILD-WRITTEN maps. The per-worker subtree rebuild runs buildOperator /
 //     buildIRProjection on the worker goroutine, and those WRITE bopts maps
@@ -12717,8 +12743,6 @@ func (b *buildOpts) forWorker() *buildOpts {
 	// Lazily-written-at-eval fields.
 	cp.nodeResolver = nil
 	cp.relResolver = nil
-	cp.fwdCSR = nil
-	cp.fwdCSRReady = false
 	// Build-written maps: nil so each worker allocates its own (no shared-map race).
 	cp.scalarCols = nil
 	cp.projAliasScalarCols = nil
@@ -12750,6 +12774,9 @@ func (b *buildOpts) forWorker() *buildOpts {
 	// morsel-parallel leaf implements no exec.PlanChildren, so nothing built below it
 	// is ever reachable from the output (rmp #2765).
 	cp.estimates = nil
+	// A probe-built seek belongs to the statement's own Selection build (rmp
+	// #3096); a worker must neither adopt nor release it.
+	cp.seekProbe = seekProbeVerdict{}
 	return &cp
 }
 
@@ -12879,6 +12906,10 @@ func (b *buildOpts) forSubquery() *buildOpts {
 		// scope-independent in exactly the way this allowlist admits — it names an
 		// optimisation, not a row, a pointer or a plan node.
 		labelCountPushdownDisabled: b.labelCountPushdownDisabled,
+		// The pinned-snapshot fact (rmp #2732). Scope-independent: a subquery of a
+		// read-only statement at a pinned snapshot reads that same snapshot, and a
+		// subquery of a writing statement inherits false.
+		pinnedRead: b.pinnedRead,
 	}
 }
 
@@ -13152,7 +13183,7 @@ func tryBuildParallelAggregateScan(
 		wWalker := &lpgNodeWalker{g: g, morsel: ids}
 		scan := exec.NewAllNodesScan(wWalker)
 		wBopts := bopts.forWorker()
-		wItems, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, wBopts)
+		wItems, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, wBopts, false)
 		wProj, perr := exec.NewProject(scan, wItems)
 		if perr != nil {
 			return nil, perr
@@ -13165,7 +13196,7 @@ func tryBuildParallelAggregateScan(
 	// tryBuildParallelScanProject's probe).
 	if _, perr := exec.NewProject(exec.NewAllNodesScan(&lpgNodeWalker{g: g, morsel: []graph.NodeID{}}),
 		func() []exec.ProjectionItem {
-			items, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, bopts.forWorker())
+			items, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, bopts.forWorker(), false)
 			return items
 		}()); perr != nil {
 		return nil, false, perr
@@ -13493,7 +13524,7 @@ func buildEagerAggregation(
 	// Built by the shared helper so the serial EagerAggregation and the parallel
 	// aggregate scan (#2111) evaluate every key and argument through the SAME
 	// closures, byte-identically.
-	items, keyCols := buildAggPreProjItems(p, schemaSnap, capturedG, capturedParams, capturedReg, capturedBopts)
+	items, keyCols := buildAggPreProjItems(p, schemaSnap, capturedG, capturedParams, capturedReg, capturedBopts, capturedBopts != nil && capturedBopts.pinnedRead)
 
 	// Wrap child with the pre-projection. When the grouping keys and aggregate
 	// arguments are scalar-property accesses on a bound node and the child emits raw
@@ -13574,6 +13605,7 @@ func buildAggPreProjItems(
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
+	reuseNodeKeys bool,
 ) ([]exec.ProjectionItem, []int) {
 	items := make([]exec.ProjectionItem, 0, len(p.GroupBy)+len(p.Aggregates))
 
@@ -13586,10 +13618,13 @@ func buildAggPreProjItems(
 		if i < len(p.GroupByExprs) {
 			astExpr = p.GroupByExprs[i]
 		}
-		items = append(items, exec.ProjectionItem{
-			Alias: varName,
-			Eval:  newAggregationEval(astExpr, varName, schemaSnap, g, params, reg, bopts),
-		})
+		var eval func(exec.Row) (expr.Value, error)
+		if v, isVar := astExpr.(*ast.Variable); isVar && reuseNodeKeys {
+			eval = newAggregationNodeKeyEval(v, schemaSnap, g, params, reg, bopts)
+		} else {
+			eval = newAggregationEval(astExpr, varName, schemaSnap, g, params, reg, bopts)
+		}
+		items = append(items, exec.ProjectionItem{Alias: varName, Eval: eval})
 	}
 
 	// Aggregate argument projections.
@@ -13647,9 +13682,130 @@ func aggArgItem(
 		}
 	}
 
+	// count(DISTINCT <bare variable>): the value is read only by the DISTINCT
+	// wrapper, whose equivalence on a node is its id ([expr.Equivalent] treats a
+	// NodeValue and an IntegerValue carrying the same id as one value), and by
+	// CountAgg, which only null-checks it. A plain node binding is therefore
+	// passed as its raw id instead of a whole materialised node (rmp #2732);
+	// relationship, path and scalar bindings are built exactly as before.
+	if aggExpr.Function == "count" && aggExpr.Distinct {
+		if v, isVar := aggExpr.ArgumentExpr.(*ast.Variable); isVar {
+			eval, _ := newAggregationNodeRefEval(v, schemaSnap, g, params, reg, bopts)
+			return exec.ProjectionItem{Alias: aggExpr.OutputName, Eval: eval}
+		}
+	}
+
 	return exec.ProjectionItem{
 		Alias: aggExpr.OutputName,
 		Eval:  newAggregationEval(aggExpr.ArgumentExpr, aggExpr.Argument, schemaSnap, g, params, reg, bopts),
+	}
+}
+
+// newAggregationNodeRefEval returns an aggregation pre-projection evaluator for
+// the bare variable v that binds a PLAIN node as its raw row cell (the node id)
+// instead of a materialised [expr.NodeValue] (rmp #2732). Every other binding of
+// v — relationship, variable-length relationship list, path, scalar column — is
+// produced exactly as [newAggregationEval] produces it, because the use it plans
+// with keeps needsWholeNode set and [populateRowCtx] honours nodeRefOnly only on
+// the plain-node branch. The returned plan answers, after its first row, which
+// of the two v resolved to; see [planBindsPlainNode].
+//
+// The evaluator recycles the binding map exactly as the gated arm of
+// [newAggregationEval] does: the plan is gated, the arena is nil, and the only
+// value that escapes is the row cell itself.
+func newAggregationNodeRefEval(
+	v *ast.Variable,
+	schemaSnap map[string]int,
+	g *lpg.ReadView[string, float64],
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	bopts *buildOpts,
+) (func(exec.Row) (expr.Value, error), *rowBindPlan) {
+	use := map[string]*nodeScalarUse{v.Name: {
+		keys:           map[string]struct{}{},
+		presenceKeys:   map[string]struct{}{},
+		needsWholeNode: true,
+		nodeRefOnly:    true,
+	}}
+	bp := newRowBindPlan(newRowSchema(schemaSnap), bopts, g, use)
+	return func(row exec.Row) (expr.Value, error) {
+		return evalRowPooledOwned(v, row, bp, params, reg)
+	}, bp
+}
+
+// planBindsPlainNode reports whether the resolved plan binds name as a plain
+// node: present in the row and carrying no entity or scalar pass-through kind.
+// Only such a binding reaches the nodeRefOnly branch of [populateRowCtx].
+func planBindsPlainNode(bp *rowBindPlan, name string) bool {
+	for _, b := range bp.resolved() {
+		if b.name == name {
+			return b.kind&(bindEntityKinds|bindScalarPassThrough) == 0
+		}
+	}
+	return false
+}
+
+// newAggregationNodeKeyEval returns the pre-projection evaluator for a grouping
+// key that is the bare variable v, on a read-only statement at a pinned
+// snapshot. It returns exactly what [newAggregationEval] returns — a plain node
+// key is still a whole [expr.NodeValue], because the key value is emitted
+// downstream and may be returned, so its labels and properties are required —
+// but it materialises the node once per RUN of consecutive rows carrying the
+// same id rather than once per row (rmp #2732).
+//
+// Why it is needed: an aggregation grouped by a node, `MATCH (u)-[:F]->() WITH
+// u, count(*)`, sees one input row per relationship, and an expansion emits a
+// node's relationships consecutively. Every row's key was materialised in full
+// and all but the first of each group was discarded after hashing; on
+// examples/26_social_scale_bench that was 7.2 GB of allocation per run.
+//
+// Why it is exact: the statement reads a pinned snapshot and writes nothing, so
+// materialising an id a second time yields a value equal to the first in every
+// field. The reused value is immutable once built, and the aggregation retains
+// only the first key value of each group.
+//
+// Concurrency: the closure holds one-entry state and is NOT safe for concurrent
+// use. It is built only on the serial aggregation path, whose pre-projection is
+// driven by one goroutine; the parallel aggregate scan builds its own items per
+// worker with reuseNodeKeys false.
+func newAggregationNodeKeyEval(
+	v *ast.Variable,
+	schemaSnap map[string]int,
+	g *lpg.ReadView[string, float64],
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	bopts *buildOpts,
+) func(exec.Row) (expr.Value, error) {
+	eval, bp := newAggregationNodeRefEval(v, schemaSnap, g, params, reg, bopts)
+	var (
+		resolved, plain bool
+		have            bool
+		lastID          expr.IntegerValue
+		lastVal         expr.Value
+	)
+	return func(row exec.Row) (expr.Value, error) {
+		val, err := eval(row)
+		if err != nil {
+			return val, err
+		}
+		iv, isID := val.(expr.IntegerValue)
+		if !isID {
+			return val, nil
+		}
+		if !resolved {
+			plain, resolved = planBindsPlainNode(bp, v.Name), true
+		}
+		if !plain {
+			// A scalar column passes its integer through unchanged; an entity
+			// binding has already been built by populateRowCtx.
+			return val, nil
+		}
+		if have && iv == lastID {
+			return lastVal, nil
+		}
+		out := upgradeNodeIDToValue(iv, g)
+		have, lastID, lastVal = true, iv, out
+		return out, nil
 	}
 }
 
@@ -15140,7 +15296,7 @@ func edgePropsToExprMap(g *lpg.ReadView[string, float64], srcKey, dstKey string)
 // by-handle label and an empty property bag correctly reports keys(r) = [] and
 // r.k IS NULL, instead of inheriting a propertied parallel sibling's keys from
 // the per-pair union. The per-pair store is reached only when the membership
-// signal is absent altogether (a 0-handle simple-graph or pre-handle edge, or a
+// signal is absent altogether (a 0-handle or pre-handle edge, or a
 // Go-API edge that stamped a handle but wrote the per-pair store only). See
 // [lazyRelResolver] and [expr.RelSource], which state the same exclusivity.
 //
@@ -15301,6 +15457,21 @@ func buildUnwindOperator(
 // relationship edge ID) the value is returned unchanged so callers can rely on
 // "value-passthrough unless we can prove it's a node".
 //
+// What forces the WHOLE node (rmp #2732). Every caller reaching this function
+// holds a value that can escape into a result row or a retained structure —
+// a bare `RETURN n`, collect(n), a grouping key `WITH n, count(*)` that is
+// emitted downstream, properties(n) — or comes from a closure that analysed no
+// expression. A reader that needs only some of the node never arrives here:
+// scalar reads (n.k, n:L) take the lazy [upgradeNodeIDToValuePartial] path,
+// field extractors (id/labels/keys) take [buildPartialNodeValueForFn], and an
+// identity-only consumer (count(DISTINCT n)) binds the raw id through
+// nodeScalarUse.nodeRefOnly. Because the value is self-describing and carries
+// no reference to the read view, it must be complete when built; deferring it
+// would require the row to carry a node reference that every downstream
+// consumer resolves, which is not this engine's row contract. The one remaining
+// avoidable cost — re-materialising a grouping key once per input row — is
+// bounded to once per run of equal ids by [newAggregationNodeKeyEval].
+//
 // Relationships are not upgraded here. The engine emits a relationship as three
 // separate IntegerValue columns (srcID, edgeID, dstID) and the schema carries
 // no per-column kind information, so RelationshipValue construction needs
@@ -15412,6 +15583,16 @@ type nodeScalarUse struct {
 	needsLabelList bool
 	needsKeyNames  bool
 	needsWholeNode bool
+	// nodeRefOnly is never set by [analyseNodeScalarUse]. The aggregation builder
+	// sets it, together with needsWholeNode, on a use it constructs for a bare
+	// variable whose consumer needs a plain node binding only as a REFERENCE —
+	// the argument of count(DISTINCT x), which reads identity alone, and a
+	// grouping key that [newAggregationNodeKeyEval] materialises itself (rmp
+	// #2732). [populateRowCtx] then binds a plain node variable to its raw row
+	// cell instead of calling [upgradeNodeIDToValue]. needsWholeNode stays set so
+	// every other consumer of the use — the relationship and path reconstructions
+	// above the node branch — keeps building the whole entity exactly as before.
+	nodeRefOnly bool
 }
 
 // hasScalarFnNeed reports whether the variable is touched by at least one
@@ -16195,10 +16376,19 @@ func buildRowCtxWithUse(row exec.Row, bp *rowBindPlan) expr.RowContext {
 // global arena would let two concurrent query goroutines clobber each other's
 // node ids. See [acquireRowCtx]/[releaseRowCtx] and the soundness invariant on
 // [populateRowCtx].
+//
+// The struct is kept at exactly one 64-byte cache line (pinned by
+// TestPooledRowCtxFitsOneCacheLine): the two cursors are int32 so the
+// relationship arena (rmp #3104) fits beside the node arena without growing the
+// unit. An earlier relationship-arena variant with int cursors grew the unit past
+// one line and cost a reproducible ~1.7% on an aggregation that binds no
+// relationship at all (#2388 measurement record).
 type pooledRowCtx struct {
-	ctx  expr.RowContext      // the per-row variable bindings map
-	lazy []expr.LazyNodeValue // arena of reusable lazy node structs
-	used int                  // cursor into lazy; reset to 0 on each acquire
+	ctx     expr.RowContext              // the per-row variable bindings map
+	lazy    []expr.LazyNodeValue         // arena of reusable lazy node structs
+	rels    []expr.LazyRelationshipValue // arena of reusable lazy relationship structs (rmp #3104)
+	used    int32                        // cursor into lazy; reset to 0 on each acquire
+	relUsed int32                        // cursor into rels; reset to 0 on each acquire
 }
 
 // rowCtxPool recycles per-row [pooledRowCtx] units for the non-escaping
@@ -16265,7 +16455,7 @@ func acquireRowCtx(schemaLen int) *pooledRowCtx {
 		p = &pooledRowCtx{ctx: make(expr.RowContext, rowCtxPoolCap)}
 	}
 	clear(p.ctx)
-	p.used = 0
+	p.used, p.relUsed = 0, 0
 	return p
 }
 
@@ -16276,7 +16466,7 @@ func acquireRowCtx(schemaLen int) *pooledRowCtx {
 // a distinct arena slot (the cursor advances per call within one populateRowCtx
 // pass), so two variables in the same row never alias one struct.
 func (p *pooledRowCtx) borrowLazy(id uint64, res expr.NodeResolver) *expr.LazyNodeValue {
-	if p.used < len(p.lazy) {
+	if int(p.used) < len(p.lazy) {
 		v := &p.lazy[p.used]
 		p.used++
 		v.Reset(id, res)
@@ -16286,6 +16476,30 @@ func (p *pooledRowCtx) borrowLazy(id uint64, res expr.NodeResolver) *expr.LazyNo
 	v := &p.lazy[len(p.lazy)-1]
 	p.used++
 	v.Reset(id, res)
+	return v
+}
+
+// borrowLazyRel is [pooledRowCtx.borrowLazy] for a relationship (rmp #3104): it
+// returns a [*expr.LazyRelationshipValue] from the unit's relationship arena,
+// rebound to the given identity, type, storage coordinates and resolver. The
+// pointer is owned by this pooledRowCtx and is valid only until the unit is
+// released; it must never escape the row it is read in, which the scalarUse gate
+// guarantees exactly as it does for a borrowed lazy node. Each relationship
+// variable in a row draws a distinct slot (the cursor advances per call within
+// one populateRowCtx pass), so two variables in one row never alias one struct.
+//
+// The slot is rebound by assigning the value [expr.NewLazyRelationshipValue]
+// builds. The constructor is inlined and its result does not escape, so the
+// assignment is a stack-to-arena copy with no heap allocation, and the rebound
+// slot is field-for-field the value the constructor returns — no second
+// construction path exists to drift from it.
+func (p *pooledRowCtx) borrowLazyRel(id, startID, endID uint64, relType string, src expr.RelSource, res expr.RelationshipResolver) *expr.LazyRelationshipValue {
+	if int(p.relUsed) >= len(p.rels) {
+		p.rels = append(p.rels, expr.LazyRelationshipValue{})
+	}
+	v := &p.rels[p.relUsed]
+	p.relUsed++
+	*v = *expr.NewLazyRelationshipValue(id, startID, endID, relType, src, res)
 	return v
 }
 
@@ -16420,7 +16634,7 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, bp *rowBindPlan, arena *p
 				// fetch be replaced by a kind-gated EdgeHasProperty presence
 				// check. It is nil on every ungated plan, which keeps that build
 				// byte-identical (C5).
-				if rv, ok := buildRelationshipValueFromRow(row, &b.meta.edge, g, bopts, b.use); ok {
+				if rv, ok := buildRelationshipValueFromRow(row, &b.meta.edge, g, bopts, b.use, arena); ok {
 					ctx[b.name] = rv
 					continue
 				}
@@ -16447,6 +16661,15 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, bp *rowBindPlan, arena *p
 				continue
 			}
 			use := b.use
+			// Node reference (rmp #2732): the consumer reads only the node's
+			// identity, or materialises the node itself. Restricted to a plain
+			// node binding — no entity kind, whose failed reconstruction falls
+			// through to here — so the raw cell differs from the eager upgrade
+			// only by the property and label copy the consumer does not want.
+			if use.nodeRefOnly && b.kind&bindEntityKinds == 0 {
+				ctx[b.name] = row[colIdx]
+				continue
+			}
 			// Node field-extractor (#1659: labels(n)/keys(n)/id(n)): the lazy
 			// value answers only on-demand scalar accesses (n.k, n:Label) and
 			// cannot enumerate labels or keys, and fnLabels/fnKeys/fnID
@@ -16639,17 +16862,17 @@ func slotHoldsHandle(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID
 // [expr.RelationshipValue] exactly as before, which is why the return type is
 // expr.Value rather than expr.RelationshipValue.
 //
-// The lazy value is allocated fresh per row rather than drawn from the pooled
-// RowContext's struct arena, the way the lazy NODE value is. That is a MEASURED
-// choice, not an oversight: an arena variant was built and interleaved against
-// this one, and it made the pooled path no faster (the predicate query moved
-// -5.44% without it against -5.51% with it, a difference inside the measured
-// noise floor) while growing [pooledRowCtx] past one cache line, which cost a
-// reproducible ~1.7% on an unrelated aggregation that binds no relationship at
-// all. Allocating one small immutable struct also keeps the value free of the
-// single-goroutine ownership contract a reused struct would carry. See the
-// #2388 measurement record.
-func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.Value, bool) {
+// ARENA (rmp #3104). When arena is non-nil — the pooled non-escaping path
+// ([evalRowPooled] on a gated plan), and only there — the lazy value is drawn
+// from the pooled RowContext's relationship arena ([pooledRowCtx.borrowLazyRel])
+// instead of being allocated per row, the way the lazy NODE value is (#1697). It
+// carries the same ownership contract as a borrowed lazy node: valid only until
+// the unit is released, never escaping the row. Every other caller (the
+// aggregation pre-projection, the eager builders, tests) passes nil and gets a
+// freshly allocated value exactly as before. The #2388 arena variant was
+// rejected because it grew [pooledRowCtx] past one cache line; this one keeps the
+// unit at 64 bytes by narrowing the cursors to int32.
+func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse, arena *pooledRowCtx) (expr.Value, bool) {
 	// The oracle for "the relationship is resolved once per row" (#2658): one count
 	// per mapper-resolution + [relStoredInverted] + by-handle-routing pass. Gated,
 	// so it costs a predicted branch when off — see [projFusionCountersOn].
@@ -16692,43 +16915,49 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 			// defaulted to forward) and, crucially, lets the property fetch be
 			// skipped (#1630) without losing the direction signal.
 			stKey, enKey := srcKey, dstKey
+			// stID/enID are the NodeIDs of stKey/enKey. The Mapper is an
+			// append-only bijection (an interned key never changes id), so the
+			// ids that just Resolved to srcKey/dstKey ARE what Lookup(srcKey) /
+			// Lookup(dstKey) would return: the ID-keyed label reads below are
+			// the key-keyed ones minus two Mapper lookups each (rmp #3080).
+			stID, enID := graph.NodeID(srcID), graph.NodeID(dstID)
 			// The row's edge id IS the stable handle since rmp #2317, so it is
 			// recovered BEFORE the orientation decision below, which consults it.
 			fwdHandle := uint64(edgeIDVal)
 			if relStoredInvertedForHop(row, meta, g, graph.NodeID(srcID), graph.NodeID(dstID), srcKey, dstKey, fwdHandle) {
 				storageStart, storageEnd = dstID, srcID
 				stKey, enKey = dstKey, srcKey
+				stID, enID = enID, stID
 			}
-			ets := g.EdgeLabels(stKey, enKey)
+			// ets is the type set the edge's type is picked from. The per-pair
+			// union (EdgeLabelsByID, an O(deg(src)) scan of src's slot label
+			// column) is read LAST and only when neither per-instance source
+			// below answered: it used to be read first and then overwritten,
+			// unread, for every by-handle-typed (Cypher-created) edge (rmp #3080).
+			var ets []string
 			// Per-instance label override: when the CSR slot at
-			// edgeIDVal corresponds to a specific parallel CREATE
-			// (multigraph mode), narrow the edge's type to that
+			// edgeIDVal corresponds to a specific parallel CREATE,
+			// narrow the edge's type to that
 			// CREATE's label set. The per-pair property union is
 			// kept so SET / REMOVE / `r.foo` reflect the live edge
 			// state — only the type label benefits from
 			// per-instance specialisation (Match2 [6] / Match7 [29]
 			// / MatchWhere1 [11]).
 			//
-			// Stable-handle path first: read the explicit per-edge
-			// handle at this forward CSR position and resolve the type
-			// by it. This is delete-stable — unlike the positional
-			// instance idx (edgeInstanceIdxFor), it does not mis-map
-			// after a parallel sibling is deleted and the neighbour
-			// slice is compacted. Both per-instance lookups are keyed on
-			// the STORAGE pair (stKey -> enKey), not the row's
-			// (srcKey, dstKey): for the undirected reverse hop the storage
-			// direction is inverted (storage holds enKey <- ... actually
-			// stKey -> enKey), and edgeIDVal is the forward-CSR position in
-			// stKey's adjacency that Expand resolved per parallel instance
-			// (rmp #1634). Falls back to the positional idx when no handle
-			// column is present or the slot's handle is 0 (a MERGE-created
-			// edge).
+			// Stable-handle path first: since rmp #2317 the row's edge id
+			// (edgeIDVal) IS the stable per-edge handle, so the type is
+			// resolved by it directly, with no CSR position to translate.
+			// This is delete-stable: compacting a pair's neighbour slice
+			// after a parallel sibling is deleted does not move a handle.
+			// Both per-instance lookups are keyed on the STORAGE pair
+			// (stKey -> enKey), not the row's (srcKey, dstKey): for an
+			// undirected reverse hop the storage direction is inverted.
+			// A handle of 0 falls back to the pair's derived union below.
 			//
-			// fwdHandle, recovered once here, is the SHARED disambiguator for
-			// both the type and the property resolution of this bound instance
-			// (rmp #1684): it is the stable per-edge handle at the row's forward
-			// CSR position, or 0 when no handle column is present or the slot's
-			// handle is the 0 sentinel. The type path consumes it inline below;
+			// fwdHandle is the SHARED disambiguator for both the type and the
+			// property resolution of this bound instance (rmp #1684): the
+			// row's stable per-edge handle, or the 0 sentinel. The type path
+			// consumes it inline below;
 			// buildEdgeProps reuses the SAME handle so r.foo / properties(r) /
 			// RETURN r report the bound edge's OWN properties rather than the
 			// latest-wins union over parallel siblings — keeping the property
@@ -16750,28 +16979,38 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 			// propertied sibling's keys. len(perHandle) > 0 captures it here.
 			hasByHandleEntry := false
 			if fwdHandle != 0 {
-				if perHandle := g.EdgeLabelsByHandle(stKey, enKey, fwdHandle); len(perHandle) > 0 {
+				if perHandle := g.EdgeLabelsByHandleID(stID, enID, fwdHandle); len(perHandle) > 0 {
 					ets = perHandle
 					handled = true
 					hasByHandleEntry = true
 				}
 			}
-			if !handled {
-				instanceIdx, totalCreates, parallelCount := edgeInstanceIdxFor(bopts, g, stKey, enKey, uint64(edgeIDVal))
-				if instanceIdx > 0 && parallelCount >= totalCreates && totalCreates > 0 {
-					if perInstance := g.EdgeLabelsAt(stKey, enKey, instanceIdx); len(perInstance) > 0 {
-						ets = perInstance
-					}
+			// No by-handle record: the edge was not created by Cypher (every
+			// Cypher CREATE/MERGE records its mandatory type by handle), so its
+			// type is the pair's derived union. The per-CREATE ordinal store is
+			// NOT consulted: only Cypher-created edges populate it, and they never
+			// reach here. Reading it by treating the handle as a forward-CSR
+			// position typed a Go-API edge as a Cypher sibling (rmp #3088).
+			//
+			// The pair union is streamed into the picker rather than returned as a
+			// slice: the slice was one allocation per materialised relationship,
+			// read once by pickEdgeType and dropped (rmp #3106).
+			if handled {
+				if len(ets) > 0 {
+					edgeType = pickEdgeType(ets, meta.acceptedTypes)
 				}
-			}
-			if len(ets) > 0 {
-				edgeType = pickEdgeType(ets, meta.acceptedTypes)
+			} else if t, ok := pickPairEdgeType(g, stID, enID, meta.acceptedTypes); ok {
+				edgeType = t
 			}
 			// Lazy relationship (rmp #2388): every field below is already
 			// resolved, so when the use is value-key-only the property map is
 			// the ONLY thing left to build — and the lazy value builds it never.
 			// Falls through to the eager map on every shape the gate rejects.
 			if relSrc, lazyOK := relLazyRoute(g, stKey, enKey, fwdHandle, hasByHandleEntry, relUse); lazyOK {
+				if arena != nil {
+					return arena.borrowLazyRel(uint64(edgeIDVal), storageStart, storageEnd,
+						edgeType, relSrc, lazyRelResolverFor(bopts, g)), true
+				}
 				return expr.NewLazyRelationshipValue(uint64(edgeIDVal), storageStart, storageEnd,
 					edgeType, relSrc, lazyRelResolverFor(bopts, g)), true
 			}
@@ -16818,14 +17057,14 @@ func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadV
 //     also compares EQUAL by relationship identity, because the ID below is the
 //     forward position in both directions.
 //
-//   - Type and properties. Recover the stable handle at fwdPos on the storage
-//     pair via [edgeHandleAtFwdPos]; when the by-handle MEMBERSHIP signal holds
+//   - Type and properties. fwdPos IS the edge's stable handle since rmp #2317,
+//     so no position is translated; when the by-handle MEMBERSHIP signal holds
 //     (a non-empty by-handle label set — Cypher CREATE/MERGE always records the
 //     mandatory type by-handle, so this also covers a zero-property parallel
 //     edge) resolve the type from [lpg.Graph.EdgeLabelsByHandle] and the
 //     properties from that ONE edge's by-handle store via [buildEdgeProps]. This
 //     is the same membership predicate and the same fallback ladder the
-//     single-hop path uses: a non-multigraph / legacy / 0-handle edge, and a
+//     single-hop path uses: a legacy / 0-handle edge, and a
 //     Go-API edge that stamped a handle but wrote only the per-pair store, both
 //     fall back to the coalesced per-pair surfaces, byte-identical to the
 //     pre-#1685 build.
@@ -16981,8 +17220,8 @@ var relPresencePlaceholder = expr.BoolValue(true)
 // propertied sibling's keys.
 //
 // Otherwise every branch falls back to the per-pair coalesced surfaces,
-// byte-identical to the original build. The fallback covers (a) a non-multigraph
-// / legacy / 0-sentinel edge (fwdHandle == 0), AND (b) an edge created through
+// byte-identical to the original build. The fallback covers (a) a legacy /
+// 0-sentinel edge (fwdHandle == 0), AND (b) an edge created through
 // the public Go API (Graph.AddEdge[H] + Graph.SetEdgeProperty), which stamps a
 // handle but writes the per-pair store ONLY, so it has NO by-handle entry and
 // per-pair is its sole materialised property mapping (hasByHandleEntry false). It
@@ -17127,69 +17366,6 @@ func relPresentByHandleOrPair(g *lpg.ReadView[string, float64], stKey, enKey str
 	return g.EdgeHasProperty(stKey, enKey, k)
 }
 
-// edgeInstanceIdxFor returns the 1-based per-CREATE instance index that
-// the CSR slot at edgePos corresponds to, together with the total
-// CREATE count for (srcKey, dstKey) and the number of parallel CSR
-// entries for that pair. Returns 0 / 0 / 0 when the position is out of
-// range or either endpoint is unknown to the mapper.
-//
-// Multigraph storage records one parallel CSR slot per CREATE, so
-// counting how many earlier entries (in the src's adjacency range)
-// share the same dst — up to and including edgePos — yields the
-// CREATE-time instance idx. Simple-graph storage collapses every
-// parallel CREATE onto one slot, so parallelCount stays at 1 and
-// callers fall back to the per-pair union surfaces.
-func edgeInstanceIdxFor(bopts *buildOpts, g *lpg.ReadView[string, float64], srcKey, dstKey string, edgePos uint64) (instanceIdx, totalCreates, parallelCount int64) {
-	totalCreates = g.EdgeCreateCount(srcKey, dstKey)
-	if totalCreates == 0 {
-		return 0, 0, 0
-	}
-	adj := g.AdjList()
-	srcID, ok := adj.Mapper().Lookup(srcKey)
-	if !ok {
-		return 0, totalCreates, 0
-	}
-	dstID, ok := adj.Mapper().Lookup(dstKey)
-	if !ok {
-		return 0, totalCreates, 0
-	}
-	fwdCSR := ensureFwdCSR(bopts, g)
-	if fwdCSR == nil {
-		return 0, totalCreates, 0
-	}
-	verts := fwdCSR.VerticesSlice()
-	edges := fwdCSR.EdgesSlice()
-	if uint64(srcID)+1 >= uint64(len(verts)) {
-		return 0, totalCreates, 0
-	}
-	start := verts[uint64(srcID)]
-	end := verts[uint64(srcID)+1]
-	if edgePos < start || edgePos >= end {
-		return 0, totalCreates, 0
-	}
-	for pos := start; pos <= edgePos; pos++ {
-		if pos >= uint64(len(edges)) {
-			break
-		}
-		if edges[pos] == dstID {
-			parallelCount++
-		}
-	}
-	// parallelCount now equals the index of edgePos within (srcID, dstID)
-	// parallel entries (1-based). Also count remaining occurrences so
-	// the caller knows the total parallel storage entries for the pair.
-	total := parallelCount
-	for pos := edgePos + 1; pos < end; pos++ {
-		if pos >= uint64(len(edges)) {
-			break
-		}
-		if edges[pos] == dstID {
-			total++
-		}
-	}
-	return parallelCount, totalCreates, total
-}
-
 // pickEdgeType chooses the rel-type label to surface for a stored edge.
 // LPG merges parallel edges between the same endpoint pair into one entry
 // with a label set, so g.EdgeLabels can return more than one label in
@@ -17204,14 +17380,17 @@ func pickEdgeType(stored, accepted []string) string {
 	if len(stored) == 0 {
 		return ""
 	}
+	// The accepted list comes from the pattern text (`[r:A|B]`), so it is a
+	// handful of names: a nested scan answers it with no per-row allocation,
+	// where a set built here cost one map per materialised relationship (rmp
+	// #3106). The scan order — stored labels outermost — is the selection rule
+	// itself: the FIRST stored label that is accepted wins.
 	if len(accepted) > 0 {
-		acceptSet := make(map[string]struct{}, len(accepted))
-		for _, a := range accepted {
-			acceptSet[a] = struct{}{}
-		}
 		for _, s := range stored {
-			if _, ok := acceptSet[s]; ok {
-				return s
+			for _, a := range accepted {
+				if s == a {
+					return s
+				}
 			}
 		}
 	}
@@ -17222,6 +17401,38 @@ func pickEdgeType(stored, accepted []string) string {
 		}
 	}
 	return best
+}
+
+// pickPairEdgeType is [pickEdgeType] over the pair's derived type union,
+// streamed from [lpg.ReadView.ForEachEdgeLabelByID] instead of materialised by
+// [lpg.ReadView.EdgeLabelsByID] (rmp #3106). Both surfaces emit the same names
+// in the same order, so the result is pickEdgeType's: the first emitted name
+// that is accepted, else the smallest emitted name. ok is false when the pair
+// has no type, where the caller keeps its declared type exactly as it did on an
+// empty slice.
+func pickPairEdgeType(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID, accepted []string) (string, bool) {
+	var (
+		best, hit    string
+		seen, hasHit bool
+	)
+	g.ForEachEdgeLabelByID(srcID, dstID, func(name string) {
+		if !seen || name < best {
+			best = name
+		}
+		seen = true
+		if !hasHit {
+			for _, a := range accepted {
+				if name == a {
+					hit, hasHit = name, true
+					break
+				}
+			}
+		}
+	})
+	if hasHit {
+		return hit, true
+	}
+	return best, seen
 }
 
 // buildIRProjection converts IR ProjectionItems to a physical Project operator.
@@ -17441,7 +17652,15 @@ func buildIRProjection(
 	// not address the same value in the INPUT row, so `RETURN a.id AS a,
 	// a.id` returned the bound node for the second column instead of the
 	// integer property (Return4 [3]).
-	inputSchema := copySchema(schema)
+	//
+	// Both snapshots of this function come from the plan-cache entry's layout
+	// memo when the build carries one (rmp #3097, [layoutMemo]), keyed on the
+	// projection's first item.
+	var layoutKey any
+	if len(items) > 0 {
+		layoutKey = &items[0]
+	}
+	inputSchema := bopts.projInputSchema(layoutKey, schema)
 	_ = inputSchema // referenced below in fast-path branches
 	// generalSnap is ONE schema snapshot shared by every general-path item in this
 	// body, built on the first item that needs it. Every such item resolves against
@@ -17981,7 +18200,7 @@ func buildIRProjection(
 			if evalFn == nil {
 				// General path: evaluate full AST expression with loaded RowContext.
 				if !generalSnapReady {
-					generalSnap = newRowSchema(copySchema(schema))
+					generalSnap = bopts.projGeneralRowSchema(layoutKey, schema)
 					generalSnapReady = true
 				}
 				schemaSnap := generalSnap
@@ -18301,9 +18520,16 @@ func columnarScanVar(plan ir.LogicalPlan) (string, bool) {
 // Being defined in terms of the real rewrites, rather than re-deriving their conditions,
 // is deliberate: a probe that guessed would drift from what buildOperator actually does,
 // and the failure mode of drift here is silently losing an index again.
+//
+// When schema is empty — the only case either caller reaches — the operator the
+// probe built is not discarded: it is handed to the Selection build of the same
+// statement through bopts, so the seek is built once per execution (rmp #3096,
+// see [seekProbeVerdict]). labelSrc is the statement's resolver, the one that
+// build passes, so the handed-off operator is the one it would have built.
 func indexSeekWouldFire(
 	sel *ir.Selection,
 	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
 	params map[string]expr.Value,
 	schema map[string]int,
 	idxMgr *index.Manager,
@@ -18322,22 +18548,49 @@ func indexSeekWouldFire(
 		g = lw.g
 	}
 
+	if labelSrc == nil {
+		labelSrc = labelSrcFromView(g)
+	}
+	// The verdict is handed on only for an empty schema; see [seekProbeVerdict].
+	handOff := len(schema) == 0
+
+	// Each builder writes the schema only on success, so with an empty schema one
+	// map serves all three; it is replaced should a declining builder ever write.
+	var work map[string]int
+	probeSchema := func() map[string]int {
+		if !handOff || work == nil || len(work) != 0 {
+			work = copySchema(schema)
+		}
+		return work
+	}
+
 	// Hash seek on `n.prop = <const>`.
-	if op, ok, err := tryBuildIndexSeekFromSelection(sel, params, copySchema(schema), idxMgr, labelSrcFromView(g), bopts); err == nil && ok {
-		closeProbe(op)
+	op, ok, hashErr := tryBuildIndexSeekFromSelection(sel, params, probeSchema(), idxMgr, labelSrc, bopts)
+	if hashErr == nil && ok {
+		settleProbe(handOff, bopts, sel, seekProbeHash, op, work, false)
 		return true
 	}
 	// Key-set seek: a disjunction of equalities on one property (#2183).
-	if op, ok := tryBuildIndexSeekSetFromSelection(sel, params, copySchema(schema), idxMgr, g, bopts); ok {
-		closeProbe(op)
+	if op, ok := tryBuildIndexSeekSetFromSelection(sel, params, probeSchema(), idxMgr, g, bopts); ok {
+		settleProbe(handOff, bopts, sel, seekProbeSet, op, work, hashErr != nil)
 		return true
 	}
 	// Range seek on a bound btree (#1505), including the numeric companion #2169 opens.
-	if op, ok := buildRangeSeekIfEnabled(bopts, sel, copySchema(schema), idxMgr, g, params); ok {
-		closeProbe(op)
+	if op, ok := buildRangeSeekIfEnabled(bopts, sel, probeSchema(), idxMgr, g, params); ok {
+		settleProbe(handOff, bopts, sel, seekProbeRange, op, work, hashErr != nil)
 		return true
 	}
 	return false
+}
+
+// settleProbe hands a probe-built operator to the Selection build when handOff
+// holds, and releases it otherwise.
+func settleProbe(handOff bool, bopts *buildOpts, sel *ir.Selection, kind seekProbeKind, op exec.Operator, after map[string]int, hashErr bool) {
+	if !handOff {
+		closeProbe(op)
+		return
+	}
+	bopts.recordSeekProbe(sel, kind, op, after, hashErr)
 }
 
 // closeProbe releases an operator built only to answer a planning question.
@@ -18391,7 +18644,7 @@ func tryBuildColumnarFilterChain(
 	// which is flat in the label population. Composing the two (seek to narrow the
 	// stream, columnar to avoid boxing what survives) is the better end state and is
 	// tracked separately; yielding is the part that is unconditionally correct.
-	if indexSeekWouldFire(sel, walker, params, schema, idxMgr, bopts) {
+	if indexSeekWouldFire(sel, walker, labelSrc, params, schema, idxMgr, bopts) {
 		return nil, false, nil
 	}
 	// The min-cardinality label re-anchor (#2077) replaces the scanned label with the
@@ -18787,7 +19040,7 @@ func tryBuildColumnarAggSource(
 		// min-label re-anchor (#2077) and the label intersection (#2133) each reduce the
 		// rows SCANNED. All three are evaluated read-only against the innermost
 		// Selection, the one buildOperator would rewrite.
-		if indexSeekWouldFire(innermost, walker, params, schema, idxMgr, bopts) {
+		if indexSeekWouldFire(innermost, walker, labelSrc, params, schema, idxMgr, bopts) {
 			return nil, false, nil
 		}
 		if bopts.minLabelScanEnabled {
@@ -19450,7 +19703,9 @@ func buildScalarPropertyChunkFiller(nodeChunkCol int, propName string, g *lpg.Re
 func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) exec.FilterFn {
 	// Derived ONCE per execution: the predicate closure runs per row, and the
 	// row layout is a pure function of the schema.
-	rs := newRowSchema(copySchema(schema))
+	// From the plan-cache entry's layout memo when the build carries one (rmp
+	// #3097, [layoutMemo]).
+	rs := bopts.filterRowSchema(predExpr, schema)
 	scalarUse, bail := analyseNodeScalarUseFor(bopts, predExpr)
 	if bail {
 		scalarUse = nil
@@ -21309,17 +21564,11 @@ type lpgMutatorAdapter struct {
 	touched *touchedNodes
 	// stampCon: see [mutationUndo.stampCon] (rmp #2353/#2355).
 	stampCon bool
-	// bopts is the per-query build options carrying the cached forward-CSR
-	// snapshot ([ensureFwdCSR]). It is used only by [EdgeHandleAtPosition] to
-	// resolve a bound relationship instance's stable handle from its forward-CSR
-	// edge position, reusing the exact read-path mechanism ([edgeHandleAtFwdPos]).
-	// It may be nil (resolution then falls back to a fresh CSR build).
-	bopts *buildOpts
 	// wtx is the write transaction this statement is running as, set by
 	// [setMutatorWriteTx] the moment the bracket opens (rmp #2304). It is what
-	// [lpgMutatorAdapter.EdgeHandleAtPosition] resolves its read through, so the
-	// handle it finds is the one THIS transaction can see — its own uncommitted
-	// instances included, another in-flight writer's excluded.
+	// the adapter's writer views ([lpgMutatorAdapter.w], [lpg.Graph.WriterViewOf])
+	// read through, so what they see is what THIS transaction can see — its own
+	// uncommitted writes included, another in-flight writer's excluded.
 	//
 	// The zero value means "no transaction", which reads the present. That is the
 	// right answer for the read-only test stubs that never open a bracket, and the
@@ -21477,7 +21726,7 @@ func (a *lpgMutatorAdapter) cs() *count.Store {
 //
 // Binding the two together is the point: every existing call site already sat behind the
 // audited "was this a real change" discriminator (a re-intern is not a creation, but
-// re-creating a tombstoned key is; a non-multigraph duplicate edge is not an addition).
+// re-creating a tombstoned key is).
 // Routing both counter families through one helper per effect means the per-statement
 // counts cannot drift from the counts the TCK already verifies, and no site can be
 // missed by omission.
@@ -21651,16 +21900,6 @@ func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	return id, nil
 }
 
-// ErrParallelEdgeInSimpleGraph is returned by a Cypher write that would add a
-// second relationship between an ordered node pair that already has one when the
-// backing graph is not a multigraph and therefore cannot store the parallel
-// edge. openCypher's data model is a multigraph in which every CREATE adds a
-// relationship, so the Cypher engine must be constructed over a graph built with
-// adjlist.Config{Multigraph: true}. The write fails fast and aborts the
-// transaction rather than silently discarding the edge, upholding the module's
-// fail-stop, never-fail-silent contract.
-var ErrParallelEdgeInSimpleGraph = errors.New("cypher: cannot create a parallel edge on a non-multigraph graph; construct the engine over a graph created with adjlist.Config{Multigraph: true}")
-
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
 func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
 	// rmp #2883: journal both endpoints' liveness and src's run before the write.
@@ -21669,10 +21908,6 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
-	if !a.g.AdjList().Multigraph() && edgeExisted {
-		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
-	}
 	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
@@ -21684,14 +21919,8 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if !dstExisted && src != dst {
 		a.countNodeCreated()
 	}
-	// edgeAdded is always true here: the non-multigraph duplicate-pair case that
-	// used to be a silent no-op is now rejected above, before any mutation, so
-	// this branch is never skipped. Kept explicit for symmetry with
-	// [walMutatorAdapter.AddEdge].
-	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
-	}
+	a.countRelCreated()
+	a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, nil
 }
@@ -21705,10 +21934,6 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
-	if !a.g.AdjList().Multigraph() && edgeExisted {
-		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
-	}
 	handle, err := a.w().AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
@@ -21721,14 +21946,8 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if !dstExisted && src != dst {
 		a.countNodeCreated()
 	}
-	// edgeAdded is always true here: the non-multigraph duplicate-pair case that
-	// used to be a silent no-op is now rejected above, before any mutation, so
-	// this branch is never skipped. Kept explicit for symmetry with
-	// [walMutatorAdapter.AddEdge].
-	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
-	}
+	a.countRelCreated()
+	a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, handle, nil
 }
@@ -22726,12 +22945,6 @@ type walMutatorAdapter struct {
 	touched *touchedNodes
 	// stampCon: see [mutationUndo.stampCon] (rmp #2353/#2355).
 	stampCon bool
-	// bopts is the per-query build options carrying the cached forward-CSR
-	// snapshot ([ensureFwdCSR]). It is used only by [EdgeHandleAtPosition] to
-	// resolve a bound relationship instance's stable handle from its forward-CSR
-	// edge position, reusing the exact read-path mechanism ([edgeHandleAtFwdPos]).
-	// It may be nil (resolution then falls back to a fresh CSR build).
-	bopts *buildOpts
 	// wtx is the write transaction this statement is running as; see the field of
 	// the same name on [lpgMutatorAdapter] for what it resolves and why the zero
 	// value is not a usable default inside a bracket (rmp #2304).
@@ -23001,10 +23214,6 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
-	if !a.g.AdjList().Multigraph() && edgeExisted {
-		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
-	}
 	mark, counted := a.effectMark()
 	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
@@ -23030,18 +23239,11 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if !dstExisted && src != dst {
 		a.countNodeCreated()
 	}
-	// A duplicate (src,dst) AddEdge on a non-multigraph graph used to be treated
-	// as a storage no-op; counting it and recording a RemoveEdge undo inverse
-	// let a rolled-back transaction DELETE the pre-existing committed edge — an
-	// Atomicity breach the DST disk-full scenario found (#1751). The guard above
-	// now rejects that case before any mutation (rmp #1856: openCypher CREATE
-	// never deduplicates), so edgeAdded is always true here: on a multigraph
-	// every AddEdge adds a parallel edge, and on a simple graph reaching this
-	// line already implies !edgeExisted.
-	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
-	}
+	// Storage is a multigraph, so every AddEdge that returns here added a
+	// parallel edge: the counter and the RemoveEdge undo inverse always describe
+	// a real addition (#1751, rmp #1856, rmp #3072).
+	a.countRelCreated()
+	a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	if txErr != nil {
 		return 0, 0, txErr
@@ -23064,10 +23266,6 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
-	if !a.g.AdjList().Multigraph() && edgeExisted {
-		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
-	}
 	mark, counted := a.effectMark()
 	handle, err := a.w().AddEdgeH(src, dst, w)
 	if err != nil {
@@ -23097,14 +23295,8 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if !dstExisted && src != dst {
 		a.countNodeCreated()
 	}
-	// edgeAdded is always true here: the non-multigraph duplicate-pair case that
-	// used to be a silent no-op is now rejected above, before any mutation, so
-	// this branch is never skipped. Kept explicit for symmetry with
-	// [lpgMutatorAdapter.AddEdge].
-	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
-	}
+	a.countRelCreated()
+	a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	if txErr != nil {
 		return 0, 0, 0, txErr
@@ -23141,25 +23333,14 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	// false — so a shape whose arc is already gone reaches this line with
 	// present == false.
 	//
-	// The frame waits on it too, but only where the WAL is a FAITHFUL description
-	// of this graph's adjacency, which is what [walMutatorAdapter.mustDescribeNoOpRemoval]
-	// answers. A frame may be dropped as redundant only if the presence probe above
-	// — which reads the IN-MEMORY adjacency — predicts what a replay will find. On a
-	// directed graph it does: every arc this adapter changes is described by exactly
-	// one frame, so memory and replay stay in step by induction. On an UNDIRECTED
-	// graph it does not, because [walMutatorAdapter.RemoveAllEdgesFrom] retires each
-	// mirror arc while emitting a frame only for the forward one — so there the
-	// "redundant" frame is the one that actually performs the removal on replay, and
-	// dropping it LOSES the deletion. Measured, not reasoned: gating unconditionally
-	// on `present` left deleted edges alive in the recovered graph on 7 of 16
-	// undirected shapes (fan-in-64, mixed-in-and-out, clique-4, detach-all,
-	// reciprocal-pair, detach-path-2cycle, del-r-bothdir), which refutes the claim
-	// rmp #2706 recorded here that the gate "was shown to recover an identical
-	// graph". A smaller WAL that replays to a different graph is data loss, not a
-	// saving (rmp #2734).
+	// The frame waits on it too. A frame may be dropped as redundant only because
+	// the presence probe above — which reads the IN-MEMORY adjacency — predicts
+	// what a replay will find: every arc this adapter changes is described by
+	// exactly one frame, so memory and replay stay in step by induction. A smaller
+	// WAL that replays to a different graph would be data loss, not a saving
+	// (rmp #2734).
 	//
-	// On the directed shapes the gate is worth having, and it is reachable there —
-	// this is NOT only the undirected engine's problem.
+	// The gate is reachable:
 	// `MATCH (a)-[r:R]-(b) WITH r DELETE r` binds one stored relationship in both
 	// traversal directions, so [exec] reaches this method twice for it: before the
 	// gate that wrote 2 frames for 1 relationship removed (37.9% of the delete
@@ -23184,7 +23365,7 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	if present {
 		a.countRelDeleted()
 	}
-	if (present && a.tookEffect(mark, counted)) || a.mustDescribeNoOpRemoval() {
+	if present && a.tookEffect(mark, counted) {
 		_ = a.tx.RemoveEdge(src, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, and this adapter is never reached on a finished transaction. Discarded because [exec.GraphMutator.RemoveEdge] returns nothing — see the discard note on [walMutatorAdapter].
 	}
 	r.recordRemoveEdge(&pre, present)
@@ -23221,44 +23402,17 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	// that comment first; it carries the evidence for both.
 	// [WriteView.RemoveEdgeByHandle] folds BOTH "refused" and "nothing matched" into
 	// its false (its godoc says so, and that is where it differs from the
-	// [WriteView.RemoveEdge] sibling), and neither case warrants a frame on a graph
-	// whose WAL faithfully describes its adjacency: a refused removal must not be
-	// described durably (rmp #2694/#2725), and a removal that matched nothing removed
-	// nothing. On an undirected graph that faithfulness does not hold, so the frame
-	// is emitted regardless — see [walMutatorAdapter.mustDescribeNoOpRemoval].
-	// Reachable on the supported directed configuration: `MATCH (a)-[r:R]-(b) DELETE r`
+	// [WriteView.RemoveEdge] sibling), and neither case warrants a frame: a refused
+	// removal must not be described durably (rmp #2694/#2725), and a removal that
+	// matched nothing removed nothing. Reachable: `MATCH (a)-[r:R]-(b) DELETE r`
 	// binds one stored relationship in both traversal directions and therefore deletes
 	// it twice, which before the gate wrote 2 frames for 1 relationship removed —
 	// 39.2% of that delete transaction's WAL bytes (rmp #2734).
 	if removed {
 		a.countRelDeleted()
-	}
-	if removed || a.mustDescribeNoOpRemoval() {
 		_ = a.tx.RemoveEdgeByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeByHandle] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveEdgeByHandle] returns nothing.
 	}
 	r.recordRemoveEdge(&pre, removed)
-}
-
-// mustDescribeNoOpRemoval reports whether a removal that provably took NOTHING out
-// of the in-memory adjacency must still be written to the WAL.
-//
-// It is true exactly when the WAL is not a faithful description of this graph's
-// adjacency, which on this adapter means an UNDIRECTED backing graph.
-// [walMutatorAdapter.RemoveAllEdgesFrom] emits one frame per OUTGOING neighbour,
-// but on an undirected adjacency the removal also retires each mirror arc, which
-// no frame describes. Recovery therefore reconstructs a different adjacency from
-// the one in memory, and the in-memory presence probe stops predicting what a
-// replay will find: a removal that is a no-op in memory can still be the frame
-// that performs the deletion on replay. Suppressing it there loses the deletion —
-// measured on 7 of 16 undirected shapes (rmp #2734).
-//
-// Cypher over an undirected LPG is not a supported configuration in the first
-// place (docs/cypher.md states `Directed: true` is required for openCypher
-// semantics, and [NewEngineWithOptions] warns at construction, #1892), so this is
-// a guard against regressing a configuration the module still constructs, not a
-// commitment to its durability. It costs one already-cached bool read.
-func (a *walMutatorAdapter) mustDescribeNoOpRemoval() bool {
-	return !a.g.AdjList().Directed()
 }
 
 // SetNodeLabel attaches label to n.
@@ -24051,9 +24205,8 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// cannot commit, but the frames must not be written on the strength of that
 	// alone — the WAL is the durable truth and it may only describe work done.
 	// Only a removal that took effect is described (see
-	// [walMutatorAdapter.effectMark]); on an undirected graph every frame is
-	// kept, as [walMutatorAdapter.mustDescribeNoOpRemoval] explains.
-	if a.tookEffect(mark, counted) || a.mustDescribeNoOpRemoval() {
+	// [walMutatorAdapter.effectMark]).
+	if a.tookEffect(mark, counted) {
 		for _, dst := range outgoing {
 			_ = a.tx.RemoveEdge(n, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveAllEdgesFrom] returns nothing.
 		}
@@ -24165,72 +24318,6 @@ func csrPairFromGraphAt(g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[flo
 	return fwd, rev, key
 }
 
-// ensureFwdCSR returns the forward CSR snapshot for relationship reconstruction,
-// building it at most once per query and caching it on bopts. The snapshot is
-// built lazily on first use so queries that never project a relationship pay
-// nothing, and reused for every result row thereafter so the O(V+E) build leaves
-// the per-row path (the #1574 fix).
-//
-// When bopts is nil (no per-query cache is available — the helpers are only
-// reached with a non-nil bopts today, but the guard keeps them safe in
-// isolation) it falls back to a one-off build, preserving the previous
-// behaviour exactly. Forward-only: the reverse CSR is never built here.
-func ensureFwdCSR(bopts *buildOpts, g *lpg.ReadView[string, float64]) *csr.CSR[float64] {
-	if g == nil {
-		return nil
-	}
-	if bopts == nil {
-		return buildFwdCSRAsOf(g)
-	}
-	if bopts.fwdCSRReady {
-		return bopts.fwdCSR
-	}
-	bopts.fwdCSR = buildFwdCSRAsOf(g)
-	bopts.fwdCSRReady = true
-	return bopts.fwdCSR
-}
-
-// buildFwdCSRAsOf builds the reconstruction CSR at the READER'S INSTANT.
-//
-// # The wrong answer this closes (rmp #2295)
-//
-// It used to call csr.BuildFromAdjListLive(g.AdjList(), …), and g.AdjList() is
-// ReadView's documented UNVERSIONED escape hatch: it answers from the PRESENT. So
-// the CSR described a different graph from the one whose forward positions it is
-// asked about — Expand minted those at the reader's instant — and a concurrent
-// DELETE of a parallel relationship made the two disagree by one slot.
-//
-// Measured before this change, with a held read transaction:
-//
-//	CREATE (a:A),(b:B),(a)-[:R1]->(b),(a)-[:R2]->(b),(a)-[:R3]->(b)
-//	tx := BeginReadTx();  MATCH (:A)-[r]->(:B) RETURN type(r)  =>  [R1 R2 R3]
-//	another transaction: MATCH (:A)-[r:R3]->(:B) DELETE r
-//	the SAME tx re-runs the same query                         =>  [R1 R2 R1]
-//
-// The row count stays right — the snapshot began before the delete — and the third
-// row's TYPE is a sibling's. The present-time CSR has two slots for the pair, so
-// [edgeInstanceIdxFor] cannot place the third position, the per-instance guard in
-// buildRelationshipValueFromRow declines, and the per-pair union fallback hands
-// pickEdgeType a set whose first member is R1.
-//
-// rmp #2295 had been DOWNGRADED to hygiene on the reasoning that the guard's skew
-// "either declines or stays self-consistent" and "never attributes one instance's
-// type to another". The decline is real and is what saves the CREATE direction; what
-// that reasoning missed is that a decline is not harmless, because the fallback it
-// declines TO picks an arbitrary member of the pair's type union.
-//
-// This is the same instant discipline [csrPairFromGraphAt] already applies, and
-// [csr.BuildFromAdjListAsOf] exists for it; the caller still caches the result per
-// query, so a query reconstructing many relationships builds it once.
-func buildFwdCSRAsOf(g *lpg.ReadView[string, float64]) *csr.CSR[float64] {
-	if snap := g.Snapshot(); snap != nil {
-		return csr.BuildFromAdjListAsOf(g.AdjList(), g.LiveNodeFilter(), snap.StartTS(), snap.TxID())
-	}
-	// No snapshot means the caller reads the present deliberately — a mutation
-	// outside any transaction — and the present is then the right instant.
-	return csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
-}
-
 // nodeIDOrNodeValue extracts a NodeID from a row column. The slot may hold a
 // raw IntegerValue (the in-pipeline encoding emitted by Expand) or a
 // NodeValue (the canonical projected form), so both shapes are accepted.
@@ -24302,9 +24389,9 @@ func forEachResolvedSlotType(
 	verts := fwdCSR.VerticesSlice()
 	edges := fwdCSR.EdgesSlice()
 	// handles aligns slot-for-slot with edges when the graph carries
-	// stable per-edge handles (multigraph CREATEs). It is nil for a graph
-	// that never stamped a handle (simple-graph / MERGE-only), in which
-	// case every slot takes the positional fallback below.
+	// stable per-edge handles (Cypher CREATEs). It is nil for a graph
+	// that never stamped a handle, in which case every slot takes the
+	// positional fallback below.
 	handles := fwdCSR.HandlesSlice()
 	mapper := adj.Mapper()
 
@@ -24443,8 +24530,9 @@ func resolveSourceSlotTypes(
 	// MERGE slots): it counts parallel CSR occurrences per dst so a
 	// fallback slot maps to its CREATE-instance idx. The
 	// handle-driven path below ignores it entirely. sc.dstParallelTotal
-	// lets the fallback tell multigraph (N_csr == N_create) from
-	// simple-graph (N_csr < N_create) storage for each pair. Both are
+	// lets the fallback tell a pair with one slot per CREATE
+	// (N_csr == N_create) from one with fewer slots (N_csr < N_create).
+	// Both are
 	// built only once a slot of this source reaches that fallback; see
 	// [slotTypeScratch.startPositionalCounts].
 	positionalReady := false
@@ -24544,7 +24632,7 @@ func resolveSourceSlotTypes(
 			// A position that WAS matched to such a slot never gets here, and that
 			// is the point: the slot's own emptiness means the relationship has no
 			// type, and the per-PAIR ordinal would answer with a sibling CREATE's
-			// type instead. On a multigraph pair mixing a Cypher-created :K slot
+			// type instead. On a pair mixing a Cypher-created :K slot
 			// with an untyped Go-API slot that made the untyped edge match
 			// `[r:K]`, so a bare MATCH counted two where one was correct.
 			if !positionalReady {
@@ -24554,13 +24642,14 @@ func resolveSourceSlotTypes(
 			totalCreates := g.EdgeCreateCount(srcStr, dstStr)
 			parallel := sc.dstParallelTotal[dst]
 			if parallel >= totalCreates && totalCreates > 0 {
-				// Multigraph: one CSR slot per CREATE. Use the
-				// per-instance label set for this specific slot.
+				// One CSR slot per CREATE. Use the per-instance
+				// label set for this specific slot.
 				labels = g.EdgeLabelsAt(srcStr, dstStr, sc.dstSeen[dst])
 			} else {
-				// Simple-graph (or no per-instance store): merge every
-				// instance's labels with the per-pair union so a
-				// filter targeting any CREATE's label still matches.
+				// Fewer slots than CREATEs (or no per-instance store):
+				// merge every instance's labels with the per-pair
+				// union so a filter targeting any CREATE's label still
+				// matches.
 				labels = collectAllInstanceLabels(g, srcStr, dstStr, totalCreates)
 			}
 		}
@@ -24646,8 +24735,8 @@ func fillSlotLabs(
 
 // collectAllInstanceLabels returns the union of every per-CREATE label
 // recorded for (srcStr, dstStr) over instance indices 1..totalCreates.
-// Used by simple-graph filter construction, where one CSR slot must
-// service every collapsed CREATE.
+// Used by filter construction when a pair has fewer CSR slots than
+// CREATEs, so one slot must service every CREATE.
 func collectAllInstanceLabels(g *lpg.ReadView[string, float64], srcStr, dstStr string, totalCreates int64) []string {
 	if totalCreates <= 0 {
 		return nil

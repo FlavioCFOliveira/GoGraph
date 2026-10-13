@@ -11,7 +11,7 @@ import (
 
 func setupSocialGraph(tb testing.TB) (*lpg.Graph[string, int64], *csr.CSR[int64]) {
 	tb.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	people := []string{"alice", "bob", "charlie", "dave", "erin"}
 	for _, p := range people {
 		if err := g.SetNodeLabel(p, "Person"); err != nil {

@@ -44,7 +44,7 @@ import (
 // returns the engine and its graph.
 func snapCacheEngine(t *testing.T) (*Engine, *lpg.Graph[string, float64], func(string)) {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	run := func(q string) {
 		t.Helper()

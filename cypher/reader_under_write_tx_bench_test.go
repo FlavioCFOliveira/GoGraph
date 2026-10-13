@@ -34,7 +34,7 @@ import (
 
 func benchBuildReaderGraph(b *testing.B, n int) *lpg.Graph[string, float64] {
 	b.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < n; i++ {
 		k := "n" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

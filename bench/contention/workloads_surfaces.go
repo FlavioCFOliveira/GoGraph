@@ -78,7 +78,7 @@ func (p *perWorker[T]) each(fn func(*T)) {
 // read-only search workloads. The chords give BFS and Dijkstra a frontier
 // wider than one node, so the traversal actually costs something.
 func seedCSR(n int) *csr.CSR[float64] {
-	a := adjlist.New[int, float64](adjlist.Config{Directed: true, Multigraph: true})
+	a := adjlist.New[int, float64](adjlist.Config{})
 	for i := range n {
 		// The ring guarantees a single strongly connected component; the two
 		// chords give an average out-degree of three.

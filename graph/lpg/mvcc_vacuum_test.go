@@ -29,7 +29,7 @@ import (
 // vacuumGraph is a graph with the substrate armed and no vacuum yet started.
 func vacuumGraph(t *testing.T) *Graph[string, float64] {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	t.Cleanup(func() {
 		if err := g.Close(); err != nil {
 			t.Errorf("Close: %v", err)
@@ -185,7 +185,7 @@ func waitVacuumQuiesced(t *testing.T, g *Graph[string, float64]) {
 // The package's goleak.VerifyTestMain is the other half — a vacuum that outlived
 // its test would fail the whole package rather than this one function.
 func TestVacuum_TerminatesOnClose(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	churn(t, g, reclaimThreshold)
 	if vs := g.VacuumStats(); vs.Starts == 0 {
 		t.Fatal("no vacuum was ever started, so this test is not closing one")
@@ -221,7 +221,7 @@ func TestVacuum_TerminatesOnClose(t *testing.T) {
 // required to close. So the sweeper must exit on its own once there is nothing
 // left to do.
 func TestVacuum_SelfTerminatesWithoutClose(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	churn(t, g, reclaimThreshold)
 	if vs := g.VacuumStats(); vs.Starts == 0 {
 		t.Fatal("no vacuum was ever started, so this test cannot observe one exiting")
@@ -247,7 +247,7 @@ func TestVacuum_SelfTerminatesWithoutClose(t *testing.T) {
 // would leave a goroutine running with nothing able to stop it, which is the leak
 // Close exists to prevent — while reporting that the caller's deadline passed.
 func TestVacuum_CloseCtxReportsAnExpiredDeadline(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	churn(t, g, reclaimThreshold)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -507,7 +507,7 @@ func TestVacuum_WatermarkRegressionIsDetected(t *testing.T) {
 	t.Parallel()
 
 	t.Run("a monotone sequence reports nothing", func(t *testing.T) {
-		g := New[string, int64](adjlist.Config{Directed: true})
+		g := New[string, int64](adjlist.Config{})
 		for _, wm := range []uint64{1, 1, 5, 5, 900, 901} {
 			g.publishWatermark(g.vac.lastWatermark.Load(), wm)
 		}
@@ -520,7 +520,7 @@ func TestVacuum_WatermarkRegressionIsDetected(t *testing.T) {
 	})
 
 	t.Run("a decrease is reported with its pair", func(t *testing.T) {
-		g := New[string, int64](adjlist.Config{Directed: true})
+		g := New[string, int64](adjlist.Config{})
 		if advanced := g.publishWatermark(g.vac.lastWatermark.Load(), 100); !advanced {
 			t.Fatal("publishWatermark(100) on a fresh graph did not report an advance")
 		}

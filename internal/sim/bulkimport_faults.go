@@ -329,7 +329,7 @@ func bulkImportCheckFaults(
 		var perr error
 		if r.viaImportInto {
 			_, perr = bulkimport.ImportIntoFS[int64](ctx, fsys, bulkImportFaultStoreDir,
-				bulkimport.Options{Directed: true, Multigraph: true, ExpectNodes: bulkImportNodes}, nodes, edges)
+				bulkimport.Options{ExpectNodes: bulkImportNodes}, nodes, edges)
 		} else {
 			_, perr = bulkimport.PublishFS[int64](ctx, fsys, bulkImportFaultStoreDir, b, nil)
 		}

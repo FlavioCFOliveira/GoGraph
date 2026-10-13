@@ -66,8 +66,7 @@ func TestCrossSnapshotBoundary_RefusesAWALOnlyStore(t *testing.T) {
 	// is WAL-only (no checkpoint dir).
 	sm, err := New(Config{
 		Seed: 11, MaxTicks: 1, Workload: edgePropertiesWorkload(NewSeed(11)),
-		Multigraph: true,
-		Crash:      CrashConfig{Enabled: true, CrashProb: 0},
+		Crash: CrashConfig{Enabled: true, CrashProb: 0},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -323,7 +322,6 @@ func TestEdgeProperties_TypedMatrixThroughSnapshotCodec(t *testing.T) {
 	ctx := context.Background()
 	sm, err := New(Config{
 		Seed: 21, MaxTicks: 1, Workload: edgePropertiesWorkload(NewSeed(21)),
-		Multigraph: true,
 		// Full-stack durable store: WAL at db/wal, snapshot at db/snapshot. The
 		// cadence is irrelevant — this probe has no tick loop and checkpoints by
 		// crossing the boundary explicitly.

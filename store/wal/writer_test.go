@@ -18,6 +18,11 @@ func TestWriter_OpenAppendSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if err := w.Append([]byte("first")); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -44,6 +49,11 @@ func TestWriter_AppendReadBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	payloads := [][]byte{
 		[]byte("alpha"),
 		[]byte("beta"),
@@ -85,6 +95,11 @@ func TestWriter_AfterCloseIsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -107,6 +122,11 @@ func TestWriter_CreatesFileWith0600(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	// Write and durably commit a frame, then read it back, to confirm the
 	// tightened create mode does not disturb append/sync/recovery.
 	if err := w.Append([]byte("secret mutation")); err != nil {

@@ -55,7 +55,7 @@ import (
 // index seek have something to prefer.
 func writeGateFixture(t *testing.T, n int) *Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	g.SetIndexManager(index.NewManager())
 	for i := 0; i < n; i++ {
 		key := fmt.Sprintf("n%d", i)
@@ -115,7 +115,7 @@ func drain(t *testing.T, eng *Engine, stmt string) {
 func TestWritePathGates_BitmapIntersectionInsideAWrite(t *testing.T) {
 	fixture := func(t *testing.T, n int) *Engine {
 		t.Helper()
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g := lpg.New[string, float64](adjlist.Config{})
 		g.SetIndexManager(index.NewManager())
 		for i := 0; i < n; i++ {
 			key := fmt.Sprintf("w%d", i)

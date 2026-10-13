@@ -210,7 +210,7 @@ const maxRegistryCaptureRetries = 8
 // [Checkpointer.truncatePrefixLocked] uses for a schema DDL racing phase 2,
 // #1774), never a Consistency violation.
 func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.Snapshot) (size int64, crc uint32, err error) {
-	return writeLabels(w, g, at, snapshotRegistry)
+	return writeLabels(w, g, at, snapshotRegistry, componentBufMax)
 }
 
 // writeLabels is the seam-injected body of [WriteLabels]. snapReg captures the
@@ -222,10 +222,10 @@ func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.S
 // and safe for concurrent independent calls as the code it replaced.
 //
 // labels write: header + string table + node records + edge records, each guarded
-func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.Snapshot, snapReg func(*lpg.LabelRegistry) []string) (size int64, crc uint32, err error) {
+func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.Snapshot, snapReg func(*lpg.LabelRegistry) []string, bufSize int) (size int64, crc uint32, err error) {
 	defer metrics.Time("store.snapshot.WriteLabels").Stop()
 
-	bw := bufio.NewWriterSize(w, 1<<20)
+	bw := bufio.NewWriterSize(w, bufSize)
 	hasher := crc32.New(castagnoli)
 	tee := io.MultiWriter(bw, hasher)
 

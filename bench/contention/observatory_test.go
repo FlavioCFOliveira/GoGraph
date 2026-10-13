@@ -298,21 +298,79 @@ func TestObserveTopSitesAreStable(t *testing.T) {
 		level    = 16
 		topN     = 5
 	)
-	first := moduleSites(t, runObservation(t, workload, level), topN)
-	second := moduleSites(t, runObservation(t, workload, level), topN)
+	first := moduleSites(t, runObservation(t, workload, level))
+	second := moduleSites(t, runObservation(t, workload, level))
 
-	// Non-vacuity. Two empty rankings compare equal, so without this the test
-	// would pass most loudly in exactly the case where the instrument had
-	// stopped attributing anything at all.
+	// Non-vacuity. Two empty rankings agree, so without this the test would
+	// pass most loudly in exactly the case where the instrument had stopped
+	// attributing anything at all.
 	const wantAtLeast = 3
 	if len(first) < wantAtLeast || len(second) < wantAtLeast {
 		t.Fatalf("ranking attributed too few module sites to constitute a stability test: %d and %d, want >= %d each\n first: %v\nsecond: %v",
 			len(first), len(second), wantAtLeast, first, second)
 	}
-	if !slices.Equal(first, second) {
-		t.Errorf("top-%d module lock sites differ between two runs of %s at level %d:\n first: %v\nsecond: %v",
-			topN, workload, level, first, second)
+	if diff := rankDisagreements(first, second, topN); len(diff) > 0 {
+		t.Errorf("top-%d module lock sites of %s at level %d rank differently between two runs (tolerance %.2f cum%% points):\n%s\n first: %v\nsecond: %v",
+			topN, workload, level, cumTieTolerance, strings.Join(diff, "\n"),
+			first[:min(topN, len(first))], second[:min(topN, len(second))])
 	}
+}
+
+// cumTieTolerance is the cumulative-percentage difference below which two
+// sites of one profile are treated as tied.
+//
+// The cum ranking puts the frames of one call chain next to each other with
+// the same cumulative time, because every sample that passes through one passes
+// through the others. pprof orders exact ties by name and prints them in that
+// order, and a handful of samples entering the chain at a different frame
+// separates them by a sub-resolution amount in either direction. Measured on
+// cypher-write-mem at level 16 over six fresh-process runs: RunInTx,
+// runInTxSession, runInTxSessionProfiled and runInTxMergeRaceRetry were exactly
+// equal in four runs and differed by 0.01 ms (984.84/984.83) and 0.05 ms
+// (948.12/948.07) in the other two, at most 0.005 cum% points; that flip alone
+// is what failed an ordered comparison. The smallest gap between two distinct
+// ranks in the same runs was about 4 cum% points (89.24% against 79.61%;
+// 92.02% against 87.86%). 0.1 points is twenty times the measured tie jitter and
+// forty times below the smallest real gap.
+const cumTieTolerance = 0.1
+
+// rankDisagreements compares two rankings over the union of their top n sites
+// and returns every pair whose relation differs between the runs, the relation
+// being above, tied or below with ties defined by [cumTieTolerance].
+//
+// A reshuffle of tied chain frames is therefore not reported: both runs call
+// the pair tied. A genuine move still is: two distinct sites that swap, a site
+// that enters one run's top n from below a site of the other's, and a site that
+// rises to tie a site it was clearly below. The last is not hypothetical:
+// cypher-write-wal at level 16 ties execUnderBarrier with RunInTx at 99.78%,
+// where cypher-write-mem keeps it about 4 cum% points below. A site absent from
+// a ranking is placed at zero, below every site pprof printed.
+func rankDisagreements(first, second []rankedSite, n int) []string {
+	cum := func(r []rankedSite, site string) float64 {
+		if i := slices.IndexFunc(r, func(s rankedSite) bool { return s.site == site }); i >= 0 {
+			return r[i].cumPct
+		}
+		return 0
+	}
+	var union []string
+	for _, r := range [][]rankedSite{first, second} {
+		for _, s := range r[:min(n, len(r))] {
+			if !slices.Contains(union, s.site) {
+				union = append(union, s.site)
+			}
+		}
+	}
+	var out []string
+	for i, a := range union {
+		for _, b := range union[i+1:] {
+			d1 := cum(first, a) - cum(first, b)
+			d2 := cum(second, a) - cum(second, b)
+			if tieClass(d1) != tieClass(d2) {
+				out = append(out, fmt.Sprintf("  %s vs %s: first %+.2f, second %+.2f cum%% points", a, b, d1, d2))
+			}
+		}
+	}
+	return out
 }
 
 // runControl executes one control fixture in a fresh child process and returns
@@ -386,19 +444,49 @@ func pprofTop(t *testing.T, profile string) (string, error) {
 	return runCmd(t, "go", "tool", "pprof", "-top", "-cum", "-lines", "-nodecount=25", profile)
 }
 
-// moduleSites extracts the first n GoGraph "function file:line" sites from a
-// pprof ranking, skipping the observatory's own frames: the harness is not the
-// subject of the measurement.
-func moduleSites(t *testing.T, top string, n int) []string {
+// tieClass classifies the cum% difference of two sites of one ranking as
+// above (1), tied (0) or below (-1).
+func tieClass(d float64) int {
+	switch {
+	case d > cumTieTolerance:
+		return 1
+	case d < -cumTieTolerance:
+		return -1
+	default:
+		return 0
+	}
+}
+
+// rankedSite is one GoGraph "function file:line" site of a pprof ranking with
+// its cumulative share of the profile's total.
+type rankedSite struct {
+	site   string
+	cumPct float64
+}
+
+func (r rankedSite) String() string { return fmt.Sprintf("%s (%.2f%%)", r.site, r.cumPct) }
+
+// moduleSites extracts the GoGraph "function file:line" sites of a pprof
+// ranking, in the order pprof printed them, skipping the observatory's own
+// frames: the harness is not the subject of the measurement.
+//
+// The share is the cum% column, not the cum time, so that two runs with
+// different totals are compared on the same scale.
+func moduleSites(t *testing.T, top string) []rankedSite {
 	t.Helper()
 	const modulePath = "github.com/FlavioCFOliveira/GoGraph/"
-	sites := make([]string, 0, n)
+	var sites []rankedSite
 	for _, line := range strings.Split(top, "\n") {
 		if !strings.Contains(line, modulePath) || strings.Contains(line, "/bench/contention") {
 			continue
 		}
+		fields := strings.Fields(line)
+		// flat flat% sum% cum cum% function file:line [(inline)]
+		if len(fields) < 7 {
+			continue
+		}
 		var fn, loc string
-		for _, f := range strings.Fields(line) {
+		for _, f := range fields[5:] {
 			switch {
 			case strings.HasPrefix(f, modulePath):
 				fn = f
@@ -409,10 +497,11 @@ func moduleSites(t *testing.T, top string, n int) []string {
 		if fn == "" || loc == "" {
 			continue
 		}
-		sites = append(sites, fn+" "+loc)
-		if len(sites) == n {
-			break
+		pct, err := strconv.ParseFloat(strings.TrimSuffix(fields[4], "%"), 64)
+		if err != nil {
+			t.Fatalf("unparseable cum%% %q in pprof line %q: %v", fields[4], line, err)
 		}
+		sites = append(sites, rankedSite{site: fn + " " + loc, cumPct: pct})
 	}
 	return sites
 }

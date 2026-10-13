@@ -26,7 +26,7 @@ func TestAllShortestPaths_HonoursContextDeadline(t *testing.T) {
 	// far more than can be enumerated within the deadline — so a correct
 	// implementation must abort on the deadline, not run to completion.
 	const width, layers = 10, 7
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.SetNodeProperty("a", "k", lpg.StringValue("src")); err != nil {
 		t.Fatalf("seed a: %v", err)
 	}

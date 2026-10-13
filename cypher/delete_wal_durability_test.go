@@ -13,6 +13,7 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -84,7 +85,12 @@ func TestCypher_DeleteWALDurability_DELETE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
-	g1 := lpg.New[string, float64](adjlist.Config{Directed: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w1.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g1 := lpg.New[string, float64](adjlist.Config{})
 	deleteWALEngineRun(t, g1, w1,
 		`CREATE (:A {name:'keep'}), (:B {name:'gone'})`,
 	)
@@ -98,6 +104,11 @@ func TestCypher_DeleteWALDurability_DELETE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open2 wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	deleteWALEngineRun(t, res2.Graph, w2, `MATCH (n:B) DELETE n`)
 
 	// open 3 (WAL replay): assert the deleted node is gone.
@@ -141,7 +152,12 @@ func TestCypher_DeleteWALDurability_DETACHDELETE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open1 wal.Open: %v", err)
 	}
-	g1 := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w1.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g1 := lpg.New[string, float64](adjlist.Config{})
 	deleteWALEngineRun(t, g1, w1,
 		`CREATE (a:A {name:'keep'})-[:REL]->(b:B {name:'gone'})`,
 	)
@@ -155,6 +171,11 @@ func TestCypher_DeleteWALDurability_DETACHDELETE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open2 wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w2.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	deleteWALEngineRun(t, res2.Graph, w2, `MATCH (n:B) DETACH DELETE n`)
 
 	// open 3 (WAL replay): assert only :A survives and B is gone.

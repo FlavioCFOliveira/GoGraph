@@ -29,7 +29,7 @@ import (
 // KindRelationshipUniqueness scope error at the expected 1-based column.
 func requireRelUniquenessError(t *testing.T, query string, wantCol uint32) {
 	t.Helper()
-	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 	err := runQuery(t, eng, query)
 	if err == nil {
 		t.Fatalf("query was ACCEPTED; want a relationship-uniqueness error:\n  %s", query)
@@ -109,7 +109,7 @@ func TestRelUniqueness_AcceptedShapes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true}))
+			eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
 			if err := runQuery(t, eng, tc.query); err != nil {
 				t.Fatalf("query was REFUSED; the clause-scoped check over-rejects:\n  %s\n  %v", tc.query, err)
 			}

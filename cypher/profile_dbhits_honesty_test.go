@@ -200,7 +200,7 @@ func profiledRemoved(plan, operator string) (removed int64, known, found bool) {
 // the two arms of the first gate comparable.
 func broomGraph(t *testing.T, fan int) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 	runHonestyWrite(t, eng, "CREATE (:Root {k:0})")
@@ -308,7 +308,7 @@ func TestProfileDbHits_VarLengthExpandCountsTraversalsNotRows(t *testing.T) {
 // record read and rejected is still charged (rmp #2761).
 func TestProfileDbHits_TypeFilteredExpandCountsSlotsWalked(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 	const others = 99
@@ -389,7 +389,7 @@ func TestProfileDbHits_TypeFilteredExpandCountsSlotsWalked(t *testing.T) {
 // mode would print "Expand" and this test would not find its subject.
 func TestProfileDbHits_ColumnarExpandCountsSlotsWalked(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 	const others = 99
@@ -454,7 +454,7 @@ const parallelHonestyGroups = 100
 // for the parallel arm and one above the node count for the serial control.
 func parallelHonestyEngine(t *testing.T, threshold int) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{ParallelScanThreshold: threshold})
 	t.Cleanup(func() { _ = eng.Close() })
 	for i := 0; i < parallelHonestyNodes; i++ {
@@ -747,7 +747,7 @@ func TestProfileDbHits_ParallelLeafPlanDetailNoLongerClaimsItIsUncounted(t *test
 // becomes fan instead of 1 while the slots walked stay a function of the shape.
 func shortestBroomGraph(t *testing.T, components, fan, decoys int, allToB bool) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 	for c := 0; c < components; c++ {

@@ -99,15 +99,6 @@ type Edge[W any] struct {
 
 // Options configures a [Builder].
 type Options struct {
-	// Directed selects a directed graph. openCypher requires directed
-	// relationships, so a Cypher-facing import wants true.
-	Directed bool
-
-	// Multigraph allows parallel edges between the same pair. openCypher's data
-	// model is a multigraph, so a Cypher-facing import wants true; without it a
-	// second edge between an existing pair fails.
-	Multigraph bool
-
 	// ExpectNodes, when > 0, pre-sizes the interning table to that cardinality.
 	// It is a pure capacity hint with no effect on the result.
 	ExpectNodes int
@@ -143,10 +134,7 @@ type Builder[W any] struct {
 
 // New returns a Builder over a fresh graph configured by opts.
 func New[W any](opts Options) *Builder[W] {
-	g := lpg.New[string, W](adjlist.Config{
-		Directed:   opts.Directed,
-		Multigraph: opts.Multigraph,
-	})
+	g := lpg.New[string, W](adjlist.Config{})
 	// Open the exclusive-build window for the whole import. Finish closes it,
 	// which freezes every touched shard's builder before the graph is handed out.
 	g.AdjList().BeginExclusiveBuild()

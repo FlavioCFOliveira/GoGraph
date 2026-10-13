@@ -49,7 +49,7 @@ var prefixSignificantNames = []string{
 // in only one of the two columns is still caught.
 func prefixSignificantGraph(t *testing.T) *adjlist.AdjList[string, int64] {
 	t.Helper()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true, Multigraph: false})
+	a := adjlist.New[string, int64](adjlist.Config{})
 	for i := range prefixSignificantNames {
 		src := prefixSignificantNames[i]
 		dst := prefixSignificantNames[(i+1)%len(prefixSignificantNames)]
@@ -172,7 +172,7 @@ func TestPrefixSignificantIDs_JSONLRoundTrip(t *testing.T) {
 	if _, err := jsonl.Write(&buf, src); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	got, _, err := jsonl.ReadInto(bytes.NewReader(buf.Bytes()), adjlist.Config{Directed: true, Multigraph: false})
+	got, _, err := jsonl.ReadInto(bytes.NewReader(buf.Bytes()), adjlist.Config{})
 	if err != nil {
 		t.Fatalf("ReadInto: %v", err)
 	}

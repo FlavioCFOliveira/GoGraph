@@ -37,6 +37,12 @@ type CSR[W any] struct {
 	handles  []uint64       // parallel to edges; nil unless the source carries per-slot stable edge handles (see HandlesSlice)
 	order    uint64         // number of distinct nodes in the snapshot
 	size     uint64         // number of edges in the snapshot
+
+	// symmetric records that [CSR.BuildSymmetric] or
+	// [BuildSymmetricFromAdjList] built the snapshot. It is set once at
+	// construction and never changed, so it needs no synchronisation. false
+	// means "not known to be symmetric", never "asymmetric".
+	symmetric bool
 }
 
 // BuildFromAdjList constructs an immutable CSR snapshot of the
@@ -614,14 +620,20 @@ func (c *CSR[W]) LiveCount() int {
 // The reverse CSR is the canonical adjacency for in-edge enumeration:
 // it pairs with the forward CSR to support algorithms that require
 // both directions (bidirectional Dijkstra, weakly-connected
-// components, semi-external in-degree queries). On an undirected
-// graph (one whose CSR is already symmetric) the returned CSR is
-// structurally identical to c.
+// components, semi-external in-degree queries). On a symmetric CSR
+// (for example one returned by [CSR.BuildSymmetric]) the reverse is
+// identical to c, column by column.
 //
-// Complexity: O(V + E) time, O(V + E) memory. The returned CSR is
-// independent of c; mutating its slices does not affect c (per the
-// immutable-snapshot contract callers must in any case respect).
+// When c is symmetric by construction ([CSR.KnownSymmetric] reports true)
+// BuildReverse returns c itself: O(1), no allocation. Both are immutable
+// snapshots, so sharing is safe under the CSR's concurrent-read contract.
+//
+// Complexity otherwise: O(V + E) time, O(V + E) memory, and the returned
+// CSR shares no memory with c.
 func (c *CSR[W]) BuildReverse() *CSR[W] {
+	if c.symmetric {
+		return c
+	}
 	maxID := uint64(c.MaxNodeID())
 	if maxID == 0 {
 		return &CSR[W]{vertices: []uint64{0}}
@@ -677,18 +689,155 @@ func (c *CSR[W]) BuildReverse() *CSR[W] {
 	}
 }
 
+// BuildSymmetric returns a fresh symmetric CSR: the undirected view of c,
+// read as a directed graph. It is the in-memory projection through which an
+// undirected algorithm (spanning trees, biconnected components, community
+// detection, Euler circuits, triangle counting) consumes a directed snapshot,
+// in place of a storage-level undirected mode.
+//
+// Every arc of c is read as one relationship, and the projection follows these
+// rules:
+//
+//   - A non-loop arc (u, v) yields two arcs, (u, v) and its mirror (v, u).
+//   - A self-loop (u, u) is kept ONCE, not mirrored.
+//   - The mirror carries the SAME weight and the SAME stable handle as its
+//     original, so one relationship keeps one identity in both directions.
+//   - Arcs are never merged. Parallel arcs (u, v) stay distinct relationships,
+//     and so do the arcs of a reciprocal pair (u, v) + (v, u): each yields its
+//     own two arcs, so u's run holds v twice.
+//
+// These rules are those of an undirected multigraph: each non-loop
+// relationship is reachable from both endpoints with one weight and one
+// handle, a self-loop is reachable once, and nothing is merged. A reciprocal
+// pair is kept as two relationships, since a directed graph holds two distinct
+// relationships there and merging them would lose one's identity and weight.
+//
+// The weights and handles columns are carried when c has them and stay nil
+// when it does not. The CSR holds no other per-arc column. Every run of the
+// result is ordered by the total key (destination, handle), as [OrderRuns]
+// defines, whether or not the runs of c were; slots that tie on that key
+// keep the order of an ascending scan of c. Order is carried over unchanged;
+// Size is the arc count of the result: twice the non-loop arcs of c plus its
+// self-loops.
+//
+// c must be well-formed ([CSR.Validate] returns nil) and is read as directed:
+// calling BuildSymmetric on a snapshot that is already symmetric doubles every
+// non-loop relationship. Every result is marked symmetric by construction:
+// [CSR.KnownSymmetric] and [CSR.IsSymmetric] return true in O(1), and
+// [CSR.BuildReverse] returns the result itself instead of copying it.
+//
+// Concurrency: BuildSymmetric only reads c, so it is safe to call
+// concurrently with any other reader of c, including other BuildSymmetric
+// calls. The returned CSR shares no memory with c and is immutable, with the
+// same concurrent-read contract as [CSR].
+//
+// Complexity: O(V + E log d) time, where d is the longest run (O(V + E) when
+// no run exceeds the insertion-sort cutoff of [OrderRuns]). Memory is the
+// result's own O(V + E) arrays, each allocated once at its exact final size,
+// plus at most one [OrderRuns] scratch buffer per column. No allocation is
+// made per arc.
+func (c *CSR[W]) BuildSymmetric() *CSR[W] {
+	if len(c.vertices) < 2 {
+		return &CSR[W]{vertices: []uint64{0}, order: c.order, symmetric: true}
+	}
+	maxID := uint64(len(c.vertices) - 1)
+
+	// Pass 1: count each node's symmetric degree into verts[x], then turn the
+	// counts into inclusive prefix sums, so verts[x] is the END of x's run.
+	verts := make([]uint64, maxID+1)
+	for u := range maxID {
+		for k := c.vertices[u]; k < c.vertices[u+1]; k++ {
+			verts[u]++
+			if v := uint64(c.edges[k]); v != u {
+				verts[v]++
+			}
+		}
+	}
+	for x := uint64(1); x < maxID; x++ {
+		verts[x] += verts[x-1]
+	}
+	total := verts[maxID-1]
+	verts[maxID] = total
+
+	edges := make([]graph.NodeID, total)
+	var weights []W
+	if c.weights != nil {
+		weights = make([]W, total)
+	}
+	var handles []uint64
+	if c.handles != nil {
+		handles = make([]uint64, total)
+	}
+
+	// Pass 2: scatter by decrementing each run's end cursor. Walking c
+	// backwards — sources, their arcs, and each arc's two emissions in reverse —
+	// fills every run in the order an ascending scan emitting (forward, mirror)
+	// would, and leaves verts[x] at the START of x's run, which is the offsets
+	// array, with no separate cursor array.
+	emit := func(src, dst graph.NodeID, k uint64) {
+		pos := verts[src] - 1
+		verts[src] = pos
+		edges[pos] = dst
+		if weights != nil {
+			weights[pos] = c.weights[k]
+		}
+		if handles != nil {
+			handles[pos] = c.handles[k]
+		}
+	}
+	for u := maxID; u > 0; u-- {
+		src := graph.NodeID(u - 1)
+		for k := c.vertices[u]; k > c.vertices[u-1]; k-- {
+			dst := c.edges[k-1]
+			if dst != src {
+				emit(dst, src, k-1)
+			}
+			emit(src, dst, k-1)
+		}
+	}
+
+	// Pass 3: order each run by (destination, handle), the invariant every CSR
+	// this package builds carries. See order.go.
+	OrderRuns(verts, edges, weights, handles)
+
+	return &CSR[W]{
+		vertices:  verts,
+		edges:     edges,
+		weights:   weights,
+		handles:   handles,
+		order:     c.order,
+		size:      total,
+		symmetric: true,
+	}
+}
+
+// KnownSymmetric reports, in O(1), whether c is symmetric by construction:
+// true exactly when c was returned by [CSR.BuildSymmetric] or
+// [BuildSymmetricFromAdjList]. false does not
+// mean c is asymmetric: a CSR built any other way may still be symmetric, and
+// [CSR.IsSymmetric] decides that.
+//
+// Consumers that need the in-edges of c use it to read c itself as its own
+// transpose instead of building one.
+func (c *CSR[W]) KnownSymmetric() bool { return c.symmetric }
+
 // IsSymmetric reports whether the CSR is symmetric — that is, whether
 // every directed edge (u, v) has a matching reverse edge (v, u). A
 // symmetric CSR is the canonical representation of an undirected
-// graph built via [adjlist.AdjList] with Directed: false.
+// graph; [CSR.BuildSymmetric] builds one from any CSR.
 //
 // Algorithms that conceptually operate on undirected graphs ([BiBFS],
 // connected components, undirected Eulerian circuits) use this check
 // to reject directed input early with a typed error rather than
 // returning silently-wrong results.
 //
-// Complexity: O(V + E) time, O(E) space (hash set of edge pairs).
+// Complexity: O(1) when c is symmetric by construction
+// ([CSR.KnownSymmetric]); otherwise O(V + E) time, O(E) space (hash set of
+// edge pairs).
 func (c *CSR[W]) IsSymmetric() bool {
+	if c.symmetric {
+		return true
+	}
 	verts := c.vertices
 	edges := c.edges
 	set := make(map[[2]graph.NodeID]struct{}, len(edges))

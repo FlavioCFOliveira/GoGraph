@@ -11,7 +11,7 @@ import (
 // immutable CSR snapshot suitable for lock-free analytical reads, and
 // reads back its order (node count) and size (edge count).
 func ExampleBuildFromAdjList() {
-	g := adjlist.New[string, int](adjlist.Config{Directed: true})
+	g := adjlist.New[string, int](adjlist.Config{})
 	_ = g.AddEdge("a", "b", 1)
 	_ = g.AddEdge("b", "c", 1)
 
@@ -29,7 +29,7 @@ func ExampleBuildFromAdjList() {
 // length of LiveNodes always agree, and LiveMask is the underlying
 // per-NodeID boolean view they are both derived from.
 func ExampleCSR_LiveCount() {
-	g := adjlist.New[string, int](adjlist.Config{Directed: true})
+	g := adjlist.New[string, int](adjlist.Config{})
 	_ = g.AddEdge("a", "b", 1)
 	_ = g.AddEdge("b", "c", 1)
 

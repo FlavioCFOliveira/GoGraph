@@ -23,8 +23,8 @@ import (
 //	Size() == m0*(m0-1)/2 + (n-m0)*m0
 //	       == 1 + (100_000 - 2)*2 == 199_997  (undirected edges)
 //
-// The CSR snapshot stores both directed arcs for each undirected
-// edge, so CSR.Size() == 2 * AdjList.Size().
+// Each undirected edge is stored as one directed arc, so
+// CSR.Size() == AdjList.Size().
 //
 // CI budget: 5 s.  The build is O(V+E) and runs in low single-digit
 // milliseconds on a development machine; the generous ceiling absorbs
@@ -33,7 +33,7 @@ func TestCSR_MegaBuild_MaxBA(t *testing.T) {
 	const budget = 5 * time.Second
 
 	shape := shapegen.BarabasiAlbert(100_000, 2, 42)
-	g, err := shape.Build(adjlist.Config{Directed: false})
+	g, err := shape.Build(adjlist.Config{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -52,8 +52,8 @@ func TestCSR_MegaBuild_MaxBA(t *testing.T) {
 	if c.Order() != a.Order() {
 		t.Errorf("Order mismatch: csr=%d adjlist=%d", c.Order(), a.Order())
 	}
-	// Undirected AdjList stores each edge once; CSR mirrors both arcs.
-	if c.Size() != 2*a.Size() {
-		t.Errorf("Size mismatch: csr=%d want 2*adjlist=%d", c.Size(), 2*a.Size())
+	// Every stored arc appears once in the CSR.
+	if c.Size() != a.Size() {
+		t.Errorf("Size mismatch: csr=%d want adjlist=%d", c.Size(), a.Size())
 	}
 }

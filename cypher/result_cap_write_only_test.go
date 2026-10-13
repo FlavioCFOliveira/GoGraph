@@ -32,7 +32,7 @@ func TestWriteOnlyCap_TripsErrResultRowsExceeded(t *testing.T) {
 		cap     = 10
 		creates = 50
 	)
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{MaxResultRows: cap})
 
 	res, err := eng.RunInTx(context.Background(),
@@ -57,7 +57,7 @@ func TestWriteOnlyCap_TripsErrResultRowsExceeded(t *testing.T) {
 func TestWriteOnlyCap_RollsBackAtomically(t *testing.T) {
 	const cap = 10
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{MaxResultRows: cap})
 
 	res, err := eng.RunInTx(context.Background(),
@@ -81,7 +81,7 @@ func TestWriteOnlyCap_RollsBackAtomically(t *testing.T) {
 func TestWriteOnlyCap_BelowCapCommits(t *testing.T) {
 	const cap = 50
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{MaxResultRows: cap})
 
 	res, err := eng.RunInTx(context.Background(),

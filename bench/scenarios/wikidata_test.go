@@ -78,7 +78,7 @@ func TestWikidata_VarlenMatch_Nightly(t *testing.T) {
 	)
 
 	// ── Build the LPG ─────────────────────────────────────────────────────────
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 

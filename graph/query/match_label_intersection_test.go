@@ -26,7 +26,7 @@ import (
 func setupLabelIntersectionGraph(tb testing.TB) (*lpg.Graph[int, int64], *csr.CSR[int64]) {
 	tb.Helper()
 
-	g := lpg.New[int, int64](adjlist.Config{Directed: true})
+	g := lpg.New[int, int64](adjlist.Config{})
 
 	for i := range 2000 {
 		if i < 1000 {

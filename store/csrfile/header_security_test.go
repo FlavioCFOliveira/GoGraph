@@ -17,7 +17,7 @@ import (
 // image: header + sections + trailing CRC32C.
 func writeValidCSR(t *testing.T) []byte {
 	t.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 32; i++ {
 		if err := a.AddEdge(i, (i+1)%32, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -193,7 +193,7 @@ func TestOpen_HostileHeaderRejected(t *testing.T) {
 func TestOpen_ValidFileStillOpens(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	const n = 48
 	for i := 0; i < n; i++ {
 		if err := a.AddEdge(i, (i+1)%n, struct{}{}); err != nil {

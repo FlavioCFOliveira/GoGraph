@@ -74,7 +74,7 @@ func countMergedNodes(t *testing.T, eng *cypher.Engine, id string) int64 {
 // exactly N would encode one it does not make either, since the writers may well
 // serialise by chance.
 func TestConcurrentMerge_WithoutAConstraintMayCreateDuplicates(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	const writers = 8
@@ -127,7 +127,7 @@ func TestConcurrentMerge_WithoutAConstraintMayCreateDuplicates(t *testing.T) {
 // than one node — a Consistency violation under the ACID mandate, not a
 // documented MERGE nuance.
 func TestConcurrentMerge_AUniqueConstraintCollapsesTheDuplicates(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -185,7 +185,7 @@ func TestConcurrentMerge_AUniqueConstraintCollapsesTheDuplicates(t *testing.T) {
 // total polluted by its peers — which is what a shared counter would break, and
 // which `-race` would also catch.
 func TestConcurrentCreate_PerStatementCountersAreNotShared(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	const (

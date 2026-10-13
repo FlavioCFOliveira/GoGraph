@@ -35,7 +35,7 @@ func TestApplyCSRToGraph_HandlelessPrefixThenHandle(t *testing.T) {
 	// one handle-bearing edge on the fast path. The CSR built from this graph
 	// carries a handle column whose leading slots are 0 and last slot is the
 	// stable handle — exactly the readback ApplyCSRToGraph dispatches on.
-	orig := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	orig := lpg.New[string, float64](adjlist.Config{})
 	const handleless = 5
 	for i := 0; i < handleless; i++ {
 		dst := string(rune('a' + i))
@@ -54,7 +54,7 @@ func TestApplyCSRToGraph_HandlelessPrefixThenHandle(t *testing.T) {
 
 	// Restore the mapper, then apply the CSR to a fresh graph — the recovery
 	// replay that panicked before the fix.
-	fresh := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	fresh := lpg.New[string, float64](adjlist.Config{})
 	var pairs []MapperPair
 	orig.AdjList().Mapper().Walk(func(id graph.NodeID, k string) bool {
 		pairs = append(pairs, MapperPair{ID: id, Key: k})

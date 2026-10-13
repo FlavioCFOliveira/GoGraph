@@ -31,7 +31,7 @@ func TestCapture_ConcurrentInternCommitAbort_Ladder(t *testing.T) {
 	for _, level := range []int{1, 8, 64, 256, 1024} {
 		t.Run(fmt.Sprintf("goroutines=%d", level), func(t *testing.T) {
 			t.Parallel()
-			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			g := lpg.New[string, float64](adjlist.Config{})
 			defer func() { _ = g.Close() }()
 			perWorker := max(totalOps/level, 4)
 			var committed sync.Map // key -> struct{}, stored after the commit returns

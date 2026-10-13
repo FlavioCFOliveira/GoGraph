@@ -41,7 +41,7 @@ import (
 // tries to sparsify it.
 func newBoolFusedFixture(t *testing.T) *Graph[string, float64] {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode %q: %v", n, err)
@@ -127,7 +127,7 @@ func TestFusedAppend_BoolColumnAsTarget(t *testing.T) {
 func TestFusedAppend_BoolColumnAcrossManySlots(t *testing.T) {
 	t.Parallel()
 	const targets = 40
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.AddNode("src"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

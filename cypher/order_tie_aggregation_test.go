@@ -19,7 +19,7 @@ import (
 //	category "B": scores [4, 5, 6]  → sum = 15
 func newTieredGraph(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
 		`CREATE (:Item {cat: 'A', score: 1})`,
@@ -109,7 +109,7 @@ func TestOrderTieAggregation_SumDESC(t *testing.T) {
 // ORDER BY total ASC, cat ASC → X before Y (same sum, X < Y lexicographically).
 func TestOrderTieAggregation_TieBreakByCat(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	for _, q := range []string{
@@ -149,7 +149,7 @@ func TestOrderTieAggregation_TieBreakByCat(t *testing.T) {
 // on a single group returns exactly one row.
 func TestOrderTieAggregation_SingleGroup(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	for _, q := range []string{

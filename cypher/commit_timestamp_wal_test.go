@@ -25,6 +25,7 @@ package cypher
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -45,7 +46,12 @@ func walEngine(t *testing.T) (*Engine, *wal.Writer, string) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := wr.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
+	g := lpg.New[string, float64](adjlist.Config{})
 	st := txn.NewStoreWithOptions[string, float64](g, wr, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),

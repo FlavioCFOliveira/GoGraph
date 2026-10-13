@@ -18,8 +18,8 @@ import (
 
 var _ = io.Discard
 
-// Write streams a DOT document representing a to w. The header
-// uses 'digraph' for directed graphs and 'graph' for undirected.
+// Write streams a DOT document representing a to w as a 'digraph': every
+// stored edge is directed and is emitted once, as src -> dst.
 // Edge weights are emitted as a label="..." attribute when non-zero.
 //
 // Concurrency: Write and [WriteCtx] are safe to call while other goroutines
@@ -46,25 +46,12 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
 func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64]) error {
 	defer metrics.Time("graph.io.dot.Write").Stop()
 	bw := bufio.NewWriterSize(w, 64*1024)
-	edgeOp := "->"
-	header := "digraph G {\n"
-	if !a.Directed() {
-		header = "graph G {\n"
-		edgeOp = "--"
-	}
-	if _, err := bw.WriteString(header); err != nil {
+	const edgeOp = "->"
+	if _, err := bw.WriteString("digraph G {\n"); err != nil {
 		metrics.IncCounter("graph.io.dot.WriteCtx.errors", 1)
 		return err
 	}
 	maxID := uint64(a.MaxNodeID())
-	seenEdge := func(srcID, dstID graph.NodeID) bool {
-		// For undirected graphs, emit (u, v) only when u <= v to
-		// avoid duplicate output for the mirrored pair.
-		if a.Directed() {
-			return true
-		}
-		return uint64(srcID) <= uint64(dstID)
-	}
 	// Pre-resolve every live name in one shard-batched pass so the
 	// inner edge loop pays no per-node Mapper.Resolve cost (each
 	// Resolve previously took a shard RLock; for dense graphs this
@@ -102,9 +89,6 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 		srcName := names[id]
 		nb, ws := a.LoadEntry(graph.NodeID(id))
 		for i, n := range nb {
-			if !seenEdge(graph.NodeID(id), n) {
-				continue
-			}
 			if uint64(n) >= maxID || !live[uint64(n)] {
 				continue
 			}

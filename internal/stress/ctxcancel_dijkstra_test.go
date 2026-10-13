@@ -43,7 +43,7 @@ func TestCtxCancel_Dijkstra_MidRun(t *testing.T) {
 
 	defer goleak.VerifyNone(t)
 
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < nodes-1; i++ {
 		if err := a.AddEdge(i, i+1, 1); err != nil {
 			t.Fatalf("AddEdge %d→%d: %v", i, i+1, err)

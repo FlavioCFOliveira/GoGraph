@@ -7,8 +7,8 @@ package cypher_test
 // The report claimed that after `SET e = {stamp:'M'}` a relationship property is
 // stored but unreadable: `e.stamp` null, `properties(e)` empty, `keys(e)` empty,
 // while `RETURN e` shows it. That premise did NOT reproduce at HEAD. Every
-// accessor agrees, on the in-memory engine and the WAL-backed store, with and
-// without multigraph, in one statement or two, and across a store reopen.
+// accessor agrees, on the in-memory engine and the WAL-backed store, in one
+// statement or two, and across a store reopen.
 //
 // The reported symptom is what a SECOND, propertyless :R relationship between a
 // second (:T{key:'s'}, :T{key:'t'}) pair produces — and CREATE always creates,
@@ -74,61 +74,55 @@ func TestRelAccessors_AgreeAfterSet(t *testing.T) {
 		{"replaceDropsOldKeys", ` {old:'o'}`, `SET e = {stamp:'M'}`, `"M"`, 1},
 		{"mutateKeepsOldKeys", ` {old:'o'}`, `SET e += {stamp:'M'}`, `"M"`, 2},
 	}
-	for _, mg := range []bool{false, true} {
-		for _, tc := range cases {
-			name := tc.name
-			if mg {
-				name += "_multigraph"
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := lpg.New[string, float64](adjlist.Config{})
+			eng := cypher.NewEngine(g)
+			seed := fmt.Sprintf(`CREATE (a:T {key:'s'})-[e:R%s]->(b:T {key:'t'})`, tc.createRel)
+			if _, err := runEntityProp(eng, seed); err != nil {
+				t.Fatalf("seed: %v", err)
 			}
-			t.Run(name, func(t *testing.T) {
-				t.Parallel()
-				g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: mg})
-				eng := cypher.NewEngine(g)
-				seed := fmt.Sprintf(`CREATE (a:T {key:'s'})-[e:R%s]->(b:T {key:'t'})`, tc.createRel)
-				if _, err := runEntityProp(eng, seed); err != nil {
-					t.Fatalf("seed: %v", err)
-				}
-				if _, err := runEntityProp(eng, relAccessorMatch+tc.set); err != nil {
-					t.Fatalf("%s: %v", tc.set, err)
-				}
+			if _, err := runEntityProp(eng, relAccessorMatch+tc.set); err != nil {
+				t.Fatalf("%s: %v", tc.set, err)
+			}
 
-				scalar := oneRow(t, eng, relAccessorMatch+`RETURN e.stamp AS v`)
-				props := oneRow(t, eng, relAccessorMatch+`RETURN properties(e) AS v`)
-				keys := oneRow(t, eng, relAccessorMatch+`RETURN keys(e) AS v`)
-				combined := oneRowFull(t, eng, relAccessorMatch+`RETURN e.stamp AS sv, properties(e) AS pv, keys(e) AS kv, e AS wv`)
+			scalar := oneRow(t, eng, relAccessorMatch+`RETURN e.stamp AS v`)
+			props := oneRow(t, eng, relAccessorMatch+`RETURN properties(e) AS v`)
+			keys := oneRow(t, eng, relAccessorMatch+`RETURN keys(e) AS v`)
+			combined := oneRowFull(t, eng, relAccessorMatch+`RETURN e.stamp AS sv, properties(e) AS pv, keys(e) AS kv, e AS wv`)
 
-				// Each accessor read alone must equal the same accessor read
-				// inside a whole-entity projection: the lazy route and the eager
-				// route must not disagree.
-				if got, want := fmtAny(scalar), fmtAny(combined["sv"]); got != want {
-					t.Errorf("e.stamp: isolated = %s, inside a whole-entity projection = %s", got, want)
-				}
-				if got, want := canonicalMap(fmtAny(props)), canonicalMap(fmtAny(combined["pv"])); got != want {
-					t.Errorf("properties(e): isolated = %s, combined = %s", got, want)
-				}
+			// Each accessor read alone must equal the same accessor read
+			// inside a whole-entity projection: the lazy route and the eager
+			// route must not disagree.
+			if got, want := fmtAny(scalar), fmtAny(combined["sv"]); got != want {
+				t.Errorf("e.stamp: isolated = %s, inside a whole-entity projection = %s", got, want)
+			}
+			if got, want := canonicalMap(fmtAny(props)), canonicalMap(fmtAny(combined["pv"])); got != want {
+				t.Errorf("properties(e): isolated = %s, combined = %s", got, want)
+			}
 
-				// The accessors must agree with each other.
-				if got := fmtAny(scalar); got != tc.wantStamp {
-					t.Errorf("e.stamp = %s, want %s", got, tc.wantStamp)
-				}
-				if n := countListKeys(fmtAny(keys)); n != tc.wantKeys {
-					t.Errorf("keys(e) = %s (%d keys), want %d", fmtAny(keys), n, tc.wantKeys)
-				}
-				// The central #2815 claim, stated directly: a non-null scalar
-				// read and an empty property map cannot both be right.
-				if fmtAny(scalar) != "null" && fmtAny(props) == "{}" {
-					t.Errorf("e.stamp = %s but properties(e) = {} — the accessors disagree about one stored property", fmtAny(scalar))
-				}
-				if fmtAny(scalar) == "null" && fmtAny(props) != "{}" {
-					t.Errorf("e.stamp = null but properties(e) = %s — the accessors disagree about one stored property", fmtAny(props))
-				}
-				// A whole-entity projection must be materialisable at all; it is
-				// the one accessor the report said still worked.
-				if combined["wv"] == nil {
-					t.Error("RETURN e produced a nil relationship column")
-				}
-			})
-		}
+			// The accessors must agree with each other.
+			if got := fmtAny(scalar); got != tc.wantStamp {
+				t.Errorf("e.stamp = %s, want %s", got, tc.wantStamp)
+			}
+			if n := countListKeys(fmtAny(keys)); n != tc.wantKeys {
+				t.Errorf("keys(e) = %s (%d keys), want %d", fmtAny(keys), n, tc.wantKeys)
+			}
+			// The central #2815 claim, stated directly: a non-null scalar
+			// read and an empty property map cannot both be right.
+			if fmtAny(scalar) != "null" && fmtAny(props) == "{}" {
+				t.Errorf("e.stamp = %s but properties(e) = {} — the accessors disagree about one stored property", fmtAny(scalar))
+			}
+			if fmtAny(scalar) == "null" && fmtAny(props) != "{}" {
+				t.Errorf("e.stamp = null but properties(e) = %s — the accessors disagree about one stored property", fmtAny(props))
+			}
+			// A whole-entity projection must be materialisable at all; it is
+			// the one accessor the report said still worked.
+			if combined["wv"] == nil {
+				t.Error("RETURN e produced a nil relationship column")
+			}
+		})
 	}
 }
 
@@ -142,7 +136,7 @@ func TestRelAccessors_AgreeAfterSet(t *testing.T) {
 // query and a later row of another sees a contradiction.
 func TestRelAccessors_SecondPairIsTwoRows(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	if _, err := runEntityProp(eng, `CREATE (a:T {key:'s'})-[e:R]->(b:T {key:'t'})`); err != nil {
 		t.Fatalf("seed: %v", err)

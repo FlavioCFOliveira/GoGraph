@@ -9,7 +9,7 @@ import (
 
 func TestWCC_TwoComponents(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestWCC_TwoComponents(t *testing.T) {
 // the other in the directed sense.
 func TestWCC_SymmetricClosure(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestWCC_SymmetricClosure(t *testing.T) {
 
 func TestWCC_Isolated(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddNode(0); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

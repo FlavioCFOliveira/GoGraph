@@ -63,7 +63,7 @@ const phaseReadQuery = "MATCH (n:Acct {id: $id}) RETURN n.bal AS b"
 // add a phase that the +12.38% measurement did not contain either.
 func newPhaseRig(tb testing.TB) *Engine {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	ctx := context.Background()
 	if _, err := eng.RunInTx(ctx, "CREATE INDEX acct_id FOR (n:Acct) ON (n.id)", nil); err != nil {

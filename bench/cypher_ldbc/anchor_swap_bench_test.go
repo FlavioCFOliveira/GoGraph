@@ -57,7 +57,7 @@ const anchorSwapBenchQuery = "MATCH (a:Hub)<-[:R]-(b:Leaf) RETURN a.tag AS at, b
 // buildAnchorSwapBenchGraph seeds the adversarial hub graph via the lpg API. The
 // engine recomputes an exact count-store from it at construction.
 func buildAnchorSwapBenchGraph() *lpg.Graph[string, float64] {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	_ = g.AddNode("hub")
 	_ = g.SetNodeLabel("hub", "Hub")
 	_ = g.SetNodeProperty("hub", "tag", lpg.Int64Value(0))

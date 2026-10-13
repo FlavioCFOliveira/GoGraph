@@ -41,7 +41,7 @@ import (
 // gating on its own present-state probe would journal an inverse and resurrect
 // it after a peer's real delete commits.
 func TestConflict_NodeRemovalReportsItsRefusalWhenDoomed(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"victim", "contended"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%s): %v", n, err)
@@ -90,7 +90,7 @@ func TestConflict_NodeRemovalReportsItsRefusalWhenDoomed(t *testing.T) {
 // above cannot answer for this path — and the node is left LIVE here too,
 // because the cross-checks all run before the tombstone flip.
 func TestConflict_NodeRemovalReportsACrossStoreRefusal(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("victim"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestConflict_NodeRemovalReportsACrossStoreRefusal(t *testing.T) {
 // journalled — a rolled-back DELETE would then become permanent, which is
 // rmp #2445's defect reopened from the other side.
 func TestConflict_NodeRemovalAppliesWithoutAConcurrentWriter(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

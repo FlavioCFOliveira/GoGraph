@@ -19,7 +19,7 @@
 //
 // # Partitioned parallel ingest
 //
-// For large directed loads the loader can build the adjacency in
+// For large loads the loader can build the adjacency in
 // parallel across bounded goroutines (see [Options.Parallel]) while
 // producing a result that is byte-for-byte identical to the sequential
 // loader. Determinism is guaranteed by a two-phase scheme: a serial
@@ -27,10 +27,8 @@
 // sequential interning order exactly by construction), then a parallel
 // second phase builds adjacency partitioned by the source node's Mapper
 // shard so that partitions write to disjoint shards with no contention
-// and each source keeps its edges in input order. Undirected and
-// simple-graph loads, and loads below a small threshold, use the
-// sequential path because mirror/dedup edges would cross partition
-// boundaries; the result is identical either way.
+// and each source keeps its edges in input order. Loads below a small
+// threshold use the sequential path; the result is identical either way.
 package bulk
 
 import (
@@ -103,19 +101,14 @@ type Options struct {
 	// determinism-neutral capacity hint. Leave it 0 when the node count
 	// is unknown.
 	ExpectNodes int
-	// Directed selects the adjacency-list configuration.
-	Directed bool
-	// Multigraph allows parallel edges in the loaded graph.
-	Multigraph bool
-	// Parallel selects partitioned-parallel ingest for large directed
-	// loads. The default (false) always uses the deterministic
-	// sequential build. When true, the loader buffers edges and builds
+	// Parallel selects partitioned-parallel ingest for large loads. The
+	// default (false) always uses the deterministic sequential build. When true, the loader buffers edges and builds
 	// the adjacency across up to GOMAXPROCS (capped at an internal
 	// bound) goroutines during [Loader.Finalise], producing a result
 	// byte-for-byte identical to the sequential build. Parallelism is
-	// only engaged for directed loads at or above an internal edge-count
-	// threshold; smaller, undirected, or simple-graph loads transparently
-	// fall back to the sequential build.
+	// only engaged for loads at or above an internal edge-count
+	// threshold; smaller loads transparently fall back to the sequential
+	// build.
 	Parallel bool
 }
 
@@ -148,7 +141,7 @@ type Loader struct {
 func New(opts Options) *Loader {
 	l := &Loader{
 		opts: opts,
-		adj:  adjlist.New[string, int64](adjlist.Config{Directed: opts.Directed, Multigraph: opts.Multigraph}),
+		adj:  adjlist.New[string, int64](adjlist.Config{}),
 	}
 	if opts.ExpectNodes > 0 {
 		// Calibrated pre-size: reserve interning capacity for the expected
@@ -236,8 +229,7 @@ func (l *Loader) Drain(ctx context.Context, ch <-chan Edge) (int, error) {
 // to opts.OutputPath as a csrfile. Returns the row count, the
 // resulting CSR (for chaining into search/extern), and any error.
 //
-// When Options.Parallel is set and the buffered load is a large
-// directed graph, Finalise builds the adjacency in parallel; the
+// When Options.Parallel is set and the buffered load is large, Finalise builds the adjacency in parallel; the
 // resulting CSR and csrfile are byte-for-byte identical to the
 // sequential build. The csrfile is published by [csrfile.WriteToFile]
 // (tmp + fsync + rename + parent fsync): the parallel build completes
@@ -310,30 +302,22 @@ func (l *Loader) Finalise() (int, *csr.CSR[int64], error) {
 }
 
 // csrDirectEligible reports whether the buffered load qualifies for the
-// CSR-direct counting-sort build. It applies to DIRECTED graphs only:
-// undirected loads mirror each edge onto the (dst, src) entry, and a
-// stable counting sort over the forward stream alone cannot reproduce
-// BuildFromAdjList byte-for-byte for the mirrored entries, so those fall
-// back to the adjacency path. A capacity-capped adjacency
+// CSR-direct counting-sort build. A capacity-capped adjacency
 // (MaxShardCapacity > 0) also falls back, because the cap's ErrShardFull
 // is enforced by the adjacency's storeEntry and must surface before the
 // single csrfile publication (see the parallel atomicity test); the
 // counting sort does not consult the cap. The public Options exposes no
 // cap knob, so production loaders are always CSR-direct eligible.
 //
-// Both directed multigraph and directed simple graphs are eligible: the
-// counting sort reproduces simple-graph first-occurrence dedup and the
-// multigraph keep-all behaviour exactly (see buildCSRDirect).
+// The counting sort keeps every parallel edge, exactly as the adjacency
+// does (see buildCSRDirect).
 func (l *Loader) csrDirectEligible() bool {
-	if !l.opts.Directed {
-		return false
-	}
 	return l.adj.Config().MaxShardCapacity == 0
 }
 
 // buildCSRDirect builds the immutable CSR from the buffered edge stream
 // with a two-pass counting sort, without ever touching the mutable
-// adjacency list. For a DIRECTED graph the output is byte-for-byte
+// adjacency list. The output is byte-for-byte
 // identical to csr.BuildFromAdjList(l.adj) had the same edges been
 // replayed through AddEdge — the determinism gate the byte-identity tests
 // enforce — while allocating O(1) large arrays instead of the
@@ -354,12 +338,10 @@ func (l *Loader) csrDirectEligible() bool {
 //     space. NodeIDs are sparse (NodeID = (intraIdx<<8)|shard), so the
 //     prefix sum spans the full [0, maxID] range with absent ("ghost")
 //     NodeIDs contributing a zero-width slot.
-//  3. Within-row order and dedup. The adjacency appends a source's
-//     neighbours in input order; in simple-graph mode a repeat (src, dst)
-//     is a no-op that keeps the first occurrence (and its weight) and
-//     drops the later one, while a multigraph keeps every parallel edge.
-//     A stable scatter (a per-source running cursor over the SAME
-//     post-dedup stream pass 1 counted) reproduces both exactly. Both
+//  3. Within-row order. The adjacency appends a source's neighbours in
+//     input order and keeps every parallel edge. A stable scatter (a
+//     per-source running cursor over the stream pass 1 counted)
+//     reproduces it exactly. Both
 //     builds then apply csr.OrderRuns to the identical pre-order arrays,
 //     so the final within-row order matches as well (rmp #2141). This
 //     step is what keeps the contract true now that BuildFromAdjList
@@ -368,37 +350,17 @@ func (l *Loader) csrDirectEligible() bool {
 func (l *Loader) buildCSRDirect() *csr.CSR[int64] {
 	edges := l.buffered
 	mapper := l.adj.Mapper()
-	simple := !l.opts.Multigraph
 
 	// Pass 1: resolve every endpoint to its NodeID in input order (fixing
 	// the same assignment the adjacency path would), and count out-degree
 	// per source. The resolved ids are retained so pass 2 does not re-intern.
 	src := make([]graph.NodeID, len(edges))
 	dst := make([]graph.NodeID, len(edges))
-	// keep[k] is false for an edge dropped by simple-graph dedup; pass 2
-	// must consume the SAME post-dedup stream pass 1 counted, so the count
-	// and the scatter cannot diverge. It stays nil for a multigraph, where
-	// every edge is kept (no per-edge flag, no allocation).
-	var keep []bool
-	var seen map[[2]graph.NodeID]struct{}
-	if simple {
-		keep = make([]bool, len(edges))
-		seen = make(map[[2]graph.NodeID]struct{}, len(edges))
-	}
-
 	for k := range edges {
 		s := mapper.Intern(edges[k].Src)
 		d := mapper.Intern(edges[k].Dst)
 		src[k] = s
 		dst[k] = d
-		if simple {
-			pair := [2]graph.NodeID{s, d}
-			if _, dup := seen[pair]; dup {
-				continue // drop the duplicate, exactly as upsertEdge does
-			}
-			seen[pair] = struct{}{}
-			keep[k] = true
-		}
 	}
 
 	// maxID is the canonical NodeID-indexed array size the CSR builder uses:
@@ -423,9 +385,6 @@ func (l *Loader) buildCSRDirect() *csr.CSR[int64] {
 	// natural zero-width slot.
 	vertices := make([]uint64, maxID+1)
 	for k := range edges {
-		if simple && !keep[k] {
-			continue
-		}
 		vertices[uint64(src[k])]++
 	}
 	var total uint64
@@ -444,9 +403,6 @@ func (l *Loader) buildCSRDirect() *csr.CSR[int64] {
 	weights := make([]int64, total)
 	cursor := make([]uint64, maxID)
 	for k := range edges {
-		if simple && !keep[k] {
-			continue
-		}
 		s := uint64(src[k])
 		pos := vertices[s] + cursor[s]
 		flat[pos] = dst[k]
@@ -468,7 +424,7 @@ func (l *Loader) buildCSRDirect() *csr.CSR[int64] {
 }
 
 // buildBuffered drains the buffered edge stream into l.adj. It chooses
-// the deterministic parallel build when the load is large and directed,
+// the deterministic parallel build when the load is large,
 // and otherwise the sequential build; both produce an identical adj.
 func (l *Loader) buildBuffered() error {
 	if l.parallelEligible() {
@@ -478,14 +434,10 @@ func (l *Loader) buildBuffered() error {
 }
 
 // parallelEligible reports whether the buffered load qualifies for the
-// parallel build. Parallelism is restricted to directed graphs at or
-// above the size threshold: undirected mirroring and simple-graph
-// dedup would route edges across partition boundaries, so those modes
-// use the sequential build (which is byte-identical anyway).
+// parallel build. Parallelism is restricted to loads at or above the
+// size threshold; smaller loads use the sequential build (which is
+// byte-identical anyway).
 func (l *Loader) parallelEligible() bool {
-	if !l.opts.Directed {
-		return false
-	}
 	if len(l.buffered) < parallelMinEdges {
 		return false
 	}

@@ -74,7 +74,7 @@ func buildLabelIntersectBench(tb testing.TB, disable bool) *cypher.Engine {
 	// Directed + Multigraph is the openCypher storage model, and it also stops the
 	// engine logging its non-directed / non-multigraph warnings, which would
 	// interleave with the benchmark output and make benchstat drop samples.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	set := func(key string, labels ...string) {
 		if err := g.AddNode(key); err != nil {

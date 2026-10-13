@@ -41,7 +41,7 @@ func writeSparseEdgePropertyWorkload(t *testing.T, dir string) string {
 	t.Helper()
 	// A single-file log: this test damages or erases it as one file.
 	w := openSingleFileWAL(t, filepath.Join(dir, "wal"))
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),

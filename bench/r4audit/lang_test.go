@@ -22,7 +22,7 @@ import (
 // character (>= U+10000, encoded in UTF-16 as a surrogate pair in D800..DFFF) is
 // compared against a BMP character in E000..FFFF.
 func TestStringOrdering(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	// U+1F600 GRINNING FACE (supplementary) vs U+FB01 LATIN SMALL LIGATURE FI (BMP, > D800)
 	vals := []string{"\U0001F600", "ﬁ", "z", "a", "Z", "é" /* é */, "e"}
 	for i, v := range vals {

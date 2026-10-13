@@ -101,13 +101,20 @@ func TestBrandesArena_BitIdentical(t *testing.T) {
 	t.Parallel()
 
 	build := func(directed bool, edges [][2]int) *csr.CSR[struct{}] {
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: directed})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		for _, e := range edges {
 			if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
 				t.Fatalf("AddEdge(%d,%d): %v", e[0], e[1], err)
 			}
 		}
-		return csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a)
+		if !directed {
+			c = c.BuildSymmetric()
+		}
+		if !directed {
+			c = c.BuildSymmetric()
+		}
+		return c
 	}
 
 	cases := []struct {
@@ -181,11 +188,14 @@ func TestBrandesArena_BitIdentical_Random(t *testing.T) {
 				t.Parallel()
 				const n = 64
 				r := rand.New(rand.NewPCG(seed, seed*2654435761)) //nolint:gosec // G404: math/rand/v2 PCG seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
-				a := adjlist.New[int, struct{}](adjlist.Config{Directed: directed})
+				a := adjlist.New[int, struct{}](adjlist.Config{})
 				for i := 0; i < 4*n; i++ {
 					_ = a.AddEdge(r.IntN(n), r.IntN(n), struct{}{})
 				}
 				c := csr.BuildFromAdjList(a)
+				if !directed {
+					c = c.BuildSymmetric()
+				}
 				want := betweennessLegacy(c)
 				got := Betweenness(c)
 				if idx, ok := bitsEqual(want, got); !ok {

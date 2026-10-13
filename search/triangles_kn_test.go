@@ -26,12 +26,12 @@ func TestCountTriangles_Kn(t *testing.T) {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			t.Parallel()
 
-			g, err := shapegen.Complete(n, false).Build(adjlist.Config{Directed: false})
+			g, err := shapegen.Complete(n, false).Build(adjlist.Config{})
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}
 			a := g.AdjList()
-			c := csr.BuildFromAdjList(a)
+			c := csr.BuildFromAdjList(a).BuildSymmetric()
 
 			total, perNode := CountTriangles(c)
 

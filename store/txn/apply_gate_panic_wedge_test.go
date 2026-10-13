@@ -215,7 +215,7 @@ func newWedgeStore(t *testing.T) (*txn.Store[string, int64], *wal.Writer) {
 		t.Fatalf("wal.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	return txn.NewStoreWithCodec(g, w, txn.NewStringCodec()), w
 }
 

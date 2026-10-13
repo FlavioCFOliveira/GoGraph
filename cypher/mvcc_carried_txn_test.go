@@ -67,7 +67,7 @@ var writeSurface = []string{
 // assertion is a direct observation and the instrument costs the measured path
 // nothing.
 func TestWritePath_ResolvesNoCommitRecordThroughTheAmbientSlot(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	before := g.AmbientVersionResolutions()
@@ -103,7 +103,7 @@ func TestWritePath_ResolvesNoCommitRecordThroughTheAmbientSlot(t *testing.T) {
 // through the slot. It is pinned inside lpg by
 // TestWriteView_CarriesTheTransactionRatherThanResolvingIt.
 func TestAmbientSlotGate_NoExportedWriteResolvesThroughTheSlot(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 
 	// Half one: no bracket open. An untransacted write is NOT an ambient
 	// resolution.
@@ -185,7 +185,7 @@ func mustSetProp(t *testing.T, g *lpg.Graph[string, float64], key string, v int6
 // inside it, and writes nothing, so the only effect it has on the run is the slot
 // it publishes.
 func TestWritePath_OneStatementLandsOnOneCommitRecord(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	if r, err := eng.RunAny(context.Background(), `CREATE (:Acct {id:'a', bal:100})`, nil); err != nil {

@@ -26,7 +26,7 @@ import (
 // refresh has something to build statistics from.
 func statsProcEngine(t *testing.T) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < 200; i++ {
 		k := "s" + strconv.Itoa(i)
 		if err := g.AddNode(k); err != nil {

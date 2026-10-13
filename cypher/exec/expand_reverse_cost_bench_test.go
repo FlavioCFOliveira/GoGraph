@@ -11,7 +11,7 @@ package exec_test
 // The Expand operator is driven over CSR snapshots whose NodeID is the array
 // index (the staticCSR helper of expand_test.go), so the edge list maps
 // one-to-one onto CSR positions. HandlesSlice is nil, which is exactly the
-// production NON-multigraph path: the reverse traversal recovers a canonical
+// handle-less production path: the reverse traversal recovers a canonical
 // edge id through Expand.lookupFwdEdgePos, not the by-handle variant.
 //
 // Findings drive the #2090 anchor-swap policy:
@@ -244,7 +244,7 @@ func BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree(b *testing.B) {
 func BenchmarkBuildReverse_vs_E(b *testing.B) {
 	for _, E := range []int{10000, 100000, 1000000} {
 		n := E
-		adj := adjlist.New[int, float64](adjlist.Config{Directed: true})
+		adj := adjlist.New[int, float64](adjlist.Config{})
 		for i := 0; i < n; i++ {
 			_ = adj.AddNode(i)
 		}

@@ -25,7 +25,7 @@ import (
 
 // constraintIndexSeekEngine returns a fresh engine backed by a directed LPG.
 func constraintIndexSeekEngine() *cypher.Engine {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	return cypher.NewEngine(g)
 }
 

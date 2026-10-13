@@ -14,7 +14,7 @@ import (
 // symlinkEscapeCSR builds a small CSR to publish.
 func symlinkEscapeCSR(t *testing.T) *csr.CSR[struct{}] {
 	t.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 8; i++ {
 		if err := a.AddEdge(i, (i+1)%8, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)

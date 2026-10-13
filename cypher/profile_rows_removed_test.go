@@ -49,7 +49,7 @@ import (
 // generator that drifted would fail the gate rather than silently weaken it.
 func removedFixture(t *testing.T, total, matches int) *cypher.Engine {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 	ctx := context.Background()
@@ -301,7 +301,7 @@ func TestProfileRowsRemoved_ColumnarFilterReportsTheSameFigure(t *testing.T) {
 // rejected 99" is exactly the comparison the figure exists to make.
 func TestProfileRowsRemoved_TypeFilteredExpandSaysWhatItSkipped(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 	const others = 99
@@ -464,7 +464,7 @@ func TestProfileTableRowsRemoved_ColumnAppearsOnlyWhenSomethingRemoves(t *testin
 // count is tied to the independently-counted slot walk rather than asserted alone.
 func TestProfileRowsRemoved_ReverseDirectionRejectionsAreCounted(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 
@@ -577,7 +577,7 @@ func TestProfileRowsRemoved_ReverseDirectionRejectionsAreCounted(t *testing.T) {
 // ColumnarFilter above reports removed=0 in all four arms.
 func TestProfileRowsRemoved_ColumnarExpandReportsThroughAPlannedQuery(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 	const others = 99

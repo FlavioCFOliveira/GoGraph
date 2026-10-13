@@ -21,7 +21,7 @@ import (
 func TestGraphML_TombstonedNodeNotExported(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b", "dead"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%q): %v", n, err)
@@ -90,7 +90,7 @@ func TestGraphML_TombstonedNodeNotExported(t *testing.T) {
 func TestGraphML_DeleteThenRecreateExportsOnce(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	if err := g.AddNode("dead"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestGraphML_DeleteThenRecreateExportsOnce(t *testing.T) {
 func TestGraphML_OnlyTombstonedNodesExportsEmptyGraph(t *testing.T) {
 	t.Parallel()
 
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	for _, n := range []string{"x", "y"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode(%q): %v", n, err)

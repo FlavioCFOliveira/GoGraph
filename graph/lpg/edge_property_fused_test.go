@@ -80,14 +80,14 @@ func TestFused_EquivalenceSingleEdge(t *testing.T) {
 		t.Run(k.name, func(t *testing.T) {
 			t.Parallel()
 			// Two-step reference.
-			ref := New[string, int64](adjlist.Config{Directed: true})
+			ref := New[string, int64](adjlist.Config{})
 			if err := ref.AddEdgeLabeled("a", "b", 1, "REL"); err != nil {
 				t.Fatalf("AddEdgeLabeled: %v", err)
 			}
 			ref.mustSet(t, "a", "b", "p", k.v)
 
 			// Fused.
-			fused := New[string, int64](adjlist.Config{Directed: true})
+			fused := New[string, int64](adjlist.Config{})
 			if err := fused.AddEdgeLabeledWithProperty("a", "b", 1, "REL", "p", k.v); err != nil {
 				t.Fatalf("AddEdgeLabeledWithProperty: %v", err)
 			}
@@ -117,8 +117,8 @@ func TestFused_EquivalenceSingleEdge(t *testing.T) {
 func TestFused_EquivalenceHighDegree(t *testing.T) {
 	t.Parallel()
 	const degree = 600 // large enough to span several geometric grows + a reshape
-	ref := New[string, int64](adjlist.Config{Directed: true})
-	fused := New[string, int64](adjlist.Config{Directed: true})
+	ref := New[string, int64](adjlist.Config{})
+	fused := New[string, int64](adjlist.Config{})
 	for i := 0; i < degree; i++ {
 		dst := fmt.Sprintf("d%d", i)
 		// A mix of date strings (folded to epoch-day) and plain strings.
@@ -147,8 +147,8 @@ func TestFused_EquivalenceHighDegree(t *testing.T) {
 // fans out to all slots and reads consistently.
 func TestFused_EquivalenceMultigraphParallelEdges(t *testing.T) {
 	t.Parallel()
-	ref := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
-	fused := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	ref := New[string, int64](adjlist.Config{})
+	fused := New[string, int64](adjlist.Config{})
 	// Three parallel a->b edges, each fused with the SAME key but a per-edge value;
 	// the per-pair coalesce takes the latest dst-matching slot, so both paths must
 	// agree on the last value.
@@ -181,8 +181,8 @@ func TestFused_EquivalenceMultigraphParallelEdges(t *testing.T) {
 // grownWithValue-after-dense paths.
 func TestFused_MixedWithSetEdgeProperty(t *testing.T) {
 	t.Parallel()
-	ref := New[string, int64](adjlist.Config{Directed: true})
-	fused := New[string, int64](adjlist.Config{Directed: true})
+	ref := New[string, int64](adjlist.Config{})
+	fused := New[string, int64](adjlist.Config{})
 	const degree = 40
 	for i := 0; i < degree; i++ {
 		dst := fmt.Sprintf("d%d", i)
@@ -216,8 +216,8 @@ func TestFused_MixedWithSetEdgeProperty(t *testing.T) {
 // path. This exercises CompactSlot on a fused-built sparse block.
 func TestFused_EquivalenceAfterRemoval(t *testing.T) {
 	t.Parallel()
-	ref := New[string, int64](adjlist.Config{Directed: true})
-	fused := New[string, int64](adjlist.Config{Directed: true})
+	ref := New[string, int64](adjlist.Config{})
+	fused := New[string, int64](adjlist.Config{})
 	const degree = 30
 	for i := 0; i < degree; i++ {
 		dst := fmt.Sprintf("d%d", i)
@@ -245,28 +245,6 @@ func TestFused_EquivalenceAfterRemoval(t *testing.T) {
 	}
 }
 
-// TestFused_EquivalenceUndirected asserts the undirected mirror carries the same
-// fused property on both directions, matching the two-step path.
-func TestFused_EquivalenceUndirected(t *testing.T) {
-	t.Parallel()
-	ref := New[string, int64](adjlist.Config{Directed: false})
-	fused := New[string, int64](adjlist.Config{Directed: false})
-	if err := ref.AddEdgeLabeled("x", "y", 1, "KNOWS"); err != nil {
-		t.Fatalf("ref add: %v", err)
-	}
-	ref.mustSet(t, "x", "y", "since", StringValue("\x012019-05-05"))
-	if err := fused.AddEdgeLabeledWithProperty("x", "y", 1, "KNOWS", "since", StringValue("\x012019-05-05")); err != nil {
-		t.Fatalf("fused add: %v", err)
-	}
-	for _, pair := range [][2]string{{"x", "y"}, {"y", "x"}} {
-		r := edgePropsString(ref.EdgeProperties(pair[0], pair[1]))
-		f := edgePropsString(fused.EdgeProperties(pair[0], pair[1]))
-		if r != f {
-			t.Fatalf("undirected %s->%s mismatch: two-step %s fused %s", pair[0], pair[1], r, f)
-		}
-	}
-}
-
 // TestFused_RandomisedEquivalence builds two graphs — one fused, one two-step —
 // from the same randomised script of labelled property-carrying edges across many
 // sources and degrees, and asserts every pair coalesces identically. This is the
@@ -274,8 +252,8 @@ func TestFused_EquivalenceUndirected(t *testing.T) {
 func TestFused_RandomisedEquivalence(t *testing.T) {
 	t.Parallel()
 	rng := rand.New(rand.NewSource(0x1646)) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
-	ref := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
-	fused := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	ref := New[string, int64](adjlist.Config{})
+	fused := New[string, int64](adjlist.Config{})
 	const sources = 50
 	type pair struct{ src, dst string }
 	seen := map[pair]struct{}{}

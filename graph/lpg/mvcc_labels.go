@@ -179,6 +179,7 @@ func (sh *nodeLabelShard) pushLabelDelta(id graph.NodeID, action uint8, lid Labe
 	if sh.d == nil {
 		// Lazily allocated: a shard that is never written keeps no side map, so
 		// a read-only graph pays nothing for the mechanism existing.
+		sh.hasD.Store(true) // before the delta exists; see hasD
 		sh.d = make(map[graph.NodeID]*nodeLabelDelta, 8)
 	}
 	sh.d[id] = &nodeLabelDelta{
@@ -344,4 +345,13 @@ func (g *Graph[N, W]) labelBagPlain(id graph.NodeID) labelBag {
 	cur := sh.m[id]
 	sh.mu.RUnlock()
 	return cur
+}
+
+// dropDeltasIfEmpty nils d when it holds nothing and lowers hasD with it. The
+// caller must hold sh.mu for writing.
+func (sh *nodeLabelShard) dropDeltasIfEmpty() {
+	if len(sh.d) == 0 {
+		sh.d = nil
+		sh.hasD.Store(false)
+	}
 }

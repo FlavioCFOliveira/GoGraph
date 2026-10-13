@@ -209,7 +209,7 @@ const propertiesCapHintMax = 1 << 20
 // this checkpoint attempt with nothing written or truncated — never a
 // silently inconsistent record.
 func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.Snapshot) (size int64, crc uint32, err error) {
-	return writeProperties(w, g, at, snapshotPropertyKeys, newPropValueArena)
+	return writeProperties(w, g, at, snapshotPropertyKeys, newPropValueArena, componentBufMax)
 }
 
 // newPropValueArena is the production value-arena factory: it hands writeProperties
@@ -233,10 +233,11 @@ func writeProperties[N comparable, W any](
 	at *lpg.Snapshot,
 	snapKeys func(*lpg.PropertyKeyRegistry) []string,
 	newArena func() *propValueArena,
+	bufSize int,
 ) (size int64, crc uint32, err error) {
 	defer metrics.Time("store.snapshot.WriteProperties").Stop()
 
-	bw := bufio.NewWriterSize(w, 1<<20)
+	bw := bufio.NewWriterSize(w, bufSize)
 	hasher := crc32.New(castagnoli)
 	tee := io.MultiWriter(bw, hasher)
 

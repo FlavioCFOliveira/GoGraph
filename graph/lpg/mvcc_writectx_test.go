@@ -49,7 +49,7 @@ func mustCommit[N comparable, W any](t *testing.T, tx *labelTx[N, W]) uint64 {
 // bracket really does open mid-flight.
 func TestWriteCtx_DisjointDirectWritersDoNotConflict(t *testing.T) {
 	t.Parallel()
-	g := New[int, int64](adjlist.Config{Directed: true, Multigraph: false})
+	g := New[int, int64](adjlist.Config{})
 
 	const (
 		goroutines = 64
@@ -87,7 +87,7 @@ func TestWriteCtx_DisjointDirectWritersDoNotConflict(t *testing.T) {
 // exists for: two overlapping write transactions hold two distinct contexts,
 // and neither can observe the other's.
 func TestWriteCtx_TwoTransactionsHaveDistinctState(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 
 	a := g.beginWriteCtx()
 	b := g.beginWriteCtx()
@@ -117,7 +117,7 @@ func TestWriteCtx_TwoTransactionsHaveDistinctState(t *testing.T) {
 // TestWriteCtx_ConflictIsScopedToTheWritingTransaction is rmp #2300's rule, now
 // sound: the conflict is decided from the writer's OWN snapshot.
 func TestWriteCtx_ConflictIsScopedToTheWritingTransaction(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestWriteCtx_ConflictIsScopedToTheWritingTransaction(t *testing.T) {
 // TestWriteCtx_DisjointTransactionsDoNotConflict is what distinguishes conflict
 // detection from a global lock wearing a new name.
 func TestWriteCtx_DisjointTransactionsDoNotConflict(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode %s: %v", n, err)
@@ -198,7 +198,7 @@ func TestWriteCtx_DisjointTransactionsDoNotConflict(t *testing.T) {
 // PrepareForWrite tests first: a transaction must be free to write the same
 // object twice.
 func TestWriteCtx_OwnSecondWriteIsNotAConflict(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestWriteCtx_OwnSecondWriteIsNotAConflict(t *testing.T) {
 //
 // What MERGE actually needs is below, and it is unaffected by the fix.
 func TestWriteCtx_ReassertingAVisibleValueDoesNotConflict(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestWriteCtx_ReassertingAVisibleValueDoesNotConflict(t *testing.T) {
 // IN-FLIGHT transaction has written must be REFUSED, because it cannot have read that
 // value and so must have computed it from a version already displaced.
 func TestWriteCtx_WritingOverAnInFlightVersionConflicts(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestWriteCtx_WritingOverAnInFlightVersionConflicts(t *testing.T) {
 // rather than defensive.
 func TestWriteCtx_VoidPrimitiveConflictDoomsTheTransaction(t *testing.T) {
 	t.Run("label removal", func(t *testing.T) {
-		g := New[string, int64](adjlist.Config{Directed: true})
+		g := New[string, int64](adjlist.Config{})
 		if err := g.AddNode("a"); err != nil {
 			t.Fatalf("AddNode: %v", err)
 		}
@@ -352,7 +352,7 @@ func TestWriteCtx_VoidPrimitiveConflictDoomsTheTransaction(t *testing.T) {
 	})
 
 	t.Run("property delete", func(t *testing.T) {
-		g := New[string, int64](adjlist.Config{Directed: true})
+		g := New[string, int64](adjlist.Config{})
 		if err := g.AddNode("a"); err != nil {
 			t.Fatalf("AddNode: %v", err)
 		}
@@ -393,7 +393,7 @@ func TestWriteCtx_VoidPrimitiveConflictDoomsTheTransaction(t *testing.T) {
 // conflict reported stays the FIRST one — the one that explains the failure —
 // rather than whichever object the transaction tripped over on its way out.
 func TestWriteCtx_DoomedTransactionRefusesEveryFurtherWrite(t *testing.T) {
-	g := New[string, int64](adjlist.Config{Directed: true})
+	g := New[string, int64](adjlist.Config{})
 	for _, n := range []string{"a", "b"} {
 		if err := g.AddNode(n); err != nil {
 			t.Fatalf("AddNode %s: %v", n, err)
@@ -449,7 +449,7 @@ func TestWriteCtx_DoomedTransactionRefusesEveryFurtherWrite(t *testing.T) {
 // becomes visible at its OWN commit rather than at a neighbour's.
 func TestWriteCtx_RecycledStateIsNeverSharedAcrossTransactions(t *testing.T) {
 	t.Parallel()
-	g := New[int, int64](adjlist.Config{Directed: true})
+	g := New[int, int64](adjlist.Config{})
 	// The visibility assertions below read the past through fabricated snapshots,
 	// which reclamation owes nothing to. A real reader has to hold the past open;
 	// see pinHorizon.
@@ -509,7 +509,7 @@ func TestWriteCtx_RecycledStateIsNeverSharedAcrossTransactions(t *testing.T) {
 // be fully visible afterwards.
 func TestWriteCtx_ConcurrentTransactionsKeepTheirOwnRecord(t *testing.T) {
 	t.Parallel()
-	g := New[int, int64](adjlist.Config{Directed: true})
+	g := New[int, int64](adjlist.Config{})
 
 	const (
 		writers   = 24

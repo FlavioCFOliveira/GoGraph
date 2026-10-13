@@ -37,7 +37,7 @@ func TestWriteSections_ENOSPC(t *testing.T) {
 	t.Parallel()
 
 	// Build a small unweighted CSR to exercise the function.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 8; i++ {
 		if err := a.AddEdge(i, (i+1)%8, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
@@ -108,7 +108,7 @@ func itoa(n int) string {
 func TestWriteToFile_ReadOnlyDir(t *testing.T) {
 	t.Parallel()
 
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	if err := a.AddEdge(0, 1, struct{}{}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

@@ -17,6 +17,7 @@ package txn_test
 
 import (
 	"encoding/binary"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -32,11 +33,16 @@ import (
 // is what every caller did before rmp #2302.
 func commitNodes(t *testing.T, dir string, resume uint64, keys ...string) {
 	t.Helper()
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	w, err := wal.Open(filepath.Join(dir, "wal"))
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	st := txn.NewStoreWithOptions(g, w, txn.Options[string, int64]{
 		Codec:        txn.NewStringCodec(),
 		WeightCodec:  txn.NewInt64WeightCodec(),
@@ -206,6 +212,11 @@ func TestRecovery_MaxTxnSeqCountsAnIncompleteTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.Open: %v", err)
 	}
+	t.Cleanup(func() { // close before the directory is removed (rmp #3095)
+		if err := w.Close(); err != nil && !errors.Is(err, wal.ErrWriterClosed) {
+			t.Errorf("wal.Close: %v", err)
+		}
+	})
 	codec := txn.NewStringCodec()
 	buf := []byte{txn.OpRecordV3, byte(txn.OpAddNode)}
 	buf = binary.LittleEndian.AppendUint64(buf, 2)

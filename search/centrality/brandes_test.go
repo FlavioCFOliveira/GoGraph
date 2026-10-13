@@ -13,13 +13,13 @@ func TestBetweenness_Path(t *testing.T) {
 	t.Parallel()
 	// Undirected path 0-1-2-3-4. Centre node 2 has the highest
 	// betweenness; nodes 0/4 are zero.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 4; i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	bc := Betweenness(c)
 	id0, _ := a.Mapper().Lookup(0)
 	id2, _ := a.Mapper().Lookup(2)
@@ -38,7 +38,7 @@ func TestBetweenness_Path(t *testing.T) {
 // allocs/op to drop by >=50% versus the v1.0 implementation, achieved
 // by lifting the queue and stack allocations to the outer loop.
 func BenchmarkBrandes_RandomGraph(b *testing.B) {
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	const n = 512
 	r := rand.New(rand.NewPCG(19, 23)) //nolint:gosec // deterministic benchmark RNG
 	for i := 0; i < 3*n; i++ {
@@ -46,7 +46,7 @@ func BenchmarkBrandes_RandomGraph(b *testing.B) {
 			b.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -61,14 +61,14 @@ func BenchmarkBrandes_RandomGraph(b *testing.B) {
 // for the scale benchmarks below.
 func buildRandomCSR(b *testing.B, n, avgDeg int) *csr.CSR[struct{}] {
 	b.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	r := rand.New(rand.NewPCG(19, 23)) //nolint:gosec // deterministic benchmark RNG
 	for i := 0; i < avgDeg*n; i++ {
 		if err := a.AddEdge(r.IntN(n), r.IntN(n), struct{}{}); err != nil {
 			b.Fatalf("AddEdge: %v", err)
 		}
 	}
-	return csr.BuildFromAdjList(a)
+	return csr.BuildFromAdjList(a).BuildSymmetric()
 }
 
 // BenchmarkBrandes_Scale measures Betweenness across larger and denser
@@ -111,13 +111,13 @@ func TestBetweenness_Star(t *testing.T) {
 	t.Parallel()
 	// Star: hub 0 connected to 1..4. Hub has max betweenness;
 	// every leaf has 0.
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 1; i <= 4; i++ {
 		if err := a.AddEdge(0, i, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 	bc := Betweenness(c)
 	hub, _ := a.Mapper().Lookup(0)
 	if math.Abs(bc[uint64(hub)]-12) > 1e-9 { // 4*3 ordered pairs through hub

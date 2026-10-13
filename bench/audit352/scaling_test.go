@@ -20,7 +20,7 @@ import (
 // workload's — this is what makes the sweep able to distinguish "a large
 // constant factor" from "a worse complexity class".
 func buildRelGraphN(n int) *lpg.Graph[string, float64] {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 	for i := 0; i < n; i++ {

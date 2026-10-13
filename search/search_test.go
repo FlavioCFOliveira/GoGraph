@@ -17,7 +17,7 @@ import (
 // and unweighted edges defined by the (src, dst) pairs in edges.
 func buildFromEdges(tb testing.TB, edges [][2]int) (*csr.CSR[struct{}], *adjlist.AdjList[int, struct{}]) {
 	tb.Helper()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for _, e := range edges {
 		if err := a.AddEdge(e[0], e[1], struct{}{}); err != nil {
 			tb.Fatalf("AddEdge: %v", err)
@@ -328,7 +328,7 @@ var _ = sort.Ints
 
 func BenchmarkBFS_Chain10M(b *testing.B) {
 	const n = 10_000_000
-	a := adjlist.New[uint32, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[uint32, struct{}](adjlist.Config{})
 	for i := uint32(0); i < uint32(n-1); i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			b.Fatalf("AddEdge: %v", err)
@@ -345,7 +345,7 @@ func BenchmarkBFS_Chain10M(b *testing.B) {
 
 func BenchmarkDFS_Chain10M(b *testing.B) {
 	const n = 10_000_000
-	a := adjlist.New[uint32, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[uint32, struct{}](adjlist.Config{})
 	for i := uint32(0); i < uint32(n-1); i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			b.Fatalf("AddEdge: %v", err)
@@ -364,7 +364,7 @@ func BenchmarkDFS_Chain10M(b *testing.B) {
 // cancelled context.
 func TestBFSCtx_HonoursCancel(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	for i := 0; i < 100; i++ {
 		if err := a.AddEdge(i, i+1, struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)

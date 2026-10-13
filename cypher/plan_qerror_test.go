@@ -200,7 +200,7 @@ func seedStaleMCVGraph(t *testing.T) (e *Engine, hotAfter int64) {
 		cold   = staleMCVCold
 		remain = staleMCVRemain
 	)
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	add := func(key, label, grp string, rank int64) {
 		t.Helper()
 		if err := g.AddNode(key); err != nil {

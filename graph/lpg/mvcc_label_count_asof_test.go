@@ -316,7 +316,7 @@ func TestLabelCountAsOf_PinnedSnapshotIgnoresLaterCommits(t *testing.T) {
 // relies on: a label nothing ever carried counts zero rather than panicking or
 // interning an id on a read path.
 func TestLabelCountAsOf_UnknownLabelIsZero(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	if _, ok := g.Registry().Lookup("NeverInterned"); ok {
 		t.Fatal("the fixture already interned the label this test needs to be absent")
 	}

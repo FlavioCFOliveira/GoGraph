@@ -60,7 +60,7 @@ func init() {
 // it produces the same CSR — and therefore the same snapshot bytes —
 // in every process.
 func buildDeterministicCSR() *csr.CSR[int64] {
-	a := adjlist.New[int, int64](adjlist.Config{Directed: true})
+	a := adjlist.New[int, int64](adjlist.Config{})
 	for i := 0; i < 49; i++ {
 		if err := a.AddEdge(i, i+1, int64(i)); err != nil {
 			panic(fmt.Sprintf("buildDeterministicCSR AddEdge: %v", err))

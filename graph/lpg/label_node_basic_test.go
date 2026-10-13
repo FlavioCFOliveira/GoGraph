@@ -161,7 +161,7 @@ func TestLPG_NodeLabel(t *testing.T) {
 	// already interned and the node is present. This sub-test is NOT
 	// parallel so testing.AllocsPerRun is meaningful.
 	t.Run("HasNodeLabel_ZeroAlloc", func(t *testing.T) {
-		g := lpg.New[int, int64](adjlist.Config{Directed: true})
+		g := lpg.New[int, int64](adjlist.Config{})
 		if err := g.SetNodeLabel(0, "Person"); err != nil {
 			t.Fatalf("SetNodeLabel: %v", err)
 		}
@@ -177,7 +177,7 @@ func TestLPG_NodeLabel(t *testing.T) {
 	// zero-alloc (both registry fast-path and shard fast-path return
 	// early without allocating).
 	t.Run("HasNodeLabel_ZeroAlloc_AbsentLabel", func(t *testing.T) {
-		g := lpg.New[int, int64](adjlist.Config{Directed: true})
+		g := lpg.New[int, int64](adjlist.Config{})
 		if err := g.SetNodeLabel(0, "Person"); err != nil {
 			t.Fatalf("SetNodeLabel: %v", err)
 		}

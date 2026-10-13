@@ -128,7 +128,7 @@ const durableDiskSeedMix uint64 = 0x5715_D157_0DD_F00D
 // SimServer engine) recovered via the WAL-only path ([recovery.ReplayWAL]).
 func durableStoreConfig() simStoreConfig {
 	return simStoreConfig{
-		graphConfig: adjlist.Config{Directed: true, Multigraph: true},
+		graphConfig: adjlist.Config{},
 	}
 }
 
@@ -137,7 +137,7 @@ func durableStoreConfig() simStoreConfig {
 // through the full snapshot+WAL path ([recovery.OpenFS]).
 func fullStackStoreConfig() simStoreConfig {
 	return simStoreConfig{
-		graphConfig: adjlist.Config{Directed: true, Multigraph: true},
+		graphConfig: adjlist.Config{},
 		dir:         "db",
 	}
 }

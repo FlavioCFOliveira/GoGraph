@@ -27,7 +27,7 @@ import (
 // endpoint ids, so each store's test starts from a pair that exists.
 func sideGraph(t *testing.T) (*Graph[string, float64], graph.NodeID, graph.NodeID) {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
 		if err := g.Writer(tx).AddNode("a"); err != nil {
 			return err

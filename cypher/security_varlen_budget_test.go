@@ -87,7 +87,7 @@ func secCypherCountRows(t *testing.T, eng *cypher.Engine, q string) int {
 // new cap bounds only pathological aggregate work, never legitimate fan-out.
 func TestSec_Cypher_VarLen_BoundedMultiRowStillSucceeds(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	const k = 8 // chain length; VLE [:R*1..8] from the head reaches 8 nodes.
@@ -121,7 +121,7 @@ func TestSec_Cypher_VarLen_BoundedMultiRowStillSucceeds(t *testing.T) {
 // invisible on any tiny graph (which is all openCypher TCK graphs are).
 func TestSec_Cypher_VarLen_UnboundedStarTerminates(t *testing.T) {
 	t.Parallel()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	const k = 8

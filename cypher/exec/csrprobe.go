@@ -63,7 +63,8 @@ func firstDstPos(edges []graph.NodeID, start, end, dst uint64) (uint64, bool) {
 //
 // The upper end is found by walking forward from the lower bound rather than by a
 // second binary search: the run is the multiplicity of one parallel-edge group,
-// which is 1 in a simple graph and small in practice, so a walk is cheaper than
+// which is 1 for a pair without parallel edges and small in practice, so a walk
+// is cheaper than
 // another O(log d) chain of dependent loads.
 func dstRun(edges []graph.NodeID, start, end, dst uint64) (uint64, uint64) {
 	lo := lowerBoundDst(edges, start, end, dst)

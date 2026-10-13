@@ -33,7 +33,7 @@ const psTestThreshold = 50
 // integer "v" property and a "g" group property in {0,1,2}.
 func buildPSTestGraph(t *testing.T, n int) *lpg.Graph[string, float64] {
 	t.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := range n {
 		k := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(k); err != nil {
@@ -190,7 +190,7 @@ func TestParallelScan_SmallGraphStaysSerial(t *testing.T) {
 // TestParallelScan_EmptyGraph proves count over an empty graph yields 0 on both
 // paths and the parallel count reduce declines (live count 0 is not > threshold).
 func TestParallelScan_EmptyGraph(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	on := NewEngineWithOptions(g, EngineOptions{ParallelScanThreshold: 0}) // default threshold
 	got := drainSortedPS(t, on, `MATCH (n) RETURN count(*) AS c`)
 	if len(got) != 1 || got[0] != "c=0" {

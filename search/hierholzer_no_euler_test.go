@@ -48,13 +48,13 @@ func TestHierholzerUndirected_NoEulerian(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+			a := adjlist.New[int, int64](adjlist.Config{})
 			for _, e := range tc.edges {
 				if err := a.AddEdge(e[0], e[1], int64(1)); err != nil {
 					t.Fatalf("AddEdge(%d,%d): %v", e[0], e[1], err)
 				}
 			}
-			c := csr.BuildFromAdjList(a)
+			c := csr.BuildFromAdjList(a).BuildSymmetric()
 			_, err := HierholzerUndirected(c)
 			if !errors.Is(err, ErrNoEulerian) {
 				t.Fatalf("%s: expected ErrNoEulerian, got %v", tc.name, err)
@@ -66,7 +66,7 @@ func TestHierholzerUndirected_NoEulerian(t *testing.T) {
 	// Degrees: 0→4, 1→3, 2→3, 3→3, 4→3 — four odd-degree vertices.
 	t.Run("wheel_W4", func(t *testing.T) {
 		t.Parallel()
-		a := adjlist.New[int, int64](adjlist.Config{Directed: false})
+		a := adjlist.New[int, int64](adjlist.Config{})
 		rimEdges := [][2]int{{1, 2}, {2, 3}, {3, 4}, {4, 1}}
 		spokeEdges := [][2]int{{0, 1}, {0, 2}, {0, 3}, {0, 4}}
 		for _, e := range append(rimEdges, spokeEdges...) {
@@ -74,7 +74,7 @@ func TestHierholzerUndirected_NoEulerian(t *testing.T) {
 				t.Fatalf("AddEdge(%d,%d): %v", e[0], e[1], err)
 			}
 		}
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		_, err := HierholzerUndirected(c)
 		if !errors.Is(err, ErrNoEulerian) {
 			t.Fatalf("wheel W4 has 4 odd-degree vertices: expected ErrNoEulerian, got %v", err)

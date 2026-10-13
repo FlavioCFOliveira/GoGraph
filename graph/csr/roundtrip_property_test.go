@@ -16,9 +16,8 @@ import (
 var roundtripShapes = []shapegen.Shape[int, int64]{
 	shapegen.EmptyGraph(),
 	shapegen.SingleNode(),
-	shapegen.SingleEdge(true, false, false),
-	shapegen.SingleEdge(false, false, false),
-	shapegen.SingleEdge(true, false, true), // self-loop
+	shapegen.SingleEdge(false, false),
+	shapegen.SingleEdge(false, true), // self-loop
 	shapegen.ParallelDigon(3),
 	shapegen.IsolatedOnly(10),
 	shapegen.Cycle(7, true),
@@ -28,8 +27,7 @@ var roundtripShapes = []shapegen.Shape[int, int64]{
 	shapegen.CompleteBipartite(4, 4),
 	shapegen.BarabasiAlbert(100, 3, 42),
 	shapegen.WattsStrogatz(30, 4, 20, 0),
-	shapegen.Path(10, true),
-	shapegen.Path(10, false),
+	shapegen.Path(10),
 }
 
 // nodeEdge is a directed node-pair used in round-trip comparison.
@@ -89,7 +87,7 @@ func TestCSR_RoundTrip_PreservesEdges_10kIterations(t *testing.T) {
 		idx := rapid.IntRange(0, len(roundtripShapes)-1).Draw(rt, "shape")
 		shape := roundtripShapes[idx]
 
-		g, err := shape.Build(adjlist.Config{Directed: true})
+		g, err := shape.Build(adjlist.Config{})
 		if err != nil {
 			rt.Fatalf("Build: %v", err)
 		}

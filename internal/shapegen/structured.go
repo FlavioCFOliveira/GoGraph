@@ -27,7 +27,7 @@ import (
 //
 // Each generator constructs the underlying [adjlist.Config] from the
 // caller-supplied cfg, preserving cfg.MaxShardCapacity verbatim, and
-// overrides cfg.Directed=false and cfg.Multigraph=false: every
+// stores each undirected edge as ONE directed arc, in the orientation the generator enumerates it: every
 // structured shape defined here is an undirected simple graph.
 //
 // # Edge ordering and determinism
@@ -73,7 +73,7 @@ func (s structuredBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], error
 // graph Q_d: nodes are the integers 0..2^d-1 interpreted as bit
 // strings, with an undirected edge between any two nodes whose
 // labels differ in exactly one bit. The graph is undirected and
-// simple; cfg.Directed and cfg.Multigraph are overridden to false.
+// simple; each edge is stored as one directed arc.
 //
 // Catalogue invariants on the returned graph:
 //
@@ -102,8 +102,6 @@ func Hypercube(d int) Shape[int, int64] {
 		name:  "structured.hypercube",
 		knobs: []Knob{{Name: "d", Min: 0, Max: 24, Default: 3}},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildHypercube(g, d)
 		},
@@ -136,8 +134,7 @@ func buildHypercube(g *lpg.Graph[int, int64], d int) error {
 // lattice: each cell is additionally connected to its four diagonal
 // neighbours.
 //
-// The graph is undirected and simple; cfg.Directed and cfg.Multigraph
-// are overridden to false. Empty rows/columns are allowed: when
+// The graph is undirected and simple; each edge is stored as one directed arc. Empty rows/columns are allowed: when
 // m == 0 or n == 0 the returned graph has zero nodes and zero edges.
 // A 1x1 grid has one node and zero edges in either neighbourhood
 // scheme.
@@ -177,8 +174,6 @@ func Grid(m, n int, eightNeighbour bool) Shape[int, int64] {
 			{Name: "n", Min: 0, Max: 1000, Default: 3},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildGrid(g, m, n, eightNeighbour)
 		},
@@ -217,8 +212,7 @@ func buildGrid(g *lpg.Graph[int, int64], m, n int, eightNeighbour bool) error {
 // Torus returns a Shape that builds the m-by-n torus graph T_{m,n}.
 // It is the 4-neighbour grid with wrap-around: every cell (r, c) is
 // joined to (r, (c+1) mod n), ((r+1) mod m, c), and so on. The graph
-// is undirected and simple; cfg.Directed and cfg.Multigraph are
-// overridden to false.
+// is undirected and simple; each edge is stored as one directed arc.
 //
 // Catalogue invariants on the returned graph (m, n >= 1):
 //
@@ -234,18 +228,15 @@ func buildGrid(g *lpg.Graph[int, int64], m, n int, eightNeighbour bool) error {
 //
 // Torus declares two knobs "m" and "n" over [1, 1000] (1 is the
 // smallest valid dimension; m=1, n=1 collapses to a single node with
-// no edges in the simple-graph regime because every neighbour
-// coincides with the cell itself). The constructor panics when
-// m < 1 or n < 1.
+// no edges because every neighbour coincides with the cell itself).
+// The constructor panics when m < 1 or n < 1.
 //
 // Edges are inserted in ascending source order. Per cell (r, c) the
 // constructor emits the right neighbour (r, (c+1) mod n) only when
 // that target is not the cell itself (n >= 2); analogously for the
 // down neighbour ((r+1) mod m, c). When m == 2 or n == 2 the wrap
-// neighbour coincides with the non-wrap neighbour, so the simple
-// graph collapses the duplicate to a single edge: HasEdge is
-// idempotent and AddEdge on the second call is a no-op in the
-// non-multigraph regime.
+// neighbour coincides with the non-wrap neighbour, so the same
+// undirected edge is reached twice; the generator emits it once.
 func Torus(m, n int) Shape[int, int64] {
 	if m < 1 || n < 1 {
 		panic(fmt.Sprintf("shapegen: Torus requires m, n >= 1, got m=%d n=%d", m, n))
@@ -257,8 +248,6 @@ func Torus(m, n int) Shape[int, int64] {
 			{Name: "n", Min: 1, Max: 1000, Default: 3},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildTorus(g, m, n)
 		},
@@ -272,18 +261,26 @@ func Torus(m, n int) Shape[int, int64] {
 // every loop.
 func buildTorus(g *lpg.Graph[int, int64], m, n int) error {
 	err := addNodesRange(g, m*n)
+	// When a dimension is 2 the wrap neighbour coincides with the non-wrap
+	// one, so the same undirected edge is reached twice; it is emitted once.
+	seen := make(map[[2]int]struct{}, 2*m*n)
+	add := func(u, v int) error {
+		if u == v {
+			return nil
+		}
+		key := [2]int{min(u, v), max(u, v)}
+		if _, dup := seen[key]; dup {
+			return nil
+		}
+		seen[key] = struct{}{}
+		return g.AddEdge(canonicalNode(u), canonicalNode(v), unweightedSentinel)
+	}
 	for r := 0; r < m && err == nil; r++ {
 		for c := 0; c < n && err == nil; c++ {
 			u := r*n + c
-			right := r*n + (c+1)%n
-			if u != right {
-				err = g.AddEdge(canonicalNode(u), canonicalNode(right), unweightedSentinel)
-			}
+			err = add(u, r*n+(c+1)%n)
 			if err == nil {
-				down := ((r+1)%m)*n + c
-				if u != down {
-					err = g.AddEdge(canonicalNode(u), canonicalNode(down), unweightedSentinel)
-				}
+				err = add(u, ((r+1)%m)*n+c)
 			}
 		}
 	}
@@ -299,8 +296,7 @@ func buildTorus(g *lpg.Graph[int, int64], m, n int) error {
 //
 // Nodes are arranged in row-major order: square (r, c) at row r in
 // [0, n) and column c in [0, n) has id r*n + c. The graph is
-// undirected and simple; cfg.Directed and cfg.Multigraph are
-// overridden to false.
+// undirected and simple; each edge is stored as one directed arc.
 //
 // Catalogue invariants on the returned graph (n >= 1):
 //
@@ -326,8 +322,6 @@ func Rook(n int) Shape[int, int64] {
 		name:  "structured.rook",
 		knobs: []Knob{{Name: "n", Min: 1, Max: 1000, Default: 3}},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildRook(g, n)
 		},
@@ -358,8 +352,7 @@ func buildRook(g *lpg.Graph[int, int64], n int) error {
 // Mobius returns a Shape that builds the Möbius ladder M_n: the
 // cycle C_{2n} with n additional "rungs" connecting every pair of
 // antipodal nodes (i, i+n) for i in [0, n). The graph is
-// undirected and simple; cfg.Directed and cfg.Multigraph are
-// overridden to false.
+// undirected and simple; each edge is stored as one directed arc.
 //
 // Nodes are 0..2n-1. The cycle edges run (i, (i+1) mod 2n) for
 // i in [0, 2n); the rung edges run (i, i+n) for i in [0, n).
@@ -386,8 +379,6 @@ func Mobius(n int) Shape[int, int64] {
 		name:  "structured.mobius",
 		knobs: []Knob{{Name: "n", Min: 2, Max: 1000, Default: 3}},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildMobius(g, n)
 		},
@@ -415,8 +406,7 @@ func buildMobius(g *lpg.Graph[int, int64], n int) error {
 // n -- (n+1) -- ... -- (2n-1); the rungs connect node i with node
 // n+i for i in [0, n).
 //
-// The graph is undirected and simple; cfg.Directed and
-// cfg.Multigraph are overridden to false.
+// The graph is undirected and simple; each edge is stored as one directed arc.
 //
 // Catalogue invariants on the returned graph (n >= 1):
 //
@@ -443,8 +433,6 @@ func Ladder(n int) Shape[int, int64] {
 		name:  "structured.ladder",
 		knobs: []Knob{{Name: "n", Min: 1, Max: 1000, Default: 3}},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildLadder(g, n)
 		},
@@ -474,8 +462,7 @@ func buildLadder(g *lpg.Graph[int, int64], n int) error {
 // n -- (n+1) -- ... -- (2n-1) -- n; the rungs connect node i with
 // node n+i for i in [0, n).
 //
-// The graph is undirected and simple; cfg.Directed and
-// cfg.Multigraph are overridden to false.
+// The graph is undirected and simple; each edge is stored as one directed arc.
 //
 // Catalogue invariants on the returned graph (n >= 3):
 //
@@ -499,8 +486,6 @@ func Prism(n int) Shape[int, int64] {
 		name:  "structured.prism",
 		knobs: []Knob{{Name: "n", Min: 3, Max: 1000, Default: 3}},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildPrism(g, n)
 		},
@@ -527,8 +512,7 @@ func buildPrism(g *lpg.Graph[int, int64], n int) error {
 // Theta returns a Shape that builds the theta graph θ_{a,b,c}: two
 // "pole" vertices joined by three internally vertex-disjoint paths
 // of lengths a, b, c (lengths measured in edges). The graph is
-// undirected and simple; cfg.Directed and cfg.Multigraph are
-// overridden to false.
+// undirected and simple; each edge is stored as one directed arc.
 //
 // Node ids:
 //
@@ -546,9 +530,9 @@ func buildPrism(g *lpg.Graph[int, int64], n int) error {
 //
 // Theta declares three knobs "a", "b", "c" over [1, 1000]. The
 // lower bound is 1 because a length-1 path collapses to the single
-// edge (s, t). When two or more of (a, b, c) are 1 the simple-graph
-// regime collapses the duplicate (s, t) edges to one, which would
-// violate the closed-form Size: the constructor therefore panics
+// edge (s, t). When two or more of (a, b, c) are 1 the graph would
+// hold parallel (s, t) edges and no longer be simple: the constructor
+// therefore panics
 // when more than one of (a, b, c) equals 1. The remaining
 // degenerate case (exactly one length-1 path) is well-defined and
 // produces a "lollipop with two arcs and one chord" graph.
@@ -585,8 +569,6 @@ func Theta(a, b, c int) Shape[int, int64] {
 			{Name: "c", Min: 1, Max: 1000, Default: 4},
 		},
 		build: func(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
-			cfg.Directed = false
-			cfg.Multigraph = false
 			g := lpg.New[int, int64](cfg)
 			return g, buildTheta(g, a, b, c)
 		},

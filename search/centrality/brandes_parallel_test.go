@@ -19,14 +19,14 @@ func TestBetweennessParallel_VsSerial(t *testing.T) {
 	t.Parallel()
 	r := rand.New(rand.NewPCG(197, 199)) //nolint:gosec // deterministic
 	for seed := 0; seed < 5; seed++ {
-		a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+		a := adjlist.New[int, struct{}](adjlist.Config{})
 		const n = 64
 		for i := 0; i < 2*n; i++ {
 			if err := a.AddEdge(r.IntN(n), r.IntN(n), struct{}{}); err != nil {
 				t.Fatalf("AddEdge: %v", err)
 			}
 		}
-		c := csr.BuildFromAdjList(a)
+		c := csr.BuildFromAdjList(a).BuildSymmetric()
 		serial := Betweenness(c)
 		parallel := BetweennessParallel(c, 4)
 		for i, sv := range serial {
@@ -49,14 +49,14 @@ func TestBetweennessParallel_VsSerial(t *testing.T) {
 func TestBetweennessParallel_CancellationCascades(t *testing.T) {
 	t.Parallel()
 	const n = 2048
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	r := rand.New(rand.NewPCG(7, 11)) //nolint:gosec // deterministic
 	for i := 0; i < 4*n; i++ {
 		if err := a.AddEdge(r.IntN(n), r.IntN(n), struct{}{}); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c := csr.BuildFromAdjList(a)
+	c := csr.BuildFromAdjList(a).BuildSymmetric()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel almost immediately so every worker observes ctx.Err()
@@ -109,13 +109,13 @@ func BenchmarkBetweenness_Parallel(b *testing.B) {
 func buildSerialBrandesFixture(tb testing.TB) (c *csr.CSR[struct{}], n int) {
 	tb.Helper()
 	n = 512
-	a := adjlist.New[int, struct{}](adjlist.Config{Directed: false})
+	a := adjlist.New[int, struct{}](adjlist.Config{})
 	r := rand.New(rand.NewPCG(211, 223)) //nolint:gosec // deterministic
 	for i := 0; i < 3*n; i++ {
 		if err := a.AddEdge(r.IntN(n), r.IntN(n), struct{}{}); err != nil {
 			tb.Fatalf("AddEdge: %v", err)
 		}
 	}
-	c = csr.BuildFromAdjList(a)
+	c = csr.BuildFromAdjList(a).BuildSymmetric()
 	return c, n
 }

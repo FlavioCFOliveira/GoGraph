@@ -13,6 +13,17 @@ package exec
 // backing array for every Next call; no per-row heap allocation occurs once
 // the internal nodeIDs slice has been collected.
 //
+// # Streaming (rmp #3081)
+//
+// When the walker also implements [nodeIDStreamer] and reports that it streams
+// — the read path at a pinned MVCC snapshot — Init collects nothing: Next and
+// FillChunk pull ids in batches of at most [allNodesScanBatch] into one
+// operator-owned buffer, so the scan holds O(batch) ids instead of O(V). The
+// emitted ids and their order are exactly those the materialising path emits,
+// because the streamer resolves every id's existence as of the snapshot, which
+// does not move while the statement runs. Every other walker (a write path's
+// own view, a morsel, a test stub) keeps the Init-time materialisation.
+//
 // # Cancellation
 //
 // ctx.Err() is checked at the top of every Next call and additionally every
@@ -39,6 +50,24 @@ type nodeWalker interface {
 	WalkNodeIDs(fn func(graph.NodeID) bool)
 }
 
+// nodeIDStreamer is the optional batch-pull extension of [nodeWalker]. A walker
+// implements it when the set of ids it yields is fixed for the whole statement,
+// so ids may be produced lazily rather than collected in Init.
+type nodeIDStreamer interface {
+	// StreamsNodeIDs reports whether NextNodeIDs may replace WalkNodeIDs.
+	StreamsNodeIDs() bool
+	// NextNodeIDs refills dst (len 0, cap > 0) with the next ids in WalkNodeIDs
+	// order, advancing cur; an empty result means the walk is exhausted.
+	NextNodeIDs(cur *graph.MapperCursor, dst []graph.NodeID) []graph.NodeID
+	// NodeIDUpperBound is an upper bound on the ids a whole walk yields.
+	NodeIDUpperBound() int
+}
+
+// allNodesScanBatch is the streamed scan's batch size in ids (4 KiB): large
+// enough that the per-batch shard lock and visibility checks amortise, small
+// enough that the buffer stays in L1.
+const allNodesScanBatch = 512
+
 // AllNodesScan is a Volcano leaf operator that produces one Row per node in
 // the graph.  Each Row has a single column: an [expr.IntegerValue] holding the
 // node's [graph.NodeID] cast to int64.
@@ -48,8 +77,15 @@ type AllNodesScan struct {
 	g       nodeWalker
 	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
 	buf     [1]expr.Value   // fixed backing buffer — zero-alloc per Next
-	nodeIDs []graph.NodeID  // collected during Init; owned by this operator
+	nodeIDs []graph.NodeID  // collected during Init, or the current streamed batch
 	pos     int             // current iteration cursor
+
+	// Streaming state (rmp #3081); stream is nil on the materialising path.
+	stream   nodeIDStreamer
+	cur      graph.MapperCursor
+	batch    []graph.NodeID // operator-owned batch buffer, allocated once
+	bound    int            // NodeIDUpperBound at Init, for rowCountHint
+	streamed bool           // set once the stream is exhausted or closed
 }
 
 // NewAllNodesScan creates an AllNodesScan over g.
@@ -57,11 +93,27 @@ func NewAllNodesScan(g nodeWalker) *AllNodesScan {
 	return &AllNodesScan{g: g}
 }
 
-// Init collects all NodeIDs from the graph into an internal slice.  The
-// collection itself honours ctx cancellation every 4096 nodes.
+// Init collects all NodeIDs from the graph into an internal slice, or, for a
+// streaming walker, only positions the stream at its start. The collection
+// itself honours ctx cancellation every 4096 nodes.
 func (op *AllNodesScan) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.pos = 0
+	if s, ok := op.g.(nodeIDStreamer); ok && s.StreamsNodeIDs() {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("exec: AllNodesScan init cancelled: %w", err)
+		}
+		if op.batch == nil {
+			op.batch = make([]graph.NodeID, 0, allNodesScanBatch)
+		}
+		op.stream = s
+		op.cur = graph.MapperCursor{}
+		op.nodeIDs = op.batch[:0]
+		op.bound = s.NodeIDUpperBound()
+		op.streamed = false
+		return nil
+	}
+	op.stream = nil
 	op.nodeIDs = op.nodeIDs[:0] // reuse backing array across re-inits
 
 	var count int
@@ -91,7 +143,7 @@ func (op *AllNodesScan) Next(out *Row) (bool, error) {
 	if err := op.ctx.Err(); err != nil {
 		return false, err
 	}
-	if op.pos >= len(op.nodeIDs) {
+	if op.pos >= len(op.nodeIDs) && !op.refill() {
 		return false, nil
 	}
 	op.buf[0] = expr.IntegerValue(op.nodeIDs[op.pos])
@@ -100,10 +152,27 @@ func (op *AllNodesScan) Next(out *Row) (bool, error) {
 	return true, nil
 }
 
+// refill pulls the next streamed batch into op.nodeIDs and reports whether it
+// holds any id. On the materialising path it reports false: Init collected
+// everything there is.
+func (op *AllNodesScan) refill() bool {
+	if op.stream == nil || op.streamed {
+		return false
+	}
+	op.nodeIDs = op.stream.NextNodeIDs(&op.cur, op.batch[:0])
+	op.pos = 0
+	if len(op.nodeIDs) == 0 {
+		op.streamed = true
+		return false
+	}
+	return true
+}
+
 // Close releases resources.  The collected nodeIDs slice is retained (but its
 // length zeroed) to allow reuse if Init is called again.
 func (op *AllNodesScan) Close() error {
 	op.pos = len(op.nodeIDs) // mark as exhausted
+	op.streamed = true
 	return nil
 }
 
@@ -113,6 +182,11 @@ func (op *AllNodesScan) Close() error {
 // valid upper bound). It satisfies [rowCountHinter] so the materialise drain can
 // presize its backing slice for a full-node scan (#1720).
 func (op *AllNodesScan) rowCountHint() (int, bool) {
+	if op.stream != nil {
+		// Streamed: nothing is collected yet, so report the interned-id count
+		// taken at Init — still a true upper bound (see nodeIDStreamer).
+		return op.bound, true
+	}
 	return len(op.nodeIDs), true
 }
 
@@ -121,7 +195,7 @@ func (op *AllNodesScan) rowCountHint() (int, bool) {
 // P3): a columnar-aware parent drains the scan column-major, avoiding the
 // per-row [expr.Value] box [AllNodesScan.Next] pays.
 func (op *AllNodesScan) NewOutputChunk(capacity int) *Chunk {
-	return NewChunk(capacity, expr.KindInteger)
+	return newNodeIDChunk(capacity)
 }
 
 // FillChunk appends up to maxRows more NodeIDs, as unboxed int64, into column 0
@@ -137,7 +211,10 @@ func (op *AllNodesScan) FillChunk(dst *Chunk, maxRows int) (int, error) {
 		return 0, err
 	}
 	n := 0
-	for n < maxRows && op.pos < len(op.nodeIDs) {
+	for n < maxRows {
+		if op.pos >= len(op.nodeIDs) && !op.refill() {
+			break
+		}
 		if n&4095 == 0 && n > 0 {
 			if err := op.ctx.Err(); err != nil {
 				return n, err

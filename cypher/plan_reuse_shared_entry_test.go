@@ -70,7 +70,7 @@ const sharedEntryNodes = 64
 // nothing) is visible.
 func newSharedEntryRig(tb testing.TB) *Engine {
 	tb.Helper()
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	for i := 0; i < sharedEntryNodes; i++ {
 		id := fmt.Sprintf("n%d", i)
 		if err := g.AddNode(id); err != nil {

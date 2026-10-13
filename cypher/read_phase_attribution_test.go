@@ -25,7 +25,7 @@ import (
 )
 
 func TestReadPhasePrefixMatchesRunRead(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	eng := NewEngine(g)
 	ctx := context.Background()
 	for i := 0; i < 8; i++ {

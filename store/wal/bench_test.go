@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -117,6 +118,11 @@ func BenchmarkPhase3Truncate(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
+			b.Cleanup(func() { // close before the directory is removed (rmp #3095)
+				if err := w.Close(); err != nil && !errors.Is(err, ErrWriterClosed) {
+					b.Errorf("wal.Close: %v", err)
+				}
+			})
 			for n := 0; n < prefix; n += frame {
 				if err := w.Append(payload); err != nil {
 					b.Fatal(err)

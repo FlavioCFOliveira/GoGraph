@@ -21,7 +21,7 @@ import (
 
 func txGraph(t *testing.T, nodes ...string) (*Graph[string, float64], map[string]graph.NodeID) {
 	t.Helper()
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g := New[string, float64](adjlist.Config{})
 	ids := make(map[string]graph.NodeID, len(nodes))
 	for _, n := range nodes {
 		if err := g.AddNode(n); err != nil {

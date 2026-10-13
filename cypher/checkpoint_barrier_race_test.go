@@ -129,7 +129,7 @@ func TestCheckpoint_SnapshotUnderBarrier_NoPartialTransaction(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	g := lpg.New[string, float64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, float64](g, w, cpRaceStoreOpts())
 	eng := cypher.NewEngineWithStore(store)
 

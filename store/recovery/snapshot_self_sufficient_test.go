@@ -34,7 +34,7 @@ func TestRecovery_V3Snapshot_WALAbsent_SelfSufficient(t *testing.T) {
 
 	// A single-file log: this test damages or erases it as one file.
 	w := openSingleFileWAL(t, walPath)
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 
 	// Seed: small social graph with edges, node labels, edge labels.
@@ -183,7 +183,7 @@ func TestRecovery_V3Snapshot_RoundTripByteStable(t *testing.T) {
 	walPath := filepath.Join(dir, "wal")
 	// A single-file log: this test damages or erases it as one file.
 	w := openSingleFileWAL(t, walPath)
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithCodec(g, w, txn.NewStringCodec())
 	for _, e := range []struct{ s, d string }{
 		{"a", "b"}, {"b", "c"}, {"c", "d"}, {"a", "d"},
@@ -296,7 +296,7 @@ func TestRecovery_V3Snapshot_WALReplayAfterSnapshot(t *testing.T) {
 	walPath := filepath.Join(dir, "wal")
 	// A single-file log: this test damages or erases it as one file.
 	w := openSingleFileWAL(t, walPath)
-	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	g := lpg.New[string, int64](adjlist.Config{})
 	store := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
