@@ -16,6 +16,8 @@ package lpg
 // to prevent.
 
 import (
+	"slices"
+
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -273,7 +275,7 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 // marked aborted (ACID audit round 6, finding M1). A node entered more than once
 // is withdrawn by its first visit.
 func (g *Graph[N, W]) reclaimAbortedLifeOf(ids []graph.NodeID) int {
-	lw := lifeWithdrawal{markUnborn: g.markUnborn}
+	lw := lifeWithdrawal{markUnborn: g.markUnborn, sizeHint: len(ids)}
 	for _, id := range ids {
 		sh := g.nodeLifeShardFor(id)
 		sh.mu.Lock()
@@ -301,6 +303,29 @@ type lifeWithdrawal struct {
 	toRevive    []graph.NodeID
 	released    []LabelID
 	freed       int
+	// sizeHint is the number of nodes the withdrawal visits, or zero when it is
+	// not known in advance. toTombstone and toRevive each take it as their
+	// capacity on their first entry, so a withdrawal of a large write set
+	// allocates each list once rather than through repeated append growth,
+	// which for a large slice copies about four times its final size
+	// (rmp #3125). A list that receives no entry allocates nothing.
+	sizeHint int
+}
+
+// tombstone records that t's node must be left dead.
+func (lw *lifeWithdrawal) tombstone(t lifeTombstone) {
+	if lw.toTombstone == nil && lw.sizeHint > 0 {
+		lw.toTombstone = make([]lifeTombstone, 0, lw.sizeHint)
+	}
+	lw.toTombstone = append(lw.toTombstone, t)
+}
+
+// revive records that id's node must be left alive.
+func (lw *lifeWithdrawal) revive(id graph.NodeID) {
+	if lw.toRevive == nil && lw.sizeHint > 0 {
+		lw.toRevive = make([]graph.NodeID, 0, lw.sizeHint)
+	}
+	lw.toRevive = append(lw.toRevive, id)
 }
 
 // lifeTombstone is one node an aborted birth leaves dead, and whether it had
@@ -352,9 +377,9 @@ func (lw *lifeWithdrawal) withdrawLocked(sh *nodeLifeShard, id graph.NodeID) {
 		lw.withdrawRecordLocked(sh, true, id, born)
 		lw.withdrawRecordLocked(sh, false, id, died)
 		if revive {
-			lw.toRevive = append(lw.toRevive, id)
+			lw.revive(id)
 		} else {
-			lw.toTombstone = append(lw.toTombstone, lifeTombstone{id: id, unborn: born.unbornBefore})
+			lw.tombstone(lifeTombstone{id: id, unborn: born.unbornBefore})
 		}
 	case bornAborted:
 		if !born.wasAlive && born.unbornBefore {
@@ -362,13 +387,13 @@ func (lw *lifeWithdrawal) withdrawLocked(sh *nodeLifeShard, id graph.NodeID) {
 		}
 		lw.withdrawRecordLocked(sh, true, id, born)
 		if born.wasAlive {
-			lw.toRevive = append(lw.toRevive, id)
+			lw.revive(id)
 			return
 		}
-		lw.toTombstone = append(lw.toTombstone, lifeTombstone{id: id, unborn: born.unbornBefore})
+		lw.tombstone(lifeTombstone{id: id, unborn: born.unbornBefore})
 	case diedAborted:
 		lw.withdrawRecordLocked(sh, false, id, died)
-		lw.toRevive = append(lw.toRevive, id)
+		lw.revive(id)
 	}
 }
 
@@ -411,14 +436,16 @@ func (g *Graph[N, W]) finishLifeWithdrawal(lw *lifeWithdrawal) int {
 		g.nodeLifeActive.Add(-int64(lw.freed))
 	}
 	g.tombstoneAbortedBatch(lw.toTombstone)
-	for _, t := range lw.toTombstone {
-		if t.unborn {
-			// The node existed only by the aborted transaction's creation:
-			// a first birth, or a create-then-delete pair (rmp #2947, see
-			// [Graph.unborn]). withdrawLocked already marked it under the life-
-			// shard lock (WAL v2 step 1); marking is idempotent, and repeating it
-			// here keeps the set right for any withdrawal built without the hook.
-			g.markUnborn(t.id)
+	// The node existed only by the aborted transaction's creation: a first
+	// birth, or a create-then-delete pair (rmp #2947, see [Graph.unborn]). A
+	// withdrawal built with the hook already marked it under the life-shard lock
+	// (WAL v2 step 1), so marking it again here only repeated a lock and a map
+	// probe per node (rmp #3125); one built without the hook marks it here.
+	if lw.markUnborn == nil {
+		for _, t := range lw.toTombstone {
+			if t.unborn {
+				g.markUnborn(t.id)
+			}
 		}
 	}
 	for _, id := range lw.toRevive {
@@ -465,8 +492,10 @@ func (g *Graph[N, W]) tombstoneAborted(id graph.NodeID) {
 }
 
 // tombstoneAbortedBatch is [Graph.tombstoneAborted] for every node in ts, with
-// one copy of the tombstone bitmap per batch of ids rather than one per id
-// (rmp #3122, #3123).
+// one new tombstone bitmap per batch of ids rather than one per id (rmp #3122,
+// #3123): for a batch of at least [releaseBatchMin] ids the union of the
+// published bitmap and the batch ([idBatchBitmap]), and for a smaller one a
+// copy with the ids added to it.
 //
 // The bitmap is copy-on-write — readers load it without a lock — so every flip
 // copies it whole. One flip per withdrawn creation therefore cost O(N) per node
@@ -488,6 +517,10 @@ func (g *Graph[N, W]) tombstoneAbortedBatch(ts []lifeTombstone) {
 		return
 	}
 	batch := max(releaseBatchMin, len(ts)/256)
+	var buf []uint64
+	if len(ts) >= releaseBatchMin {
+		buf = make([]uint64, 0, min(batch, len(ts)))
+	}
 	for start := 0; start < len(ts); start += batch {
 		chunk := ts[start:min(start+batch, len(ts))]
 		for _, t := range chunk {
@@ -496,24 +529,43 @@ func (g *Graph[N, W]) tombstoneAbortedBatch(ts []lifeTombstone) {
 				g.pinChurnForDivergentBag(t.id, false)
 			}
 		}
+		var batchSet *roaring64.Bitmap
+		if len(chunk) >= releaseBatchMin {
+			buf = buf[:0]
+			for _, t := range chunk {
+				buf = append(buf, uint64(t.id))
+			}
+			batchSet = idBatchBitmap(buf)
+		}
 		g.tombstoneMu.Lock()
 		cur := g.tombstones.Load()
 		var next *roaring64.Bitmap
 		added := 0
-		for _, t := range chunk {
-			if cur != nil && cur.Contains(uint64(t.id)) {
-				continue
-			}
-			if next == nil {
-				if cur == nil {
-					next = roaring64.New()
-				} else {
-					next = cur.Clone()
+		switch {
+		case batchSet == nil:
+			// A small batch: one copy and a checked add per id costs less than
+			// building a second bitmap for the union.
+			for _, t := range chunk {
+				if cur != nil && cur.Contains(uint64(t.id)) {
+					continue
+				}
+				if next == nil {
+					if cur == nil {
+						next = roaring64.New()
+					} else {
+						next = cur.Clone()
+					}
+				}
+				if next.CheckedAdd(uint64(t.id)) {
+					added++
 				}
 			}
-			if next.CheckedAdd(uint64(t.id)) {
-				added++
-			}
+		case cur == nil:
+			next = batchSet
+			added = int(batchSet.GetCardinality())
+		default:
+			next = roaring64.Or(cur, batchSet)
+			added = int(next.GetCardinality() - cur.GetCardinality())
 		}
 		if added > 0 {
 			// Counter first, bitmap second — see [Graph.removeNodeInfo] (rmp #2687).
@@ -525,6 +577,24 @@ func (g *Graph[N, W]) tombstoneAbortedBatch(ts []lifeTombstone) {
 			g.BumpTopoGeneration()
 		}
 	}
+}
+
+// idBatchBitmap returns a new bitmap holding the ids in buf, which it sorts in
+// place so the bitmap is built one container at a time.
+//
+// The tombstone flips of a batch of at least [releaseBatchMin] ids are applied
+// as one set operation with it —
+// a union for [Graph.tombstoneAbortedBatch], a difference for
+// [Graph.untombstoneReleased] — rather than one checked add or remove per id
+// on the copy (rmp #3125). Measured at the five-second reproduction, 6.8
+// million ids: the per-id removal took 0.46 s, most of it recounting the
+// cardinality of a run container on every call, and split runs one id at a
+// time.
+func idBatchBitmap(buf []uint64) *roaring64.Bitmap {
+	slices.Sort(buf)
+	b := roaring64.New()
+	b.AddMany(buf)
+	return b
 }
 
 // abortWithdrawsCreation reports whether removing id, as an inverse in the undo

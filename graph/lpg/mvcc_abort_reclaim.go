@@ -234,6 +234,13 @@ func (g *Graph[N, W]) withdrawAbortedWrites(writes []mvcc.SideWrite) int {
 		iProps                        int
 		lifeIDs, claimIDs             []graph.NodeID
 	)
+	// Sized before they are filled (rmp #3125): append growth of a large slice
+	// copies about four times its final size, and an aborted bulk creation puts
+	// one entry per created node in lifeIDs.
+	if nLife, nClaim := countSideStores(writes); nLife > 0 || nClaim > 0 {
+		lifeIDs = make([]graph.NodeID, 0, nLife)
+		claimIDs = make([]graph.NodeID, 0, nClaim)
+	}
 	for _, w := range writes {
 		pair := edgeKey{src: graph.NodeID(w.A), dst: graph.NodeID(w.B)}
 		switch w.Store {
@@ -312,6 +319,21 @@ func (g *Graph[N, W]) withdrawAbortedWrites(writes []mvcc.SideWrite) int {
 		g.adjVer.clearAbortedOf(claimIDs)
 	}
 	return labels + props + life + overflow + hLabels + hProps + iLabels + iProps
+}
+
+// countSideStores counts the entries of writes in the node-life and the
+// adjacency-claim stores, the two that [Graph.withdrawAbortedWrites] collects
+// into lists.
+func countSideStores(writes []mvcc.SideWrite) (life, claim int) {
+	for _, w := range writes {
+		switch w.Store {
+		case sideNodeLife:
+			life++
+		case sideAdjClaim:
+			claim++
+		}
+	}
+	return life, claim
 }
 
 // abortRecord aborts the transaction whose state is st and whose commit record

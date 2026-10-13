@@ -75,6 +75,8 @@ package lpg
 // any concurrent creation or removal.
 
 import (
+	"github.com/RoaringBitmap/roaring/v2/roaring64"
+
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/internal/synthkey"
 )
@@ -193,8 +195,9 @@ func (g *Graph[N, W]) neverBornHeld(id graph.NodeID, drop bool) bool {
 	return true
 }
 
-// untombstoneReleased clears the tombstone of every id in ids with one copy of
-// the bitmap. No label bitmap is touched: a released node carries no label
+// untombstoneReleased clears the tombstone of every id in ids with one new
+// bitmap: for at least [releaseBatchMin] ids the set difference of the
+// published one and the batch, and for fewer a copy with the ids removed. No label bitmap is touched: a released node carries no label
 // ([Graph.nodeBagsEmpty]), so there is nothing for the churn gate to pin
 // either.
 func (g *Graph[N, W]) untombstoneReleased(ids []graph.NodeID) {
@@ -204,11 +207,22 @@ func (g *Graph[N, W]) untombstoneReleased(ids []graph.NodeID) {
 	if cur == nil {
 		return
 	}
-	next := cur.Clone()
+	var next *roaring64.Bitmap
 	removed := 0
-	for _, id := range ids {
-		if next.CheckedRemove(uint64(id)) {
-			removed++
+	if len(ids) >= releaseBatchMin {
+		buf := make([]uint64, len(ids))
+		for i, id := range ids {
+			buf[i] = uint64(id)
+		}
+		// One set difference for the batch; see [idBatchBitmap] (rmp #3125).
+		next = roaring64.AndNot(cur, idBatchBitmap(buf))
+		removed = int(cur.GetCardinality() - next.GetCardinality())
+	} else {
+		next = cur.Clone()
+		for _, id := range ids {
+			if next.CheckedRemove(uint64(id)) {
+				removed++
+			}
 		}
 	}
 	if removed == 0 {
