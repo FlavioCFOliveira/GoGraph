@@ -1306,3 +1306,22 @@ python3 $L6/agg.py $L6/owner.elevated.tsv {alloc_space line,cpu fn,cpu fncum} 40
 python3 $L6/agg.py $L6/owner.contention.tsv delay line 40
 rm -rf $R
 ```
+
+## 55. Campaign verdict, accepted by the user (2026-10-13)
+
+This section supersedes the verdicts of sections 45 and 52, which remain as written.
+
+- The iteration-6 sweep measured four undecided module-owned residuals marginally above the 1%
+  thresholds of section 49:
+
+| # | site (row) | cost at `8b089715` | threshold |
+|---|---|---|---|
+| Q11 | `reserveSetPropertyGen` (37) | 2.49 s block + mutex (1.85%) | 1.35 s contention delay |
+| Q12′ | `appendSuspects`, whole function (37) | 2.38 s block + mutex (1.77%) | 1.35 s contention delay |
+| — | `exec.(*Expand).buildRow` flat CPU (26, 24_plandiff, 25) | 3.12 s (1.34%) | 2.33 s CPU |
+| N3 | `lpg.(*sourceSlots).pairRun` (26) | 2.59 s (1.11%) | 2.33 s CPU |
+
+- **The user accepted these four as insignificant on 2026-10-13.** No task is opened for them.
+- Every other residual is fixed, inherent, idle, below threshold, user-dropped, or in the
+  backlog (S3–S6, #3098–#3101).
+- **Verdict: the profiling campaign is closed.**
