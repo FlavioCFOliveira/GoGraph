@@ -100,7 +100,7 @@ same CSR.
 A 5-node directed cycle built via `int` keys:
 
 ```go
-a := adjlist.New[int, struct{}](adjlist.Config{Directed: true})
+a := adjlist.New[int, struct{}](adjlist.Config{})
 for i := 0; i < 5; i++ {
     a.AddEdge(i, (i+1)%5, struct{}{})
 }
