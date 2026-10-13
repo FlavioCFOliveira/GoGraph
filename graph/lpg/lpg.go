@@ -4220,6 +4220,13 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) bool {
 		}
 		return true
 	}
+	// THE ABORT WITHDRAWS THIS CREATION ITSELF (rmp #3122, #3123). See
+	// [Graph.abortWithdrawsCreation]: retiring the node here would only record a
+	// death, an exclusive adjacency claim and a tombstone that the abort then
+	// withdraws again, one node at a time.
+	if g.abortWithdrawsCreation(id, tx) {
+		return true
+	}
 	// NO SCOPED CHURN HOLD (rmp #2963). The churn gate of every label in the bag
 	// is raised before the first mutation by two holders that outlive the
 	// retirement: the death claim below ([Graph.noteNodeDied] raises it before

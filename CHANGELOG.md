@@ -6,6 +6,29 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A write statement cut by its context deadline no longer takes many times its deadline to
+  roll back, nor multiplies its peak heap while doing so (rmp #3122, #3123, `b1e9e21f`).**
+  Present in v0.17.1 and earlier. The rollback deleted every node the statement had created
+  through the ordinary delete path, which copied the whole copy-on-write tombstone bitmap once per
+  node and recorded bookkeeping the abort then withdrew: the rollback was quadratic. A
+  `MATCH (a), (b), (c) CREATE ()` over 600 nodes cut at 1 s returned 8.6 to 9.2 s after its deadline
+  and peaked at about 1.7 GB of heap; cut at 5 s it returned 64 s late and peaked at 7.2 GB. The
+  abort now withdraws the nodes the statement created and flips their tombstones in batches, with
+  the same end state. The same statement now returns about 1.4 s after a 1 s deadline with a peak
+  of about 0.75 GB, and about 7.1 s after a 5 s deadline with a peak of about 3 GB. The rollback is
+  now linear, at about 1 µs per created node. The deadline itself was always noticed within
+  microseconds.
+
+### Performance
+
+- **The abort path allocates about a third less per created node (rmp #3125, `2885d7d3`)**:
+  pre-sized withdrawal lists, one bitmap `Or`/`AndNot` per batch of at least 1024 ids instead of
+  per-id updates, and no duplicate unborn-mark pass. Rolling back a 5 s cut `CREATE` allocates
+  197 B per id instead of 307. A large `DELETE` rollback was measured linear and is unchanged
+  (rmp #3124).
+
 [Unreleased]: https://github.com/FlavioCFOliveira/GoGraph/compare/v0.17.1...HEAD
 
 ## [0.17.1] — 2026-10-13
