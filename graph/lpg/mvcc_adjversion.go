@@ -236,10 +236,26 @@ func (sh *adjVersionShard) newEntryLocked(id graph.NodeID) *adjStamps {
 // releaseIfEmptyLocked drops an emptied map that has grown past
 // [adjKeepEntries] and keeps a smaller one for the next write (rmp #3025). The
 // caller holds the shard lock.
+//
+// A grown map that has fallen back to [adjKeepEntries] entries or fewer without
+// emptying is copied into a fresh small map, because a Go map never shrinks on
+// delete: an aborted bulk write otherwise left the table sized for every node it
+// touched while a few concurrent entries kept it non-empty (rmp #3120). The copy
+// moves at most adjKeepEntries entries and clears grown, so it happens once per
+// growth.
 func (sh *adjVersionShard) releaseIfEmptyLocked() {
-	if len(sh.d) == 0 && sh.grown {
-		sh.d, sh.grown = nil, false
+	if !sh.grown || len(sh.d) > adjKeepEntries {
+		return
 	}
+	if len(sh.d) == 0 {
+		sh.d, sh.grown = nil, false
+		return
+	}
+	small := make(map[graph.NodeID]*adjStamps, adjKeepEntries)
+	for id, e := range sh.d {
+		small[id] = e
+	}
+	sh.d, sh.grown = small, false
 }
 
 // adjVersions is the per-node adjacency conflict index.

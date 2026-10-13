@@ -507,7 +507,7 @@ func (av *adjVersions) clearAbortedOf(ids []graph.NodeID) (freed int) {
 }
 
 // clearAbortedLocked clears the aborted sides of id's stamps, dropping the entry
-// when both are aborted and it keeps no displaced commit, and reports whether it
+// when no side is left and it keeps no displaced commit, and reports whether it
 // dropped it. The caller holds the shard lock.
 //
 // A cleared side does not take the commit it displaced with it: that commit was
@@ -518,19 +518,22 @@ func (sh *adjVersionShard) clearAbortedLocked(id graph.NodeID) int {
 	if e == nil {
 		return 0
 	}
-	a := stampTS(e.appendInfo)
-	x := stampTS(e.exclusiveInfo)
-	if a == mvcc.AbortedTS && x == mvcc.AbortedTS && e.floorTS == 0 {
-		delete(sh.d, id)
-		return 1
-	}
 	// One side aborted and the other live: clear only the aborted side, so the
 	// live one keeps refusing what it must.
-	if a == mvcc.AbortedTS {
+	if stampTS(e.appendInfo) == mvcc.AbortedTS {
 		e.appendInfo = nil
 	}
-	if x == mvcc.AbortedTS {
+	if stampTS(e.exclusiveInfo) == mvcc.AbortedTS {
 		e.exclusiveInfo = nil
+	}
+	// An entry left with no side and no floor records nothing and refuses
+	// nothing, so it is dropped now rather than at the next watermark sweep: the
+	// common case is an aborted side beside a side that was never set, and
+	// keeping those entries held one per node an aborted bulk creation touched
+	// until the vacuum ran (rmp #3120).
+	if e.appendInfo == nil && e.exclusiveInfo == nil && e.floorTS == 0 {
+		delete(sh.d, id)
+		return 1
 	}
 	return 0
 }

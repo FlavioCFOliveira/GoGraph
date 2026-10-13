@@ -215,6 +215,10 @@ func (m *Mapper[N]) shardFor(k N) uint64 {
 // The forward map answers Intern; the reverse slice answers Resolve.
 type mapperShard[N comparable] struct {
 	forward map[N]NodeID
+	// forwardDeletes counts keys deleted from forward since it was last built,
+	// so [Mapper.Unplace] can rebuild it once the deletions outnumber its
+	// entries: a Go map never shrinks on delete (rmp #3119).
+	forwardDeletes int
 	// reverse is indexed by intra-shard index. A HOLE — an index below next
 	// that names no key (an id never born, restored by [Mapper.LoadFrom]) —
 	// holds the zero value and has its bit set in holes.
@@ -225,9 +229,26 @@ type mapperShard[N comparable] struct {
 	holes []uint64
 	// holeCount is the number of set bits in holes.
 	holeCount int
+	// tail holds the slots from tailBase on once a key has been bound at least
+	// [mapperTailGap] indices past the end of reverse — which happens after a
+	// release cut the end of the shard and the high-water mark kept its indices
+	// out of reuse (rmp #3121). The indices between the end of reverse and
+	// tailBase are holes that hold no memory at all, and within the tail a slot
+	// lives at tail[(i-tailBase)>>mapperPageBits][(i-tailBase)&mapperPageMask],
+	// in fixed-size pages allocated on the first binding and freed when every
+	// slot of theirs is a hole. A shard that never released keys has no tail, so
+	// its reverse table and every read path over it are exactly what they were.
+	tail []*[mapperPageSize]N
+	// tailBase is the index of the tail's first slot and tailLen its slot count;
+	// tailLen is zero exactly when the shard has no tail.
+	tailBase, tailLen uint64
+	// tailHoles is the tail's hole bitset, indexed from tailBase, and
+	// tailHoleCount the number of its set bits.
+	tailHoles     []uint64
+	tailHoleCount int
 	// next is the shard's high-water mark: the intra index the next new key
-	// receives. Always >= len(reverse); greater only when a restore named a
-	// next above the last restored index.
+	// receives. Always >= the shard's last slot + 1; greater when a restore
+	// named a next above the last restored index or a release cut the end.
 	next uint64
 	// idLimit is the reserved limit (WAL v2 step 4): with a reserver installed,
 	// every intra index below it is covered by a logged reservation, and a new key
@@ -236,6 +257,168 @@ type mapperShard[N comparable] struct {
 	// under s.mu. Monotone non-decreasing; math.MaxUint64 means unlimited.
 	idLimit atomic.Uint64
 	mu      sync.RWMutex
+}
+
+// The tail's page size, and the gap past the end of reverse at which a new key
+// starts a tail rather than filling the gap with holes (rmp #3121).
+const (
+	mapperPageBits = 6
+	mapperPageSize = 1 << mapperPageBits
+	mapperPageMask = mapperPageSize - 1
+	mapperTailGap  = mapperPageSize
+)
+
+// endLocked returns one past the shard's last slot. The caller holds s.mu.
+func (s *mapperShard[N]) endLocked() uint64 {
+	if s.tailLen != 0 {
+		return s.tailBase + s.tailLen
+	}
+	return uint64(len(s.reverse))
+}
+
+// bindAtLocked binds k at idx, which lies at or beyond the end of reverse and
+// is not a bound slot. A small gap is filled with holes, as it always was; a gap
+// of [mapperTailGap] or more starts the tail instead. An index inside the gap
+// below an existing tail — reachable only by a recovery placement — extends
+// reverse up to it. The caller holds s.mu for writing.
+func (s *mapperShard[N]) bindAtLocked(idx uint64, k N) {
+	dense := uint64(len(s.reverse))
+	if s.tailLen == 0 {
+		if idx-dense < mapperTailGap {
+			s.growToLocked(idx)
+			s.reverse = append(s.reverse, k)
+			return
+		}
+		s.tailBase = idx
+	}
+	if idx < s.tailBase {
+		s.growToLocked(idx)
+		s.reverse = append(s.reverse, k)
+		return
+	}
+	rel := idx - s.tailBase
+	for s.tailLen < rel {
+		s.setTailHoleLocked(s.tailLen)
+		s.tailLen++
+	}
+	if rel < s.tailLen {
+		s.tailHoles[rel>>6] &^= 1 << (rel & 63)
+		s.tailHoleCount--
+	} else {
+		s.tailLen = rel + 1
+	}
+	p := int(rel >> mapperPageBits)
+	for len(s.tail) <= p {
+		s.tail = append(s.tail, nil)
+	}
+	if s.tail[p] == nil {
+		s.tail[p] = new([mapperPageSize]N)
+	}
+	s.tail[p][rel&mapperPageMask] = k
+}
+
+// isTailHoleLocked reports whether tail-relative index rel (< tailLen) is a
+// hole. The caller holds s.mu.
+func (s *mapperShard[N]) isTailHoleLocked(rel uint64) bool {
+	return s.tail[rel>>mapperPageBits] == nil || s.tailBitLocked(rel)
+}
+
+// tailBitLocked reports whether rel's bit is set in tailHoles, which is
+// allocated only as far as the tail's highest hole. The caller holds s.mu.
+func (s *mapperShard[N]) tailBitLocked(rel uint64) bool {
+	w := rel >> 6
+	return w < uint64(len(s.tailHoles)) && s.tailHoles[w]&(1<<(rel&63)) != 0
+}
+
+// setTailHoleLocked marks tail-relative index rel a hole. The caller holds s.mu
+// for writing.
+func (s *mapperShard[N]) setTailHoleLocked(rel uint64) {
+	w := rel >> 6
+	for uint64(len(s.tailHoles)) <= w {
+		s.tailHoles = append(s.tailHoles, 0)
+	}
+	if s.tailHoles[w]&(1<<(rel&63)) == 0 {
+		s.tailHoles[w] |= 1 << (rel & 63)
+		s.tailHoleCount++
+	}
+}
+
+// resolveTailLocked is [Mapper.Resolve] for an index at or beyond the end of
+// reverse. The caller holds s.mu.
+func (s *mapperShard[N]) resolveTailLocked(idx uint64) (N, bool) {
+	var zero N
+	if s.tailLen == 0 || idx < s.tailBase || idx-s.tailBase >= s.tailLen {
+		return zero, false
+	}
+	rel := idx - s.tailBase
+	if s.isTailHoleLocked(rel) {
+		return zero, false
+	}
+	return s.tail[rel>>mapperPageBits][rel&mapperPageMask], true
+}
+
+// unplaceTailLocked turns the bound tail slot idx into a hole, frees its page
+// when the page holds no bound slot any more, and cuts the holes at the end of
+// the tail, dropping the tail once it binds nothing. It reports false when idx
+// is not a bound tail slot. The caller holds s.mu for writing.
+func (s *mapperShard[N]) unplaceTailLocked(idx uint64) bool {
+	if s.tailLen == 0 || idx < s.tailBase || idx-s.tailBase >= s.tailLen {
+		return false
+	}
+	rel := idx - s.tailBase
+	if s.isTailHoleLocked(rel) {
+		return false
+	}
+	p := rel >> mapperPageBits
+	var zero N
+	s.tail[p][rel&mapperPageMask] = zero
+	s.setTailHoleLocked(rel)
+	lo, hi := p<<mapperPageBits, min((p+1)<<mapperPageBits, s.tailLen)
+	free := true
+	for i := lo; i < hi && free; i++ {
+		free = s.tailBitLocked(i)
+	}
+	if free {
+		s.tail[p] = nil
+	}
+	s.next = max(s.next, s.tailBase+s.tailLen)
+	for s.tailLen > 0 && s.isTailHoleLocked(s.tailLen-1) {
+		s.tailLen--
+		if s.tailBitLocked(s.tailLen) {
+			s.tailHoles[s.tailLen>>6] &^= 1 << (s.tailLen & 63)
+			s.tailHoleCount--
+		}
+	}
+	pages := int((s.tailLen + mapperPageMask) >> mapperPageBits)
+	clear(s.tail[pages:])
+	s.tail = s.tail[:pages]
+	if s.tailLen == 0 {
+		s.tail, s.tailHoles, s.tailBase, s.tailHoleCount = nil, nil, 0, 0
+	} else if words := int((s.tailLen + 63) >> 6); len(s.tailHoles) > words {
+		s.tailHoles = s.tailHoles[:words]
+	}
+	return true
+}
+
+// walkTailLocked is [Mapper.Walk] over the tail of shard shardIdx. It reports
+// false when fn stopped the walk. The caller holds s.mu.
+func (s *mapperShard[N]) walkTailLocked(shardIdx uint64, fn func(NodeID, N) bool) bool {
+	for p, pg := range s.tail {
+		if pg == nil {
+			continue
+		}
+		lo := uint64(p) << mapperPageBits
+		hi := min(lo+mapperPageSize, s.tailLen)
+		for rel := lo; rel < hi; rel++ {
+			if s.tailBitLocked(rel) {
+				continue
+			}
+			if !fn(packNodeID(shardIdx, s.tailBase+rel), pg[rel&mapperPageMask]) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // isHoleLocked reports whether intra index idx (< len(reverse)) is a hole. The
@@ -266,6 +449,45 @@ func (s *mapperShard[N]) growToLocked(idx uint64) {
 	for uint64(len(s.reverse)) < idx {
 		s.setHoleLocked(uint64(len(s.reverse)))
 		s.reverse = append(s.reverse, zero)
+	}
+}
+
+// trimTrailingHolesLocked cuts the holes at the end of reverse and gives back
+// the capacity that frees (rmp #3119). The high-water mark keeps the trimmed
+// indices out of reuse, so no id is issued twice. The caller holds s.mu for
+// writing.
+func (s *mapperShard[N]) trimTrailingHolesLocked() {
+	oldLen := uint64(len(s.reverse))
+	s.next = max(s.next, oldLen)
+	n := oldLen
+	for n > 0 && s.isHoleLocked(n-1) {
+		n--
+		s.holes[n>>6] &^= 1 << (n & 63)
+		s.holeCount--
+	}
+	if n == oldLen {
+		return
+	}
+	s.reverse = s.reverse[:n]
+	if uint64(cap(s.reverse)) > 2*n+64 {
+		if n == 0 {
+			s.reverse = nil
+		} else {
+			trimmed := make([]N, n)
+			copy(trimmed, s.reverse)
+			s.reverse = trimmed
+		}
+	}
+	if s.holeCount == 0 {
+		s.holes = nil
+	} else if words := int((n + 63) >> 6); len(s.holes) > words {
+		if cap(s.holes) > 2*words {
+			trimmed := make([]uint64, words)
+			copy(trimmed, s.holes)
+			s.holes = trimmed
+		} else {
+			s.holes = s.holes[:words]
+		}
 	}
 }
 
@@ -400,7 +622,7 @@ func (m *Mapper[N]) internSlowHook(s *mapperShard[N], shardIdx uint64, k N, onCr
 	// The new key takes the shard's high-water mark. It equals len(reverse)
 	// except after a restore that named a higher next, when the indices in
 	// between become holes: ids that were reserved and never born.
-	idx := max(s.next, uint64(len(s.reverse)))
+	idx := max(s.next, s.endLocked())
 	if ref := m.reserver.Load(); ref != nil {
 		// WAL v2 step 4: the id is issued only once a logged reservation covers it.
 		// The lock order is mapper shard, then the reserver's (the WAL writer's).
@@ -408,9 +630,12 @@ func (m *Mapper[N]) internSlowHook(s *mapperShard[N], shardIdx uint64, k N, onCr
 			ref.r.ReserveIDs(int(shardIdx), idx+1)
 		}
 	}
-	s.growToLocked(idx)
 	id := packNodeID(shardIdx, idx)
-	s.reverse = append(s.reverse, k)
+	if s.tailLen == 0 && idx == uint64(len(s.reverse)) {
+		s.reverse = append(s.reverse, k)
+	} else {
+		s.bindAtLocked(idx, k)
+	}
 	s.next = idx + 1
 	s.forward[k] = id
 	if onCreate != nil {
@@ -446,7 +671,10 @@ func (m *Mapper[N]) Resolve(id NodeID) (N, bool) {
 	s := &m.shards[shardIdx]
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if idx >= uint64(len(s.reverse)) || s.isHoleLocked(idx) {
+	if idx >= uint64(len(s.reverse)) {
+		return s.resolveTailLocked(idx)
+	}
+	if s.isHoleLocked(idx) {
 		var zero N
 		return zero, false
 	}
@@ -485,6 +713,10 @@ func (m *Mapper[N]) Walk(fn func(NodeID, N) bool) {
 				s.mu.RUnlock()
 				return
 			}
+		}
+		if s.tailLen != 0 && !s.walkTailLocked(shardIdx, fn) {
+			s.mu.RUnlock()
+			return
 		}
 		s.mu.RUnlock()
 	}
@@ -528,6 +760,22 @@ func (m *Mapper[N]) AppendIDs(dst []NodeID, cur MapperCursor, limit int) ([]Node
 			}
 			cur.intra++
 		}
+		if s.tailLen != 0 {
+			cur.intra = max(cur.intra, s.tailBase)
+			n = s.tailBase + s.tailLen
+			for cur.intra < n && limit > 0 {
+				rel := cur.intra - s.tailBase
+				if s.tail[rel>>mapperPageBits] == nil {
+					cur.intra = min(n, s.tailBase+(rel|mapperPageMask)+1)
+					continue
+				}
+				if !s.isTailHoleLocked(rel) {
+					dst = append(dst, packNodeID(cur.shard, cur.intra))
+					limit--
+				}
+				cur.intra++
+			}
+		}
 		s.mu.RUnlock()
 		if cur.intra >= n {
 			cur.shard++
@@ -545,24 +793,26 @@ func (m *Mapper[N]) Len() int {
 	for i := range m.shards {
 		s := &m.shards[i]
 		s.mu.RLock()
-		n += len(s.reverse) - s.holeCount
+		n += len(s.reverse) - s.holeCount + int(s.tailLen) - s.tailHoleCount
 		s.mu.RUnlock()
 	}
 	return n
 }
 
-// MaxNodeID returns one more than the largest [NodeID] that has been
-// assigned by this Mapper (holes included: it bounds the id space, not the
-// node count). It is the natural size for an array
-// indexed directly by NodeID (e.g. a CSR offsets array). Returns 0
-// when no value has been interned.
+// MaxNodeID returns one more than the largest [NodeID] whose slot the Mapper
+// still holds: every interned id, and every hole below the last interned id of
+// its shard, lies below it (it bounds the id space, not the node count). Holes
+// at the end of a shard that [Mapper.Unplace] trimmed are not counted: they
+// name no key, no walk visits them, and their indices are never issued again.
+// It is the natural size for an array indexed directly by NodeID (e.g. a CSR
+// offsets array). Returns 0 when no slot is held.
 func (m *Mapper[N]) MaxNodeID() NodeID {
 	var maxIntra uint64
 	for i := range m.shards {
 		s := &m.shards[i]
 		s.mu.RLock()
-		if uint64(len(s.reverse)) > maxIntra {
-			maxIntra = uint64(len(s.reverse))
+		if e := s.endLocked(); e > maxIntra {
+			maxIntra = e
 		}
 		s.mu.RUnlock()
 	}

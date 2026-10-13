@@ -805,6 +805,7 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) uint64 {
 		return 0
 	}
 	info, created := g.stamp.EndFor(&w.tx)
+	w.versioned = created
 	applier := w.applier
 	w.applier = nil
 	if info == nil {
@@ -853,6 +854,9 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) uint64 {
 		// memory whatever their commit record says, and until the sweep withdraws
 		// them the stored value still carries this transaction's writes (rmp #2318).
 		g.abortWake(created-adjFreed, &w.tx)
+		// After the withdrawal, so every record the transaction wrote is gone and
+		// the nodes it created are unborn and tombstoned (rmp #3119).
+		g.releaseNeverBorn(w)
 		return 0
 	}
 	// Allocate, store into the shared record, THEN publish. A reader must never

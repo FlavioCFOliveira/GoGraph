@@ -33,7 +33,7 @@ func (m *Mapper[N]) Watermark() *MapperWatermark {
 	for i := range m.shards {
 		s := &m.shards[i]
 		s.mu.RLock()
-		w.n[i] = max(s.next, uint64(len(s.reverse)))
+		w.n[i] = max(s.next, s.endLocked())
 		s.mu.RUnlock()
 	}
 	return w

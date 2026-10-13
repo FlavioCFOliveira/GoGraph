@@ -6,6 +6,31 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Planned as **v0.17.1** (PATCH: no exported API change, no WAL or on-disk format change).
+
+### Fixed
+
+- **A rolled-back write statement no longer leaves its node keys interned in `graph.Mapper`
+  (rmp #3119, #3120).** Present in v0.15.0, v0.16.0 and v0.17.0; **fixed in v0.17.1**, so
+  embedders pinned to an earlier version should move their pin. When a transaction that created
+  nodes aborted as a whole — an autocommit statement cut by its context deadline, a failed or
+  refused statement, or an explicit transaction rolled back — the anonymous keys it minted for
+  `CREATE ()` stayed in the Mapper, together with the transaction's write set, adjacency-version
+  entries and unborn marks. A cut `MATCH (a), (b), (c) CREATE ()` over 600 nodes left the live heap
+  at 1847.5 MB after `runtime.GC()`, against 2.3 MB before the statement. The abort now releases
+  every never-born node created under a minted key: the key no longer resolves, its id becomes a
+  hole, and the Mapper gives the memory back; the same scenario now leaves 2.5 MB. Committed ids and
+  `elementId()` are unchanged, ids are never issued twice, and a statement that fails inside a
+  transaction that later commits keeps its bindings, as before.
+  `(*graph.Mapper).MaxNodeID` no longer counts holes trimmed from the end of a shard.
+- **New keys interned after a large rollback no longer re-create the released id range in memory
+  (rmp #3121).** Ids are never reissued, so the first keys after a rollback land past the released
+  range; that range was materialised again as holes, about 16 B per released id (1000 creates after
+  the cut above: 124.3 MB live). A shard now keeps such a run of holes at its end in no memory, with
+  the new keys held in small pages allocated on demand; the same 1000 creates leave 2.9 MB. Holes in
+  the middle of a shard — nodes committed in the same shard while a large statement was rolled back —
+  still cost about 16 B per id.
+
 [Unreleased]: https://github.com/FlavioCFOliveira/GoGraph/compare/v0.17.0...HEAD
 
 ## [0.17.0] — 2026-10-13
