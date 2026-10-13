@@ -277,10 +277,20 @@ func (m *Mapper[N]) PlaceUnborn(k N, id NodeID) (placed bool, err error) {
 	return true, nil
 }
 
-// Unplace removes a binding [Mapper.PlaceUnborn] established, leaving id's slot a
-// hole; recovery uses it to withdraw the placements of a transaction it then
-// discards. It reports whether k was bound to id. The shard's high-water mark is
-// not lowered. Safe for concurrent use; recovery calls it from one goroutine.
+// Unplace removes the binding of k to id, leaving id's slot a hole, and reports
+// whether k was bound to id. Recovery uses it to withdraw the placements of a
+// transaction it then discards; an aborted write transaction uses it to give back
+// the keys of the nodes it created that never came into existence (rmp #3119).
+//
+// The shard's high-water mark is not lowered, so id is never issued again and a
+// later [Mapper.Intern] of k assigns a new id. The memory the binding held is
+// returned: holes at the end of the shard's reverse table are cut and the
+// capacity they leave is given back, and the forward map is rebuilt once the
+// keys deleted from it since it was built outnumber the keys it holds, because a
+// Go map never shrinks on delete. Both costs are amortised over the deletions
+// that cause them.
+//
+// Safe for concurrent use.
 func (m *Mapper[N]) Unplace(k N, id NodeID) bool {
 	shardIdx, idx := unpackNodeID(id)
 	s := &m.shards[shardIdx]
@@ -293,5 +303,17 @@ func (m *Mapper[N]) Unplace(k N, id NodeID) bool {
 	var zero N
 	s.reverse[idx] = zero
 	s.setHoleLocked(idx)
+	if idx == uint64(len(s.reverse))-1 {
+		s.trimTrailingHolesLocked()
+	}
+	s.forwardDeletes++
+	if s.forwardDeletes >= 64 && s.forwardDeletes >= len(s.forward) {
+		rebuilt := make(map[N]NodeID, len(s.forward))
+		for k, v := range s.forward {
+			rebuilt[k] = v
+		}
+		s.forward = rebuilt
+		s.forwardDeletes = 0
+	}
 	return true
 }

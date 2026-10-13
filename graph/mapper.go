@@ -215,6 +215,10 @@ func (m *Mapper[N]) shardFor(k N) uint64 {
 // The forward map answers Intern; the reverse slice answers Resolve.
 type mapperShard[N comparable] struct {
 	forward map[N]NodeID
+	// forwardDeletes counts keys deleted from forward since it was last built,
+	// so [Mapper.Unplace] can rebuild it once the deletions outnumber its
+	// entries: a Go map never shrinks on delete (rmp #3119).
+	forwardDeletes int
 	// reverse is indexed by intra-shard index. A HOLE — an index below next
 	// that names no key (an id never born, restored by [Mapper.LoadFrom]) —
 	// holds the zero value and has its bit set in holes.
@@ -266,6 +270,45 @@ func (s *mapperShard[N]) growToLocked(idx uint64) {
 	for uint64(len(s.reverse)) < idx {
 		s.setHoleLocked(uint64(len(s.reverse)))
 		s.reverse = append(s.reverse, zero)
+	}
+}
+
+// trimTrailingHolesLocked cuts the holes at the end of reverse and gives back
+// the capacity that frees (rmp #3119). The high-water mark keeps the trimmed
+// indices out of reuse, so no id is issued twice. The caller holds s.mu for
+// writing.
+func (s *mapperShard[N]) trimTrailingHolesLocked() {
+	oldLen := uint64(len(s.reverse))
+	s.next = max(s.next, oldLen)
+	n := oldLen
+	for n > 0 && s.isHoleLocked(n-1) {
+		n--
+		s.holes[n>>6] &^= 1 << (n & 63)
+		s.holeCount--
+	}
+	if n == oldLen {
+		return
+	}
+	s.reverse = s.reverse[:n]
+	if uint64(cap(s.reverse)) > 2*n+64 {
+		if n == 0 {
+			s.reverse = nil
+		} else {
+			trimmed := make([]N, n)
+			copy(trimmed, s.reverse)
+			s.reverse = trimmed
+		}
+	}
+	if s.holeCount == 0 {
+		s.holes = nil
+	} else if words := int((n + 63) >> 6); len(s.holes) > words {
+		if cap(s.holes) > 2*words {
+			trimmed := make([]uint64, words)
+			copy(trimmed, s.holes)
+			s.holes = trimmed
+		} else {
+			s.holes = s.holes[:words]
+		}
 	}
 }
 
@@ -551,11 +594,13 @@ func (m *Mapper[N]) Len() int {
 	return n
 }
 
-// MaxNodeID returns one more than the largest [NodeID] that has been
-// assigned by this Mapper (holes included: it bounds the id space, not the
-// node count). It is the natural size for an array
-// indexed directly by NodeID (e.g. a CSR offsets array). Returns 0
-// when no value has been interned.
+// MaxNodeID returns one more than the largest [NodeID] whose slot the Mapper
+// still holds: every interned id, and every hole below the last interned id of
+// its shard, lies below it (it bounds the id space, not the node count). Holes
+// at the end of a shard that [Mapper.Unplace] trimmed are not counted: they
+// name no key, no walk visits them, and their indices are never issued again.
+// It is the natural size for an array indexed directly by NodeID (e.g. a CSR
+// offsets array). Returns 0 when no slot is held.
 func (m *Mapper[N]) MaxNodeID() NodeID {
 	var maxIntra uint64
 	for i := range m.shards {

@@ -6,6 +6,24 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Planned as **v0.17.1** (PATCH: no exported API change, no WAL or on-disk format change).
+
+### Fixed
+
+- **A rolled-back write statement no longer leaves its node keys interned in `graph.Mapper`
+  (rmp #3119, #3120).** Present in v0.15.0, v0.16.0 and v0.17.0; **fixed in v0.17.1**, so
+  embedders pinned to an earlier version should move their pin. When a transaction that created
+  nodes aborted as a whole — an autocommit statement cut by its context deadline, a failed or
+  refused statement, or an explicit transaction rolled back — the anonymous keys it minted for
+  `CREATE ()` stayed in the Mapper, together with the transaction's write set, adjacency-version
+  entries and unborn marks. A cut `MATCH (a), (b), (c) CREATE ()` over 600 nodes left the live heap
+  at 1847.5 MB after `runtime.GC()`, against 2.3 MB before the statement. The abort now releases
+  every never-born node created under a minted key: the key no longer resolves, its id becomes a
+  hole, and the Mapper gives the memory back; the same scenario now leaves 2.5 MB. Committed ids and
+  `elementId()` are unchanged, ids are never issued twice, and a statement that fails inside a
+  transaction that later commits keeps its bindings, as before.
+  `(*graph.Mapper).MaxNodeID` no longer counts holes trimmed from the end of a shard.
+
 [Unreleased]: https://github.com/FlavioCFOliveira/GoGraph/compare/v0.17.0...HEAD
 
 ## [0.17.0] — 2026-10-13

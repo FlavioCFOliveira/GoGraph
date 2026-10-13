@@ -44,6 +44,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/synthkey"
 )
 
 // ErrPropertyValueIsNull is the sentinel returned by [parsePropValue] when
@@ -155,7 +156,7 @@ func exprScalarToProperty(v expr.Value) (lpg.PropertyValue, error) {
 // [CreateNode.freshNodeKey]. Kept as a constant so the sequence-seeding scan in
 // [maxSynthKeySuffix] and the formatter in [CreateNode.freshNodeKey] cannot
 // drift apart.
-const synthKeyPrefix = "__cx_"
+const synthKeyPrefix = synthkey.Prefix
 
 // mergeKeyInfix is the extra segment [Merge.freshNodeKey] inserts between
 // synthKeyPrefix and the hex counter, so merge-created keys take the form

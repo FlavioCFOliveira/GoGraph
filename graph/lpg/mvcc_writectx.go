@@ -229,6 +229,39 @@ type writeCtx struct {
 	// out of that work aborts as well. Plain, not atomic: only the goroutine
 	// that drives the transaction reads or writes it.
 	abandon bool
+	// versioned is how many versions the transaction created, recorded when it
+	// ends ([Graph.endWrite], [Graph.finishImplicit]) so the state can be judged
+	// for recycling: every entry of its write sets is one of those versions.
+	versioned int64
+}
+
+// maxRetainedCreated caps the capacity of [writeCtx.created] that recycled
+// state may keep, and maxRetainedVersions the size of transaction whose state is
+// recycled at all (rmp #3120). maxRetainedVersions keeps the write sets of
+// [mvcc.TxState] within the capacity that type itself retains across [mvcc.TxState.Arm]:
+// they hold at most one entry per version, and an append-grown slice of up to
+// 512 entries has a capacity below 1024.
+const (
+	maxRetainedCreated  = 1024
+	maxRetainedVersions = 512
+)
+
+// recyclable reports whether w may be offered for reuse after its transaction
+// ended, and prepares it if so (rmp #3120). State whose transaction created more
+// versions than [maxRetainedVersions] is not recycled: its write sets and its
+// created list are sized for that transaction, and the single recycling slot
+// would pin them until the next transaction armed it — after an aborted bulk
+// creation, hundreds of megabytes for as long as the graph stayed idle. Such
+// state is left to the collector, exactly as [Graph.acquireWriteCtx] drops state
+// it cannot re-arm, and the next transaction allocates fresh state. Re-arming it
+// here to trim it instead is not safe: a writer that found it through the
+// ambient slot could still allocate a record into it.
+func (w *writeCtx) recyclable() bool {
+	if w.versioned > maxRetainedVersions || cap(w.created) > maxRetainedCreated {
+		return false
+	}
+	w.versioned = 0
+	return true
 }
 
 // beginWriteCtx opens per-transaction write state, NOT published on the graph's
@@ -324,6 +357,7 @@ func (g *Graph[N, W]) acquireWriteCtx(startTS, txID uint64) *writeCtx {
 	w.applier = nil
 	w.abandon = false
 	w.created = w.created[:0]
+	w.versioned = 0
 	return w
 }
 
@@ -335,6 +369,9 @@ func (g *Graph[N, W]) acquireWriteCtx(startTS, txID uint64) *writeCtx {
 // object and is never recycled, and the adjacency holds a transaction TOKEN
 // rather than a pointer.
 func (g *Graph[N, W]) releaseWriteCtx(w *writeCtx) {
+	if !w.recyclable() {
+		return
+	}
 	g.writeCtxFree.Store(w)
 }
 

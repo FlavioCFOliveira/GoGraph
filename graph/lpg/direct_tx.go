@@ -258,6 +258,7 @@ func (g *Graph[N, W]) acquireImplicit() *writeCtx {
 	w.commitTS, w.allocRec, w.applier, w.counts = 0, nil, nil, nil
 	w.abandon = false
 	w.created = w.created[:0]
+	w.versioned = 0
 	return w
 }
 
@@ -279,7 +280,9 @@ func (g *Graph[N, W]) finishImplicit(w *writeCtx, err error) error {
 		if info != nil {
 			g.abortWake(versions-g.abortRecord(&w.tx, info), &w.tx)
 		}
-		g.implicitCtx.Put(w)
+		if w.versioned = versions; w.recyclable() {
+			g.implicitCtx.Put(w)
+		}
 		return err
 	}
 	if info != nil {
@@ -287,7 +290,9 @@ func (g *Graph[N, W]) finishImplicit(w *writeCtx, err error) error {
 		info.Commit(ts)
 		g.mvccClock.PublishCommit(info, ts)
 	}
-	g.implicitCtx.Put(w)
+	if w.versioned = versions; w.recyclable() {
+		g.implicitCtx.Put(w)
+	}
 	// The versions this transaction made, and those raw adjacency writes made
 	// with no transaction since the last charge, which nothing else drains now
 	// that a direct write no longer goes through [Graph.reclaimAfterDirectWrite]
