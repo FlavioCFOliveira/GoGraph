@@ -83,7 +83,7 @@ func (m *Mapper[N]) LoadFrom(entries []MapperEntry[N], next *[MapperShards]uint6
 	for i := range m.shards {
 		s := &m.shards[i]
 		s.mu.RLock()
-		empty := len(s.forward) == 0 && len(s.reverse) == 0 && s.next == 0
+		empty := len(s.forward) == 0 && len(s.reverse) == 0 && s.tailLen == 0 && s.next == 0
 		s.mu.RUnlock()
 		if !empty {
 			return ErrMapperNotEmpty
@@ -268,9 +268,13 @@ func (m *Mapper[N]) PlaceUnborn(k N, id NodeID) (placed bool, err error) {
 		w := idx >> 6
 		s.holes[w] &^= 1 << (idx & 63)
 		s.holeCount--
+	} else if s.tailLen != 0 && idx >= s.tailBase && idx-s.tailBase < s.tailLen {
+		if !s.isTailHoleLocked(idx - s.tailBase) {
+			return false, fmt.Errorf("%w: id %d already holds another key", ErrNodeIDMismatch, uint64(id))
+		}
+		s.bindAtLocked(idx, k)
 	} else {
-		s.growToLocked(idx)
-		s.reverse = append(s.reverse, k)
+		s.bindAtLocked(idx, k)
 	}
 	s.forward[k] = id
 	s.next = max(s.next, idx+1)
@@ -285,10 +289,12 @@ func (m *Mapper[N]) PlaceUnborn(k N, id NodeID) (placed bool, err error) {
 // The shard's high-water mark is not lowered, so id is never issued again and a
 // later [Mapper.Intern] of k assigns a new id. The memory the binding held is
 // returned: holes at the end of the shard's reverse table are cut and the
-// capacity they leave is given back, and the forward map is rebuilt once the
-// keys deleted from it since it was built outnumber the keys it holds, because a
-// Go map never shrinks on delete. Both costs are amortised over the deletions
-// that cause them.
+// capacity they leave is given back, a page of the shard's tail that binds
+// nothing any more is freed (keys interned after such a cut start the tail, so
+// the cut indices never take memory again; rmp #3121), and the forward map is
+// rebuilt once the keys deleted from it since it was built outnumber the keys it
+// holds, because a Go map never shrinks on delete. These costs are amortised
+// over the deletions that cause them.
 //
 // Safe for concurrent use.
 func (m *Mapper[N]) Unplace(k N, id NodeID) bool {
@@ -296,16 +302,22 @@ func (m *Mapper[N]) Unplace(k N, id NodeID) bool {
 	s := &m.shards[shardIdx]
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if cur, ok := s.forward[k]; !ok || cur != id || idx >= uint64(len(s.reverse)) {
+	if cur, ok := s.forward[k]; !ok || cur != id {
 		return false
 	}
-	delete(s.forward, k)
-	var zero N
-	s.reverse[idx] = zero
-	s.setHoleLocked(idx)
-	if idx == uint64(len(s.reverse))-1 {
-		s.trimTrailingHolesLocked()
+	if idx >= uint64(len(s.reverse)) {
+		if !s.unplaceTailLocked(idx) {
+			return false
+		}
+	} else {
+		var zero N
+		s.reverse[idx] = zero
+		s.setHoleLocked(idx)
+		if idx == uint64(len(s.reverse))-1 {
+			s.trimTrailingHolesLocked()
+		}
 	}
+	delete(s.forward, k)
 	s.forwardDeletes++
 	if s.forwardDeletes >= 64 && s.forwardDeletes >= len(s.forward) {
 		rebuilt := make(map[N]NodeID, len(s.forward))

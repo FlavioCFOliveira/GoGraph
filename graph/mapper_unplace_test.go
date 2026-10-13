@@ -132,3 +132,55 @@ func TestMapperUnplace_PlaceUnbornAfterTrim(t *testing.T) {
 		t.Fatalf("Len = %d, want 1", m.Len())
 	}
 }
+
+// TestMapperUnplace_ReadPathsOverRefilledEnd releases every key, interns new
+// ones far past the old end, releases some of those, and checks that Resolve,
+// Walk and AppendIDs agree on exactly the keys left (rmp #3121).
+func TestMapperUnplace_ReadPathsOverRefilledEnd(t *testing.T) {
+	t.Parallel()
+	m := NewMapper[int]()
+	const n = 600 * mapperShardCount
+	for i := 0; i < n; i++ {
+		m.Unplace(i, m.Intern(i))
+	}
+	kept := map[NodeID]int{}
+	for i := n; i < n+3000; i++ {
+		id := m.Intern(i)
+		if i%3 == 0 {
+			if !m.Unplace(i, id) {
+				t.Fatalf("Unplace(%d) = false", i)
+			}
+			continue
+		}
+		kept[id] = i
+	}
+	if m.Len() != len(kept) {
+		t.Fatalf("Len = %d, want %d", m.Len(), len(kept))
+	}
+	for id, k := range kept {
+		if got, ok := m.Resolve(id); !ok || got != k {
+			t.Fatalf("Resolve(%d) = (%d,%v), want (%d,true)", id, got, ok, k)
+		}
+	}
+	var walked []NodeID
+	m.Walk(func(id NodeID, k int) bool {
+		if kept[id] != k {
+			t.Fatalf("Walk yielded (%d,%d), want key %d", id, k, kept[id])
+		}
+		walked = append(walked, id)
+		return true
+	})
+	var paged []NodeID
+	var cur MapperCursor
+	for !cur.Done() {
+		paged, cur = m.AppendIDs(paged, cur, 97)
+	}
+	if len(walked) != len(kept) || len(paged) != len(walked) {
+		t.Fatalf("Walk %d ids, AppendIDs %d ids, want %d", len(walked), len(paged), len(kept))
+	}
+	for i := range walked {
+		if walked[i] != paged[i] {
+			t.Fatalf("Walk and AppendIDs disagree at %d: %d vs %d", i, walked[i], paged[i])
+		}
+	}
+}

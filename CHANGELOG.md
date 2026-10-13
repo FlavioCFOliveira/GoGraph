@@ -23,6 +23,13 @@ Planned as **v0.17.1** (PATCH: no exported API change, no WAL or on-disk format 
   `elementId()` are unchanged, ids are never issued twice, and a statement that fails inside a
   transaction that later commits keeps its bindings, as before.
   `(*graph.Mapper).MaxNodeID` no longer counts holes trimmed from the end of a shard.
+- **New keys interned after a large rollback no longer re-create the released id range in memory
+  (rmp #3121).** Ids are never reissued, so the first keys after a rollback land past the released
+  range; that range was materialised again as holes, about 16 B per released id (1000 creates after
+  the cut above: 124.3 MB live). A shard now keeps such a run of holes at its end in no memory, with
+  the new keys held in small pages allocated on demand; the same 1000 creates leave 2.9 MB. Holes in
+  the middle of a shard — nodes committed in the same shard while a large statement was rolled back —
+  still cost about 16 B per id.
 
 [Unreleased]: https://github.com/FlavioCFOliveira/GoGraph/compare/v0.17.0...HEAD
 
