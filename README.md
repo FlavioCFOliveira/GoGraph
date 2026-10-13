@@ -5,42 +5,38 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.17.0`.** This is the project's **twenty-second
+**Current release: `v0.17.1`.** This is the project's **twenty-third
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.17.0` is a pre-1.0 **MINOR** release of **53 commits** from **two
-sprints**: 366 (*Drop undirected relations and simple graphs*) and 367
-(*Performance and Efficiency Laboratory*).
+`v0.17.1` is a pre-1.0 **PATCH** release of **4 commits** — 2 changes and
+2 merges — from **one sprint**: 368 (*Rollback memory reclamation in
+graph.Mapper*). No exported identifier was added, removed or re-signed, no
+WAL or on-disk format changed, and `go.mod` and `go.sum` are unchanged from
+`v0.17.0`: the upgrade is a drop-in version bump.
 
-**It breaks the exported API and changes the on-disk format.** Every graph
-is now a directed multigraph; undirected and simple graphs are no longer
-supported. Parsing every non-test Go file outside `internal/`, `examples/`,
-`cmd/` and any `gen/`, `tck/` or `testdata/` directory at both ends of the
-window and diffing the rendered declarations gives **5 152 exported
-declarations before and 5 162 after: 24 added, 1 re-signed and 14
-removed** — among them `adjlist.Config.Directed` and `Config.Multigraph`.
-Undirected analytics read the symmetric projection `csr.BuildSymmetric`.
-
-**The snapshot manifest is now version 5**, which `v0.16.0` and earlier
-builds refuse. A store written by an undirected or simple graph is
-migrated by its first clean open; a directed multigraph store opens as is
-and writes a version-5 manifest at its next checkpoint. Back up a store
-before its first open with `v0.17.0` if you need a downgrade path. Sprint
-367 cut module-attributed CPU by 39.3 %, allocation by 29.2 % and
-contention delay by 50.9 % across the examples
-([docs/campaign-lab-2026-10-09.md](docs/campaign-lab-2026-10-09.md)).
+**Upgrade if you embed `v0.15.0`, `v0.16.0` or `v0.17.0`.** A write
+transaction that created nodes and then aborted as a whole — an autocommit
+statement cut by its context deadline, a failed or refused statement, or an
+explicit rollback — left the keys it had minted for `CREATE ()` interned in
+`graph.Mapper`, together with its write set. A cut `MATCH (a), (b), (c)
+CREATE ()` over 600 nodes left **1847.5 MB** live after GC; it now leaves
+**2.5 MB** (rmp #3119, #3120). New keys interned after such a rollback no
+longer re-create the released id range in memory: 1000 creates after it
+fell from **124.3 MB** to **2.9 MB** live (rmp #3121).
+`(*graph.Mapper).MaxNodeID` no longer counts holes trimmed from the end of
+a shard.
 
 The two compliance invariants remain in force: the module is **100 %
 openCypher TCK-compliant at the execution level** (**3 897/3 897
 scenarios**; `tckExecutionBaseline` is unchanged) and **100 %
-ACID-compliant**. `go.mod` and `go.sum` are unchanged from `v0.16.0`.
+ACID-compliant**.
 
 The module uses the conventional Go path
 `github.com/FlavioCFOliveira/GoGraph` and is fetchable with
-`go get github.com/FlavioCFOliveira/GoGraph@v0.17.0`. See
+`go get github.com/FlavioCFOliveira/GoGraph@v0.17.1`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.17.0.md](release-notes/v0.17.0.md) for the full release
+[release-notes/v0.17.1.md](release-notes/v0.17.1.md) for the full release
 narrative, the behaviour changes a caller must know about, and what the
 release does **not** establish.
 
