@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestWriteCounters_ExactWhenQuiescent asserts the sum is EXACT once every writer has
@@ -93,8 +94,24 @@ func TestWriteCounters_WritersNeverNegative(t *testing.T) {
 	}
 	// Sampled while the writers run, which is the only regime in which the invariant
 	// can be broken.
+	//
+	// The loop is bounded by a CONDITION, not by a count: it runs until a positive read
+	// has been seen AND minSamples reads have been taken. A fixed count let a loaded
+	// scheduler finish the sampler before any writer goroutine ran, which failed the
+	// vacuity check below with no defect in the counter. The deadline only bounds a
+	// gauge that never rises; it is read every deadlineEvery samples so the clock stays
+	// off the per-sample path, and on expiry the vacuity error is still reported.
+	const (
+		minSamples    = 20000
+		deadlineEvery = 1024
+		maxWait       = 10 * time.Second
+	)
+	deadline := time.Now().Add(maxWait)
 	sawPositive := false
-	for i := 0; i < 20000; i++ {
+	for i := 0; i < minSamples || !sawPositive; i++ {
+		if i%deadlineEvery == 0 && i >= minSamples && time.Now().After(deadline) {
+			break
+		}
 		if n := c.Writers(); n < 0 {
 			close(stop)
 			wg.Wait()
