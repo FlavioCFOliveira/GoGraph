@@ -92,7 +92,7 @@ func (m *Mapper[N]) ReservedLimits() [MapperShards]uint64 {
 func (m *Mapper[N]) RestoreNext(shard int, next uint64) {
 	s := &m.shards[shard]
 	s.mu.Lock()
-	s.next = max(next, uint64(len(s.reverse)))
+	s.next = max(next, s.endLocked())
 	s.mu.Unlock()
 }
 
