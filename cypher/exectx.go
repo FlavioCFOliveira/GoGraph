@@ -287,9 +287,12 @@ type ExplicitTx struct {
 	// began. A different generation at COMMIT means a constraint was registered
 	// while it was open, and its final state is validated against it (rmp
 	// #2936; see [exec.ConstraintRegistry.ValidateStraddler]).
-	conGen      uint64
-	decision    index.CommitTicket
-	decisionMgr *index.Manager
+	conGen uint64
+	// releasesOwed is set by Commit's finalisation on the success path: conTxn's
+	// UNIQUE releases are applied by release() after the publication (rmp #3128).
+	releasesOwed bool
+	decision     index.CommitTicket
+	decisionMgr  *index.Manager
 
 	// walTx is the single WAL transaction backing the whole explicit transaction,
 	// non-nil only on a WAL-backed engine. It holds the store's writer
@@ -445,6 +448,23 @@ func (e *Engine) beginTxSession(ctx context.Context, sess *lpg.Session[string, f
 		// under a schema with no UNIQUE constraint pays one pointer.
 		conTxn: &exec.ConstraintTxn{},
 	}
+	// Read BEFORE any statement can run, so a constraint registered after this
+	// load is one the transaction's writes may predate (rmp #2936).
+	//
+	// Read BEFORE the two gates below as well (rmp #3127). A registration
+	// increments its kind's active counter and only then advances the
+	// generation, both in one critical section, so a generation loaded here
+	// either predates the registration — the commit then sees it move and
+	// validates the transaction as a straddler — or follows it, and the counter
+	// loads below see the constraint. Loaded after the gates, a registration
+	// landing between them left the transaction with no touched set AND the
+	// live generation: neither the existence check nor the straddler validation
+	// ran, and a REMOVE n.s committed under a live NOT NULL constraint.
+	tx.conGen = e.constraintReg.Generation()
+	tx.conTxn.TrackReservationsSince(tx.conGen)
+	if h := e.beginTxGatesHookForTest; h != nil {
+		h()
+	}
 	// Allocate the touched-node set only when an existence constraint is active,
 	// so a transaction with none records nothing (#1754).
 	if e.constraintReg != nil && e.constraintReg.HasAnyNotNull() {
@@ -454,10 +474,6 @@ func (e *Engine) beginTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// matching comment on the autocommit path (rmp #2353, widened by rmp #2355).
 	tx.stampCon = e.constraintReg != nil &&
 		(e.constraintReg.HasAnyNotNull() || e.constraintReg.HasAnyUnique())
-	// Read BEFORE any statement can run, so a constraint registered after this
-	// load is one the transaction's writes may predate (rmp #2936).
-	tx.conGen = e.constraintReg.Generation()
-	tx.conTxn.TrackReservationsSince(tx.conGen)
 	// A write refused under a constraint registered after this point, of a value
 	// this transaction released before that constraint existed, is deferred to
 	// the commit-time validation; the registry reads this transaction's touched
@@ -953,12 +969,13 @@ func (tx *ExplicitTx) Commit() (err error) {
 			recordCountCommit(tx.eng.countStore, tx.cbuf) // observability (#2087)
 			tx.cbuf.Commit(tx.eng.countStore)
 		}
-		// APPLY THE DEFERRED UNIQUE RELEASES (rmp #2366), on the same
-		// durable-then-visible side of the barrier as the index buffer: a value this
-		// transaction vacated becomes available exactly when the graph stops holding
-		// it, and not before. Every failure branch above rolls back through
-		// rollbackInBarrierLocked, which drops the same marks instead.
-		tx.eng.constraintReg.CommitTxn(tx.conTxn)
+		// THE DEFERRED UNIQUE RELEASES ARE OWED, NOT APPLIED (rmp #2366, rmp
+		// #3128). The transaction is not visible until release() publishes it, and
+		// a value freed here could be reserved and published by a peer first, so a
+		// snapshot between the two publications held it twice. release() applies
+		// them right after the publication. Every failure branch above rolls back
+		// through rollbackInBarrierLocked, which drops the same marks instead.
+		tx.releasesOwed = true
 		// Drop the undo log: the transaction is keeping its writes.
 		tx.undo = nil
 		return nil
@@ -1066,6 +1083,7 @@ func (tx *ExplicitTx) rollbackInBarrierLocked() (undoOK bool) {
 	// could collide with a peer's own committed release. This is what makes the
 	// rollback order-independent.
 	tx.conTxn.Reset()
+	tx.releasesOwed = false
 	if tx.buf != nil {
 		tx.buf.Rollback()
 	}
@@ -1130,6 +1148,15 @@ func (tx *ExplicitTx) release() {
 		tx.eng.g.EndVersionedTx(tx.wtx)
 	}
 	tx.wtx = lpg.WriteTx{}
+	// The transaction is visible now: only from here may a peer take the UNIQUE
+	// values it vacated (rmp #3128). Still inside the commit-decision bracket —
+	// its exit is deferred above — so a constraint build or drop, which drains
+	// that bracket, cannot rebuild a value-set between the publication and the
+	// release.
+	if tx.releasesOwed {
+		tx.releasesOwed = false
+		tx.eng.constraintReg.CommitTxn(tx.conTxn)
+	}
 }
 
 // recoverExecPanic is the deferred recover boundary for [ExplicitTx.Exec]. The

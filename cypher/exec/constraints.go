@@ -524,13 +524,20 @@ type ConstraintRegistry struct {
 	//
 	// # Why reading it without the lock is sound
 	//
-	// A registration can only happen under [Engine.ddlMu] AND the graph's schema
-	// barrier held EXCLUSIVELY, while an ordinary write holds that barrier SHARED for
-	// its whole bracket — and these methods are called from inside that bracket. So a
-	// write that reads zero here cannot have a constraint appear underneath it: the
-	// DDL cannot acquire the barrier until the write's bracket closes. The counter is
-	// atomic rather than plain only because the DDL writing it and the write reading
-	// it are different goroutines.
+	// A registration runs with the engine's schema gate held strongly. An AUTOCOMMIT
+	// statement holds that gate weakly from before its first write until after its
+	// publication, so for it a zero read here cannot have a constraint appear
+	// underneath: the DDL waits for the statement to finish.
+	//
+	// An EXPLICIT transaction does NOT hold the schema gate across its statements
+	// (an earlier version of this comment said every write did; rmp #3128 corrected
+	// it). A constraint can therefore register after one of its writes read zero
+	// here. That write is caught at the transaction's COMMIT instead: the
+	// transaction read the catalogue generation at BeginTx before any gate (rmp
+	// #3127), the registration advances it, and [ConstraintRegistry.ValidateStraddler]
+	// then validates the transaction's final state against the new constraint
+	// (rmp #2936). The counter is atomic because the DDL writing it and the write
+	// reading it are different goroutines.
 	uniqueActive atomic.Int64
 	// notNullActive is the same counter for NOT NULL constraints.
 	//
@@ -1507,9 +1514,13 @@ func (r *ConstraintRegistry) ReleasePropertyValue(ct *ConstraintTxn, labels []st
 
 // CommitTxn applies ct's pending releases to the shared value-sets and clears it.
 //
-// It must be called exactly once per transaction that committed, from inside the
-// same window that publishes the transaction's writes, so the value a committed
-// release frees becomes available at the instant the graph stops holding it.
+// It must be called exactly once per transaction that committed, AFTER the
+// transaction has been published, and while constraint DDL is still excluded
+// (the autocommit statement's schema gate, the explicit transaction's
+// commit-decision bracket). Called before the publication, it let a peer reserve
+// the freed value and publish first, so a snapshot between the two publications
+// held the value twice (rmp #3128). In the gap after publication the value is
+// still reserved, so a peer writing it is refused: the conservative direction.
 //
 // A rolled-back transaction calls [ConstraintTxn.Reset] instead — there is nothing
 // to undo, because a deferred release never touched anything shared.
