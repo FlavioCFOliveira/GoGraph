@@ -590,6 +590,28 @@ Task execution is the natural continuation of planning. A **unit of work** is a 
 
 **Model and effort.** Wherever possible, match the model and its reasoning-effort level to the demands of each individual operation within the unit of work.
 
+### Work log — rmp comments
+
+**The `rmp` comment log is the tracking record of every task and every sprint while the work runs.** Write each entry when its event happens, never reconstructed at the close, through the `roadmap-manager` skill.
+
+- **Sprint comments are high-level sprint management.** They record what governs the sprint as a whole: scope and sequencing decisions, batching, user decisions, carry-over, gate results, and the sprint's progress. They never carry a task's technical detail.
+- **Task comments are specific to that task's work.** They record what the work on that task discovered, tried, measured, and decided.
+- **Every entry uses the comment type whose meaning fits it**, and its wording follows that type:
+
+  | Type | Applies to | Write it when… | Its body states |
+  |---|---|---|---|
+  | `HYPOTHESIS` | task | a proposition is about to be tested | the proposition, and what would confirm or refute it |
+  | `TEST` | task | a test, benchmark, or verification was run | the exact command or procedure, and its result |
+  | `FINDING` | task, sprint | something was observed, measured, attributed, or refuted | the fact, with its evidence |
+  | `DECISION` | task, sprint | a choice was made between options | the choice, its reasoning, and the options rejected |
+  | `PROGRESS` | task, sprint | the work advanced materially | what is done, and what remains |
+  | `UPDATE` | task, sprint | a task's or sprint's definition changed | why it changed |
+  | `NOTE` | task | context worth keeping fits no other type | the context, and why it matters |
+
+- **Sprint comments accept only `FINDING`, `DECISION`, `PROGRESS`, and `UPDATE`.**
+- **A task is not ready to close** until its log holds a `DECISION` for every non-obvious choice, a `TEST` for the verification of its acceptance criteria, a `FINDING` for every discovery a later reader needs, and an `UPDATE` for every change to its definition.
+- **Read the log before acting:** before resuming, investigating, editing, or closing a task, and before reporting on a sprint.
+
 ---
 
 ## Knowledge Graph
